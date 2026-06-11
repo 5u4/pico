@@ -10,10 +10,9 @@ path = "src/main.rs"
 
 [dependencies]
 color-eyre.workspace = true
+pico-shared.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-tracing-error.workspace = true
-tracing-subscriber.workspace = true
 
 [lints]
 workspace = true
