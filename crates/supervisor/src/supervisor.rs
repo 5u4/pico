@@ -5,7 +5,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use color_eyre::eyre::{WrapErr, eyre};
@@ -16,6 +16,11 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use crate::{config::Config, slots::Slots};
 
 const HISTORY_CAP: usize = 5;
+
+/// How long a control client has to deliver its request frame before the
+/// connection is dropped. Bounds a stalled or malicious client so it can't pin
+/// a handler task — and thus stall the shutdown drain — indefinitely.
+const REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 struct WorkerProc {
     child: tokio::process::Child,
@@ -160,7 +165,21 @@ impl Supervisor {
     async fn handle_conn(self: Arc<Self>, stream: tokio::net::UnixStream) -> color_eyre::Result<()> {
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = tokio::io::BufReader::new(read_half);
-        let Some(req): Option<Request> = pico_shared::proto::read_frame(&mut reader).await? else {
+        let read = tokio::select! {
+            biased;
+            () = self.cancel.cancelled() => return Ok(()),
+            read = tokio::time::timeout(
+                REQUEST_READ_TIMEOUT,
+                pico_shared::proto::read_frame::<Request, _>(&mut reader),
+            ) => read,
+        };
+        let Some(req) = (match read {
+            Ok(frame) => frame?,
+            Err(_elapsed) => {
+                tracing::debug!("control client idle past read timeout; dropping connection");
+                return Ok(());
+            }
+        }) else {
             return Ok(());
         };
         let resp = match req {

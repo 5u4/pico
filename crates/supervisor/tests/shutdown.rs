@@ -188,3 +188,51 @@ fn boot_adopts_current_slot() {
 
     assert!(booted.is_some(), "supervisor did not adopt the current-slot worker on boot");
 }
+
+#[test]
+fn shutdown_does_not_hang_on_idle_client() {
+    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+    let home = std::env::temp_dir().join(format!("pico-it-{}-{nanos}", std::process::id()));
+    let sup_dir = home.join(".pico").join("supervisor");
+    std::fs::create_dir_all(&sup_dir).unwrap();
+    let socket = PathBuf::from(format!("/tmp/pico-it-{nanos}.sock"));
+    std::fs::write(
+        sup_dir.join("supervisor.toml"),
+        format!("health_timeout_secs = 5\nsocket_path = \"{}\"\n", socket.display()),
+    )
+    .unwrap();
+
+    let mut sup = Command::new(bin("supervisor"))
+        .env("HOME", &home)
+        .spawn()
+        .expect("spawn supervisor");
+
+    if poll(Duration::from_secs(10), || request(&socket, "{\"cmd\":\"status\"}")).is_none() {
+        let _ = sup.kill();
+        let _ = sup.wait();
+        let _ = std::fs::remove_dir_all(&home);
+        panic!("supervisor never started serving");
+    }
+
+    // Connect but send nothing: the handler parks in read_frame. Give it a beat
+    // to reach that read so it is genuinely in-flight when the signal lands.
+    let idle = UnixStream::connect(&socket).expect("connect idle client");
+    std::thread::sleep(Duration::from_millis(500));
+
+    // The drain must not wait this stalled handler out: shutdown must finish
+    // well under REQUEST_READ_TIMEOUT (10s).
+    unsafe {
+        libc::kill(sup.id() as i32, libc::SIGTERM);
+    }
+    let exited = poll(Duration::from_secs(8), || sup.try_wait().ok().flatten());
+
+    let clean = matches!(exited, Some(st) if st.success());
+    if exited.is_none() {
+        let _ = sup.kill();
+        let _ = sup.wait();
+    }
+    drop(idle);
+    let _ = std::fs::remove_dir_all(&home);
+
+    assert!(clean, "supervisor hung on shutdown with an idle client connected: {exited:?}");
+}
