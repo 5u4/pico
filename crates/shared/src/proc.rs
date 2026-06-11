@@ -8,15 +8,10 @@ fn render(cmd: &Command) -> String {
     parts.join(" ")
 }
 
-/// Run `cmd` to completion, discarding its output. Errors on a non-zero exit;
-/// the full stderr is logged at `warn` and the command + status go into the
-/// returned error.
-pub async fn run(cmd: &mut Command) -> color_eyre::Result<()> {
-    run_capture(cmd).await.map(drop)
-}
-
-/// Like [`run`] but returns the command's trimmed stdout on success.
-pub async fn run_capture(cmd: &mut Command) -> color_eyre::Result<String> {
+/// Run `cmd` to completion, returning its trimmed stdout. Errors on a non-zero
+/// exit; the full stderr is logged at `warn` and the command + status go into
+/// the returned error. Callers that do not need the output can ignore it.
+pub async fn run(cmd: &mut Command) -> color_eyre::Result<String> {
     let rendered = render(cmd);
     tracing::debug!(command = %rendered, "running command");
 

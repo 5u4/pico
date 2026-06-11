@@ -23,7 +23,7 @@ pub async fn resolve(
             };
 
             proc::run(Command::new("git").arg("-C").arg(repo).arg("fetch")).await?;
-            let sha = proc::run_capture(Command::new("git").arg("-C").arg(repo).arg("rev-parse").arg(rev)).await?;
+            let sha = proc::run(Command::new("git").arg("-C").arg(repo).arg("rev-parse").arg(rev)).await?;
             proc::run(Command::new("git").arg("-C").arg(repo).arg("checkout").arg(&sha)).await?;
             proc::run(Command::new("cargo").current_dir(repo).arg("build").arg("--release")).await?;
 
