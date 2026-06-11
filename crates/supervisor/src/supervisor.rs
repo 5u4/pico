@@ -1,0 +1,362 @@
+use std::{
+    collections::VecDeque,
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex},
+    time::Instant,
+};
+
+use color_eyre::eyre::{WrapErr, eyre};
+use pico_shared::proto::{DeployRecord, DeployTarget, Request, Response, StatusReport};
+use tokio::sync::{Mutex as AsyncMutex, oneshot};
+
+use crate::{config::Config, slots::Slots};
+
+const HISTORY_CAP: usize = 5;
+
+struct WorkerProc {
+    child: tokio::process::Child,
+    pid: Option<u32>,
+    bin: PathBuf,
+    started_at: Instant,
+}
+
+/// Owns the worker process, the deploy pipeline, and the control socket.
+pub struct Supervisor {
+    config: Config,
+    worker_root: PathBuf,
+    slots: Slots,
+    worker: AsyncMutex<Option<WorkerProc>>,
+    history: Mutex<VecDeque<DeployRecord>>,
+    deploy_lock: AsyncMutex<()>,
+    pending_ready: Mutex<Option<oneshot::Sender<()>>>,
+}
+
+impl Supervisor {
+    pub fn new(config: Config, worker_root: PathBuf, slots: Slots) -> Self {
+        Self {
+            config,
+            worker_root,
+            slots,
+            worker: AsyncMutex::new(None),
+            history: Mutex::new(VecDeque::new()),
+            deploy_lock: AsyncMutex::new(()),
+            pending_ready: Mutex::new(None),
+        }
+    }
+
+    /// Spawn the `current` slot binary if one exists. Failure is non-fatal: the
+    /// socket stays up so a `deploy` can recover.
+    pub async fn boot(&self) -> color_eyre::Result<()> {
+        let Some(current) = self.slots.current_target()? else {
+            tracing::info!("no current slot; awaiting deploy");
+            return Ok(());
+        };
+        match self.spawn_and_validate(&current).await {
+            Ok(proc) => {
+                let pid = proc.pid;
+                *self.worker.lock().await = Some(proc);
+                tracing::info!(binary = %current.display(), ?pid, "booted worker from current slot");
+            }
+            Err(e) => {
+                tracing::warn!(error = %format!("{e:#}"), "boot spawn failed; awaiting deploy");
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn serve(self: Arc<Self>) -> color_eyre::Result<()> {
+        let socket = self.config.socket_path.clone();
+        if let Some(parent) = socket.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        match std::fs::remove_file(&socket) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+        let listener =
+            tokio::net::UnixListener::bind(&socket).wrap_err_with(|| format!("bind {}", socket.display()))?;
+        tracing::info!(socket = %socket.display(), "supervisor listening");
+
+        loop {
+            let (stream, _addr) = listener.accept().await?;
+            let me = Arc::clone(&self);
+            tokio::spawn(async move {
+                if let Err(e) = me.handle_conn(stream).await {
+                    tracing::warn!(error = %format!("{e:#}"), "connection error");
+                }
+            });
+        }
+    }
+
+    async fn handle_conn(self: Arc<Self>, stream: tokio::net::UnixStream) -> color_eyre::Result<()> {
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = tokio::io::BufReader::new(read_half);
+        let Some(req): Option<Request> = pico_shared::proto::read_frame(&mut reader).await? else {
+            return Ok(());
+        };
+        let resp = match req {
+            Request::Ready => {
+                self.signal_ready();
+                return Ok(());
+            }
+            Request::Deploy { target } => self.deploy(target).await,
+            Request::Rollback => self.rollback().await,
+            Request::Status => self.status().await,
+            Request::Stop => self.stop().await,
+        };
+        pico_shared::proto::write_frame(&mut write_half, &resp).await
+    }
+
+    fn signal_ready(&self) {
+        if let Some(tx) = self.pending_ready.lock().expect("pending_ready poisoned").take() {
+            let _ = tx.send(());
+        }
+    }
+
+    async fn deploy(&self, target: DeployTarget) -> Response {
+        let _guard = self.deploy_lock.lock().await;
+        let desc = describe(&target);
+
+        let bin = match crate::build::resolve(&target, self.config.repo_path.as_deref(), self.slots.builds_dir()).await
+        {
+            Ok(bin) => bin,
+            Err(e) => {
+                return Response::Error {
+                    message: format!("build failed: {e:#}"),
+                };
+            }
+        };
+
+        let previous = match self.slots.current_target() {
+            Ok(p) => p,
+            Err(e) => {
+                return Response::Error {
+                    message: format!("{e:#}"),
+                };
+            }
+        };
+
+        if let Some(old) = self.worker.lock().await.take() {
+            self.kill_worker(old).await;
+        }
+
+        match self.spawn_and_validate(&bin).await {
+            Ok(proc) => {
+                let pid = proc.pid;
+                *self.worker.lock().await = Some(proc);
+                let note = match self.slots.promote(&bin) {
+                    Ok(()) => String::new(),
+                    Err(e) => {
+                        tracing::warn!(error = %format!("{e:#}"), "slot promote failed");
+                        format!(" (warning: slot update failed: {e:#})")
+                    }
+                };
+                self.record(&desc, "ok");
+                Response::Ok {
+                    detail: format!("deployed {} (pid {}){note}", bin.display(), fmt_pid(pid)),
+                }
+            }
+            Err(e) => match previous {
+                Some(prev) => match self.spawn_and_validate(&prev).await {
+                    Ok(proc) => {
+                        *self.worker.lock().await = Some(proc);
+                        self.record(&desc, "rolled_back");
+                        Response::Error {
+                            message: format!("deploy failed ({e:#}); rolled back to {}", prev.display()),
+                        }
+                    }
+                    Err(e2) => {
+                        self.record(&desc, "failed");
+                        Response::Error {
+                            message: format!("deploy failed ({e:#}); rollback also failed ({e2:#}); no worker running"),
+                        }
+                    }
+                },
+                None => {
+                    self.record(&desc, "failed");
+                    Response::Error {
+                        message: format!("deploy failed ({e:#}); no previous slot; no worker running"),
+                    }
+                }
+            },
+        }
+    }
+
+    async fn rollback(&self) -> Response {
+        let _guard = self.deploy_lock.lock().await;
+        let prev = match self.slots.previous_target() {
+            Ok(Some(p)) => p,
+            Ok(None) => {
+                return Response::Error {
+                    message: "no previous slot to roll back to".into(),
+                };
+            }
+            Err(e) => {
+                return Response::Error {
+                    message: format!("{e:#}"),
+                };
+            }
+        };
+
+        if let Some(old) = self.worker.lock().await.take() {
+            self.kill_worker(old).await;
+        }
+
+        match self.spawn_and_validate(&prev).await {
+            Ok(proc) => {
+                *self.worker.lock().await = Some(proc);
+                if let Err(e) = self.slots.swap() {
+                    return Response::Error {
+                        message: format!("rolled back to {} but slot swap failed: {e:#}", prev.display()),
+                    };
+                }
+                self.record("rollback", "ok");
+                Response::Ok {
+                    detail: format!("rolled back to {}", prev.display()),
+                }
+            }
+            Err(e) => {
+                self.record("rollback", "failed");
+                Response::Error {
+                    message: format!("rollback failed: {e:#}; no worker running"),
+                }
+            }
+        }
+    }
+
+    async fn status(&self) -> Response {
+        let current = match self.slots.current_target() {
+            Ok(c) => c.map(|p| p.display().to_string()),
+            Err(e) => {
+                return Response::Error {
+                    message: format!("{e:#}"),
+                };
+            }
+        };
+        let (running, pid, uptime_secs) = match &*self.worker.lock().await {
+            Some(w) => (true, w.pid, Some(w.started_at.elapsed().as_secs())),
+            None => (false, None, None),
+        };
+        let deploys = self
+            .history
+            .lock()
+            .expect("history poisoned")
+            .iter()
+            .rev()
+            .cloned()
+            .collect();
+        Response::Status(StatusReport {
+            running,
+            pid,
+            current,
+            uptime_secs,
+            deploys,
+        })
+    }
+
+    async fn stop(&self) -> Response {
+        match self.worker.lock().await.take() {
+            Some(w) => {
+                self.kill_worker(w).await;
+                Response::Ok {
+                    detail: "worker stopped".into(),
+                }
+            }
+            None => Response::Ok {
+                detail: "no worker running".into(),
+            },
+        }
+    }
+
+    /// Spawn `worker --path <root> --socket <sock>` from `bin` and wait for its
+    /// `ready` ping within `health_timeout`. On any failure the child is killed
+    /// before the error returns, so no orphan survives.
+    async fn spawn_and_validate(&self, bin: &Path) -> color_eyre::Result<WorkerProc> {
+        let (tx, rx) = oneshot::channel();
+        *self.pending_ready.lock().expect("pending_ready poisoned") = Some(tx);
+
+        let mut child = tokio::process::Command::new(bin)
+            .arg("--path")
+            .arg(&self.worker_root)
+            .arg("--socket")
+            .arg(&self.config.socket_path)
+            .spawn()
+            .wrap_err_with(|| format!("spawn {}", bin.display()))?;
+        let pid = child.id();
+
+        let outcome: color_eyre::Result<()> = tokio::select! {
+            ready = rx => ready.map_err(|_| eyre!("ready channel closed before worker reported")),
+            exit = child.wait() => match exit {
+                Ok(status) => Err(eyre!("worker exited before ready: {status}")),
+                Err(e) => Err(eyre!("waiting on worker: {e}")),
+            },
+            () = tokio::time::sleep(self.config.health_timeout) => {
+                Err(eyre!("worker not ready within {:?}", self.config.health_timeout))
+            }
+        };
+
+        self.pending_ready.lock().expect("pending_ready poisoned").take();
+
+        match outcome {
+            Ok(()) => Ok(WorkerProc {
+                child,
+                pid,
+                bin: bin.to_path_buf(),
+                started_at: Instant::now(),
+            }),
+            Err(e) => {
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+                Err(e)
+            }
+        }
+    }
+
+    async fn kill_worker(&self, mut proc: WorkerProc) {
+        tracing::info!(binary = %proc.bin.display(), pid = ?proc.pid, "stopping worker");
+        if let Some(pid) = proc.pid {
+            // SAFETY: kill(2) with a pid we own; an invalid pid is a harmless ESRCH.
+            unsafe {
+                libc::kill(pid as libc::pid_t, libc::SIGTERM);
+            }
+        }
+        tokio::select! {
+            _ = proc.child.wait() => {}
+            () = tokio::time::sleep(self.config.health_timeout) => {
+                let _ = proc.child.start_kill();
+                let _ = proc.child.wait().await;
+            }
+        }
+    }
+
+    fn record(&self, target: &str, outcome: &str) {
+        let mut history = self.history.lock().expect("history poisoned");
+        history.push_back(DeployRecord {
+            target: target.to_string(),
+            outcome: outcome.to_string(),
+            at_unix: now_unix(),
+        });
+        while history.len() > HISTORY_CAP {
+            history.pop_front();
+        }
+    }
+}
+
+fn describe(target: &DeployTarget) -> String {
+    match target {
+        DeployTarget::Rev { rev } => format!("rev:{rev}"),
+        DeployTarget::Path { path } => format!("path:{}", path.display()),
+    }
+}
+
+fn fmt_pid(pid: Option<u32>) -> String {
+    pid.map(|p| p.to_string()).unwrap_or_else(|| "?".into())
+}
+
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
