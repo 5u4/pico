@@ -10,11 +10,27 @@ const DEFAULT_HEALTH_TIMEOUT_SECS: u64 = 30;
 /// Supervisor configuration, loaded from `<supervisor_dir>/supervisor.toml`.
 /// A missing file yields all defaults so the socket is usable with zero setup
 /// (`deploy path:` works; `deploy rev:` needs `repo_path`).
+#[derive(Deserialize)]
+#[serde(default)]
 pub struct Config {
-    pub socket_path: PathBuf,
+    /// Control-socket override; `None` means `<supervisor_dir>/pico.sock`,
+    /// resolved by the caller that knows the supervisor dir.
+    pub socket_path: Option<PathBuf>,
     pub repo_path: Option<PathBuf>,
-    pub health_timeout: Duration,
+    pub health_timeout_secs: u64,
+    #[serde(rename = "worker")]
     pub workers: Vec<WorkerEntry>,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            socket_path: None,
+            repo_path: None,
+            health_timeout_secs: DEFAULT_HEALTH_TIMEOUT_SECS,
+            workers: Vec::new(),
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -22,30 +38,17 @@ pub struct WorkerEntry {
     pub root: PathBuf,
 }
 
-#[derive(Default, Deserialize)]
-struct Raw {
-    socket_path: Option<PathBuf>,
-    repo_path: Option<PathBuf>,
-    health_timeout_secs: Option<u64>,
-    #[serde(default, rename = "worker")]
-    workers: Vec<WorkerEntry>,
-}
-
 impl Config {
     pub fn load(supervisor_dir: &Path) -> color_eyre::Result<Self> {
-        let path = supervisor_dir.join("supervisor.toml");
-        let raw: Raw = match std::fs::read_to_string(&path) {
-            Ok(text) => toml::from_str(&text)?,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Raw::default(),
-            Err(e) => return Err(e.into()),
-        };
+        match std::fs::read_to_string(supervisor_dir.join("supervisor.toml")) {
+            Ok(text) => Ok(toml::from_str(&text)?),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(e) => Err(e.into()),
+        }
+    }
 
-        Ok(Self {
-            socket_path: raw.socket_path.unwrap_or_else(|| supervisor_dir.join("pico.sock")),
-            repo_path: raw.repo_path,
-            health_timeout: Duration::from_secs(raw.health_timeout_secs.unwrap_or(DEFAULT_HEALTH_TIMEOUT_SECS)),
-            workers: raw.workers,
-        })
+    pub fn health_timeout(&self) -> Duration {
+        Duration::from_secs(self.health_timeout_secs)
     }
 
     /// Root of the single worker this supervisor manages today: the first
@@ -53,7 +56,7 @@ impl Config {
     pub fn worker_root(&self) -> color_eyre::Result<PathBuf> {
         match self.workers.first() {
             Some(w) => Ok(w.root.clone()),
-            None => Ok(pico_shared::paths::pico_home()?.join("workers").join("default")),
+            None => pico_shared::paths::worker_root(pico_shared::paths::DEFAULT_WORKER),
         }
     }
 }

@@ -1,7 +1,10 @@
 use std::{
     collections::VecDeque,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Instant,
 };
 
@@ -24,18 +27,20 @@ struct WorkerProc {
 pub struct Supervisor {
     config: Config,
     worker_root: PathBuf,
+    socket_path: PathBuf,
     slots: Slots,
     worker: AsyncMutex<Option<WorkerProc>>,
     history: Mutex<VecDeque<DeployRecord>>,
     deploy_lock: AsyncMutex<()>,
-    pending_ready: Mutex<Option<oneshot::Sender<()>>>,
+    pending_ready: Mutex<Option<(String, oneshot::Sender<()>)>>,
 }
 
 impl Supervisor {
-    pub fn new(config: Config, worker_root: PathBuf, slots: Slots) -> Self {
+    pub fn new(config: Config, worker_root: PathBuf, socket_path: PathBuf, slots: Slots) -> Self {
         Self {
             config,
             worker_root,
+            socket_path,
             slots,
             worker: AsyncMutex::new(None),
             history: Mutex::new(VecDeque::new()),
@@ -65,7 +70,7 @@ impl Supervisor {
     }
 
     pub async fn serve(self: Arc<Self>) -> color_eyre::Result<()> {
-        let socket = self.config.socket_path.clone();
+        let socket = self.socket_path.clone();
         if let Some(parent) = socket.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -96,8 +101,8 @@ impl Supervisor {
             return Ok(());
         };
         let resp = match req {
-            Request::Ready => {
-                self.signal_ready();
+            Request::Ready { token } => {
+                self.signal_ready(&token);
                 return Ok(());
             }
             Request::Deploy { target } => self.deploy(target).await,
@@ -108,9 +113,15 @@ impl Supervisor {
         pico_shared::proto::write_frame(&mut write_half, &resp).await
     }
 
-    fn signal_ready(&self) {
-        if let Some(tx) = self.pending_ready.lock().expect("pending_ready poisoned").take() {
-            let _ = tx.send(());
+    fn signal_ready(&self, token: &str) {
+        let mut pending = self.pending_ready.lock().expect("pending_ready poisoned");
+        let matches = pending.as_ref().is_some_and(|(expected, _)| expected == token);
+        if matches {
+            if let Some((_, tx)) = pending.take() {
+                let _ = tx.send(());
+            }
+        } else {
+            tracing::debug!("ignoring ready ping with unknown token");
         }
     }
 
@@ -273,14 +284,17 @@ impl Supervisor {
     /// `ready` ping within `health_timeout`. On any failure the child is killed
     /// before the error returns, so no orphan survives.
     async fn spawn_and_validate(&self, bin: &Path) -> color_eyre::Result<WorkerProc> {
+        let token = ready_token();
         let (tx, rx) = oneshot::channel();
-        *self.pending_ready.lock().expect("pending_ready poisoned") = Some(tx);
+        *self.pending_ready.lock().expect("pending_ready poisoned") = Some((token.clone(), tx));
 
         let mut child = tokio::process::Command::new(bin)
             .arg("--path")
             .arg(&self.worker_root)
             .arg("--socket")
-            .arg(&self.config.socket_path)
+            .arg(&self.socket_path)
+            .arg("--ready-token")
+            .arg(&token)
             .spawn()
             .wrap_err_with(|| format!("spawn {}", bin.display()))?;
         let pid = child.id();
@@ -291,8 +305,8 @@ impl Supervisor {
                 Ok(status) => Err(eyre!("worker exited before ready: {status}")),
                 Err(e) => Err(eyre!("waiting on worker: {e}")),
             },
-            () = tokio::time::sleep(self.config.health_timeout) => {
-                Err(eyre!("worker not ready within {:?}", self.config.health_timeout))
+            () = tokio::time::sleep(self.config.health_timeout()) => {
+                Err(eyre!("worker not ready within {:?}", self.config.health_timeout()))
             }
         };
 
@@ -323,7 +337,7 @@ impl Supervisor {
         }
         tokio::select! {
             _ = proc.child.wait() => {}
-            () = tokio::time::sleep(self.config.health_timeout) => {
+            () = tokio::time::sleep(self.config.health_timeout()) => {
                 let _ = proc.child.start_kill();
                 let _ = proc.child.wait().await;
             }
@@ -359,4 +373,14 @@ fn now_unix() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+fn ready_token() -> String {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{}-{nanos}-{seq}", std::process::id())
 }

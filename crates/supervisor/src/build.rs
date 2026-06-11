@@ -4,7 +4,8 @@ use std::{
 };
 
 use color_eyre::eyre::bail;
-use pico_shared::proto::DeployTarget;
+use pico_shared::{proc, proto::DeployTarget};
+use tokio::process::Command;
 
 /// Resolve a deploy target into a worker binary inside `builds_dir`, returning
 /// the path to the copied binary (`builds_dir/<id>/worker`). Runs while the
@@ -21,61 +22,22 @@ pub async fn resolve(
                 bail!("deploy rev: requires repo_path in supervisor.toml");
             };
 
-            run(
-                tokio::process::Command::new("git").arg("-C").arg(repo).arg("fetch"),
-                "git fetch",
-            )
-            .await?;
-
-            let output = tokio::process::Command::new("git")
-                .arg("-C")
-                .arg(repo)
-                .arg("rev-parse")
-                .arg(rev)
-                .output()
-                .await?;
-            if !output.status.success() {
-                bail!("git rev-parse: {}", String::from_utf8_lossy(&output.stderr));
-            }
-            let sha = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-
-            run(
-                tokio::process::Command::new("git")
-                    .arg("-C")
-                    .arg(repo)
-                    .arg("checkout")
-                    .arg(&sha),
-                "git checkout",
-            )
-            .await?;
-
-            run(
-                tokio::process::Command::new("cargo")
-                    .current_dir(repo)
-                    .arg("build")
-                    .arg("--release"),
-                "cargo build --release",
-            )
-            .await?;
+            proc::run(Command::new("git").arg("-C").arg(repo).arg("fetch")).await?;
+            let sha = proc::run_capture(Command::new("git").arg("-C").arg(repo).arg("rev-parse").arg(rev)).await?;
+            proc::run(Command::new("git").arg("-C").arg(repo).arg("checkout").arg(&sha)).await?;
+            proc::run(Command::new("cargo").current_dir(repo).arg("build").arg("--release")).await?;
 
             let dest = builds_dir.join(&sha).join("worker");
             copy_binary(&repo.join("target").join("release").join("worker"), &dest).await?;
             Ok(dest)
         }
         DeployTarget::Path { path } => {
-            let ts = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-            let dest = builds_dir.join(format!("dev-{ts}")).join("worker");
+            let id = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+            let dest = builds_dir.join(format!("dev-{id}")).join("worker");
             copy_binary(path, &dest).await?;
             Ok(dest)
         }
     }
-}
-
-async fn run(cmd: &mut tokio::process::Command, what: &str) -> color_eyre::Result<()> {
-    if !cmd.status().await?.success() {
-        bail!("{what} failed");
-    }
-    Ok(())
 }
 
 async fn copy_binary(src: &Path, dest: &Path) -> color_eyre::Result<()> {

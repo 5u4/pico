@@ -7,7 +7,8 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 /// supervisor's control socket.
 ///
 /// Control clients send `deploy` / `rollback` / `status` / `stop`; a worker the
-/// supervisor spawned sends `ready` once it is up, to validate a deploy.
+/// supervisor spawned sends `ready` (carrying the per-spawn token it was given)
+/// once it is up, to validate a deploy.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum Request {
@@ -15,7 +16,7 @@ pub enum Request {
     Rollback,
     Status,
     Stop,
-    Ready,
+    Ready { token: String },
 }
 
 /// What a `deploy` should run: a git revision built on the host, or a
