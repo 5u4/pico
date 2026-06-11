@@ -34,7 +34,7 @@ pub fn init(dir: &Path, prefix: &str) -> color_eyre::Result<WorkerGuard> {
         .with(fmt::layer())
         .with(fmt::layer().with_ansi(false).with_writer(file_writer))
         .with(ErrorLayer::default())
-        .init();
+        .try_init()?;
 
     Ok(guard)
 }

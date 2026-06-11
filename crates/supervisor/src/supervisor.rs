@@ -288,7 +288,7 @@ impl Supervisor {
         let (tx, rx) = oneshot::channel();
         *self.pending_ready.lock().expect("pending_ready poisoned") = Some((token.clone(), tx));
 
-        let mut child = tokio::process::Command::new(bin)
+        let mut child = match tokio::process::Command::new(bin)
             .arg("--path")
             .arg(&self.worker_root)
             .arg("--socket")
@@ -296,7 +296,13 @@ impl Supervisor {
             .arg("--ready-token")
             .arg(&token)
             .spawn()
-            .wrap_err_with(|| format!("spawn {}", bin.display()))?;
+        {
+            Ok(child) => child,
+            Err(e) => {
+                self.pending_ready.lock().expect("pending_ready poisoned").take();
+                return Err(e).wrap_err_with(|| format!("spawn {}", bin.display()));
+            }
+        };
         let pid = child.id();
 
         let outcome: color_eyre::Result<()> = tokio::select! {

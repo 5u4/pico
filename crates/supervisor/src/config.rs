@@ -5,32 +5,25 @@ use std::{
 
 use serde::Deserialize;
 
-const DEFAULT_HEALTH_TIMEOUT_SECS: u64 = 30;
+fn default_health_timeout_secs() -> u64 {
+    30
+}
 
 /// Supervisor configuration, loaded from `<supervisor_dir>/supervisor.toml`.
 /// A missing file yields all defaults so the socket is usable with zero setup
 /// (`deploy path:` works; `deploy rev:` needs `repo_path`).
 #[derive(Deserialize)]
-#[serde(default)]
 pub struct Config {
     /// Control-socket override; `None` means `<supervisor_dir>/pico.sock`,
     /// resolved by the caller that knows the supervisor dir.
+    #[serde(default)]
     pub socket_path: Option<PathBuf>,
+    #[serde(default)]
     pub repo_path: Option<PathBuf>,
+    #[serde(default = "default_health_timeout_secs")]
     pub health_timeout_secs: u64,
-    #[serde(rename = "worker")]
+    #[serde(default)]
     pub workers: Vec<WorkerEntry>,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            socket_path: None,
-            repo_path: None,
-            health_timeout_secs: DEFAULT_HEALTH_TIMEOUT_SECS,
-            workers: Vec::new(),
-        }
-    }
 }
 
 #[derive(Deserialize)]
@@ -40,11 +33,12 @@ pub struct WorkerEntry {
 
 impl Config {
     pub fn load(supervisor_dir: &Path) -> color_eyre::Result<Self> {
-        match std::fs::read_to_string(supervisor_dir.join("supervisor.toml")) {
-            Ok(text) => Ok(toml::from_str(&text)?),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(e) => Err(e.into()),
-        }
+        let text = match std::fs::read_to_string(supervisor_dir.join("supervisor.toml")) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => return Err(e.into()),
+        };
+        Ok(toml::from_str(&text)?)
     }
 
     pub fn health_timeout(&self) -> Duration {
@@ -52,7 +46,7 @@ impl Config {
     }
 
     /// Root of the single worker this supervisor manages today: the first
-    /// `[[worker]]` entry, else `~/.pico/workers/default`.
+    /// `[[workers]]` entry, else `~/.pico/workers/default`.
     pub fn worker_root(&self) -> color_eyre::Result<PathBuf> {
         match self.workers.first() {
             Some(w) => Ok(w.root.clone()),
