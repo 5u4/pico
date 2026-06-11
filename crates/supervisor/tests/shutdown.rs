@@ -103,8 +103,7 @@ fn sigterm_drains_and_stops_worker() {
         abort(&mut sup, "supervisor never started serving".into());
     }
 
-    // Deploy a worker over the socket. (boot can't validate a worker before
-    // serve binds the socket, so deploy is the path that actually brings one up.)
+    // Bring a worker up over the live socket via deploy.
     let path = serde_json::Value::String(worker.to_string_lossy().into_owned());
     let deploy = format!("{{\"cmd\":\"deploy\",\"target\":{{\"kind\":\"path\",\"path\":{path}}}}}");
     match request(&socket, &deploy) {
@@ -144,4 +143,48 @@ fn sigterm_drains_and_stops_worker() {
     );
     assert!(worker_dead, "worker was orphaned after supervisor shutdown");
     assert!(socket_gone, "control socket left behind after shutdown");
+}
+
+#[test]
+fn boot_adopts_current_slot() {
+    let worker = ensure_worker();
+    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+    let home = std::env::temp_dir().join(format!("pico-it-{}-{nanos}", std::process::id()));
+    let sup_dir = home.join(".pico").join("supervisor");
+    let slots = sup_dir.join("slots");
+    std::fs::create_dir_all(&slots).unwrap();
+    let socket = PathBuf::from(format!("/tmp/pico-it-{nanos}.sock"));
+    std::fs::write(
+        sup_dir.join("supervisor.toml"),
+        format!("health_timeout_secs = 5\nsocket_path = \"{}\"\n", socket.display()),
+    )
+    .unwrap();
+    // current slot -> the built worker; the supervisor must adopt it on boot,
+    // which only works because serve is accepting before boot validates.
+    std::os::unix::fs::symlink(&worker, slots.join("current")).unwrap();
+
+    let mut sup = Command::new(bin("supervisor"))
+        .env("HOME", &home)
+        .spawn()
+        .expect("spawn supervisor");
+
+    let booted = poll(Duration::from_secs(15), || running_pid(&socket));
+
+    // Stop the supervisor and clean up regardless of the outcome.
+    unsafe {
+        libc::kill(sup.id() as i32, libc::SIGTERM);
+    }
+    let _ = poll(Duration::from_secs(15), || sup.try_wait().ok().flatten());
+    let _ = sup.kill();
+    let _ = sup.wait();
+    if let Some(pid) = booted
+        && alive(pid as i32)
+    {
+        unsafe {
+            libc::kill(pid as i32, libc::SIGKILL);
+        }
+    }
+    let _ = std::fs::remove_dir_all(&home);
+
+    assert!(booted.is_some(), "supervisor did not adopt the current-slot worker on boot");
 }

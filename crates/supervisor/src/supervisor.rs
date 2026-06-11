@@ -54,9 +54,12 @@ impl Supervisor {
         }
     }
 
-    /// Spawn the `current` slot binary if one exists. Failure is non-fatal: the
-    /// socket stays up so a `deploy` can recover.
-    pub async fn boot(&self) -> color_eyre::Result<()> {
+    /// Adopt the `current` slot binary if one exists. Must run only once the
+    /// accept loop is live: the spawned worker validates by sending a ready ping
+    /// back over the control socket, so booting before [`Self::serve`] is
+    /// accepting would dead-lock on a ping nothing receives. Failure is
+    /// non-fatal — the socket stays up so a `deploy` can recover.
+    async fn boot(&self) -> color_eyre::Result<()> {
         let Some(current) = self.slots.current_target()? else {
             tracing::info!("no current slot; awaiting deploy");
             return Ok(());
@@ -100,13 +103,32 @@ impl Supervisor {
             watcher.cancel();
         });
 
-        let result: color_eyre::Result<()> = loop {
+        let accept = {
+            let me = Arc::clone(&self);
+            tokio::spawn(async move { me.accept_loop(listener).await })
+        };
+
+        // Socket is accepting now, so a worker adopted from the current slot can
+        // deliver its ready ping. Booting earlier would dead-lock on it.
+        self.boot().await?;
+
+        let result = match accept.await {
+            Ok(result) => result,
+            Err(e) => Err(eyre!("accept task panicked: {e}")),
+        };
+
+        self.shutdown().await;
+        result
+    }
+
+    async fn accept_loop(self: Arc<Self>, listener: tokio::net::UnixListener) -> color_eyre::Result<()> {
+        loop {
             let stream = tokio::select! {
                 biased;
-                () = self.cancel.cancelled() => break Ok(()),
+                () = self.cancel.cancelled() => return Ok(()),
                 accepted = listener.accept() => match accepted {
                     Ok((stream, _addr)) => stream,
-                    Err(e) => break Err(e).wrap_err("accept failed"),
+                    Err(e) => return Err(e).wrap_err("accept failed"),
                 },
             };
             let me = Arc::clone(&self);
@@ -115,10 +137,7 @@ impl Supervisor {
                     tracing::warn!(error = %format!("{e:#}"), "connection error");
                 }
             });
-        };
-
-        self.shutdown().await;
-        result
+        }
     }
 
     /// Stop accepting, drain in-flight handlers so an in-flight deploy finishes

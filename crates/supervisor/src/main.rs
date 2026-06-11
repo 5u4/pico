@@ -19,6 +19,5 @@ async fn main() -> color_eyre::Result<()> {
     let slots = slots::Slots::new(&dir)?;
     let sup = Arc::new(supervisor::Supervisor::new(config, worker_root, socket_path, slots));
 
-    sup.boot().await?;
     sup.serve().await
 }
