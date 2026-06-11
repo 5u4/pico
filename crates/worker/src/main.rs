@@ -1,10 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use pico_shared::proto::{self, Request};
-use tokio::{
-    net::UnixStream,
-    signal::unix::{SignalKind, signal},
-};
+use tokio::net::UnixStream;
 
 struct Args {
     root: PathBuf,
@@ -65,7 +62,7 @@ async fn main() -> color_eyre::Result<()> {
 
     tracing::warn!("scaffold build — no App wired yet");
 
-    wait_for_shutdown().await?;
+    pico_shared::signal::wait_for_shutdown().await?;
     tracing::info!("shutdown signal received; exiting");
     Ok(())
 }
@@ -79,14 +76,4 @@ async fn report_ready(socket: &Path, token: &str) -> color_eyre::Result<()> {
         },
     )
     .await
-}
-
-async fn wait_for_shutdown() -> color_eyre::Result<()> {
-    let mut term = signal(SignalKind::terminate())?;
-    let mut interrupt = signal(SignalKind::interrupt())?;
-    tokio::select! {
-        _ = term.recv() => {}
-        _ = interrupt.recv() => {}
-    }
-    Ok(())
 }

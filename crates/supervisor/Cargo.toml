@@ -14,8 +14,13 @@ libc.workspace = true
 pico-shared.workspace = true
 serde.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 toml.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+libc.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true

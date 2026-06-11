@@ -11,6 +11,7 @@ use std::{
 use color_eyre::eyre::{WrapErr, eyre};
 use pico_shared::proto::{DeployRecord, DeployTarget, Request, Response, StatusReport};
 use tokio::sync::{Mutex as AsyncMutex, oneshot};
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::{config::Config, slots::Slots};
 
@@ -33,6 +34,8 @@ pub struct Supervisor {
     history: Mutex<VecDeque<DeployRecord>>,
     deploy_lock: AsyncMutex<()>,
     pending_ready: Mutex<Option<(String, oneshot::Sender<()>)>>,
+    cancel: CancellationToken,
+    tracker: TaskTracker,
 }
 
 impl Supervisor {
@@ -46,6 +49,8 @@ impl Supervisor {
             history: Mutex::new(VecDeque::new()),
             deploy_lock: AsyncMutex::new(()),
             pending_ready: Mutex::new(None),
+            cancel: CancellationToken::new(),
+            tracker: TaskTracker::new(),
         }
     }
 
@@ -83,14 +88,53 @@ impl Supervisor {
             tokio::net::UnixListener::bind(&socket).wrap_err_with(|| format!("bind {}", socket.display()))?;
         tracing::info!(socket = %socket.display(), "supervisor listening");
 
-        loop {
-            let (stream, _addr) = listener.accept().await?;
+        let watcher = self.cancel.clone();
+        tokio::spawn(async move {
+            match pico_shared::signal::wait_for_shutdown().await {
+                Ok(()) => tracing::info!("shutdown signal received; draining"),
+                Err(e) => {
+                    tracing::error!(error = %format!("{e:#}"), "signal setup failed; shutdown not handled");
+                    return;
+                }
+            }
+            watcher.cancel();
+        });
+
+        let result: color_eyre::Result<()> = loop {
+            let stream = tokio::select! {
+                biased;
+                () = self.cancel.cancelled() => break Ok(()),
+                accepted = listener.accept() => match accepted {
+                    Ok((stream, _addr)) => stream,
+                    Err(e) => break Err(e).wrap_err("accept failed"),
+                },
+            };
             let me = Arc::clone(&self);
-            tokio::spawn(async move {
+            self.tracker.spawn(async move {
                 if let Err(e) = me.handle_conn(stream).await {
                     tracing::warn!(error = %format!("{e:#}"), "connection error");
                 }
             });
+        };
+
+        self.shutdown().await;
+        result
+    }
+
+    /// Stop accepting, drain in-flight handlers so an in-flight deploy finishes
+    /// (rather than leaving the slots half-updated), then stop the worker and
+    /// remove the control socket. Runs on every exit from [`Self::serve`].
+    async fn shutdown(&self) {
+        self.cancel.cancel();
+        self.tracker.close();
+        self.tracker.wait().await;
+        if let Some(worker) = self.worker.lock().await.take() {
+            self.kill_worker(worker).await;
+        }
+        match std::fs::remove_file(&self.socket_path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => tracing::warn!(error = %e, "failed to remove control socket"),
         }
     }
 
