@@ -9,11 +9,13 @@ rust-version = "1.92"
 
 [workspace.dependencies]
 color-eyre = "0.6.5"
+libc = "0.2.186"
 pico-core = { path = "crates/core" }
 pico-shared = { path = "crates/shared" }
 poise = "0.6.2"
 rig-core = "0.38.2"
 serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
 serenity = "0.12.5"
 sqlx = { version = "0.9.0", features = ["runtime-tokio", "sqlite"] }
 tokio = { version = "1.52.3", features = ["full"] }
