@@ -11,5 +11,8 @@ poise.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 
+[dev-dependencies]
+dotenvy.workspace = true
+
 [lints]
 workspace = true

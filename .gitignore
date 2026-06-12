@@ -1,3 +1,5 @@
 .DS_Store
 docs/
 target/
+.env*
+!.env.e2e.example
