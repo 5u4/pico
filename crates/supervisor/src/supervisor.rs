@@ -5,16 +5,22 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use color_eyre::eyre::{WrapErr, eyre};
 use pico_shared::proto::{DeployRecord, DeployTarget, Request, Response, StatusReport};
 use tokio::sync::{Mutex as AsyncMutex, oneshot};
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::{config::Config, slots::Slots};
 
 const HISTORY_CAP: usize = 5;
+
+/// How long a control client has to deliver its request frame before the
+/// connection is dropped. Bounds a stalled or malicious client so it can't pin
+/// a handler task — and thus stall the shutdown drain — indefinitely.
+const REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 struct WorkerProc {
     child: tokio::process::Child,
@@ -33,6 +39,8 @@ pub struct Supervisor {
     history: Mutex<VecDeque<DeployRecord>>,
     deploy_lock: AsyncMutex<()>,
     pending_ready: Mutex<Option<(String, oneshot::Sender<()>)>>,
+    cancel: CancellationToken,
+    tracker: TaskTracker,
 }
 
 impl Supervisor {
@@ -46,15 +54,27 @@ impl Supervisor {
             history: Mutex::new(VecDeque::new()),
             deploy_lock: AsyncMutex::new(()),
             pending_ready: Mutex::new(None),
+            cancel: CancellationToken::new(),
+            tracker: TaskTracker::new(),
         }
     }
 
-    /// Spawn the `current` slot binary if one exists. Failure is non-fatal: the
-    /// socket stays up so a `deploy` can recover.
-    pub async fn boot(&self) -> color_eyre::Result<()> {
-        let Some(current) = self.slots.current_target()? else {
-            tracing::info!("no current slot; awaiting deploy");
-            return Ok(());
+    /// Adopt the `current` slot binary if one exists. Must run only once the
+    /// accept loop is live: the spawned worker validates by sending a ready ping
+    /// back over the control socket, so booting before [`Self::serve`] is
+    /// accepting would deadlock on a ping nothing receives. Failure is
+    /// non-fatal — the socket stays up so a `deploy` can recover.
+    async fn boot(&self) {
+        let current = match self.slots.current_target() {
+            Ok(Some(current)) => current,
+            Ok(None) => {
+                tracing::info!("no current slot; awaiting deploy");
+                return;
+            }
+            Err(e) => {
+                tracing::warn!(error = %format!("{e:#}"), "reading current slot failed; awaiting deploy");
+                return;
+            }
         };
         match self.spawn_and_validate(&current).await {
             Ok(proc) => {
@@ -66,7 +86,6 @@ impl Supervisor {
                 tracing::warn!(error = %format!("{e:#}"), "boot spawn failed; awaiting deploy");
             }
         }
-        Ok(())
     }
 
     pub async fn serve(self: Arc<Self>) -> color_eyre::Result<()> {
@@ -83,10 +102,48 @@ impl Supervisor {
             tokio::net::UnixListener::bind(&socket).wrap_err_with(|| format!("bind {}", socket.display()))?;
         tracing::info!(socket = %socket.display(), "supervisor listening");
 
-        loop {
-            let (stream, _addr) = listener.accept().await?;
+        let watcher = self.cancel.clone();
+        tokio::spawn(async move {
+            match pico_shared::signal::wait_for_shutdown().await {
+                Ok(()) => tracing::info!("shutdown signal received; draining"),
+                Err(e) => {
+                    tracing::error!(error = %format!("{e:#}"), "signal setup failed; shutdown not handled");
+                    return;
+                }
+            }
+            watcher.cancel();
+        });
+
+        let accept = {
             let me = Arc::clone(&self);
-            tokio::spawn(async move {
+            tokio::spawn(async move { me.accept_loop(listener).await })
+        };
+
+        // Socket is accepting now, so a worker adopted from the current slot can
+        // deliver its ready ping. Booting earlier would deadlock on it.
+        self.boot().await;
+
+        let result = match accept.await {
+            Ok(result) => result,
+            Err(e) => Err(eyre!("accept task panicked: {e}")),
+        };
+
+        self.shutdown().await;
+        result
+    }
+
+    async fn accept_loop(self: Arc<Self>, listener: tokio::net::UnixListener) -> color_eyre::Result<()> {
+        loop {
+            let stream = tokio::select! {
+                biased;
+                () = self.cancel.cancelled() => return Ok(()),
+                accepted = listener.accept() => match accepted {
+                    Ok((stream, _addr)) => stream,
+                    Err(e) => return Err(e).wrap_err("accept failed"),
+                },
+            };
+            let me = Arc::clone(&self);
+            self.tracker.spawn(async move {
                 if let Err(e) = me.handle_conn(stream).await {
                     tracing::warn!(error = %format!("{e:#}"), "connection error");
                 }
@@ -94,10 +151,41 @@ impl Supervisor {
         }
     }
 
+    /// Stop accepting, drain in-flight handlers so an in-flight deploy finishes
+    /// (rather than leaving the slots half-updated), then stop the worker and
+    /// remove the control socket. Runs on every exit from [`Self::serve`].
+    async fn shutdown(&self) {
+        self.cancel.cancel();
+        self.tracker.close();
+        self.tracker.wait().await;
+        if let Some(worker) = self.worker.lock().await.take() {
+            self.kill_worker(worker).await;
+        }
+        match std::fs::remove_file(&self.socket_path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => tracing::warn!(error = %e, "failed to remove control socket"),
+        }
+    }
+
     async fn handle_conn(self: Arc<Self>, stream: tokio::net::UnixStream) -> color_eyre::Result<()> {
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = tokio::io::BufReader::new(read_half);
-        let Some(req): Option<Request> = pico_shared::proto::read_frame(&mut reader).await? else {
+        let read = tokio::select! {
+            biased;
+            () = self.cancel.cancelled() => return Ok(()),
+            read = tokio::time::timeout(
+                REQUEST_READ_TIMEOUT,
+                pico_shared::proto::read_frame::<Request, _>(&mut reader),
+            ) => read,
+        };
+        let Some(req) = (match read {
+            Ok(frame) => frame?,
+            Err(_elapsed) => {
+                tracing::debug!("control client idle past read timeout; dropping connection");
+                return Ok(());
+            }
+        }) else {
             return Ok(());
         };
         let resp = match req {
