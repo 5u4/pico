@@ -11,6 +11,7 @@ rust-version = "1.92"
 color-eyre = "0.6.5"
 dotenvy = "0.15"
 libc = "0.2.186"
+parking_lot = "0.12.5"
 pico-core = { path = "crates/core" }
 pico-shared = { path = "crates/shared" }
 poise = "0.6.2"

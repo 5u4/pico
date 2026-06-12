@@ -1096,8 +1096,11 @@ version = "0.1.0"
 dependencies = [
  "color-eyre",
  "dotenvy",
+ "parking_lot",
  "pico-shared",
  "poise",
+ "serde",
+ "serde_json",
  "tokio",
  "tracing",
 ]
