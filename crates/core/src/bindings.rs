@@ -161,7 +161,10 @@ fn is_valid_channel_id(id: &str) -> bool {
 }
 
 fn is_valid_profile(name: &str) -> bool {
-    !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
 /// Invariants for a binding, enforced both when `/bind set` writes one and when
