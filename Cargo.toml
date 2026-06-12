@@ -9,6 +9,7 @@ rust-version = "1.92"
 
 [workspace.dependencies]
 color-eyre = "0.6.5"
+dotenvy = "0.15"
 libc = "0.2.186"
 pico-core = { path = "crates/core" }
 pico-shared = { path = "crates/shared" }
