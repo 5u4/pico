@@ -11,6 +11,7 @@ rust-version = "1.92"
 color-eyre = "0.6.5"
 dotenvy = "0.15"
 libc = "0.2.186"
+parking_lot = "0.12.5"
 pico-core = { path = "crates/core" }
 pico-shared = { path = "crates/shared" }
 poise = "0.6.2"
@@ -37,6 +38,7 @@ tracing = "0.1.44"
 tracing-appender = "0.2.5"
 tracing-error = "0.2.1"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+ulid = "1.2.1"
 
 [workspace.lints.clippy]
 pub_use = "deny"
