@@ -2,7 +2,7 @@
 //! a running daemon's socket, sends one request, and prints the reply. The
 //! daemon itself takes no subcommand (`supervisor` with no arguments).
 
-use std::path::PathBuf;
+use std::{path::PathBuf, time::Duration};
 
 use color_eyre::eyre::{WrapErr, eyre};
 use pico_shared::proto::{self, DeployTarget, Request, Response};
@@ -67,13 +67,17 @@ fn report(resp: Response) -> color_eyre::Result<()> {
 async fn send(request: Request) -> color_eyre::Result<Response> {
     let dir = pico_shared::paths::supervisor_dir()?;
     let socket = Config::load(&dir)?.socket_path.unwrap_or_else(|| dir.join("pico.sock"));
-    let stream = UnixStream::connect(&socket)
+    let stream = tokio::time::timeout(Duration::from_secs(5), UnixStream::connect(&socket))
         .await
+        .map_err(|_| eyre!("connecting to {} timed out", socket.display()))?
         .wrap_err_with(|| format!("connect {} (is the supervisor running?)", socket.display()))?;
     let (read_half, mut write_half) = stream.into_split();
     proto::write_frame(&mut write_half, &request).await?;
     let mut reader = BufReader::new(read_half);
-    proto::read_frame(&mut reader)
-        .await?
+    // 10m matches the Discord /deploy read budget so a `deploy rev:` host build
+    // has room; status/stop/rollback reply in milliseconds.
+    tokio::time::timeout(Duration::from_secs(600), proto::read_frame::<Response, _>(&mut reader))
+        .await
+        .map_err(|_| eyre!("supervisor did not reply within 10m"))??
         .ok_or_else(|| eyre!("supervisor closed the connection without replying"))
 }
