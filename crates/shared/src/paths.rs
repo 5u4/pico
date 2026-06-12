@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Name of the default worker root under `workers/`.
 pub const DEFAULT_WORKER: &str = "default";
@@ -19,4 +19,11 @@ pub fn supervisor_dir() -> color_eyre::Result<PathBuf> {
 /// `~/.pico/workers/<name>` — a worker root (its state + identity).
 pub fn worker_root(name: &str) -> color_eyre::Result<PathBuf> {
     Ok(pico_home()?.join("workers").join(name))
+}
+
+/// `<root>/secrets/<name>` — a credential file under a worker root. Takes the
+/// root explicitly because `worker --path` can point anywhere, not just under
+/// `$HOME`; recomputing from `pico_home()` would ignore that override.
+pub fn worker_secret(root: &Path, name: &str) -> PathBuf {
+    root.join("secrets").join(name)
 }

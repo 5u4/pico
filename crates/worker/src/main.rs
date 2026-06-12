@@ -49,21 +49,33 @@ async fn main() -> color_eyre::Result<()> {
         "pico worker starting"
     );
 
-    match &args.socket {
-        Some(socket) => {
-            let token = args.ready_token.clone().unwrap_or_default();
-            match report_ready(socket, &token).await {
-                Ok(()) => tracing::info!(socket = %socket.display(), "reported ready to supervisor"),
-                Err(e) => tracing::warn!(error = %format!("{e:#}"), "failed to report ready to supervisor"),
+    let app = pico_core::app::App::build(&args.root).await?;
+
+    let on_connected = {
+        let socket = args.socket.clone();
+        let token = args.ready_token.clone().unwrap_or_default();
+        move || async move {
+            match socket {
+                Some(socket) => match report_ready(&socket, &token).await {
+                    Ok(()) => tracing::info!(socket = %socket.display(), "reported ready to supervisor"),
+                    Err(e) => tracing::warn!(error = %format!("{e:#}"), "failed to report ready to supervisor"),
+                },
+                None => tracing::warn!("standalone (no --socket): hot-update disabled"),
             }
         }
-        None => tracing::warn!("standalone (no --socket): hot-update disabled"),
-    }
+    };
 
-    tracing::warn!("scaffold build — no App wired yet");
+    app.run(
+        async {
+            if let Err(e) = pico_shared::signal::wait_for_shutdown().await {
+                tracing::error!(error = %format!("{e:#}"), "signal wait failed; shutting down");
+            }
+        },
+        on_connected,
+    )
+    .await?;
 
-    pico_shared::signal::wait_for_shutdown().await?;
-    tracing::info!("shutdown signal received; exiting");
+    tracing::info!("shutdown complete; exiting");
     Ok(())
 }
 
