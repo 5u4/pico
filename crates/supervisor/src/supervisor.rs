@@ -64,10 +64,17 @@ impl Supervisor {
     /// back over the control socket, so booting before [`Self::serve`] is
     /// accepting would dead-lock on a ping nothing receives. Failure is
     /// non-fatal — the socket stays up so a `deploy` can recover.
-    async fn boot(&self) -> color_eyre::Result<()> {
-        let Some(current) = self.slots.current_target()? else {
-            tracing::info!("no current slot; awaiting deploy");
-            return Ok(());
+    async fn boot(&self) {
+        let current = match self.slots.current_target() {
+            Ok(Some(current)) => current,
+            Ok(None) => {
+                tracing::info!("no current slot; awaiting deploy");
+                return;
+            }
+            Err(e) => {
+                tracing::warn!(error = %format!("{e:#}"), "reading current slot failed; awaiting deploy");
+                return;
+            }
         };
         match self.spawn_and_validate(&current).await {
             Ok(proc) => {
@@ -79,7 +86,6 @@ impl Supervisor {
                 tracing::warn!(error = %format!("{e:#}"), "boot spawn failed; awaiting deploy");
             }
         }
-        Ok(())
     }
 
     pub async fn serve(self: Arc<Self>) -> color_eyre::Result<()> {
@@ -115,7 +121,7 @@ impl Supervisor {
 
         // Socket is accepting now, so a worker adopted from the current slot can
         // deliver its ready ping. Booting earlier would dead-lock on it.
-        self.boot().await?;
+        self.boot().await;
 
         let result = match accept.await {
             Ok(result) => result,

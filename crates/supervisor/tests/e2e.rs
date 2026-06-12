@@ -14,7 +14,7 @@ use std::{
     os::unix::net::UnixStream,
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus},
-    sync::{Mutex, MutexGuard},
+    sync::{Mutex, MutexGuard, OnceLock},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -25,19 +25,26 @@ fn bin(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_supervisor")).with_file_name(name)
 }
 
-/// `cargo test -p supervisor` builds the supervisor bin but not the worker bin
-/// from the sibling crate; build it on demand so the test stands alone.
+/// Path to the worker binary, built once per test process. `cargo test -p
+/// supervisor` builds the supervisor bin but not the sibling worker bin, so
+/// build it on demand; the `OnceLock` keeps concurrent tests from racing the
+/// build (which would oversubscribe the CPU and reintroduce readiness flakes).
 fn worker_bin() -> PathBuf {
-    let worker = bin("worker");
-    if !worker.exists() {
-        let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
-        let status = Command::new(cargo)
-            .args(["build", "-p", "worker"])
-            .status()
-            .expect("run cargo build -p worker");
-        assert!(status.success(), "failed to build worker binary");
-    }
-    worker
+    static WORKER: OnceLock<PathBuf> = OnceLock::new();
+    WORKER
+        .get_or_init(|| {
+            let worker = bin("worker");
+            if !worker.exists() {
+                let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+                let status = Command::new(cargo)
+                    .args(["build", "-p", "worker"])
+                    .status()
+                    .expect("run cargo build -p worker");
+                assert!(status.success(), "failed to build worker binary");
+            }
+            worker
+        })
+        .clone()
 }
 
 /// `kill(pid, 0)` probes existence without delivering a signal.

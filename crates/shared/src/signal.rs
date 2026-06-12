@@ -1,8 +1,9 @@
 use tokio::signal::unix::{SignalKind, signal};
 
 /// Resolve once the process receives `SIGTERM` or `SIGINT`. Both handlers are
-/// installed up front, so a signal that arrives before this future is awaited
-/// is still delivered. Errors only if the handlers cannot be registered.
+/// registered before the `select!`, so a signal delivered after registration
+/// is caught even if it lands before this future is polled. Errors only if the
+/// handlers cannot be registered.
 pub async fn wait_for_shutdown() -> color_eyre::Result<()> {
     let mut term = signal(SignalKind::terminate())?;
     let mut interrupt = signal(SignalKind::interrupt())?;
