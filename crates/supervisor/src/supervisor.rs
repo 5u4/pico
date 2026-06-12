@@ -62,7 +62,7 @@ impl Supervisor {
     /// Adopt the `current` slot binary if one exists. Must run only once the
     /// accept loop is live: the spawned worker validates by sending a ready ping
     /// back over the control socket, so booting before [`Self::serve`] is
-    /// accepting would dead-lock on a ping nothing receives. Failure is
+    /// accepting would deadlock on a ping nothing receives. Failure is
     /// non-fatal — the socket stays up so a `deploy` can recover.
     async fn boot(&self) {
         let current = match self.slots.current_target() {
@@ -120,7 +120,7 @@ impl Supervisor {
         };
 
         // Socket is accepting now, so a worker adopted from the current slot can
-        // deliver its ready ping. Booting earlier would dead-lock on it.
+        // deliver its ready ping. Booting earlier would deadlock on it.
         self.boot().await;
 
         let result = match accept.await {
