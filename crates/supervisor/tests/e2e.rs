@@ -25,22 +25,24 @@ fn bin(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_supervisor")).with_file_name(name)
 }
 
-/// Path to the worker binary, built once per test process. `cargo test -p
-/// supervisor` builds the supervisor bin but not the sibling worker bin, so
-/// build it on demand; the `OnceLock` keeps concurrent tests from racing the
-/// build (which would oversubscribe the CPU and reintroduce readiness flakes).
-fn worker_bin() -> PathBuf {
+/// Path to the fake test-double worker (`crates/worker`'s `fake-worker` bin,
+/// behind the `test-stub` feature). The real worker only reaches "ready" by
+/// connecting to Discord, which a hermetic test can't do; the supervisor needs
+/// nothing but the ready ping, so these orchestration tests deploy the stub.
+/// Built on demand — `cargo test -p supervisor` builds no worker bin — with a
+/// `OnceLock` so concurrent tests don't race the build.
+fn fake_worker_bin() -> PathBuf {
     static WORKER: OnceLock<PathBuf> = OnceLock::new();
     WORKER
         .get_or_init(|| {
-            let worker = bin("worker");
+            let worker = bin("fake-worker");
             if !worker.exists() {
                 let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
                 let status = Command::new(cargo)
-                    .args(["build", "-p", "worker"])
+                    .args(["build", "-p", "worker", "--features", "test-stub"])
                     .status()
-                    .expect("run cargo build -p worker");
-                assert!(status.success(), "failed to build worker binary");
+                    .expect("run cargo build -p worker --features test-stub");
+                assert!(status.success(), "failed to build fake-worker binary");
             }
             worker
         })
@@ -201,7 +203,7 @@ impl Drop for Fixture {
 #[test]
 fn deploy_then_sigterm_drains_and_stops_worker() {
     let mut fx = Fixture::start(None);
-    let resp = fx.deploy_path(&worker_bin());
+    let resp = fx.deploy_path(&fake_worker_bin());
     assert!(status_is(&resp, "ok"), "deploy did not succeed: {resp}");
     let worker = fx.running_pid().expect("worker running after deploy");
     assert!(alive(worker));
@@ -221,7 +223,7 @@ fn deploy_then_sigterm_drains_and_stops_worker() {
 
 #[test]
 fn boot_adopts_current_slot() {
-    let fx = Fixture::start(Some(&worker_bin()));
+    let fx = Fixture::start(Some(&fake_worker_bin()));
     let booted = poll(Duration::from_secs(15), || fx.running_pid());
     assert!(booted.is_some(), "supervisor did not adopt the current-slot worker on boot");
 }
@@ -245,7 +247,7 @@ fn shutdown_does_not_hang_on_idle_client() {
 #[test]
 fn redeploy_replaces_worker() {
     let fx = Fixture::start(None);
-    let worker = worker_bin();
+    let worker = fake_worker_bin();
     assert!(status_is(&fx.deploy_path(&worker), "ok"), "first deploy failed");
     let first = fx.running_pid().expect("worker running after first deploy");
 
@@ -262,7 +264,7 @@ fn redeploy_replaces_worker() {
 #[test]
 fn failed_build_keeps_current_worker() {
     let fx = Fixture::start(None);
-    assert!(status_is(&fx.deploy_path(&worker_bin()), "ok"), "initial deploy failed");
+    assert!(status_is(&fx.deploy_path(&fake_worker_bin()), "ok"), "initial deploy failed");
     let worker = fx.running_pid().expect("worker running after deploy");
 
     // A path that does not exist fails in the build/copy step, before the
@@ -276,7 +278,7 @@ fn failed_build_keeps_current_worker() {
 #[test]
 fn failed_deploy_rolls_back_to_previous() {
     let fx = Fixture::start(None);
-    assert!(status_is(&fx.deploy_path(&worker_bin()), "ok"), "initial deploy failed");
+    assert!(status_is(&fx.deploy_path(&fake_worker_bin()), "ok"), "initial deploy failed");
     let good_slot = fx.current_slot().expect("current slot after deploy");
 
     // A real file that is not executable: the copy succeeds but the spawn fails,
@@ -298,7 +300,7 @@ fn failed_deploy_rolls_back_to_previous() {
 #[test]
 fn rollback_restores_previous_slot() {
     let fx = Fixture::start(None);
-    let worker = worker_bin();
+    let worker = fake_worker_bin();
     let a = fx.deploy_path(&worker);
     assert!(status_is(&a, "ok"), "deploy A failed: {a}");
     let slot_a = fx.current_slot().expect("current after deploy A");
@@ -328,7 +330,7 @@ fn rollback_without_previous_errors() {
 #[test]
 fn stop_terminates_worker() {
     let fx = Fixture::start(None);
-    assert!(status_is(&fx.deploy_path(&worker_bin()), "ok"), "deploy failed");
+    assert!(status_is(&fx.deploy_path(&fake_worker_bin()), "ok"), "deploy failed");
     let worker = fx.running_pid().expect("worker running after deploy");
 
     let resp = fx.request("{\"cmd\":\"stop\"}");

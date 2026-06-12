@@ -8,11 +8,20 @@ rust-version.workspace = true
 name = "worker"
 path = "src/main.rs"
 
+[[bin]]
+name = "fake-worker"
+path = "src/fake_worker.rs"
+required-features = ["test-stub"]
+
 [dependencies]
 color-eyre.workspace = true
+pico-core.workspace = true
 pico-shared.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+
+[features]
+test-stub = []
 
 [lints]
 workspace = true
