@@ -68,7 +68,7 @@ async fn ping(ctx: Context<'_>) -> Result<(), Error> {
 #[poise::command(slash_command)]
 async fn deploy(
     ctx: Context<'_>,
-    #[description = "git rev to deploy (or path:<binary> for a prebuilt worker)"] target: String,
+    #[description = "worker binary path (or rev:<git-rev> to build a revision)"] target: String,
 ) -> Result<(), Error> {
     let Some(socket) = ctx.data().supervisor_socket.clone() else {
         ctx.say("not running under a supervisor (standalone) — `/deploy` is unavailable")
@@ -88,7 +88,9 @@ async fn deploy(
         Ok(proto::Response::Error { message }) => {
             ctx.say(format!("deploy failed: {message}")).await?;
         }
-        Ok(proto::Response::Status(_)) => {}
+        Ok(proto::Response::Status(_)) => {
+            ctx.say("deploy returned an unexpected status reply").await?;
+        }
         Err(e) => {
             ctx.say(format!("deploy outcome unknown: {e}")).await?;
         }
@@ -97,14 +99,11 @@ async fn deploy(
 }
 
 fn parse_deploy_target(arg: &str) -> proto::DeployTarget {
-    if let Some(path) = arg.strip_prefix("path:") {
-        proto::DeployTarget::Path {
-            path: std::path::PathBuf::from(path),
-        }
-    } else {
-        proto::DeployTarget::Rev {
-            rev: arg.strip_prefix("rev:").unwrap_or(arg).to_owned(),
-        }
+    match arg.strip_prefix("rev:") {
+        Some(rev) => proto::DeployTarget::Rev { rev: rev.to_owned() },
+        None => proto::DeployTarget::Path {
+            path: std::path::PathBuf::from(arg.strip_prefix("path:").unwrap_or(arg)),
+        },
     }
 }
 
@@ -305,8 +304,21 @@ async fn route_message(
     };
 
     let handle = pool.get_or_spawn(&thread_id, &config).await?;
-    let mut session = handle.lock().await;
-    drive_turn(&ctx, target, &mut session, prompt).await
+    let outcome = {
+        let mut session = handle.lock().await;
+        drive_turn(&ctx, target, &mut session, prompt).await?
+    };
+    if outcome == TurnOutcome::Dead {
+        pool.forget(&thread_id);
+    }
+    Ok(())
+}
+
+/// Whether the `omp` child survived the turn; `Dead` (event stream closed) tells the caller to drop it from the pool.
+#[derive(PartialEq, Eq)]
+enum TurnOutcome {
+    Live,
+    Dead,
 }
 
 /// Send the prompt and stream the reply into `target`, editing the posted
@@ -317,7 +329,7 @@ async fn drive_turn(
     target: serenity::ChannelId,
     session: &mut ThreadSession,
     prompt: &str,
-) -> color_eyre::Result<()> {
+) -> color_eyre::Result<TurnOutcome> {
     let _typing = target.start_typing(&ctx.http);
     session.client.prompt(prompt).await?;
 
@@ -335,16 +347,24 @@ async fn drive_turn(
                     last = Instant::now();
                 }
             }
-            Some(OmpEvent::AgentEnd) | None => break,
+            Some(OmpEvent::AgentEnd) => break,
             Some(OmpEvent::Error(e)) => {
                 let _ = target.say(ctx, format!("OMP error: {e}")).await;
-                return Ok(());
+                return Ok(TurnOutcome::Live);
             }
             Some(_) => {}
+            // Stream closed: the child died mid-turn — flush, notify, and report it dead so the pool respawns it.
+            None => {
+                reconcile(ctx, target, &reply, &mut posted).await;
+                let _ = target
+                    .say(ctx, "the OMP session ended unexpectedly; send another message to restart it")
+                    .await;
+                return Ok(TurnOutcome::Dead);
+            }
         }
     }
     reconcile(ctx, target, &reply, &mut posted).await;
-    Ok(())
+    Ok(TurnOutcome::Live)
 }
 
 /// Reconcile the posted Discord messages against the current reply text:
@@ -397,8 +417,10 @@ mod tests {
     use super::parse_deploy_target;
 
     #[test]
-    fn bare_arg_is_a_rev_explicit_prefixes_win() {
-        assert!(matches!(parse_deploy_target("main"), DeployTarget::Rev { rev } if rev == "main"));
+    fn bare_arg_is_a_path_explicit_prefixes_win() {
+        assert!(
+            matches!(parse_deploy_target("/opt/worker"), DeployTarget::Path { path } if path == std::path::Path::new("/opt/worker"))
+        );
         assert!(matches!(parse_deploy_target("rev:abc123"), DeployTarget::Rev { rev } if rev == "abc123"));
         assert!(
             matches!(parse_deploy_target("path:/opt/worker"), DeployTarget::Path { path } if path == std::path::Path::new("/opt/worker"))

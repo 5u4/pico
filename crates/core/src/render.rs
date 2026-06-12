@@ -19,18 +19,16 @@ pub fn split_to_budget(text: &str, budget: usize) -> Vec<String> {
             open_info.clone()
         };
 
-        if !content.is_empty() && projected_len(&content, line, next_in_fence) > budget {
-            if in_fence {
-                content.push("```".to_string());
-            }
-            chunks.push(content.join("\n"));
-            content = Vec::new();
-            if in_fence {
-                content.push(reopen_fence(&open_info));
+        // A line longer than the budget (minified JSON, a long URL) is hard-
+        // wrapped first, else it yields an oversized chunk Discord drops.
+        if fence {
+            emit_line(line, next_in_fence, in_fence, &open_info, budget, &mut content, &mut chunks);
+        } else {
+            for piece in hard_wrap(line, budget, in_fence, &open_info) {
+                emit_line(&piece, next_in_fence, in_fence, &open_info, budget, &mut content, &mut chunks);
             }
         }
 
-        content.push(line.to_string());
         in_fence = next_in_fence;
         open_info = next_open_info;
     }
@@ -75,6 +73,60 @@ fn reopen_fence(info: &str) -> String {
     format!("```{info}")
 }
 
+fn emit_line(
+    line: &str,
+    next_in_fence: bool,
+    in_fence: bool,
+    open_info: &str,
+    budget: usize,
+    content: &mut Vec<String>,
+    chunks: &mut Vec<String>,
+) {
+    if !content.is_empty() && projected_len(content, line, next_in_fence) > budget {
+        if in_fence {
+            content.push("```".to_string());
+        }
+        chunks.push(content.join("\n"));
+        content.clear();
+        if in_fence {
+            content.push(reopen_fence(open_info));
+        }
+    }
+    content.push(line.to_string());
+}
+
+/// Break an over-budget line into budget-sized char pieces; inside a fence the
+/// budget drops by the reopen/close marker length so each piece survives them.
+fn hard_wrap(line: &str, budget: usize, in_fence: bool, open_info: &str) -> Vec<String> {
+    let max = if in_fence {
+        // reopen "```<info>" + the two join newlines + the closing "```".
+        budget.saturating_sub(open_info.chars().count() + 8)
+    } else {
+        budget
+    }
+    .max(1);
+
+    if line.chars().count() <= max {
+        return vec![line.to_string()];
+    }
+
+    let mut pieces = Vec::new();
+    let mut piece = String::new();
+    let mut n = 0;
+    for ch in line.chars() {
+        if n == max {
+            pieces.push(std::mem::take(&mut piece));
+            n = 0;
+        }
+        piece.push(ch);
+        n += 1;
+    }
+    if !piece.is_empty() {
+        pieces.push(piece);
+    }
+    pieces
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -108,6 +160,31 @@ mod tests {
         }
         assert!(chunks[0].ends_with("```"));
         assert!(chunks[1].starts_with("```rust"));
+    }
+
+    #[test]
+    fn hard_splits_an_overlong_line_outside_a_fence() {
+        let text = "x".repeat(50);
+        let budget = 20;
+        let chunks = split_to_budget(&text, budget);
+        assert!(chunks.len() > 1);
+        for chunk in &chunks {
+            assert!(chunk.chars().count() <= budget);
+        }
+        assert_eq!(chunks.concat(), text);
+    }
+
+    #[test]
+    fn hard_splits_an_overlong_line_inside_a_fence() {
+        let text = format!("```\n{}\n```", "y".repeat(60));
+        let budget = 25;
+        let chunks = split_to_budget(&text, budget);
+        assert!(chunks.len() > 1);
+        for chunk in &chunks {
+            assert!(chunk.chars().count() <= budget);
+            assert!(chunk.starts_with("```"));
+            assert!(chunk.ends_with("```"));
+        }
     }
 
     #[test]

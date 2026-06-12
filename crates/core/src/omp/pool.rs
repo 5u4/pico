@@ -82,6 +82,12 @@ impl OmpPool {
         Ok(handle)
     }
 
+    /// Drop a dead thread's child so the next [`get_or_spawn`](Self::get_or_spawn)
+    /// respawns it (resuming via `--continue`); `kill_on_drop` fires once the turn releases its clone.
+    pub fn forget(&self, thread_id: &str) {
+        self.sessions.lock().remove(thread_id);
+    }
+
     /// Drop children idle past [`IDLE_TIMEOUT`]. `strong_count == 1` means only
     /// the map references the handle, i.e. no turn is in flight (a turn holds a
     /// clone for its whole duration); checking it under the map lock — which
