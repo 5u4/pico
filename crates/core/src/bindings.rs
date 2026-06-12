@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use color_eyre::eyre::WrapErr;
@@ -32,6 +33,7 @@ impl Bindings {
 
 #[derive(Deserialize, Serialize)]
 struct RawBinding {
+    #[serde(deserialize_with = "de_channel_id")]
     channel_id: String,
     profile: String,
     kind: String,
@@ -62,6 +64,7 @@ pub fn load(path: &Path) -> color_eyre::Result<Bindings> {
             ));
         }
         let cwd = expand_home(&raw.cwd);
+        validate_binding(&raw.channel_id, &raw.profile, &cwd)?;
         if inner.contains_key(&raw.channel_id) {
             return Err(color_eyre::eyre::eyre!("duplicate binding for channel {}", raw.channel_id));
         }
@@ -79,29 +82,15 @@ pub fn load(path: &Path) -> color_eyre::Result<Bindings> {
 }
 
 pub fn set(path: &Path, channel_id: &str, profile: &str, cwd: &Path) -> color_eyre::Result<()> {
-    if !is_valid_channel_id(channel_id) {
-        return Err(color_eyre::eyre::eyre!(
-            "invalid channel id {channel_id:?} (must match ^[0-9]{{17,20}}$)"
-        ));
-    }
-
     let cwd = match cwd.to_str() {
         Some(s) => expand_home(s),
         None => cwd.to_path_buf(),
     };
-    if !cwd.is_absolute() {
-        return Err(color_eyre::eyre::eyre!("cwd {} must be an absolute path", cwd.display()));
-    }
-    match std::fs::metadata(&cwd) {
-        Ok(meta) if meta.is_dir() => {}
-        Ok(_) => {
-            return Err(color_eyre::eyre::eyre!("cwd {} is not a directory", cwd.display()));
-        }
-        Err(e) => {
-            return Err(e).wrap_err_with(|| format!("cwd {} is not accessible", cwd.display()));
-        }
-    }
+    validate_binding(channel_id, profile, &cwd)?;
 
+    // Serialize the whole read-modify-write so two concurrent /bind commands
+    // can't lose each other's update (last writer wins on the file otherwise).
+    let _guard = write_lock();
     let mut file = read_raw(path)?.unwrap_or(RawFile { binding: Vec::new() });
     let entry = RawBinding {
         channel_id: channel_id.to_string(),
@@ -118,6 +107,7 @@ pub fn set(path: &Path, channel_id: &str, profile: &str, cwd: &Path) -> color_ey
 }
 
 pub fn unset(path: &Path, channel_id: &str) -> color_eyre::Result<bool> {
+    let _guard = write_lock();
     let mut file = match read_raw(path)? {
         Some(file) => file,
         None => return Ok(false),
@@ -149,12 +139,16 @@ fn write_atomic(path: &Path, file: &RawFile) -> color_eyre::Result<()> {
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(dir).wrap_err_with(|| format!("creating {}", dir.display()))?;
 
+    // PID alone collides between concurrent writers in one process; the
+    // per-write sequence makes each tmp name unique.
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
     let mut tmp_name = std::ffi::OsString::from(".");
     tmp_name.push(
         path.file_name()
             .unwrap_or_else(|| std::ffi::OsStr::new("bindings.toml")),
     );
-    tmp_name.push(format!(".tmp.{}", std::process::id()));
+    tmp_name.push(format!(".tmp.{}.{}", std::process::id(), seq));
     let tmp = dir.join(tmp_name);
 
     std::fs::write(&tmp, text).wrap_err_with(|| format!("writing {}", tmp.display()))?;
@@ -164,6 +158,66 @@ fn write_atomic(path: &Path, file: &RawFile) -> color_eyre::Result<()> {
 
 fn is_valid_channel_id(id: &str) -> bool {
     (17..=20).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_digit())
+}
+
+fn is_valid_profile(name: &str) -> bool {
+    !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+/// Invariants for a binding, enforced both when `/bind set` writes one and when
+/// `load` reads the file, so a hand-edited `bindings.toml` fails fast instead of
+/// at `omp` spawn. The profile check is a security boundary: it becomes a path
+/// component under `<root>/profiles/`, so `..` or an absolute path would escape.
+fn validate_binding(channel_id: &str, profile: &str, cwd: &Path) -> color_eyre::Result<()> {
+    if !is_valid_channel_id(channel_id) {
+        return Err(color_eyre::eyre::eyre!(
+            "invalid channel id {channel_id:?} (must match ^[0-9]{{17,20}}$)"
+        ));
+    }
+    if !is_valid_profile(profile) {
+        return Err(color_eyre::eyre::eyre!(
+            "invalid profile {profile:?} (must match ^[A-Za-z0-9_-]+$)"
+        ));
+    }
+    if !cwd.is_absolute() {
+        return Err(color_eyre::eyre::eyre!("cwd {} must be an absolute path", cwd.display()));
+    }
+    match std::fs::metadata(cwd) {
+        Ok(meta) if meta.is_dir() => Ok(()),
+        Ok(_) => Err(color_eyre::eyre::eyre!("cwd {} is not a directory", cwd.display())),
+        Err(e) => Err(e).wrap_err_with(|| format!("cwd {} is not accessible", cwd.display())),
+    }
+}
+
+fn write_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Accept `channel_id` as a quoted string or a bare TOML integer, per the
+/// documented `bindings.toml` contract. Bare integers above `i64::MAX` (20-digit
+/// snowflakes, not reachable until ~2084) still require quoting.
+fn de_channel_id<'de, D>(de: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct ChannelId;
+    impl<'de> serde::de::Visitor<'de> for ChannelId {
+        type Value = String;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a Discord channel id as a quoted string or bare integer")
+        }
+        fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<String, E> {
+            Ok(v.to_owned())
+        }
+        fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<String, E> {
+            Ok(v.to_string())
+        }
+        fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<String, E> {
+            Ok(v.to_string())
+        }
+    }
+    de.deserialize_any(ChannelId)
 }
 
 fn expand_home(raw: &str) -> PathBuf {
@@ -321,6 +375,56 @@ cwd = "/tmp"
         assert!(super::unset(&path, "11111111111111111").unwrap());
         assert!(!super::unset(&path, "11111111111111111").unwrap());
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn channel_id_accepts_a_bare_integer() {
+        let dir = temp_dir("intid");
+        let path = dir.join("bindings.toml");
+        std::fs::write(
+            &path,
+            "[[binding]]\nchannel_id = 1234567890123456789\nprofile = \"sen\"\nkind = \"regular\"\ncwd = \"/tmp\"\n",
+        )
+        .unwrap();
+        let bindings = super::load(&path).unwrap();
+        assert!(bindings.get("1234567890123456789").is_some());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn set_rejects_path_traversal_profile() {
+        let dir = temp_dir("travset");
+        let path = dir.join("bindings.toml");
+        assert!(super::set(&path, "11111111111111111", "..", &dir).is_err());
+        assert!(super::set(&path, "11111111111111111", "/etc", &dir).is_err());
+        assert!(super::set(&path, "11111111111111111", "a/b", &dir).is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn load_rejects_path_traversal_profile() {
+        let dir = temp_dir("travload");
+        let path = dir.join("bindings.toml");
+        std::fs::write(
+            &path,
+            "[[binding]]\nchannel_id = \"1234567890123456789\"\nprofile = \"..\"\nkind = \"regular\"\ncwd = \"/tmp\"\n",
+        )
+        .unwrap();
+        assert!(super::load(&path).is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn load_rejects_invalid_channel_id() {
+        let dir = temp_dir("badidload");
+        let path = dir.join("bindings.toml");
+        std::fs::write(
+            &path,
+            "[[binding]]\nchannel_id = \"abc\"\nprofile = \"sen\"\nkind = \"regular\"\ncwd = \"/tmp\"\n",
+        )
+        .unwrap();
+        assert!(super::load(&path).is_err());
         std::fs::remove_dir_all(&dir).ok();
     }
 }
