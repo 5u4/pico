@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# Comment-density guard. Bypass with `git commit --no-verify`.
+exec scripts/lint-comments.sh
