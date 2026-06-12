@@ -35,8 +35,8 @@ impl Drop for TempDir {
 
 /// Drives the command/response plumbing against the real binary without an LLM
 /// call. Uses the developer's authenticated agent dir so the model catalog is
-/// populated; `new_session`/`set_model`/`abort` resolve locally — no prompt, no
-/// network — and an unknown model exercises the failure path.
+/// populated; new_session/set_model/abort/follow_up resolve locally — no prompt,
+/// no network — and an unknown model exercises the failure path.
 #[tokio::test]
 #[ignore]
 async fn roundtrip_commands_without_model_calls() {
@@ -44,7 +44,6 @@ async fn roundtrip_commands_without_model_calls() {
     let config = SpawnConfig {
         model: Some("github-copilot/gpt-4o-mini".to_owned()),
         cwd: Some(cwd.path.clone()),
-        copilot_token: None,
     };
 
     let (client, _events) = OmpClient::spawn(&config).await.expect("spawn omp --mode rpc");
@@ -54,6 +53,9 @@ async fn roundtrip_commands_without_model_calls() {
         .set_model("github-copilot", "gpt-4o-mini")
         .await
         .expect("set_model to a known model");
+    // follow_up queues a message for after the (here absent) turn; it acks
+    // without starting a model call.
+    client.follow_up("noop follow-up").await.expect("follow_up");
     client.abort().await.expect("abort");
 
     let err = client
@@ -74,7 +76,6 @@ async fn streams_a_prompt_reply() {
     let config = SpawnConfig {
         model: Some("github-copilot/gpt-4o-mini".to_owned()),
         cwd: Some(cwd.path.clone()),
-        copilot_token: None,
     };
 
     let (client, mut events) = OmpClient::spawn(&config).await.expect("spawn omp --mode rpc");

@@ -8,16 +8,7 @@
 //! of its waiter. The process is killed if the client is dropped without
 //! [`OmpClient::shutdown`].
 
-use std::{
-    collections::HashMap,
-    path::PathBuf,
-    process::Stdio,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
-    time::Duration,
-};
+use std::{collections::HashMap, path::PathBuf, process::Stdio, sync::Arc, time::Duration};
 
 use color_eyre::eyre::{WrapErr, eyre};
 use parking_lot::Mutex;
@@ -27,23 +18,24 @@ use tokio::{
     sync::{Mutex as AsyncMutex, mpsc, oneshot},
 };
 
-use crate::omp::protocol::{Command, Inbound, OmpEvent, RpcResponse};
+use crate::omp::protocol::{Command, Inbound, OmpEvent, RequestId, RpcResponse};
 
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
 
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
-type Pending = Arc<Mutex<HashMap<String, oneshot::Sender<RpcResponse>>>>;
+const RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
+
+type Pending = Arc<Mutex<HashMap<RequestId, oneshot::Sender<RpcResponse>>>>;
 
 /// Spawn parameters for an `omp --mode rpc` child.
 ///
-/// `copilot_token` sets `COPILOT_GITHUB_TOKEN`; when `None`, OMP falls back to
-/// its own credential store / the inherited environment.
+/// Provider auth is intentionally absent: omp owns it (its own credential
+/// store, or any provider env var the child inherits from the worker).
 #[derive(Debug, Default, Clone)]
 pub struct SpawnConfig {
     pub model: Option<String>,
     pub cwd: Option<PathBuf>,
-    pub copilot_token: Option<String>,
 }
 
 /// A live connection to one `omp --mode rpc` process.
@@ -51,7 +43,6 @@ pub struct OmpClient {
     child: Child,
     stdin: AsyncMutex<ChildStdin>,
     pending: Pending,
-    next_id: AtomicU64,
 }
 
 impl OmpClient {
@@ -66,9 +57,6 @@ impl OmpClient {
         }
         if let Some(cwd) = &config.cwd {
             cmd.arg("--cwd").arg(cwd);
-        }
-        if let Some(token) = &config.copilot_token {
-            cmd.env("COPILOT_GITHUB_TOKEN", token);
         }
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -90,7 +78,7 @@ impl OmpClient {
         tokio::spawn(read_loop(stdout, Arc::clone(&pending), event_tx, ready_tx));
 
         match tokio::time::timeout(READY_TIMEOUT, ready_rx).await {
-            Ok(Ok(())) => {}
+            Ok(Ok(())) => tracing::debug!(model = ?config.model, "omp --mode rpc ready"),
             Ok(Err(_)) => {
                 let _ = child.start_kill();
                 return Err(eyre!("omp exited before sending its ready frame"));
@@ -105,7 +93,6 @@ impl OmpClient {
             child,
             stdin: AsyncMutex::new(stdin),
             pending,
-            next_id: AtomicU64::new(0),
         };
         Ok((client, event_rx))
     }
@@ -114,30 +101,36 @@ impl OmpClient {
     /// of [`OmpEvent`]s terminated by [`OmpEvent::AgentEnd`] (or
     /// [`OmpEvent::Error`] on an async failure).
     pub async fn prompt(&self, message: &str) -> color_eyre::Result<()> {
-        let id = self.next_id();
+        let id = RequestId::new();
         self.dispatch(&id, &Command::Prompt { id: &id, message }).await
     }
 
     /// Queue a steering message that interrupts the in-flight turn.
     pub async fn steer(&self, message: &str) -> color_eyre::Result<()> {
-        let id = self.next_id();
+        let id = RequestId::new();
         self.dispatch(&id, &Command::Steer { id: &id, message }).await
     }
 
+    /// Queue a follow-up message delivered after the in-flight turn completes.
+    pub async fn follow_up(&self, message: &str) -> color_eyre::Result<()> {
+        let id = RequestId::new();
+        self.dispatch(&id, &Command::FollowUp { id: &id, message }).await
+    }
+
     pub async fn abort(&self) -> color_eyre::Result<()> {
-        let id = self.next_id();
+        let id = RequestId::new();
         self.dispatch(&id, &Command::Abort { id: &id }).await
     }
 
     /// Start a fresh session, discarding the current conversation.
     pub async fn new_session(&self) -> color_eyre::Result<()> {
-        let id = self.next_id();
+        let id = RequestId::new();
         self.dispatch(&id, &Command::NewSession { id: &id }).await
     }
 
     /// Switch the active model for subsequent turns.
     pub async fn set_model(&self, provider: &str, model_id: &str) -> color_eyre::Result<()> {
-        let id = self.next_id();
+        let id = RequestId::new();
         self.dispatch(
             &id,
             &Command::SetModel {
@@ -168,14 +161,11 @@ impl OmpClient {
         }
     }
 
-    fn next_id(&self) -> String {
-        format!("req_{}", self.next_id.fetch_add(1, Ordering::Relaxed))
-    }
-
     /// `id` must equal the command's `id` field so the response correlates.
-    async fn dispatch(&self, id: &str, cmd: &Command<'_>) -> color_eyre::Result<()> {
+    async fn dispatch(&self, id: &RequestId, cmd: &Command<'_>) -> color_eyre::Result<()> {
         let (tx, rx) = oneshot::channel();
-        self.pending.lock().insert(id.to_owned(), tx);
+        self.pending.lock().insert(id.clone(), tx);
+        tracing::debug!(command = cmd.kind(), %id, "sending omp command");
 
         let write = {
             let mut stdin = self.stdin.lock().await;
@@ -186,11 +176,22 @@ impl OmpClient {
             return Err(e).wrap_err("write omp command");
         }
 
-        let resp = rx.await.map_err(|_| eyre!("omp exited before responding to `{id}`"))?;
+        let resp = match tokio::time::timeout(RESPONSE_TIMEOUT, rx).await {
+            Ok(Ok(resp)) => resp,
+            Ok(Err(_)) => return Err(eyre!("omp exited before responding to `{id}`")),
+            Err(_) => {
+                self.pending.lock().remove(id);
+                return Err(eyre!("omp did not respond to `{id}` within {RESPONSE_TIMEOUT:?}"));
+            }
+        };
         if resp.success {
             Ok(())
         } else {
-            Err(eyre!("omp `{}` failed: {}", resp.command, resp.error.unwrap_or_default()))
+            let detail = resp
+                .error
+                .as_deref()
+                .unwrap_or("omp reported failure without a message");
+            Err(eyre!("omp `{}` failed: {detail}", resp.command))
         }
     }
 }
@@ -224,7 +225,8 @@ async fn read_loop(
         let frame: Inbound = match serde_json::from_str(trimmed) {
             Ok(frame) => frame,
             Err(e) => {
-                tracing::warn!(error = %e, frame = %trimmed, "omp: undecodable frame");
+                tracing::warn!(error = %e, bytes = trimmed.len(), "omp: undecodable frame");
+                tracing::debug!(frame = %trimmed, "omp: undecodable frame contents");
                 continue;
             }
         };
@@ -236,7 +238,7 @@ async fn read_loop(
                 }
             }
             Inbound::Response(resp) => {
-                let waiter = resp.id.as_deref().and_then(|id| pending.lock().remove(id));
+                let waiter = resp.id.as_ref().and_then(|id| pending.lock().remove(id));
                 match waiter {
                     Some(tx) => {
                         let _ = tx.send(resp);

@@ -5,31 +5,68 @@
 //! treated as an error.
 
 use serde::{Deserialize, Serialize};
+use ulid::Ulid;
+
+/// Correlation id for a command/response round-trip. Wraps a ULID so ids are
+/// globally unique and time-sortable — and greppable across pico and omp logs.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub(crate) struct RequestId(String);
+
+impl RequestId {
+    pub(crate) fn new() -> RequestId {
+        RequestId(Ulid::new().to_string())
+    }
+}
+
+impl std::fmt::Display for RequestId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
 
 /// A drive command pico writes to OMP's stdin. Each carries a host-generated
-/// `id` so the matching [`RpcResponse`] correlates back to the awaiting caller.
+/// [`RequestId`] so the matching [`RpcResponse`] correlates back to the
+/// awaiting caller.
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case", rename_all_fields = "camelCase")]
 pub(crate) enum Command<'a> {
     Prompt {
-        id: &'a str,
+        id: &'a RequestId,
         message: &'a str,
     },
     Steer {
-        id: &'a str,
+        id: &'a RequestId,
+        message: &'a str,
+    },
+    FollowUp {
+        id: &'a RequestId,
         message: &'a str,
     },
     Abort {
-        id: &'a str,
+        id: &'a RequestId,
     },
     NewSession {
-        id: &'a str,
+        id: &'a RequestId,
     },
     SetModel {
-        id: &'a str,
+        id: &'a RequestId,
         provider: &'a str,
         model_id: &'a str,
     },
+}
+
+impl Command<'_> {
+    /// The wire `type` tag, for logging the RPC conversation.
+    pub(crate) fn kind(&self) -> &'static str {
+        match self {
+            Command::Prompt { .. } => "prompt",
+            Command::Steer { .. } => "steer",
+            Command::FollowUp { .. } => "follow_up",
+            Command::Abort { .. } => "abort",
+            Command::NewSession { .. } => "new_session",
+            Command::SetModel { .. } => "set_model",
+        }
+    }
 }
 
 /// OMP's reply to a command (`{type:"response", command, success, error?}`).
@@ -37,7 +74,7 @@ pub(crate) enum Command<'a> {
 /// as a second response with the same `id` (see [`crate::omp::client`]).
 #[derive(Debug, Deserialize)]
 pub(crate) struct RpcResponse {
-    pub id: Option<String>,
+    pub id: Option<RequestId>,
     pub command: String,
     pub success: bool,
     #[serde(default)]
@@ -127,33 +164,45 @@ mod tests {
 
     #[test]
     fn serializes_commands_with_camelcase_fields() {
+        let id = RequestId("req_0".to_owned());
         assert_eq!(
-            serde_json::to_value(Command::Prompt {
-                id: "req_0",
-                message: "hi"
+            serde_json::to_value(Command::Prompt { id: &id, message: "hi" }).unwrap(),
+            serde_json::json!({"type": "prompt", "id": "req_0", "message": "hi"}),
+        );
+        assert_eq!(
+            serde_json::to_value(Command::FollowUp {
+                id: &id,
+                message: "more"
             })
             .unwrap(),
-            serde_json::json!({"type": "prompt", "id": "req_0", "message": "hi"}),
+            serde_json::json!({"type": "follow_up", "id": "req_0", "message": "more"}),
         );
         // snake_case tag, camelCase modelId.
         assert_eq!(
             serde_json::to_value(Command::SetModel {
-                id: "req_1",
+                id: &id,
                 provider: "github-copilot",
                 model_id: "gpt-4o-mini",
             })
             .unwrap(),
             serde_json::json!({
                 "type": "set_model",
-                "id": "req_1",
+                "id": "req_0",
                 "provider": "github-copilot",
                 "modelId": "gpt-4o-mini",
             }),
         );
         assert_eq!(
-            serde_json::to_value(Command::NewSession { id: "req_2" }).unwrap(),
-            serde_json::json!({"type": "new_session", "id": "req_2"}),
+            serde_json::to_value(Command::NewSession { id: &id }).unwrap(),
+            serde_json::json!({"type": "new_session", "id": "req_0"}),
         );
+    }
+
+    #[test]
+    fn request_id_is_transparent_on_the_wire() {
+        let id = RequestId("01ABC".to_owned());
+        assert_eq!(serde_json::to_value(&id).unwrap(), serde_json::json!("01ABC"));
+        assert_eq!(serde_json::from_value::<RequestId>(serde_json::json!("01ABC")).unwrap(), id);
     }
 
     #[test]
@@ -162,7 +211,7 @@ mod tests {
 
         match parse(r#"{"id":"p1","type":"response","command":"prompt","success":true}"#) {
             Inbound::Response(r) => {
-                assert_eq!(r.id.as_deref(), Some("p1"));
+                assert_eq!(r.id, Some(RequestId("p1".to_owned())));
                 assert_eq!(r.command, "prompt");
                 assert!(r.success);
                 assert!(r.error.is_none());
