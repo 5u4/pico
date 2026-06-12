@@ -221,6 +221,28 @@ run "$DENSITY" "$repo"
 expect_rc "density: SPDX headers exempt" 0
 rm -rf "$repo"
 
+repo=$(newrepo)
+cat > "$repo/o.rs" <<'RS'
+fn o() {
+    /*
+    narration interior line one with no leading star here now
+    narration interior line two with no leading star here now
+    narration interior line three with no leading star here ok
+    */
+    let a = 1;
+    let b = 2;
+    let c = 3;
+    let d = 4;
+    let e = 5;
+    let _ = (a, b, c, d, e);
+}
+RS
+git -C "$repo" add o.rs
+run "$DENSITY" "$repo"
+expect_rc "density: bare-interior block comment counts" 1
+expect_contains "density: lists block interior line" "narration interior line one"
+rm -rf "$repo"
+
 # ---- keep-reason commit-msg gate -------------------------------------------
 
 repo=$(newrepo)
@@ -280,6 +302,21 @@ git -C "$repo" add n.rs
 printf 'add\n' > "$repo/msg"
 run "$REASONS" "$repo" msg
 expect_rc "reasons: SAFETY-only needs no trailer" 0
+rm -rf "$repo"
+
+repo=$(newrepo)
+cat > "$repo/p.rs" <<'RS'
+pub fn b() {
+    /*
+    a multi-line block note with no leading stars at all here
+    */
+    let a = 1;
+}
+RS
+git -C "$repo" add p.rs
+printf 'add\n' > "$repo/msg"
+run "$REASONS" "$repo" msg
+expect_rc "reasons: block comment needs trailer" 1
 rm -rf "$repo"
 
 # ---- summary ----------------------------------------------------------------

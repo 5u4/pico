@@ -16,8 +16,9 @@
   the reason for each added comment (`scripts/lint-comment-reasons.sh`). Exempt
   from the count: code inside rustdoc fences (run by `cargo test`), `// SAFETY:`
   blocks, and `SPDX-License-Identifier` headers; `text`/`ignore` fences count as
-  prose. Install the gates as git hooks with `scripts/install-hooks.sh`; CI runs
-  them on every push and PR.
+  prose. Install both as git hooks with `scripts/install-hooks.sh`. CI runs the
+  density gate and the lint tests; the `Comments:` trailer gate runs only as the
+  local commit-msg hook.
 
 ## Before you finish
 

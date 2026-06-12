@@ -33,7 +33,7 @@ added_comments=$(printf '%s\n' "$DIFF" | discretionary_comments | awk 'NF { c++ 
 
 # A `Comments:` trailer with non-empty text, ignoring scissors/comment lines
 # git strips from the final message.
-if grep -qiE '^[[:space:]]*Comments:[[:space:]]*\S' \
+if grep -qiE '^[[:space:]]*Comments:[[:space:]]*[^[:space:]]' \
     <(grep -vE '^[[:space:]]*#' "$MSG_FILE"); then
   exit 0
 fi
