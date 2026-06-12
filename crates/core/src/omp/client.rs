@@ -36,6 +36,12 @@ type Pending = Arc<Mutex<HashMap<RequestId, oneshot::Sender<RpcResponse>>>>;
 pub struct SpawnConfig {
     pub model: Option<String>,
     pub cwd: Option<PathBuf>,
+    pub session_dir: Option<PathBuf>,
+    /// Pass `--continue` so a respawned child resumes the session-dir's
+    /// existing session — transparent thread resume across idle-eviction and
+    /// worker restart, since the session-dir is derived from the thread id.
+    pub continue_session: bool,
+    pub append_system_prompt: Option<PathBuf>,
 }
 
 /// A live connection to one `omp --mode rpc` process.
@@ -57,6 +63,15 @@ impl OmpClient {
         }
         if let Some(cwd) = &config.cwd {
             cmd.arg("--cwd").arg(cwd);
+        }
+        if let Some(session_dir) = &config.session_dir {
+            cmd.arg("--session-dir").arg(session_dir);
+        }
+        if config.continue_session {
+            cmd.arg("--continue");
+        }
+        if let Some(prompt) = &config.append_system_prompt {
+            cmd.arg("--append-system-prompt").arg(prompt);
         }
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())

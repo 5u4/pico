@@ -1,30 +1,50 @@
-use std::path::Path;
+use std::{path::Path, sync::Arc};
 
 use color_eyre::eyre::WrapErr;
 use poise::serenity_prelude as serenity;
 
+use crate::omp::pool::OmpPool;
+
 /// The worker's running application: owns the single Discord client (gateway +
-/// command framework) for this worker root. Stage 1 is Discord-only; the LLM,
-/// per-profile storage, and scheduler attach on later milestones.
+/// command framework), the channel→profile bindings, and the per-thread OMP
+/// child pool for this worker root.
 pub struct App {
     client: serenity::Client,
     ready_rx: tokio::sync::oneshot::Receiver<()>,
+    evictor: tokio::task::JoinHandle<()>,
 }
 
 impl App {
-    /// Load the bot token from `<root>/secrets/discord_bot_token` and construct
-    /// the Discord client without connecting ([`App::run`] connects). A missing
-    /// or empty token errors here — before the worker can report ready — so a
+    /// Load the bot token + channel bindings from `<root>` and construct the
+    /// Discord client without connecting ([`App::run`] connects). A missing or
+    /// empty token errors here — before the worker can report ready — so a
     /// deploy lacking credentials fails the supervisor's health check and rolls
     /// back instead of half-starting.
-    pub async fn build(root: &Path) -> color_eyre::Result<App> {
+    pub async fn build(root: &Path, supervisor_socket: Option<std::path::PathBuf>) -> color_eyre::Result<App> {
         let token = read_secret(root, "discord_bot_token")?;
+        let bindings = crate::bindings::load(&pico_shared::paths::worker_bindings(root))?;
+        let pool = Arc::new(OmpPool::new());
+        let evictor = Arc::clone(&pool).spawn_evictor();
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
-        let client = serenity::ClientBuilder::new(&token, serenity::GatewayIntents::empty())
-            .framework(crate::discord::framework(ready_tx))
+        let intents = serenity::GatewayIntents::GUILDS
+            | serenity::GatewayIntents::GUILD_MESSAGES
+            | serenity::GatewayIntents::MESSAGE_CONTENT
+            | serenity::GatewayIntents::DIRECT_MESSAGES;
+        let client = serenity::ClientBuilder::new(&token, intents)
+            .framework(crate::discord::framework(
+                root.to_path_buf(),
+                bindings,
+                pool,
+                ready_tx,
+                supervisor_socket,
+            ))
             .await
             .wrap_err("build discord client")?;
-        Ok(App { client, ready_rx })
+        Ok(App {
+            client,
+            ready_rx,
+            evictor,
+        })
     }
 
     /// Connect to the gateway and serve until `shutdown` resolves, then stop the
@@ -37,7 +57,11 @@ impl App {
         R: FnOnce() -> Rf + Send + 'static,
         Rf: Future<Output = ()> + Send + 'static,
     {
-        let App { mut client, ready_rx } = self;
+        let App {
+            mut client,
+            ready_rx,
+            evictor,
+        } = self;
         let shard_manager = client.shard_manager.clone();
         tokio::spawn(async move {
             shutdown.await;
@@ -49,8 +73,9 @@ impl App {
                 on_connected().await;
             }
         });
-        client.start().await.wrap_err("discord client error")?;
-        Ok(())
+        let result = client.start().await.wrap_err("discord client error");
+        evictor.abort();
+        result
     }
 }
 

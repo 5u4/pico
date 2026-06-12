@@ -44,6 +44,7 @@ async fn roundtrip_commands_without_model_calls() {
     let config = SpawnConfig {
         model: Some("github-copilot/gpt-4o-mini".to_owned()),
         cwd: Some(cwd.path.clone()),
+        ..SpawnConfig::default()
     };
 
     let (client, _events) = OmpClient::spawn(&config).await.expect("spawn omp --mode rpc");
@@ -76,6 +77,7 @@ async fn streams_a_prompt_reply() {
     let config = SpawnConfig {
         model: Some("github-copilot/gpt-4o-mini".to_owned()),
         cwd: Some(cwd.path.clone()),
+        ..SpawnConfig::default()
     };
 
     let (client, mut events) = OmpClient::spawn(&config).await.expect("spawn omp --mode rpc");

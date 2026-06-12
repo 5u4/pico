@@ -48,7 +48,7 @@ async fn connects_to_gateway_then_shuts_down_cleanly() {
         .expect("set E2E_PICO_BOT_TOKEN in .env.e2e at the workspace root (see .env.e2e.example)");
     let root = TempRoot::new(&token);
 
-    let app = App::build(&root.path).await.expect("build discord client");
+    let app = App::build(&root.path, None).await.expect("build discord client");
 
     let (connected_tx, connected_rx) = oneshot::channel();
     let (shutdown_tx, shutdown_rx) = oneshot::channel();

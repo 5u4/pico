@@ -27,3 +27,30 @@ pub fn worker_root(name: &str) -> color_eyre::Result<PathBuf> {
 pub fn worker_secret(root: &Path, name: &str) -> PathBuf {
     root.join("secrets").join(name)
 }
+
+/// `<root>/bindings.toml` — channel→(profile, cwd) routing table for this root.
+pub fn worker_bindings(root: &Path) -> PathBuf {
+    root.join("bindings.toml")
+}
+
+/// `<root>/profiles/<name>` — a profile's state directory.
+pub fn profile_dir(root: &Path, name: &str) -> PathBuf {
+    root.join("profiles").join(name)
+}
+
+/// `<root>/profiles/<name>/config.toml` — a profile's feature/model config.
+pub fn profile_config(root: &Path, name: &str) -> PathBuf {
+    profile_dir(root, name).join("config.toml")
+}
+
+/// `<root>/profiles/<name>/identity.md` — a profile's appended system prompt.
+pub fn profile_identity(root: &Path, name: &str) -> PathBuf {
+    profile_dir(root, name).join("identity.md")
+}
+
+/// `<root>/profiles/<name>/sessions/<thread_id>` — the OMP `--session-dir` for
+/// one Discord thread. Derived from `thread_id`, so a respawned `omp` child
+/// resumes the thread's session via `--continue` with no stored mapping.
+pub fn profile_session_dir(root: &Path, name: &str, thread_id: &str) -> PathBuf {
+    profile_dir(root, name).join("sessions").join(thread_id)
+}
