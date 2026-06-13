@@ -152,11 +152,10 @@ where
         where
             A: serde::de::SeqAccess<'de>,
         {
-            let mut out = Vec::new();
-            while let Some(item) = seq.next_element::<String>()? {
-                out.push(item);
-            }
-            Ok(out)
+            // Only the first path is rendered; clone it and drain the rest.
+            let first = seq.next_element::<String>()?;
+            while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {}
+            Ok(first.into_iter().collect())
         }
     }
     de.deserialize_any(OneOrMany)
@@ -362,7 +361,7 @@ fn render_subagent_row(row: &SubagentRow) -> String {
     let label = if row.description.is_empty() {
         String::new()
     } else {
-        format!(" \"{}\"", truncate(&row.description, SUBAGENT_LABEL_MAX))
+        format!(" \"{}\"", truncate(first_line(&row.description), SUBAGENT_LABEL_MAX))
     };
     let action = match row.status {
         SubagentStatus::Done => "✅ done".to_owned(),
@@ -370,14 +369,14 @@ fn render_subagent_row(row: &SubagentRow) -> String {
         SubagentStatus::InProgress => match &row.current_tool {
             Some(tool) => {
                 let preview = match &row.current_tool_args {
-                    Some(args) => format!(" {}", truncate(args, SUBAGENT_ARGS_MAX)),
+                    Some(args) => format!(" {}", truncate(first_line(args), SUBAGENT_ARGS_MAX)),
                     None => String::new(),
                 };
                 format!("🔧 {tool}{preview}")
             }
             None => format!(
                 "⏳ {}",
-                truncate(row.last_intent.as_deref().unwrap_or("idle"), SUBAGENT_INTENT_MAX)
+                truncate(first_line(row.last_intent.as_deref().unwrap_or("idle")), SUBAGENT_INTENT_MAX)
             ),
         },
     };
@@ -836,6 +835,24 @@ mod tests {
         let content = render_subagent_batch(&rows, 1_000);
         assert!(content.contains("  └ [0] explore \"map the router\"  ❌ failed  · 4 tools"));
         assert!(content.contains("  └ [1] explore \"map the db\"  ❌ failed  · 1 tool"));
+    }
+
+    #[test]
+    fn multiline_fields_stay_one_row() {
+        let args = serde_json::json!({
+            "agent": "explore",
+            "tasks": [{ "id": "A", "description": "map\nthe router" }],
+        });
+        let mut rows = extract_subagent_rows(&args);
+        apply_progress(
+            &mut rows,
+            &progress(serde_json::json!([
+                { "index": 0, "status": "running", "currentTool": "bash", "currentToolArgs": "echo hi\nrm -rf /" },
+            ])),
+        );
+        let content = render_subagent_batch(&rows, 0);
+        assert_eq!(content.lines().count(), 2, "header + one row, got: {content:?}");
+        assert!(content.contains("explore \"map\"  🔧 bash echo hi"));
     }
 
     #[test]
