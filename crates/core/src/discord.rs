@@ -316,7 +316,16 @@ async fn route_message(
     let handle = pool.get_or_spawn(&thread_id, &config).await?;
     let outcome = {
         let mut session = handle.lock().await;
-        drive_turn(&ctx, target, &mut session, prompt, &cancel, profile_config.surface_thinking).await?
+        drive_turn(
+            &ctx,
+            target,
+            &mut session,
+            prompt,
+            &cancel,
+            profile_config.surface_thinking,
+            in_thread.then_some(message.id),
+        )
+        .await?
     };
     if outcome == TurnOutcome::Dead {
         pool.forget(&thread_id);
@@ -340,6 +349,7 @@ async fn drive_turn(
     prompt: &str,
     cancel: &CancellationToken,
     surface_thinking: bool,
+    reply_to: Option<serenity::MessageId>,
 ) -> color_eyre::Result<TurnOutcome> {
     let _typing = target.start_typing(&ctx.http);
     session.client.prompt(prompt).await?;
@@ -353,7 +363,7 @@ async fn drive_turn(
             () = cancel.cancelled() => {
                 activity.flush().await;
                 subagents.flush_all(false).await;
-                commit_reply(ctx, target, &reply).await;
+                commit_reply(ctx, target, &reply, reply_to).await;
                 let _ = target
                     .say(ctx, "worker is restarting; resend your message to continue")
                     .await;
@@ -404,7 +414,7 @@ async fn drive_turn(
             None => {
                 activity.flush().await;
                 subagents.flush_all(true).await;
-                commit_reply(ctx, target, &reply).await;
+                commit_reply(ctx, target, &reply, reply_to).await;
                 let _ = target
                     .say(ctx, "the OMP session ended unexpectedly; send another message to restart it")
                     .await;
@@ -414,17 +424,28 @@ async fn drive_turn(
     }
     activity.flush().await;
     subagents.flush_all(false).await;
-    commit_reply(ctx, target, &reply).await;
+    commit_reply(ctx, target, &reply, reply_to).await;
     Ok(TurnOutcome::Live)
 }
 
 /// Post the buffered answer at turn end, split to budget; the first chunk pings,
 /// follow-on chunks are silent. Blank/tool-only turns post nothing.
-async fn commit_reply(ctx: &serenity::Context, target: serenity::ChannelId, reply: &str) {
+async fn commit_reply(
+    ctx: &serenity::Context,
+    target: serenity::ChannelId,
+    reply: &str,
+    reply_to: Option<serenity::MessageId>,
+) {
     let chunks = crate::render::split_to_budget(&crate::render::defang_mentions(reply), crate::render::DISCORD_BUDGET);
     for (i, chunk) in chunks.iter().enumerate() {
         let mut message = serenity::CreateMessage::new().content(chunk.clone());
-        if i != 0 {
+        if i == 0 {
+            if let Some(msg_id) = reply_to {
+                // fail_if_not_exists(false): a deleted trigger degrades to a plain message, not a rejected send.
+                let reference = serenity::MessageReference::from((target, msg_id)).fail_if_not_exists(false);
+                message = message.reference_message(reference);
+            }
+        } else {
             message = message.flags(serenity::MessageFlags::SUPPRESS_NOTIFICATIONS);
         }
         if let Err(e) = target.send_message(ctx, message).await {
