@@ -29,8 +29,3 @@ cargo +nightly fmt
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace -- --include-ignored
 ```
-
-`--include-ignored` runs the real-world e2e tests, `#[ignore]`d by default
-because they hit live external services over the network and have side effects.
-They read secrets from `.env.e2e` — copy `.env.e2e.example` and fill it in
-before running the gate.

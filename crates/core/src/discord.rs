@@ -12,7 +12,7 @@ use crate::{
     bindings::Bindings,
     omp::{
         pool::{OmpPool, ThreadSession},
-        protocol::{AssistantMessageEvent, OmpEvent},
+        protocol::{AssistantMessageEvent, OmpEvent, ToolCallEnd, ToolCallStart},
     },
 };
 
@@ -304,8 +304,9 @@ async fn route_message(
     let session_dir = pico_shared::paths::profile_session_dir(&root, &profile, &thread_id);
     std::fs::create_dir_all(&session_dir).wrap_err_with(|| format!("create session dir {}", session_dir.display()))?;
     let identity = pico_shared::paths::profile_identity(&root, &profile);
+    let profile_config = crate::config::load(&pico_shared::paths::profile_config(&root, &profile))?;
     let config = crate::omp::client::SpawnConfig {
-        model: crate::config::load(&pico_shared::paths::profile_config(&root, &profile))?.model,
+        model: profile_config.model,
         cwd: Some(cwd),
         session_dir: Some(session_dir),
         continue_session: true,
@@ -315,7 +316,7 @@ async fn route_message(
     let handle = pool.get_or_spawn(&thread_id, &config).await?;
     let outcome = {
         let mut session = handle.lock().await;
-        drive_turn(&ctx, target, &mut session, prompt, &cancel).await?
+        drive_turn(&ctx, target, &mut session, prompt, &cancel, profile_config.surface_thinking).await?
     };
     if outcome == TurnOutcome::Dead {
         pool.forget(&thread_id);
@@ -330,28 +331,27 @@ enum TurnOutcome {
     Dead,
 }
 
-/// Send the prompt and stream the reply into `target`, editing the posted
-/// message(s) at most once per second so a long reply stays under Discord's
-/// per-channel edit rate limit. Tool/thinking deltas are ignored in Stage 1.
+/// Drive one OMP turn: render tool-call/reasoning activity as silent messages,
+/// then post the buffered answer — only text not followed by a tool survives.
 async fn drive_turn(
     ctx: &serenity::Context,
     target: serenity::ChannelId,
     session: &mut ThreadSession,
     prompt: &str,
     cancel: &CancellationToken,
+    surface_thinking: bool,
 ) -> color_eyre::Result<TurnOutcome> {
     let _typing = target.start_typing(&ctx.http);
     session.client.prompt(prompt).await?;
 
     let mut reply = String::new();
-    let mut posted: Vec<serenity::Message> = Vec::new();
-    let mut last = Instant::now();
-    let throttle = Duration::from_secs(1);
+    let mut activity = Activity::new(ctx, target);
 
     loop {
         let event = tokio::select! {
             () = cancel.cancelled() => {
-                reconcile(ctx, target, &reply, &mut posted).await;
+                activity.flush().await;
+                commit_reply(ctx, target, &reply).await;
                 let _ = target
                     .say(ctx, "worker is restarting; resend your message to continue")
                     .await;
@@ -362,20 +362,33 @@ async fn drive_turn(
         match event {
             Some(OmpEvent::Message(AssistantMessageEvent::TextDelta { delta })) => {
                 reply.push_str(&delta);
-                if last.elapsed() >= throttle {
-                    reconcile(ctx, target, &reply, &mut posted).await;
-                    last = Instant::now();
+            }
+            Some(OmpEvent::Message(AssistantMessageEvent::ThinkingEnd { content })) => {
+                if surface_thinking {
+                    activity.thinking(&content).await;
                 }
+            }
+            // A tool call means the text so far was preamble, not the answer.
+            Some(OmpEvent::ToolStart(tool)) => {
+                reply.clear();
+                activity.start(&tool).await;
+            }
+            Some(OmpEvent::ToolEnd(tool)) => {
+                activity.end(&tool).await;
             }
             Some(OmpEvent::AgentEnd) => break,
             Some(OmpEvent::Error(e)) => {
+                activity.flush().await;
                 let _ = target.say(ctx, format!("OMP error: {e}")).await;
                 return Ok(TurnOutcome::Live);
             }
-            Some(_) => {}
+            // No `_`: listing the inert variants keeps the match exhaustive, so
+            // a new `OmpEvent` is a compile error here, not a silent drop.
+            Some(OmpEvent::AgentStart | OmpEvent::Message(AssistantMessageEvent::Other)) => {}
             // Stream closed: the child died mid-turn — flush, notify, and report it dead so the pool respawns it.
             None => {
-                reconcile(ctx, target, &reply, &mut posted).await;
+                activity.flush().await;
+                commit_reply(ctx, target, &reply).await;
                 let _ = target
                     .say(ctx, "the OMP session ended unexpectedly; send another message to restart it")
                     .await;
@@ -383,36 +396,196 @@ async fn drive_turn(
             }
         }
     }
-    reconcile(ctx, target, &reply, &mut posted).await;
+    activity.flush().await;
+    commit_reply(ctx, target, &reply).await;
     Ok(TurnOutcome::Live)
 }
 
-/// Reconcile the posted Discord messages against the current reply text:
-/// edit a chunk that changed, post a chunk that does not exist yet. `reply`
-/// only grows, so chunk indices are stable.
-async fn reconcile(
-    ctx: &serenity::Context,
-    target: serenity::ChannelId,
-    reply: &str,
-    posted: &mut Vec<serenity::Message>,
-) {
+/// Post the buffered answer at turn end, split to budget; the first chunk pings,
+/// follow-on chunks are silent. Blank/tool-only turns post nothing.
+async fn commit_reply(ctx: &serenity::Context, target: serenity::ChannelId, reply: &str) {
     let chunks = crate::render::split_to_budget(&crate::render::defang_mentions(reply), crate::render::DISCORD_BUDGET);
     for (i, chunk) in chunks.iter().enumerate() {
-        match posted.get_mut(i) {
-            Some(message) if message.content != *chunk => {
-                if let Err(e) = message
-                    .edit(ctx, serenity::EditMessage::new().content(chunk.clone()))
-                    .await
-                {
-                    tracing::warn!(error = %e, "reply edit failed");
-                }
-            }
-            Some(_) => {}
-            None => match target.say(ctx, chunk.clone()).await {
-                Ok(message) => posted.push(message),
-                Err(e) => tracing::warn!(error = %e, "reply send failed"),
-            },
+        let mut message = serenity::CreateMessage::new().content(chunk.clone());
+        if i != 0 {
+            message = message.flags(serenity::MessageFlags::SUPPRESS_NOTIFICATIONS);
         }
+        if let Err(e) = target.send_message(ctx, message).await {
+            tracing::warn!(error = %e, "reply send failed");
+        }
+    }
+}
+
+const ACTIVITY_THROTTLE: Duration = Duration::from_secs(1);
+/// Hard ceiling on the actually-sent activity text, just under Discord's 2000-
+/// char limit. The rollover caps budget *raw* lines, but defang expansion and
+/// in-place failure-line rewrites can inflate the sent text past them, and an
+/// over-limit edit would 400 on every retry.
+const ACTIVITY_SEND_MAX: usize = 1990;
+
+/// A turn's coalesced tool-call + reasoning feed: one line per event in a silent
+/// message, edited in place (throttled) and rolled over at the activity caps.
+struct Activity<'a> {
+    ctx: &'a serenity::Context,
+    channel: serenity::ChannelId,
+    hosts: Vec<ActivityHost>,
+    /// tool_call_id → (host index, line index), so a tool's failure can rewrite
+    /// the exact line it started.
+    placements: std::collections::HashMap<String, (usize, usize)>,
+    last_edit: Instant,
+}
+
+struct ActivityHost {
+    message: serenity::Message,
+    lines: Vec<String>,
+    /// Last text actually sent (mention-defanged), so an unchanged flush no-ops.
+    rendered: String,
+    dirty: bool,
+}
+
+impl ActivityHost {
+    /// Lines joined, mention-defanged so tool args / thinking can't ping, and
+    /// clamped to [`ACTIVITY_SEND_MAX`] so an inflated host can't exceed the
+    /// hard message limit.
+    fn text(&self) -> String {
+        let body = crate::render::defang_mentions(&self.lines.join("\n"));
+        if body.chars().count() <= ACTIVITY_SEND_MAX {
+            return body;
+        }
+        body.chars().take(ACTIVITY_SEND_MAX).collect()
+    }
+
+    fn char_count(&self) -> usize {
+        let body: usize = self.lines.iter().map(|l| l.chars().count()).sum();
+        body + self.lines.len().saturating_sub(1)
+    }
+}
+
+impl<'a> Activity<'a> {
+    fn new(ctx: &'a serenity::Context, channel: serenity::ChannelId) -> Self {
+        Activity {
+            ctx,
+            channel,
+            hosts: Vec::new(),
+            placements: std::collections::HashMap::new(),
+            last_edit: Instant::now(),
+        }
+    }
+
+    async fn start(&mut self, tool: &ToolCallStart) {
+        let line = crate::render::tool_activity_line(&tool.tool_name, &tool.args);
+        if let Some(placement) = self.append(line).await {
+            self.placements.insert(tool.tool_call_id.clone(), placement);
+        }
+    }
+
+    async fn thinking(&mut self, content: &str) {
+        let line = crate::render::thinking_line(content);
+        if !line.is_empty() {
+            self.append(line).await;
+        }
+    }
+
+    async fn end(&mut self, tool: &ToolCallEnd) {
+        let Some((host_idx, line_idx)) = self.placements.remove(&tool.tool_call_id) else {
+            return;
+        };
+        if !tool.is_error {
+            return;
+        }
+        let error = crate::render::error_text(&tool.result);
+        let Some(host) = self.hosts.get_mut(host_idx) else {
+            return;
+        };
+        let Some(current) = host.lines.get(line_idx) else {
+            return;
+        };
+        let next = crate::render::with_failure_line(current, error.as_deref());
+        if next == *current {
+            return;
+        }
+        host.lines[line_idx] = next;
+        host.dirty = true;
+        self.maybe_flush().await;
+    }
+
+    async fn append(&mut self, line: String) -> Option<(usize, usize)> {
+        let rollover = match self.hosts.last() {
+            None => true,
+            Some(host) => {
+                let count = host.lines.len();
+                let projected = host.char_count() + line.chars().count() + usize::from(count > 0);
+                count + 1 > crate::render::ACTIVITY_LINE_CAP || projected > crate::render::ACTIVITY_CHAR_CAP
+            }
+        };
+        if rollover {
+            let sent = crate::render::defang_mentions(&line);
+            let message = self.post(&sent).await?;
+            self.hosts.push(ActivityHost {
+                message,
+                lines: vec![line],
+                rendered: sent,
+                dirty: false,
+            });
+            self.last_edit = Instant::now();
+            return Some((self.hosts.len() - 1, 0));
+        }
+        let host_idx = self.hosts.len() - 1;
+        let line_idx = {
+            let host = self.hosts.last_mut().expect("host present when not rolling over");
+            let idx = host.lines.len();
+            host.lines.push(line);
+            host.dirty = true;
+            idx
+        };
+        self.maybe_flush().await;
+        Some((host_idx, line_idx))
+    }
+
+    async fn post(&self, content: &str) -> Option<serenity::Message> {
+        let message = serenity::CreateMessage::new()
+            .content(content.to_string())
+            .flags(serenity::MessageFlags::SUPPRESS_NOTIFICATIONS);
+        match self.channel.send_message(self.ctx, message).await {
+            Ok(message) => Some(message),
+            Err(e) => {
+                tracing::warn!(error = %e, "activity send failed");
+                None
+            }
+        }
+    }
+
+    async fn maybe_flush(&mut self) {
+        if self.last_edit.elapsed() >= ACTIVITY_THROTTLE {
+            self.flush().await;
+        }
+    }
+
+    async fn flush(&mut self) {
+        let ctx = self.ctx;
+        for host in &mut self.hosts {
+            if !host.dirty {
+                continue;
+            }
+            let text = host.text();
+            if text == host.rendered {
+                host.dirty = false;
+                continue;
+            }
+            // Leave `dirty` set on failure so the next flush retries, not stuck stale.
+            match host
+                .message
+                .edit(ctx, serenity::EditMessage::new().content(text.clone()))
+                .await
+            {
+                Ok(()) => {
+                    host.rendered = text;
+                    host.dirty = false;
+                }
+                Err(e) => tracing::warn!(error = %e, "activity edit failed"),
+            }
+        }
+        self.last_edit = Instant::now();
     }
 }
 
