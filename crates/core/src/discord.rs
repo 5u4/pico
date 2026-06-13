@@ -6,6 +6,7 @@ use std::{
 use color_eyre::eyre::{WrapErr, eyre};
 use pico_shared::proto;
 use poise::serenity_prelude as serenity;
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::{
     bindings::Bindings,
@@ -19,6 +20,8 @@ pub(crate) struct Data {
     root: Arc<std::path::PathBuf>,
     bindings: Arc<parking_lot::Mutex<Bindings>>,
     pool: Arc<OmpPool>,
+    cancel: CancellationToken,
+    tracker: TaskTracker,
     supervisor_socket: Option<std::path::PathBuf>,
 }
 
@@ -34,6 +37,8 @@ pub(crate) fn framework(
     pool: Arc<OmpPool>,
     ready_tx: tokio::sync::oneshot::Sender<()>,
     supervisor_socket: Option<std::path::PathBuf>,
+    cancel: CancellationToken,
+    tracker: TaskTracker,
 ) -> poise::Framework<Data, Error> {
     poise::Framework::builder()
         .options(poise::FrameworkOptions {
@@ -50,6 +55,8 @@ pub(crate) fn framework(
                     bindings: Arc::new(parking_lot::Mutex::new(bindings)),
                     pool,
                     supervisor_socket,
+                    cancel,
+                    tracker,
                 })
             })
         })
@@ -234,9 +241,10 @@ async fn on_event(
         let root = Arc::clone(&data.root);
         let bindings = Arc::clone(&data.bindings);
         let pool = Arc::clone(&data.pool);
+        let cancel = data.cancel.clone();
         let message = new_message.clone();
-        tokio::spawn(async move {
-            if let Err(e) = route_message(ctx, root, bindings, pool, message).await {
+        data.tracker.spawn(async move {
+            if let Err(e) = route_message(ctx, root, bindings, pool, cancel, message).await {
                 tracing::warn!(error = %format!("{e:#}"), "message turn failed");
             }
         });
@@ -249,6 +257,7 @@ async fn route_message(
     root: Arc<std::path::PathBuf>,
     bindings: Arc<parking_lot::Mutex<Bindings>>,
     pool: Arc<OmpPool>,
+    cancel: CancellationToken,
     message: serenity::Message,
 ) -> color_eyre::Result<()> {
     let prompt = message.content.trim();
@@ -306,7 +315,7 @@ async fn route_message(
     let handle = pool.get_or_spawn(&thread_id, &config).await?;
     let outcome = {
         let mut session = handle.lock().await;
-        drive_turn(&ctx, target, &mut session, prompt).await?
+        drive_turn(&ctx, target, &mut session, prompt, &cancel).await?
     };
     if outcome == TurnOutcome::Dead {
         pool.forget(&thread_id);
@@ -329,6 +338,7 @@ async fn drive_turn(
     target: serenity::ChannelId,
     session: &mut ThreadSession,
     prompt: &str,
+    cancel: &CancellationToken,
 ) -> color_eyre::Result<TurnOutcome> {
     let _typing = target.start_typing(&ctx.http);
     session.client.prompt(prompt).await?;
@@ -339,7 +349,17 @@ async fn drive_turn(
     let throttle = Duration::from_secs(1);
 
     loop {
-        match session.events.recv().await {
+        let event = tokio::select! {
+            () = cancel.cancelled() => {
+                reconcile(ctx, target, &reply, &mut posted).await;
+                let _ = target
+                    .say(ctx, "worker is restarting; resend your message to continue")
+                    .await;
+                return Ok(TurnOutcome::Live);
+            }
+            event = session.events.recv() => event,
+        };
+        match event {
             Some(OmpEvent::Message(AssistantMessageEvent::TextDelta { delta })) => {
                 reply.push_str(&delta);
                 if last.elapsed() >= throttle {

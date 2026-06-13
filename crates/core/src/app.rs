@@ -1,7 +1,8 @@
-use std::{path::Path, sync::Arc};
+use std::path::Path;
 
 use color_eyre::eyre::WrapErr;
 use poise::serenity_prelude as serenity;
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::omp::pool::OmpPool;
 
@@ -11,7 +12,8 @@ use crate::omp::pool::OmpPool;
 pub struct App {
     client: serenity::Client,
     ready_rx: tokio::sync::oneshot::Receiver<()>,
-    evictor: tokio::task::JoinHandle<()>,
+    cancel: CancellationToken,
+    tracker: TaskTracker,
 }
 
 impl App {
@@ -23,8 +25,9 @@ impl App {
     pub async fn build(root: &Path, supervisor_socket: Option<std::path::PathBuf>) -> color_eyre::Result<App> {
         let token = read_secret(root, "discord_bot_token")?;
         let bindings = crate::bindings::load(&pico_shared::paths::worker_bindings(root))?;
-        let pool = Arc::new(OmpPool::new());
-        let evictor = Arc::clone(&pool).spawn_evictor();
+        let cancel = CancellationToken::new();
+        let tracker = TaskTracker::new();
+        let pool = OmpPool::new(cancel.clone(), &tracker);
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
         let intents = serenity::GatewayIntents::GUILDS
             | serenity::GatewayIntents::GUILD_MESSAGES
@@ -37,13 +40,16 @@ impl App {
                 pool,
                 ready_tx,
                 supervisor_socket,
+                cancel.clone(),
+                tracker.clone(),
             ))
             .await
             .wrap_err("build discord client")?;
         Ok(App {
             client,
             ready_rx,
-            evictor,
+            cancel,
+            tracker,
         })
     }
 
@@ -60,21 +66,41 @@ impl App {
         let App {
             mut client,
             ready_rx,
-            evictor,
+            cancel,
+            tracker,
         } = self;
         let shard_manager = client.shard_manager.clone();
-        tokio::spawn(async move {
-            shutdown.await;
-            tracing::info!("shutdown signal received; stopping discord gateway");
-            shard_manager.shutdown_all().await;
-        });
-        tokio::spawn(async move {
-            if ready_rx.await.is_ok() {
-                on_connected().await;
-            }
-        });
+        {
+            let cancel = cancel.clone();
+            tracker.spawn(async move {
+                tokio::select! {
+                    () = shutdown => {}
+                    () = cancel.cancelled() => {}
+                }
+                tracing::info!("stopping discord gateway");
+                cancel.cancel();
+                shard_manager.shutdown_all().await;
+            });
+        }
+        {
+            let cancel = cancel.clone();
+            tracker.spawn(async move {
+                tokio::select! {
+                    () = cancel.cancelled() => {}
+                    ready = ready_rx => {
+                        if ready.is_ok() {
+                            on_connected().await;
+                        }
+                    }
+                }
+            });
+        }
+        // Stop accepting new turns, then drain in-flight ones (each flushes its
+        // partial reply on `cancel`) plus the evictor and per-child stdio tasks.
         let result = client.start().await.wrap_err("discord client error");
-        evictor.abort();
+        cancel.cancel();
+        tracker.close();
+        tracker.wait().await;
         result
     }
 }

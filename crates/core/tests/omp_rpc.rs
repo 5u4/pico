@@ -11,6 +11,7 @@ use pico_core::omp::{
     client::{OmpClient, SpawnConfig},
     protocol::{AssistantMessageEvent, OmpEvent},
 };
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 /// A throwaway directory removed on drop, so a panicking test leaves nothing
 /// behind under `$TMPDIR`.
@@ -47,7 +48,10 @@ async fn roundtrip_commands_without_model_calls() {
         ..SpawnConfig::default()
     };
 
-    let (client, _events) = OmpClient::spawn(&config).await.expect("spawn omp --mode rpc");
+    let tracker = TaskTracker::new();
+    let (client, _events) = OmpClient::spawn(&config, &CancellationToken::new(), &tracker)
+        .await
+        .expect("spawn omp --mode rpc");
 
     client.new_session().await.expect("new_session");
     client
@@ -80,7 +84,10 @@ async fn streams_a_prompt_reply() {
         ..SpawnConfig::default()
     };
 
-    let (client, mut events) = OmpClient::spawn(&config).await.expect("spawn omp --mode rpc");
+    let tracker = TaskTracker::new();
+    let (client, mut events) = OmpClient::spawn(&config, &CancellationToken::new(), &tracker)
+        .await
+        .expect("spawn omp --mode rpc");
     client
         .prompt("Reply with exactly the word: pong")
         .await

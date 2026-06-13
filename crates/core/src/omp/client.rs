@@ -17,6 +17,7 @@ use tokio::{
     process::{Child, ChildStderr, ChildStdin, ChildStdout, Command as ProcCommand},
     sync::{Mutex as AsyncMutex, mpsc, oneshot},
 };
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::omp::protocol::{Command, Inbound, OmpEvent, RequestId, RpcResponse};
 
@@ -54,8 +55,14 @@ pub struct OmpClient {
 impl OmpClient {
     /// Spawn `omp --mode rpc`, wait for its `ready` frame, and return the client
     /// alongside the session event stream. Errors if the binary cannot be
-    /// spawned or it exits / stalls before reporting ready.
-    pub async fn spawn(config: &SpawnConfig) -> color_eyre::Result<(OmpClient, mpsc::UnboundedReceiver<OmpEvent>)> {
+    /// spawned or it exits / stalls before reporting ready. The stdout reader and
+    /// stderr drain run on `tracker` and stop on `cancel`, so worker shutdown
+    /// joins them instead of leaking detached tasks past the child's kill.
+    pub async fn spawn(
+        config: &SpawnConfig,
+        cancel: &CancellationToken,
+        tracker: &TaskTracker,
+    ) -> color_eyre::Result<(OmpClient, mpsc::UnboundedReceiver<OmpEvent>)> {
         let mut cmd = ProcCommand::new("omp");
         cmd.arg("--mode").arg("rpc");
         if let Some(model) = &config.model {
@@ -89,8 +96,8 @@ impl OmpClient {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let (ready_tx, ready_rx) = oneshot::channel();
 
-        tokio::spawn(drain_stderr(stderr));
-        tokio::spawn(read_loop(stdout, Arc::clone(&pending), event_tx, ready_tx));
+        spawn_until_cancel(tracker, cancel, drain_stderr(stderr));
+        spawn_until_cancel(tracker, cancel, read_loop(stdout, Arc::clone(&pending), event_tx, ready_tx));
 
         match tokio::time::timeout(READY_TIMEOUT, ready_rx).await {
             Ok(Ok(())) => tracing::debug!(model = ?config.model, "omp --mode rpc ready"),
@@ -209,6 +216,23 @@ impl OmpClient {
             Err(eyre!("omp `{}` failed: {detail}", resp.command))
         }
     }
+}
+
+/// Spawn `fut` on `tracker`, ending it early if `cancel` fires. The per-child
+/// stdio tasks use this so worker shutdown drains them through the tracker
+/// rather than leaving them detached until the child's pipes close.
+fn spawn_until_cancel(
+    tracker: &TaskTracker,
+    cancel: &CancellationToken,
+    fut: impl std::future::Future<Output = ()> + Send + 'static,
+) {
+    let cancel = cancel.clone();
+    tracker.spawn(async move {
+        tokio::select! {
+            () = cancel.cancelled() => {}
+            () = fut => {}
+        }
+    });
 }
 
 /// Drains OMP's stdout until EOF or a fatal read error, then drops all pending

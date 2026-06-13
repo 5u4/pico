@@ -15,6 +15,7 @@ use std::{
 
 use parking_lot::Mutex;
 use tokio::sync::mpsc;
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::omp::{
     client::{OmpClient, SpawnConfig},
@@ -47,14 +48,35 @@ impl ThreadHandle {
     }
 }
 
-#[derive(Default)]
 pub struct OmpPool {
     sessions: Mutex<HashMap<String, Arc<ThreadHandle>>>,
+    cancel: CancellationToken,
+    tracker: TaskTracker,
 }
 
 impl OmpPool {
-    pub fn new() -> OmpPool {
-        OmpPool::default()
+    /// Build the pool and spawn its idle-evictor on `tracker`. The sweep stops
+    /// at the next tick once `cancel` fires, so worker shutdown joins it via the
+    /// tracker rather than aborting mid-sweep. `cancel`/`tracker` are also handed
+    /// to each spawned `omp` child's stdio tasks.
+    pub fn new(cancel: CancellationToken, tracker: &TaskTracker) -> Arc<OmpPool> {
+        let pool = Arc::new(OmpPool {
+            sessions: Mutex::new(HashMap::new()),
+            cancel: cancel.clone(),
+            tracker: tracker.clone(),
+        });
+        let evictor = Arc::clone(&pool);
+        tracker.spawn(async move {
+            let mut tick = tokio::time::interval(SWEEP_INTERVAL);
+            tick.tick().await;
+            loop {
+                tokio::select! {
+                    () = cancel.cancelled() => break,
+                    _ = tick.tick() => evictor.evict_idle(),
+                }
+            }
+        });
+        pool
     }
 
     /// Return the thread's handle, spawning the `omp` child if absent or
@@ -66,7 +88,7 @@ impl OmpPool {
         }
 
         // Spawn outside the map lock (spawn awaits the child's ready frame).
-        let (client, events) = OmpClient::spawn(config).await?;
+        let (client, events) = OmpClient::spawn(config, &self.cancel, &self.tracker).await?;
         let handle = Arc::new(ThreadHandle {
             inner: tokio::sync::Mutex::new(ThreadSession { client, events }),
             last_active: AtomicU64::new(now_millis()),
@@ -84,7 +106,7 @@ impl OmpPool {
 
     /// Drop a dead thread's child so the next [`get_or_spawn`](Self::get_or_spawn)
     /// respawns it (resuming via `--continue`); `kill_on_drop` fires once the turn releases its clone.
-    pub fn forget(&self, thread_id: &str) {
+    pub(crate) fn forget(&self, thread_id: &str) {
         self.sessions.lock().remove(thread_id);
     }
 
@@ -93,25 +115,12 @@ impl OmpPool {
     /// clone for its whole duration); checking it under the map lock — which
     /// `get_or_spawn` also needs to hand out a clone — closes the race. Dropping
     /// the handle kills the child via `kill_on_drop`.
-    pub fn evict_idle(&self) {
+    fn evict_idle(&self) {
         let now = now_millis();
         let cutoff = IDLE_TIMEOUT.as_millis() as u64;
         self.sessions.lock().retain(|_, handle| {
             !(now.saturating_sub(handle.last_active.load(Ordering::Relaxed)) > cutoff && Arc::strong_count(handle) == 1)
         });
-    }
-
-    /// Run [`evict_idle`] every [`SWEEP_INTERVAL`]. Abort the returned handle to
-    /// stop sweeping (worker shutdown).
-    pub fn spawn_evictor(self: Arc<Self>) -> tokio::task::JoinHandle<()> {
-        tokio::spawn(async move {
-            let mut tick = tokio::time::interval(SWEEP_INTERVAL);
-            tick.tick().await;
-            loop {
-                tick.tick().await;
-                self.evict_idle();
-            }
-        })
     }
 }
 
@@ -120,4 +129,21 @@ fn now_millis() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn evictor_stops_on_cancel_so_the_tracker_drains() {
+        let cancel = CancellationToken::new();
+        let tracker = TaskTracker::new();
+        let _pool = OmpPool::new(cancel.clone(), &tracker);
+        cancel.cancel();
+        tracker.close();
+        tokio::time::timeout(Duration::from_secs(5), tracker.wait())
+            .await
+            .expect("evictor ignored cancellation; shutdown drain would hang");
+    }
 }
