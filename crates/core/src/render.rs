@@ -337,8 +337,8 @@ pub fn settle_rows(rows: &mut [SubagentRow], is_error: bool) {
     }
 }
 
-/// The `task` batch message: header (`👥 Running` while any row runs, else
-/// `❌ Ran` if any subagent failed, else `✅ Ran`) then one row per subagent.
+/// The `task` batch message: header (`👥 Running`/`👥 Ran`, swapped to `❌ Ran`
+/// only when a subagent failed — never `✅`) then one row per subagent.
 pub fn render_subagent_batch(rows: &[SubagentRow], elapsed_ms: u64) -> String {
     let elapsed = format_duration(elapsed_ms);
     let plural = if rows.len() == 1 { "" } else { "s" };
@@ -348,7 +348,7 @@ pub fn render_subagent_batch(rows: &[SubagentRow], elapsed_ms: u64) -> String {
     } else if rows.iter().any(|r| r.status == SubagentStatus::Failed) {
         format!("❌ Ran {n} task{plural} · {elapsed}")
     } else {
-        format!("✅ Ran {n} task{plural} · {elapsed}")
+        format!("👥 Ran {n} task{plural} · {elapsed}")
     };
     for row in rows {
         out.push('\n');
@@ -816,7 +816,7 @@ mod tests {
         );
         settle_rows(&mut rows, false);
         let content = render_subagent_batch(&rows, 3_000);
-        assert!(content.starts_with("✅ Ran 2 tasks · 3s"));
+        assert!(content.starts_with("👥 Ran 2 tasks · 3s"));
         assert!(content.contains("  └ [0] explore \"map the router\"  ✅ done  · 5 tools"));
         assert!(content.contains("  └ [1] explore \"map the db\"  ✅ done  · 2 tools"));
     }
