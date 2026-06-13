@@ -12,7 +12,7 @@ use crate::{
     bindings::Bindings,
     omp::{
         pool::{OmpPool, ThreadSession},
-        protocol::{AssistantMessageEvent, OmpEvent, ToolCallEnd, ToolCallStart},
+        protocol::{AssistantMessageEvent, OmpEvent, ToolCall, ToolCallEnd, ToolCallStart, ToolCallUpdate},
     },
 };
 
@@ -346,11 +346,13 @@ async fn drive_turn(
 
     let mut reply = String::new();
     let mut activity = Activity::new(ctx, target);
+    let mut subagents = SubagentFeed::new(ctx, target);
 
     loop {
         let event = tokio::select! {
             () = cancel.cancelled() => {
                 activity.flush().await;
+                subagents.flush_all(false).await;
                 commit_reply(ctx, target, &reply).await;
                 let _ = target
                     .say(ctx, "worker is restarting; resend your message to continue")
@@ -371,14 +373,27 @@ async fn drive_turn(
             // A tool call means the text so far was preamble, not the answer.
             Some(OmpEvent::ToolStart(tool)) => {
                 reply.clear();
-                activity.start(&tool).await;
+                match &tool {
+                    ToolCallStart::Task(call) => subagents.start(call).await,
+                    _ => activity.start(&tool).await,
+                }
+            }
+            Some(OmpEvent::ToolUpdate(tool)) => {
+                if tool.tool_name == "task" {
+                    subagents.update(&tool).await;
+                }
             }
             Some(OmpEvent::ToolEnd(tool)) => {
-                activity.end(&tool).await;
+                if tool.tool_name == "task" {
+                    subagents.end(&tool).await;
+                } else {
+                    activity.end(&tool).await;
+                }
             }
             Some(OmpEvent::AgentEnd) => break,
             Some(OmpEvent::Error(e)) => {
                 activity.flush().await;
+                subagents.flush_all(true).await;
                 let _ = target.say(ctx, format!("OMP error: {e}")).await;
                 return Ok(TurnOutcome::Live);
             }
@@ -388,6 +403,7 @@ async fn drive_turn(
             // Stream closed: the child died mid-turn — flush, notify, and report it dead so the pool respawns it.
             None => {
                 activity.flush().await;
+                subagents.flush_all(true).await;
                 commit_reply(ctx, target, &reply).await;
                 let _ = target
                     .say(ctx, "the OMP session ended unexpectedly; send another message to restart it")
@@ -397,6 +413,7 @@ async fn drive_turn(
         }
     }
     activity.flush().await;
+    subagents.flush_all(false).await;
     commit_reply(ctx, target, &reply).await;
     Ok(TurnOutcome::Live)
 }
@@ -473,9 +490,9 @@ impl<'a> Activity<'a> {
     }
 
     async fn start(&mut self, tool: &ToolCallStart) {
-        let line = crate::render::tool_activity_line(&tool.tool_name, &tool.args);
+        let line = crate::render::tool_activity_line(tool);
         if let Some(placement) = self.append(line).await {
-            self.placements.insert(tool.tool_call_id.clone(), placement);
+            self.placements.insert(tool.call().tool_call_id.clone(), placement);
         }
     }
 
@@ -586,6 +603,144 @@ impl<'a> Activity<'a> {
             }
         }
         self.last_edit = Instant::now();
+    }
+}
+
+/// Edit throttle for a live subagent batch — looser than [`ACTIVITY_THROTTLE`]
+/// because progress snapshots arrive far more often than tool-call lines.
+const SUBAGENT_THROTTLE: Duration = Duration::from_secs(2);
+
+/// Per-`task`-batch render: one Discord message per batch (keyed by tool-call
+/// id), one row per subagent, edited in place from `tool_execution_update`
+/// snapshots. Mirrors [`Activity`]'s throttled-edit model but keeps each batch
+/// as its own message instead of a coalesced feed.
+struct SubagentFeed<'a> {
+    ctx: &'a serenity::Context,
+    channel: serenity::ChannelId,
+    batches: std::collections::HashMap<String, SubagentBatch>,
+}
+
+struct SubagentBatch {
+    message: serenity::Message,
+    rows: Vec<crate::render::SubagentRow>,
+    started_at: Instant,
+    last_edit: Instant,
+    /// Last text actually sent (defanged + clamped) so an unchanged edit no-ops.
+    rendered: String,
+}
+
+impl<'a> SubagentFeed<'a> {
+    fn new(ctx: &'a serenity::Context, channel: serenity::ChannelId) -> Self {
+        SubagentFeed {
+            ctx,
+            channel,
+            batches: std::collections::HashMap::new(),
+        }
+    }
+
+    async fn start(&mut self, call: &ToolCall) {
+        let rows = crate::render::extract_subagent_rows(&call.args);
+        if rows.is_empty() {
+            return;
+        }
+        let content = subagent_send_text(&crate::render::render_subagent_batch(&rows, 0));
+        let Some(message) = self.post(&content).await else {
+            return;
+        };
+        let now = Instant::now();
+        self.batches.insert(
+            call.tool_call_id.clone(),
+            SubagentBatch {
+                message,
+                rows,
+                started_at: now,
+                last_edit: now,
+                rendered: content,
+            },
+        );
+    }
+
+    async fn update(&mut self, tool: &ToolCallUpdate) {
+        let Some(batch) = self.batches.get_mut(&tool.tool_call_id) else {
+            return;
+        };
+        crate::render::apply_progress(&mut batch.rows, &tool.partial_result);
+        let due = batch.last_edit.elapsed() >= SUBAGENT_THROTTLE;
+        if due {
+            self.edit(&tool.tool_call_id).await;
+        }
+    }
+
+    async fn end(&mut self, tool: &ToolCallEnd) {
+        let Some(batch) = self.batches.get_mut(&tool.tool_call_id) else {
+            return;
+        };
+        crate::render::settle_rows(&mut batch.rows, tool.is_error);
+        self.edit(&tool.tool_call_id).await;
+        self.batches.remove(&tool.tool_call_id);
+    }
+
+    /// Flush every open batch's current state — used when the turn ends without
+    /// a per-batch end frame (cancel, async error, child death). When
+    /// `settle_failed` the subagents are definitively gone (OMP error / dead
+    /// child), so in-progress rows settle to ❌; on a cancel/restart the turn may
+    /// resume, so rows keep their live status instead.
+    async fn flush_all(&mut self, settle_failed: bool) {
+        let keys: Vec<String> = self.batches.keys().cloned().collect();
+        for key in keys {
+            if settle_failed && let Some(batch) = self.batches.get_mut(&key) {
+                crate::render::settle_rows(&mut batch.rows, true);
+            }
+            self.edit(&key).await;
+        }
+    }
+
+    async fn edit(&mut self, key: &str) {
+        let Some(batch) = self.batches.get_mut(key) else {
+            return;
+        };
+        let elapsed = batch.started_at.elapsed().as_millis() as u64;
+        let content = subagent_send_text(&crate::render::render_subagent_batch(&batch.rows, elapsed));
+        if content == batch.rendered {
+            batch.last_edit = Instant::now();
+            return;
+        }
+        match batch
+            .message
+            .edit(self.ctx, serenity::EditMessage::new().content(content.clone()))
+            .await
+        {
+            Ok(()) => {
+                batch.rendered = content;
+                batch.last_edit = Instant::now();
+            }
+            Err(e) => tracing::warn!(error = %e, "subagent edit failed"),
+        }
+    }
+
+    async fn post(&self, content: &str) -> Option<serenity::Message> {
+        let message = serenity::CreateMessage::new()
+            .content(content.to_string())
+            .flags(serenity::MessageFlags::SUPPRESS_NOTIFICATIONS);
+        match self.channel.send_message(self.ctx, message).await {
+            Ok(message) => Some(message),
+            Err(e) => {
+                tracing::warn!(error = %e, "subagent send failed");
+                None
+            }
+        }
+    }
+}
+
+/// Defang mentions in a subagent batch render (descriptions and tool args are
+/// user/model controlled) and clamp to the Discord hard limit so an oversized
+/// batch can't 400 every edit.
+fn subagent_send_text(raw: &str) -> String {
+    let defanged = crate::render::defang_mentions(raw);
+    if defanged.chars().count() <= ACTIVITY_SEND_MAX {
+        defanged
+    } else {
+        defanged.chars().take(ACTIVITY_SEND_MAX).collect()
     }
 }
 

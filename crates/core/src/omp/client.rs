@@ -294,6 +294,9 @@ async fn read_loop(
             Inbound::ToolExecutionStart(tool) => {
                 let _ = event_tx.send(OmpEvent::ToolStart(tool));
             }
+            Inbound::ToolExecutionUpdate(tool) => {
+                let _ = event_tx.send(OmpEvent::ToolUpdate(tool));
+            }
             Inbound::ToolExecutionEnd(tool) => {
                 let _ = event_tx.send(OmpEvent::ToolEnd(tool));
             }

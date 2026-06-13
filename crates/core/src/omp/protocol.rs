@@ -89,6 +89,7 @@ pub enum OmpEvent {
     AgentStart,
     Message(AssistantMessageEvent),
     ToolStart(ToolCallStart),
+    ToolUpdate(ToolCallUpdate),
     ToolEnd(ToolCallEnd),
     /// The agent finished the turn. Terminal for the current prompt.
     AgentEnd,
@@ -116,15 +117,79 @@ pub enum AssistantMessageEvent {
     Other,
 }
 
-/// Payload of a `tool_execution_start` frame.
+/// Shared payload of a tool-call frame: the correlation id, the raw tool name
+/// (kept for the unknown-tool render and logging), the args, and the optional
+/// host-supplied intent.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ToolCallStart {
+pub struct ToolCall {
     pub tool_call_id: String,
     pub tool_name: String,
     pub args: serde_json::Value,
     #[serde(default)]
     pub intent: Option<String>,
+}
+
+/// A `tool_execution_start` frame, classified by tool at decode so the renderer
+/// matches a typed variant. Open set: unknown tools fall to [`Self::Unknown`],
+/// keeping the raw name. A new variant makes the render match non-exhaustive.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(from = "ToolCall")]
+pub enum ToolCallStart {
+    Read(ToolCall),
+    Search(ToolCall),
+    Find(ToolCall),
+    Lsp(ToolCall),
+    Edit(ToolCall),
+    Write(ToolCall),
+    Bash(ToolCall),
+    Browser(ToolCall),
+    Eval(ToolCall),
+    WebSearch(ToolCall),
+    Task(ToolCall),
+    Ask(ToolCall),
+    Unknown(ToolCall),
+}
+
+impl From<ToolCall> for ToolCallStart {
+    fn from(call: ToolCall) -> Self {
+        match call.tool_name.as_str() {
+            "read" => Self::Read(call),
+            "search" => Self::Search(call),
+            "find" => Self::Find(call),
+            "lsp" => Self::Lsp(call),
+            "edit" => Self::Edit(call),
+            "write" => Self::Write(call),
+            "bash" => Self::Bash(call),
+            "browser" => Self::Browser(call),
+            "eval" => Self::Eval(call),
+            "web_search" => Self::WebSearch(call),
+            "task" => Self::Task(call),
+            "ask" => Self::Ask(call),
+            _ => Self::Unknown(call),
+        }
+    }
+}
+
+impl ToolCallStart {
+    /// The shared payload, whichever tool this was classified as.
+    pub fn call(&self) -> &ToolCall {
+        match self {
+            Self::Read(c)
+            | Self::Search(c)
+            | Self::Find(c)
+            | Self::Lsp(c)
+            | Self::Edit(c)
+            | Self::Write(c)
+            | Self::Bash(c)
+            | Self::Browser(c)
+            | Self::Eval(c)
+            | Self::WebSearch(c)
+            | Self::Task(c)
+            | Self::Ask(c)
+            | Self::Unknown(c) => c,
+        }
+    }
 }
 
 /// Payload of a `tool_execution_end` frame.
@@ -136,6 +201,18 @@ pub struct ToolCallEnd {
     pub result: serde_json::Value,
     #[serde(default)]
     pub is_error: bool,
+}
+
+/// Payload of a `tool_execution_update` frame. `partial_result` is the tool's
+/// in-flight result; for the `task` tool it carries `details.progress` — one
+/// subagent snapshot per row. Kept raw because only the subagent renderer reads
+/// into it, and only for `task`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolCallUpdate {
+    pub tool_call_id: String,
+    pub tool_name: String,
+    pub partial_result: serde_json::Value,
 }
 
 /// Every frame the client reads off OMP's stdout; unmodeled frames decode to
@@ -151,6 +228,7 @@ pub(crate) enum Inbound {
         assistant_message_event: AssistantMessageEvent,
     },
     ToolExecutionStart(ToolCallStart),
+    ToolExecutionUpdate(ToolCallUpdate),
     ToolExecutionEnd(ToolCallEnd),
     #[serde(other)]
     Unknown,
@@ -277,11 +355,11 @@ mod tests {
         match parse(
             r#"{"type":"tool_execution_start","toolCallId":"call_1","toolName":"bash","args":{"command":"echo hi"},"intent":"Running echo"}"#,
         ) {
-            Inbound::ToolExecutionStart(t) => {
-                assert_eq!(t.tool_call_id, "call_1");
-                assert_eq!(t.tool_name, "bash");
-                assert_eq!(t.args["command"], "echo hi");
-                assert_eq!(t.intent.as_deref(), Some("Running echo"));
+            Inbound::ToolExecutionStart(ToolCallStart::Bash(c)) => {
+                assert_eq!(c.tool_call_id, "call_1");
+                assert_eq!(c.tool_name, "bash");
+                assert_eq!(c.args["command"], "echo hi");
+                assert_eq!(c.intent.as_deref(), Some("Running echo"));
             }
             other => panic!("expected tool start, got {other:?}"),
         }
@@ -294,6 +372,28 @@ mod tests {
                 assert!(!t.is_error);
             }
             other => panic!("expected tool end, got {other:?}"),
+        }
+
+        // An unclassified tool keeps its raw name in the Unknown payload.
+        match parse(r#"{"type":"tool_execution_start","toolCallId":"c","toolName":"mcp__x","args":{}}"#) {
+            Inbound::ToolExecutionStart(ToolCallStart::Unknown(c)) => assert_eq!(c.tool_name, "mcp__x"),
+            other => panic!("expected unknown tool start, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decodes_tool_execution_update_with_task_progress() {
+        // The `task` tool streams a partial result whose `details.progress`
+        // carries one snapshot per subagent; `args` is present on the wire and
+        // must be ignored.
+        let line = r#"{"type":"tool_execution_update","toolCallId":"call_2","toolName":"task","args":{"agent":"explore"},"partialResult":{"content":[{"type":"text","text":"Running..."}],"details":{"progress":[{"index":0,"status":"running","currentTool":"read"}]}}}"#;
+        match parse(line) {
+            Inbound::ToolExecutionUpdate(t) => {
+                assert_eq!(t.tool_call_id, "call_2");
+                assert_eq!(t.tool_name, "task");
+                assert_eq!(t.partial_result["details"]["progress"][0]["currentTool"], "read");
+            }
+            other => panic!("expected tool update, got {other:?}"),
         }
     }
 

@@ -1,3 +1,7 @@
+use serde::Deserialize;
+
+use crate::omp::protocol::ToolCallStart;
+
 pub const DISCORD_BUDGET: usize = 1800;
 
 pub fn split_to_budget(text: &str, budget: usize) -> Vec<String> {
@@ -55,91 +59,106 @@ const ERROR_DETAIL: usize = 60;
 pub const ACTIVITY_LINE_CAP: usize = 20;
 pub const ACTIVITY_CHAR_CAP: usize = 1800;
 
-/// The tools pico renders with a bespoke emoji. Everything else (MCP tools,
-/// custom tools, anything OMP grows later) is [`ToolName::Unknown`] and renders
-/// generically — the set is open, so a catch-all is intrinsic, not a gap. The
-/// `Unknown` payload borrows the name, so an unknown tool costs no allocation.
-#[derive(Clone, Copy)]
-enum ToolName<'a> {
-    Read,
-    Search,
-    Find,
-    Lsp,
-    Edit,
-    Write,
-    Bash,
-    Browser,
-    Eval,
-    WebSearch,
-    Task,
-    Ask,
-    Unknown(&'a str),
-}
-
-impl<'a> From<&'a str> for ToolName<'a> {
-    fn from(name: &'a str) -> Self {
-        match name {
-            "read" => Self::Read,
-            "search" => Self::Search,
-            "find" => Self::Find,
-            "lsp" => Self::Lsp,
-            "edit" => Self::Edit,
-            "write" => Self::Write,
-            "bash" => Self::Bash,
-            "browser" => Self::Browser,
-            "eval" => Self::Eval,
-            "web_search" => Self::WebSearch,
-            "task" => Self::Task,
-            "ask" => Self::Ask,
-            other => Self::Unknown(other),
-        }
-    }
-}
-
-/// One activity-feed line for a tool call: a per-tool emoji plus the tool's
-/// primary argument trimmed to [`ACTIVITY_DETAIL`]. Adding a known
-/// [`ToolName`] variant makes this match non-exhaustive, so a new tool can't
-/// silently slip through without a deliberate emoji choice.
-pub fn tool_activity_line(tool_name: &str, args: &serde_json::Value) -> String {
-    match ToolName::from(tool_name) {
-        tool @ (ToolName::Read | ToolName::Search | ToolName::Find | ToolName::Lsp) => {
-            format!("🔍 {}", truncate(&first_positional(tool, args), ACTIVITY_DETAIL))
-        }
-        ToolName::Edit => format!("✏️ {}", truncate(&edit_path_arg(args).unwrap_or_default(), ACTIVITY_DETAIL)),
-        ToolName::Write => format!("✏️ {}", truncate(&field_string(args, "path"), ACTIVITY_DETAIL)),
-        ToolName::Bash => format!("💻 {}", truncate(first_line(&field_string(args, "command")), ACTIVITY_DETAIL)),
-        ToolName::Browser => {
-            let action = field_string(args, "action");
-            let url = field_string(args, "url");
-            let detail = if url.is_empty() {
-                field_string(args, "selector")
-            } else {
-                url
-            };
+/// One activity-feed line for a tool call: a per-tool emoji plus the primary arg
+/// trimmed to [`ACTIVITY_DETAIL`]. Matches the decode-time [`ToolCallStart`]
+/// classification and reads typed [`Args`] fields. `task` is routed away by the
+/// turn loop, so it shares the generic render.
+pub fn tool_activity_line(tool: &ToolCallStart) -> String {
+    let raw = &tool.call().args;
+    let a = Args::deserialize(raw).unwrap_or_default();
+    let first_path = a.paths.first().map(String::as_str).unwrap_or_default();
+    match tool {
+        ToolCallStart::Read(_) => locate("🔍", prefer([a.path, first_path])),
+        ToolCallStart::Search(_) => locate("🔍", prefer([a.pattern, a.query])),
+        ToolCallStart::Find(_) => locate("🔍", prefer([first_path, a.path])),
+        ToolCallStart::Lsp(_) => locate("🔍", prefer([a.uri, a.symbol, a.query])),
+        ToolCallStart::Edit(_) => locate("✏️", edit_path_arg(a.path, a.input)),
+        ToolCallStart::Write(_) => locate("✏️", a.path),
+        ToolCallStart::Bash(_) => locate("💻", first_line(a.command)),
+        ToolCallStart::Browser(_) => {
+            let detail = prefer([a.url, a.selector]);
             if detail.is_empty() {
-                format!("🌐 {action}")
+                format!("🌐 {}", a.action)
             } else {
-                format!("🌐 {action} {}", truncate(&detail, ACTIVITY_DETAIL))
+                format!("🌐 {} {}", a.action, truncate(detail, ACTIVITY_DETAIL))
             }
         }
-        ToolName::Eval => {
-            let lang = field_string(args, "language");
-            let code = field_string(args, "code");
-            if code.is_empty() {
-                format!("🧪 {lang}")
+        ToolCallStart::Eval(_) => {
+            if a.code.is_empty() {
+                format!("🧪 {}", a.language)
             } else {
-                format!("🧪 {lang} {}", truncate(first_line(&code), ACTIVITY_DETAIL))
+                format!("🧪 {} {}", a.language, truncate(first_line(a.code), ACTIVITY_DETAIL))
             }
         }
-        ToolName::WebSearch => format!("🔎 {}", truncate(&field_string(args, "query"), ACTIVITY_DETAIL)),
-        ToolName::Task => {
-            let agent = field_string(args, "agent");
-            let detail = if agent.is_empty() { json_preview(args) } else { agent };
-            format!("🤖 {}", truncate(&detail, ACTIVITY_DETAIL))
+        ToolCallStart::WebSearch(_) => locate("🔎", a.query),
+        ToolCallStart::Ask(_) => format!("❓ {}", truncate(&json_preview(raw), ACTIVITY_DETAIL)),
+        ToolCallStart::Task(call) | ToolCallStart::Unknown(call) => {
+            format!("🛠️ {}", truncate(&call.tool_name, ACTIVITY_DETAIL))
         }
-        ToolName::Ask => format!("❓ {}", truncate(&json_preview(args), ACTIVITY_DETAIL)),
-        ToolName::Unknown(name) => format!("🛠️ {}", truncate(name, ACTIVITY_DETAIL)),
     }
+}
+
+/// Borrowed view over the `args` fields the activity line reads. serde fills
+/// only what's present (missing → `""`) and ignores unknown args; borrowing
+/// keeps a large `command`/`code` from being cloned just to take its first line.
+#[derive(serde::Deserialize, Default)]
+#[serde(default)]
+struct Args<'a> {
+    path: &'a str,
+    pattern: &'a str,
+    query: &'a str,
+    uri: &'a str,
+    symbol: &'a str,
+    command: &'a str,
+    action: &'a str,
+    url: &'a str,
+    selector: &'a str,
+    language: &'a str,
+    code: &'a str,
+    input: &'a str,
+    #[serde(default, deserialize_with = "string_or_seq")]
+    paths: Vec<String>,
+}
+
+/// `emoji` + the detail trimmed to [`ACTIVITY_DETAIL`]. An empty detail renders
+/// as just the emoji and a trailing space, matching the per-field arms.
+fn locate(emoji: &str, detail: &str) -> String {
+    format!("{emoji} {}", truncate(detail, ACTIVITY_DETAIL))
+}
+
+/// First non-empty candidate (typed field preference, replacing the per-tool
+/// key list), or `""` when all are empty.
+fn prefer<'a>(candidates: impl IntoIterator<Item = &'a str>) -> &'a str {
+    candidates.into_iter().find(|s| !s.is_empty()).unwrap_or_default()
+}
+
+/// Deserialize `string | array-of-strings` (OMP's `search` `paths`) into a
+/// `Vec`. Without it a bare-string `paths` aborts the whole [`Args`] decode and
+/// blanks the line. Owned — entries are short and only the first is read.
+fn string_or_seq<'de, D>(de: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct OneOrMany;
+    impl<'de> serde::de::Visitor<'de> for OneOrMany {
+        type Value = Vec<String>;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a string or array of strings")
+        }
+        fn visit_str<E>(self, value: &str) -> Result<Self::Value, E> {
+            Ok(vec![value.to_owned()])
+        }
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: serde::de::SeqAccess<'de>,
+        {
+            // Only the first path is rendered; clone it and drain the rest.
+            let first = seq.next_element::<String>()?;
+            while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {}
+            Ok(first.into_iter().collect())
+        }
+    }
+    de.deserialize_any(OneOrMany)
 }
 
 /// One activity-feed line for a reasoning block: the first line of the thinking
@@ -184,6 +203,244 @@ pub fn error_text(result: &serde_json::Value) -> Option<String> {
     })
 }
 
+/// Per-row detail caps for the subagent batch render; the leading marker/emoji
+/// sits outside each.
+const SUBAGENT_LABEL_MAX: usize = 28;
+const SUBAGENT_ARGS_MAX: usize = 40;
+const SUBAGENT_INTENT_MAX: usize = 40;
+const SUBAGENT_MODEL_MAX: usize = 30;
+
+/// Lifecycle of one subagent row, folded from `AgentProgress.status`:
+/// `completed` → [`SubagentStatus::Done`], `failed`/`aborted` →
+/// [`SubagentStatus::Failed`], `running`/`pending` →
+/// [`SubagentStatus::InProgress`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum SubagentStatus {
+    InProgress,
+    Done,
+    Failed,
+}
+
+/// One subagent's live render state in a `task` batch. Seeded from the tool args
+/// at start (`index`, `agent`, `description`), then folded forward from each
+/// `tool_execution_update` snapshot matched by `index`.
+pub struct SubagentRow {
+    pub index: u64,
+    pub agent: String,
+    pub description: String,
+    pub status: SubagentStatus,
+    pub tool_count: u64,
+    pub current_tool: Option<String>,
+    pub current_tool_args: Option<String>,
+    pub last_intent: Option<String>,
+    pub resolved_model: Option<String>,
+}
+
+/// One row per subagent from a `task` call's args (`{ agent, tasks: [...] }`, or
+/// a single `{ id, description }`). Array position becomes `index` — preserved
+/// across id-less skips — to match `AgentProgress.index`. Empty if not a batch.
+pub fn extract_subagent_rows(args: &serde_json::Value) -> Vec<SubagentRow> {
+    let Some(obj) = args.as_object() else {
+        return Vec::new();
+    };
+    let agent = obj.get("agent").and_then(serde_json::Value::as_str).unwrap_or("agent");
+    if let Some(list) = obj.get("tasks").and_then(serde_json::Value::as_array) {
+        return list
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| has_id(entry))
+            .map(|(index, entry)| seed_row(index as u64, agent, entry))
+            .collect();
+    }
+    if has_id(args) {
+        return vec![seed_row(0, agent, args)];
+    }
+    Vec::new()
+}
+
+fn has_id(value: &serde_json::Value) -> bool {
+    value
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|s| !s.is_empty())
+}
+
+fn seed_row(index: u64, agent: &str, entry: &serde_json::Value) -> SubagentRow {
+    SubagentRow {
+        index,
+        agent: agent.to_owned(),
+        description: entry
+            .get("description")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        status: SubagentStatus::InProgress,
+        tool_count: 0,
+        current_tool: None,
+        current_tool_args: None,
+        last_intent: None,
+        resolved_model: None,
+    }
+}
+
+/// Fold an update's per-subagent snapshots onto rows by `index`. Tolerates
+/// `{ details: { progress } }` and bare `{ progress }`. The four live fields are
+/// overwritten every snapshot (omitted clears) so the row mirrors the latest.
+pub fn apply_progress(rows: &mut [SubagentRow], partial: &serde_json::Value) {
+    let Some(progress) = read_progress(partial) else {
+        return;
+    };
+    for entry in progress {
+        let Some(index) = entry.get("index").and_then(serde_json::Value::as_u64) else {
+            continue;
+        };
+        let Some(row) = rows.iter_mut().find(|r| r.index == index) else {
+            continue;
+        };
+        if let Some(status) = entry
+            .get("status")
+            .and_then(serde_json::Value::as_str)
+            .and_then(normalize_status)
+        {
+            row.status = status;
+        }
+        row.current_tool = str_field(entry, "currentTool");
+        row.current_tool_args = str_field(entry, "currentToolArgs");
+        row.last_intent = str_field(entry, "lastIntent");
+        row.resolved_model = str_field(entry, "resolvedModel");
+        if let Some(count) = entry.get("toolCount").and_then(serde_json::Value::as_u64) {
+            row.tool_count = count;
+        }
+        if row.description.is_empty()
+            && let Some(desc) = entry.get("description").and_then(serde_json::Value::as_str)
+        {
+            row.description = desc.to_owned();
+        }
+        if let Some(agent) = str_field(entry, "agent") {
+            row.agent = agent;
+        }
+    }
+}
+
+/// At batch end settle any row still [`SubagentStatus::InProgress`] — to
+/// [`SubagentStatus::Failed`] when the whole `task` call errored, else
+/// [`SubagentStatus::Done`]. The update stream may not deliver a terminal
+/// snapshot for every row before the end frame lands.
+pub fn settle_rows(rows: &mut [SubagentRow], is_error: bool) {
+    let fallback = if is_error {
+        SubagentStatus::Failed
+    } else {
+        SubagentStatus::Done
+    };
+    for row in rows.iter_mut().filter(|r| r.status == SubagentStatus::InProgress) {
+        row.status = fallback;
+    }
+}
+
+/// The `task` batch message: header (`👥 Running`/`👥 Ran`, swapped to `❌ Ran`
+/// only when a subagent failed — never `✅`) then one row per subagent.
+pub fn render_subagent_batch(rows: &[SubagentRow], elapsed_ms: u64) -> String {
+    let elapsed = format_duration(elapsed_ms);
+    let plural = if rows.len() == 1 { "" } else { "s" };
+    let n = rows.len();
+    let mut out = if rows.iter().any(|r| r.status == SubagentStatus::InProgress) {
+        format!("👥 Running {n} task{plural} · {elapsed}")
+    } else if rows.iter().any(|r| r.status == SubagentStatus::Failed) {
+        format!("❌ Ran {n} task{plural} · {elapsed}")
+    } else {
+        format!("👥 Ran {n} task{plural} · {elapsed}")
+    };
+    for row in rows {
+        out.push('\n');
+        out.push_str(&render_subagent_row(row));
+    }
+    out
+}
+
+fn render_subagent_row(row: &SubagentRow) -> String {
+    let label = if row.description.is_empty() {
+        String::new()
+    } else {
+        format!(" \"{}\"", truncate(first_line(&row.description), SUBAGENT_LABEL_MAX))
+    };
+    let action = match row.status {
+        SubagentStatus::Done => "✅ done".to_owned(),
+        SubagentStatus::Failed => "❌ failed".to_owned(),
+        SubagentStatus::InProgress => match &row.current_tool {
+            Some(tool) => {
+                let preview = match &row.current_tool_args {
+                    Some(args) => format!(" {}", truncate(first_line(args), SUBAGENT_ARGS_MAX)),
+                    None => String::new(),
+                };
+                format!("🔧 {tool}{preview}")
+            }
+            None => format!(
+                "⏳ {}",
+                truncate(first_line(row.last_intent.as_deref().unwrap_or("idle")), SUBAGENT_INTENT_MAX)
+            ),
+        },
+    };
+    let counter = if row.tool_count > 0 {
+        let plural = if row.tool_count == 1 { "" } else { "s" };
+        format!("  · {} tool{plural}", row.tool_count)
+    } else {
+        String::new()
+    };
+    let model = match &row.resolved_model {
+        Some(model) => format!("  · {}", truncate(model, SUBAGENT_MODEL_MAX)),
+        None => String::new(),
+    };
+    let (index, agent) = (row.index, &row.agent);
+    format!("  └ [{index}] {agent}{label}  {action}{counter}{model}")
+}
+
+fn read_progress(partial: &serde_json::Value) -> Option<&Vec<serde_json::Value>> {
+    let scope = match partial.get("details") {
+        Some(details) if details.is_object() => details,
+        _ => partial,
+    };
+    scope.get("progress").and_then(serde_json::Value::as_array)
+}
+
+fn str_field(entry: &serde_json::Value, key: &str) -> Option<String> {
+    entry
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+}
+
+fn normalize_status(value: &str) -> Option<SubagentStatus> {
+    match value {
+        "completed" => Some(SubagentStatus::Done),
+        "failed" | "aborted" => Some(SubagentStatus::Failed),
+        "running" | "pending" => Some(SubagentStatus::InProgress),
+        _ => None,
+    }
+}
+
+/// Compact human-facing duration: largest non-zero unit down to seconds,
+/// skipping zero components (`1m`, `1h5s`, `1d30m`). Sub-second renders `0s`.
+pub fn format_duration(ms: u64) -> String {
+    if ms < 1_000 {
+        return "0s".to_owned();
+    }
+    let total_sec = ms / 1_000;
+    let (day, hr, min, sec) = (
+        total_sec / 86_400,
+        (total_sec % 86_400) / 3_600,
+        (total_sec % 3_600) / 60,
+        total_sec % 60,
+    );
+    let mut out = String::new();
+    for (value, unit) in [(day, 'd'), (hr, 'h'), (min, 'm'), (sec, 's')] {
+        if value > 0 {
+            let _ = std::fmt::Write::write_fmt(&mut out, format_args!("{value}{unit}"));
+        }
+    }
+    if out.is_empty() { "0s".to_owned() } else { out }
+}
+
 /// Char-aware truncation with a trailing ellipsis; `max` counts the ellipsis.
 fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
@@ -198,64 +455,19 @@ fn first_line(s: &str) -> &str {
     s.split('\n').next().unwrap_or(s)
 }
 
-fn field_string(args: &serde_json::Value, key: &str) -> String {
-    args.get(key)
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_owned)
-        .unwrap_or_default()
-}
-
 fn json_preview(args: &serde_json::Value) -> String {
     serde_json::to_string(args).unwrap_or_default()
 }
 
-/// The tool's primary positional argument, by tool: `read`→path, `search`→
-/// pattern, etc. A single ordered key list would pick the wrong field, so the
-/// preference order is per-tool, falling back to the first string value.
-fn first_positional(tool: ToolName<'_>, args: &serde_json::Value) -> String {
-    let Some(obj) = args.as_object() else {
-        return String::new();
-    };
-    let keys: &[&str] = match tool {
-        ToolName::Read => &["path", "paths"],
-        ToolName::Search => &["pattern", "query"],
-        ToolName::Find => &["paths", "path"],
-        ToolName::Lsp => &["uri", "symbol", "query"],
-        _ => &[],
-    };
-    for key in keys {
-        match obj.get(*key) {
-            Some(serde_json::Value::String(s)) if !s.is_empty() => return s.clone(),
-            Some(serde_json::Value::Array(a)) => {
-                if let Some(serde_json::Value::String(s)) = a.first()
-                    && !s.is_empty()
-                {
-                    return s.clone();
-                }
-            }
-            _ => {}
-        }
-    }
-    for value in obj.values() {
-        if let serde_json::Value::String(s) = value
-            && !s.is_empty()
-        {
-            return s.clone();
-        }
-    }
-    String::new()
-}
-
-/// The edit tool's target path: an explicit `path` field, else the path parsed
+/// The edit tool's target path: an explicit `path` arg, else the path parsed
 /// from the first hashline header (`[path#TAG]`) or apply-patch directive
-/// (`*** Update File: path`) in its `input`.
-fn edit_path_arg(args: &serde_json::Value) -> Option<String> {
-    let obj = args.as_object()?;
-    if let Some(serde_json::Value::String(path)) = obj.get("path") {
-        return Some(path.clone());
+/// (`*** Update File: path`) in its `input`. Borrows from the inputs; `""` when
+/// nothing resolves.
+fn edit_path_arg<'a>(path: &'a str, input: &'a str) -> &'a str {
+    if !path.is_empty() {
+        return path;
     }
-    let raw = obj.get("input")?.as_str()?;
-    for line in raw.lines() {
+    for line in input.lines() {
         // Anchored to the line start (like picomp's `^\s*\[`): a hashline header
         // opens its line, so a mid-line bracket in an apply-patch diff body
         // (`#[derive]`, `arr[0]`) can't be mistaken for one.
@@ -264,19 +476,19 @@ fn edit_path_arg(args: &serde_json::Value) -> Option<String> {
         {
             let inner = &rest[..close];
             if !inner.is_empty() {
-                return Some(strip_hashline_tag(inner).to_owned());
+                return strip_hashline_tag(inner);
             }
         }
     }
-    for line in raw.lines() {
+    for line in input.lines() {
         if let Some(rest) = line.trim_start().strip_prefix("*** Update File:") {
-            let path = rest.trim();
-            if !path.is_empty() {
-                return Some(path.to_owned());
+            let resolved = rest.trim();
+            if !resolved.is_empty() {
+                return resolved;
             }
         }
     }
-    None
+    ""
 }
 
 /// Drop a trailing `#XXXX` snapshot tag (exactly four hex digits) from a
@@ -443,50 +655,65 @@ mod tests {
         assert_eq!(defang_mentions("plain text"), "plain text");
     }
 
+    fn line(name: &str, args: serde_json::Value) -> String {
+        tool_activity_line(&ToolCallStart::from(crate::omp::protocol::ToolCall {
+            tool_call_id: "id".to_owned(),
+            tool_name: name.to_owned(),
+            args,
+            intent: None,
+        }))
+    }
+
     #[test]
     fn tool_lines_pick_emoji_and_primary_arg() {
         use serde_json::json;
-        assert_eq!(tool_activity_line("read", &json!({ "paths": ["a.rs", "b.rs"] })), "🔍 a.rs");
-        assert_eq!(tool_activity_line("search", &json!({ "pattern": "TODO" })), "🔍 TODO");
-        assert_eq!(tool_activity_line("write", &json!({ "path": "x.rs" })), "✏️ x.rs");
+        assert_eq!(line("read", json!({ "paths": ["a.rs", "b.rs"] })), "🔍 a.rs");
+        assert_eq!(line("search", json!({ "pattern": "TODO" })), "🔍 TODO");
+        assert_eq!(line("write", json!({ "path": "x.rs" })), "✏️ x.rs");
+        assert_eq!(line("bash", json!({ "command": "echo hi\nrm -rf" })), "💻 echo hi");
         assert_eq!(
-            tool_activity_line("bash", &json!({ "command": "echo hi\nrm -rf" })),
-            "💻 echo hi"
-        );
-        assert_eq!(
-            tool_activity_line("browser", &json!({ "action": "open", "url": "https://x" })),
+            line("browser", json!({ "action": "open", "url": "https://x" })),
             "🌐 open https://x"
         );
         assert_eq!(
-            tool_activity_line("eval", &json!({ "language": "py", "code": "print(1)\nmore" })),
+            line("eval", json!({ "language": "py", "code": "print(1)\nmore" })),
             "🧪 py print(1)"
         );
-        assert_eq!(tool_activity_line("web_search", &json!({ "query": "rust" })), "🔎 rust");
-        assert_eq!(tool_activity_line("task", &json!({ "agent": "explore" })), "🤖 explore");
-        assert!(tool_activity_line("ask", &json!({ "questions": [] })).starts_with("❓ "));
-        assert_eq!(tool_activity_line("totally_unknown", &json!({ "a": 1 })), "🛠️ totally_unknown");
+        assert_eq!(line("web_search", json!({ "query": "rust" })), "🔎 rust");
+        assert!(line("ask", json!({ "questions": [] })).starts_with("❓ "));
+        assert_eq!(line("totally_unknown", json!({ "a": 1 })), "🛠️ totally_unknown");
+        // task is routed to the subagent renderer; reaching the activity feed it renders generically.
+        assert_eq!(line("task", json!({ "agent": "explore" })), "🛠️ task");
+    }
+
+    #[test]
+    fn search_tolerates_string_or_array_paths() {
+        use serde_json::json;
+        // OMP's `search` schemas `paths` as string|array; a string form must not
+        // abort the whole args decode and blank the pattern.
+        assert_eq!(line("search", json!({ "pattern": "TODO", "paths": "src" })), "🔍 TODO");
+        assert_eq!(line("search", json!({ "pattern": "TODO", "paths": ["src", "lib"] })), "🔍 TODO");
+        // A bare-string `paths` still resolves as the primary when it's all there is.
+        assert_eq!(line("find", json!({ "paths": "src/**/*.rs" })), "🔍 src/**/*.rs");
     }
 
     #[test]
     fn edit_line_resolves_the_target_path() {
         use serde_json::json;
         assert_eq!(
-            tool_activity_line("edit", &json!({ "input": "[src/foo.rs#1A2B]\nreplace 1..1:\n+x" })),
+            line("edit", json!({ "input": "[src/foo.rs#1A2B]\nreplace 1..1:\n+x" })),
             "✏️ src/foo.rs"
         );
+        assert_eq!(line("edit", json!({ "input": "[src/bare.rs]\n+x" })), "✏️ src/bare.rs");
+        assert_eq!(line("edit", json!({ "path": "given.rs" })), "✏️ given.rs");
         assert_eq!(
-            tool_activity_line("edit", &json!({ "input": "[src/bare.rs]\n+x" })),
-            "✏️ src/bare.rs"
-        );
-        assert_eq!(tool_activity_line("edit", &json!({ "path": "given.rs" })), "✏️ given.rs");
-        assert_eq!(
-            tool_activity_line("edit", &json!({ "input": "*** Begin Patch\n*** Update File: lib/x.rs\n+y" })),
+            line("edit", json!({ "input": "*** Begin Patch\n*** Update File: lib/x.rs\n+y" })),
             "✏️ lib/x.rs"
         );
         assert_eq!(
-            tool_activity_line(
+            line(
                 "edit",
-                &json!({ "input": "*** Begin Patch\n*** Update File: src/main.rs\n+    let x = arr[0];" })
+                json!({ "input": "*** Begin Patch\n*** Update File: src/main.rs\n+    let x = arr[0];" })
             ),
             "✏️ src/main.rs"
         );
@@ -494,11 +721,11 @@ mod tests {
 
     #[test]
     fn detail_trims_to_sixty_chars_on_char_boundaries() {
-        let line = tool_activity_line("read", &serde_json::json!({ "path": "a".repeat(70) }));
-        let detail: String = line.chars().skip(2).collect(); // drop "🔍 "
+        let out = line("read", serde_json::json!({ "path": "a".repeat(70) }));
+        let detail: String = out.chars().skip(2).collect();
         assert_eq!(detail.chars().count(), 60);
         assert!(detail.ends_with('\u{2026}'));
-        let wide = tool_activity_line("read", &serde_json::json!({ "path": "中".repeat(70) }));
+        let wide = line("read", serde_json::json!({ "path": "中".repeat(70) }));
         assert!(wide.starts_with("🔍 中"));
         assert!(wide.ends_with('\u{2026}'));
     }
@@ -528,5 +755,145 @@ mod tests {
         assert_eq!(error_text(&json!("bare string")).as_deref(), Some("bare string"));
         assert_eq!(error_text(&json!({ "content": [] })), None);
         assert_eq!(error_text(&json!({ "unrelated": 1 })), None);
+    }
+
+    fn batch_args() -> serde_json::Value {
+        serde_json::json!({
+            "agent": "explore",
+            "tasks": [
+                { "id": "ExploreRouter", "description": "map the router" },
+                { "id": "ExploreDb", "description": "map the db" },
+            ],
+        })
+    }
+
+    fn progress(entries: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({ "content": [{ "type": "text", "text": "Running..." }], "details": { "progress": entries } })
+    }
+
+    #[test]
+    fn start_render_has_header_and_one_idle_row_per_subagent() {
+        let rows = extract_subagent_rows(&batch_args());
+        let content = render_subagent_batch(&rows, 0);
+        assert!(content.contains("👥 Running 2 tasks · 0s"));
+        assert!(content.contains("  └ [0] explore \"map the router\"  ⏳ idle"));
+        assert!(content.contains("  └ [1] explore \"map the db\"  ⏳ idle"));
+    }
+
+    #[test]
+    fn progress_partial_renders_tool_args_count_and_model() {
+        let mut rows = extract_subagent_rows(&batch_args());
+        apply_progress(
+            &mut rows,
+            &progress(serde_json::json!([
+                {
+                    "index": 0,
+                    "status": "running",
+                    "currentTool": "read",
+                    "currentToolArgs": "packages/agent/src/discord/subagent-render.ts",
+                    "toolCount": 3,
+                    "resolvedModel": "anthropic/claude",
+                },
+                { "index": 1, "status": "running", "lastIntent": "Scanning schema", "toolCount": 1 },
+            ])),
+        );
+        let content = render_subagent_batch(&rows, 0);
+        assert!(content.contains("🔧 read packages/agent/src/discord/subagent-ren\u{2026}"));
+        assert!(content.contains("· 3 tools"));
+        assert!(content.contains("· anthropic/claude"));
+        assert!(content.contains("  └ [1] explore \"map the db\"  ⏳ Scanning schema  · 1 tool"));
+    }
+
+    #[test]
+    fn end_freezes_done_header_and_settles_running_rows() {
+        let mut rows = extract_subagent_rows(&batch_args());
+        apply_progress(
+            &mut rows,
+            &progress(serde_json::json!([
+                { "index": 0, "status": "completed", "toolCount": 5 },
+                { "index": 1, "status": "running", "currentTool": "search", "toolCount": 2 },
+            ])),
+        );
+        settle_rows(&mut rows, false);
+        let content = render_subagent_batch(&rows, 3_000);
+        assert!(content.starts_with("👥 Ran 2 tasks · 3s"));
+        assert!(content.contains("  └ [0] explore \"map the router\"  ✅ done  · 5 tools"));
+        assert!(content.contains("  └ [1] explore \"map the db\"  ✅ done  · 2 tools"));
+    }
+
+    #[test]
+    fn errored_batch_settles_running_rows_to_failed() {
+        let mut rows = extract_subagent_rows(&batch_args());
+        apply_progress(
+            &mut rows,
+            &progress(serde_json::json!([
+                { "index": 0, "status": "failed", "toolCount": 4 },
+                { "index": 1, "status": "running", "toolCount": 1 },
+            ])),
+        );
+        settle_rows(&mut rows, true);
+        let content = render_subagent_batch(&rows, 1_000);
+        assert!(content.starts_with("❌ Ran 2 tasks · 1s"));
+        assert!(content.contains("  └ [0] explore \"map the router\"  ❌ failed  · 4 tools"));
+        assert!(content.contains("  └ [1] explore \"map the db\"  ❌ failed  · 1 tool"));
+    }
+
+    #[test]
+    fn one_failure_taints_an_otherwise_done_header() {
+        let mut rows = extract_subagent_rows(&batch_args());
+        apply_progress(
+            &mut rows,
+            &progress(serde_json::json!([
+                { "index": 0, "status": "completed", "toolCount": 3 },
+                { "index": 1, "status": "failed", "toolCount": 1 },
+            ])),
+        );
+        let content = render_subagent_batch(&rows, 2_000);
+        assert!(content.starts_with("❌ Ran 2 tasks · 2s"), "got: {content:?}");
+        assert!(content.contains("  └ [0] explore \"map the router\"  ✅ done  · 3 tools"));
+    }
+
+    #[test]
+    fn multiline_fields_stay_one_row() {
+        let args = serde_json::json!({
+            "agent": "explore",
+            "tasks": [{ "id": "A", "description": "map\nthe router" }],
+        });
+        let mut rows = extract_subagent_rows(&args);
+        apply_progress(
+            &mut rows,
+            &progress(serde_json::json!([
+                { "index": 0, "status": "running", "currentTool": "bash", "currentToolArgs": "echo hi\nrm -rf /" },
+            ])),
+        );
+        let content = render_subagent_batch(&rows, 0);
+        assert_eq!(content.lines().count(), 2, "header + one row, got: {content:?}");
+        assert!(content.contains("explore \"map\"  🔧 bash echo hi"));
+    }
+
+    #[test]
+    fn non_batch_args_yield_no_rows() {
+        assert!(extract_subagent_rows(&serde_json::json!({ "not": "a batch" })).is_empty());
+        assert!(extract_subagent_rows(&serde_json::json!({ "tasks": [{ "description": "no id" }] })).is_empty());
+    }
+
+    #[test]
+    fn single_task_fallback_seeds_one_row() {
+        let rows =
+            extract_subagent_rows(&serde_json::json!({ "agent": "oracle", "id": "Solo", "description": "do it" }));
+        assert_eq!(rows.len(), 1);
+        let content = render_subagent_batch(&rows, 0);
+        assert!(content.starts_with("👥 Running 1 task · 0s"));
+        assert!(content.contains("  └ [0] oracle \"do it\"  ⏳ idle"));
+    }
+
+    #[test]
+    fn duration_skips_zero_components() {
+        assert_eq!(format_duration(0), "0s");
+        assert_eq!(format_duration(999), "0s");
+        assert_eq!(format_duration(1_000), "1s");
+        assert_eq!(format_duration(65_000), "1m5s");
+        assert_eq!(format_duration(3_600_000), "1h");
+        assert_eq!(format_duration(90_000_000), "1d1h");
     }
 }
