@@ -96,8 +96,8 @@ impl OmpClient {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let (ready_tx, ready_rx) = oneshot::channel();
 
-        spawn_until_cancel(tracker, cancel, drain_stderr(stderr));
-        spawn_until_cancel(tracker, cancel, read_loop(stdout, Arc::clone(&pending), event_tx, ready_tx));
+        tracker.spawn(drain_stderr(stderr, cancel.clone()));
+        tracker.spawn(read_loop(stdout, Arc::clone(&pending), event_tx, ready_tx, cancel.clone()));
 
         match tokio::time::timeout(READY_TIMEOUT, ready_rx).await {
             Ok(Ok(())) => tracing::debug!(model = ?config.model, "omp --mode rpc ready"),
@@ -218,30 +218,14 @@ impl OmpClient {
     }
 }
 
-/// Spawn `fut` on `tracker`, ending it early if `cancel` fires. The per-child
-/// stdio tasks use this so worker shutdown drains them through the tracker
-/// rather than leaving them detached until the child's pipes close.
-fn spawn_until_cancel(
-    tracker: &TaskTracker,
-    cancel: &CancellationToken,
-    fut: impl std::future::Future<Output = ()> + Send + 'static,
-) {
-    let cancel = cancel.clone();
-    tracker.spawn(async move {
-        tokio::select! {
-            () = cancel.cancelled() => {}
-            () = fut => {}
-        }
-    });
-}
-
-/// Drains OMP's stdout until EOF or a fatal read error, then drops all pending
-/// waiters so in-flight commands fail instead of hanging.
+/// Drains OMP's stdout until EOF, a read error, or `cancel`, then drops all
+/// pending waiters so in-flight commands fail fast instead of hanging.
 async fn read_loop(
     stdout: ChildStdout,
     pending: Pending,
     event_tx: mpsc::UnboundedSender<OmpEvent>,
     ready_tx: oneshot::Sender<()>,
+    cancel: CancellationToken,
 ) {
     let mut reader = BufReader::new(stdout);
     let mut line = String::new();
@@ -249,7 +233,11 @@ async fn read_loop(
 
     loop {
         line.clear();
-        match reader.read_line(&mut line).await {
+        let read = tokio::select! {
+            () = cancel.cancelled() => break,
+            read = reader.read_line(&mut line) => read,
+        };
+        match read {
             Ok(0) => break,
             Ok(_) => {}
             Err(e) => {
@@ -317,12 +305,16 @@ async fn read_loop(
 }
 
 /// Forward OMP's stderr to the log so a full pipe can never block the child.
-async fn drain_stderr(stderr: ChildStderr) {
+async fn drain_stderr(stderr: ChildStderr, cancel: CancellationToken) {
     let mut reader = BufReader::new(stderr);
     let mut line = String::new();
     loop {
         line.clear();
-        match reader.read_line(&mut line).await {
+        let read = tokio::select! {
+            () = cancel.cancelled() => break,
+            read = reader.read_line(&mut line) => read,
+        };
+        match read {
             Ok(0) | Err(_) => break,
             Ok(_) => tracing::debug!(target: "omp_stderr", "{}", line.trim_end()),
         }
