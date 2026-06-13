@@ -337,16 +337,16 @@ pub fn settle_rows(rows: &mut [SubagentRow], is_error: bool) {
     }
 }
 
-/// Render the whole `task` batch message: a header (`👥 Running N tasks ·
-/// <elapsed>` while any row runs, `✅ Ran …` once all settle) then one indented
-/// row per subagent.
+/// The `task` batch message: header (`👥 Running` while any row runs, else
+/// `❌ Ran` if any subagent failed, else `✅ Ran`) then one row per subagent.
 pub fn render_subagent_batch(rows: &[SubagentRow], elapsed_ms: u64) -> String {
     let elapsed = format_duration(elapsed_ms);
     let plural = if rows.len() == 1 { "" } else { "s" };
-    let running = rows.iter().any(|r| r.status == SubagentStatus::InProgress);
     let n = rows.len();
-    let mut out = if running {
+    let mut out = if rows.iter().any(|r| r.status == SubagentStatus::InProgress) {
         format!("👥 Running {n} task{plural} · {elapsed}")
+    } else if rows.iter().any(|r| r.status == SubagentStatus::Failed) {
+        format!("❌ Ran {n} task{plural} · {elapsed}")
     } else {
         format!("✅ Ran {n} task{plural} · {elapsed}")
     };
@@ -833,8 +833,24 @@ mod tests {
         );
         settle_rows(&mut rows, true);
         let content = render_subagent_batch(&rows, 1_000);
+        assert!(content.starts_with("❌ Ran 2 tasks · 1s"));
         assert!(content.contains("  └ [0] explore \"map the router\"  ❌ failed  · 4 tools"));
         assert!(content.contains("  └ [1] explore \"map the db\"  ❌ failed  · 1 tool"));
+    }
+
+    #[test]
+    fn one_failure_taints_an_otherwise_done_header() {
+        let mut rows = extract_subagent_rows(&batch_args());
+        apply_progress(
+            &mut rows,
+            &progress(serde_json::json!([
+                { "index": 0, "status": "completed", "toolCount": 3 },
+                { "index": 1, "status": "failed", "toolCount": 1 },
+            ])),
+        );
+        let content = render_subagent_batch(&rows, 2_000);
+        assert!(content.starts_with("❌ Ran 2 tasks · 2s"), "got: {content:?}");
+        assert!(content.contains("  └ [0] explore \"map the router\"  ✅ done  · 3 tools"));
     }
 
     #[test]
