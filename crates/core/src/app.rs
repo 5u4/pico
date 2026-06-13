@@ -2,29 +2,55 @@ use std::path::Path;
 
 use color_eyre::eyre::WrapErr;
 use poise::serenity_prelude as serenity;
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
+
+use crate::omp::pool::OmpPool;
 
 /// The worker's running application: owns the single Discord client (gateway +
-/// command framework) for this worker root. Stage 1 is Discord-only; the LLM,
-/// per-profile storage, and scheduler attach on later milestones.
+/// command framework), the channel→profile bindings, and the per-thread OMP
+/// child pool for this worker root.
 pub struct App {
     client: serenity::Client,
     ready_rx: tokio::sync::oneshot::Receiver<()>,
+    cancel: CancellationToken,
+    tracker: TaskTracker,
 }
 
 impl App {
-    /// Load the bot token from `<root>/secrets/discord_bot_token` and construct
-    /// the Discord client without connecting ([`App::run`] connects). A missing
-    /// or empty token errors here — before the worker can report ready — so a
+    /// Load the bot token + channel bindings from `<root>` and construct the
+    /// Discord client without connecting ([`App::run`] connects). A missing or
+    /// empty token errors here — before the worker can report ready — so a
     /// deploy lacking credentials fails the supervisor's health check and rolls
     /// back instead of half-starting.
-    pub async fn build(root: &Path) -> color_eyre::Result<App> {
+    pub async fn build(root: &Path, supervisor_socket: Option<std::path::PathBuf>) -> color_eyre::Result<App> {
         let token = read_secret(root, "discord_bot_token")?;
+        let bindings = crate::bindings::load(&pico_shared::paths::worker_bindings(root))?;
+        let cancel = CancellationToken::new();
+        let tracker = TaskTracker::new();
+        let pool = OmpPool::new(cancel.clone(), &tracker);
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
-        let client = serenity::ClientBuilder::new(&token, serenity::GatewayIntents::empty())
-            .framework(crate::discord::framework(ready_tx))
+        let intents = serenity::GatewayIntents::GUILDS
+            | serenity::GatewayIntents::GUILD_MESSAGES
+            | serenity::GatewayIntents::MESSAGE_CONTENT
+            | serenity::GatewayIntents::DIRECT_MESSAGES;
+        let client = serenity::ClientBuilder::new(&token, intents)
+            .framework(crate::discord::framework(
+                root.to_path_buf(),
+                bindings,
+                pool,
+                ready_tx,
+                supervisor_socket,
+                cancel.clone(),
+                tracker.clone(),
+            ))
             .await
             .wrap_err("build discord client")?;
-        Ok(App { client, ready_rx })
+        Ok(App {
+            client,
+            ready_rx,
+            cancel,
+            tracker,
+        })
     }
 
     /// Connect to the gateway and serve until `shutdown` resolves, then stop the
@@ -37,20 +63,45 @@ impl App {
         R: FnOnce() -> Rf + Send + 'static,
         Rf: Future<Output = ()> + Send + 'static,
     {
-        let App { mut client, ready_rx } = self;
+        let App {
+            mut client,
+            ready_rx,
+            cancel,
+            tracker,
+        } = self;
         let shard_manager = client.shard_manager.clone();
-        tokio::spawn(async move {
-            shutdown.await;
-            tracing::info!("shutdown signal received; stopping discord gateway");
-            shard_manager.shutdown_all().await;
-        });
-        tokio::spawn(async move {
-            if ready_rx.await.is_ok() {
-                on_connected().await;
-            }
-        });
-        client.start().await.wrap_err("discord client error")?;
-        Ok(())
+        {
+            let cancel = cancel.clone();
+            tracker.spawn(async move {
+                tokio::select! {
+                    () = shutdown => {}
+                    () = cancel.cancelled() => {}
+                }
+                tracing::info!("stopping discord gateway");
+                cancel.cancel();
+                shard_manager.shutdown_all().await;
+            });
+        }
+        {
+            let cancel = cancel.clone();
+            tracker.spawn(async move {
+                tokio::select! {
+                    () = cancel.cancelled() => {}
+                    ready = ready_rx => {
+                        if ready.is_ok() {
+                            on_connected().await;
+                        }
+                    }
+                }
+            });
+        }
+        // Stop accepting new turns, then drain in-flight ones (each flushes its
+        // partial reply on `cancel`) plus the evictor and per-child stdio tasks.
+        let result = client.start().await.wrap_err("discord client error");
+        cancel.cancel();
+        tracker.close();
+        tracker.wait().await;
+        result
     }
 }
 
