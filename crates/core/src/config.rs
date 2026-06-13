@@ -5,12 +5,15 @@ use serde::Deserialize;
 
 pub struct ProfileConfig {
     pub model: Option<String>,
+    pub surface_thinking: bool,
 }
 
 #[derive(Deserialize)]
 struct RawConfig {
     #[serde(default)]
     llm: Option<RawLlm>,
+    #[serde(default)]
+    discord: Option<RawDiscord>,
 }
 
 #[derive(Deserialize)]
@@ -19,11 +22,20 @@ struct RawLlm {
     model: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct RawDiscord {
+    #[serde(default)]
+    surface_thinking: bool,
+}
+
 pub fn load(config_path: &Path) -> color_eyre::Result<ProfileConfig> {
     let text = match std::fs::read_to_string(config_path) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(ProfileConfig { model: None });
+            return Ok(ProfileConfig {
+                model: None,
+                surface_thinking: false,
+            });
         }
         Err(e) => {
             return Err(e).wrap_err_with(|| format!("reading {}", config_path.display()));
@@ -33,6 +45,7 @@ pub fn load(config_path: &Path) -> color_eyre::Result<ProfileConfig> {
     let raw: RawConfig = toml::from_str(&text).wrap_err_with(|| format!("parsing {}", config_path.display()))?;
     Ok(ProfileConfig {
         model: raw.llm.and_then(|llm| llm.model),
+        surface_thinking: raw.discord.is_some_and(|d| d.surface_thinking),
     })
 }
 
@@ -79,6 +92,20 @@ mod tests {
 
         let cfg = super::load(&path).unwrap();
         assert_eq!(cfg.model, None);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn reads_surface_thinking_and_defaults_off() {
+        let dir = temp_dir("thinking");
+        let on = dir.join("on.toml");
+        std::fs::write(&on, "[discord]\nsurface_thinking = true\n").unwrap();
+        assert!(super::load(&on).unwrap().surface_thinking);
+
+        let bare = dir.join("bare.toml");
+        std::fs::write(&bare, "[llm]\nmodel = \"x\"\n").unwrap();
+        assert!(!super::load(&bare).unwrap().surface_thinking);
 
         std::fs::remove_dir_all(&dir).ok();
     }

@@ -1,6 +1,9 @@
 //! End-to-end test for the message-driven chat path: a driver bot posts in a
-//! channel bound to a profile; pico opens a thread off that message and streams
-//! an OMP (Copilot) reply into it.
+//! channel bound to a profile; pico opens a thread off that message and posts a
+//! buffered OMP (Copilot) reply into it. Also asserts the gateway connects and shuts
+//! down cleanly — folded in from a former standalone gateway test so the pico
+//! bot connects only once per run; two back-to-back connections of the same bot
+//! trip Discord's per-bot identify/session limit and flake on connect.
 //!
 //! `#[ignore]`d by default — it spawns the real `omp` binary, connects two live
 //! Discord bots, and hits Copilot over the network. Run with `--include-ignored`
@@ -134,8 +137,12 @@ async fn bound_message_opens_thread_and_replies() {
         let _ = tid.delete(&driver).await;
     }
     let _ = shutdown_tx.send(());
-    let _ = tokio::time::timeout(Duration::from_secs(15), server).await;
+    let shutdown = tokio::time::timeout(Duration::from_secs(15), server).await;
 
     assert!(thread.is_some(), "pico never opened a thread for the bound-channel message");
-    assert!(replied, "pico opened a thread but never streamed a 'pong' reply");
+    assert!(replied, "pico opened a thread but never posted a 'pong' reply");
+    shutdown
+        .expect("pico did not shut down within 15s")
+        .expect("run task panicked")
+        .expect("discord client returned an error");
 }

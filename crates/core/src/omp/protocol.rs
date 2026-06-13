@@ -97,18 +97,20 @@ pub enum OmpEvent {
     Error(String),
 }
 
-/// The `assistantMessageEvent` payload of a `message_update` frame. Only the
-/// text/thinking deltas pico streams are modeled; all other delta kinds
-/// (`start`, `done`, tool-call deltas, …) collapse to
-/// [`AssistantMessageEvent::Other`].
+/// The `assistantMessageEvent` payload of a `message_update` frame. pico
+/// streams the answer from `text_delta` and surfaces reasoning from the
+/// terminal `thinking_end` (which carries the whole thinking block); every
+/// other delta kind (`start`, `done`, tool-call + intermediate thinking
+/// deltas, …) collapses to [`AssistantMessageEvent::Other`].
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AssistantMessageEvent {
     TextDelta {
         delta: String,
     },
-    ThinkingDelta {
-        delta: String,
+    ThinkingEnd {
+        #[serde(default)]
+        content: String,
     },
     #[serde(other)]
     Other,
@@ -246,24 +248,28 @@ mod tests {
     }
 
     #[test]
-    fn decodes_thinking_delta_and_collapses_other_deltas() {
+    fn decodes_thinking_end_and_collapses_other_deltas() {
         match parse(
-            r#"{"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","contentIndex":0,"delta":"hmm"}}"#,
+            r#"{"type":"message_update","assistantMessageEvent":{"type":"thinking_end","contentIndex":0,"content":"the plan"}}"#,
         ) {
             Inbound::MessageUpdate {
-                assistant_message_event: AssistantMessageEvent::ThinkingDelta { delta },
+                assistant_message_event: AssistantMessageEvent::ThinkingEnd { content },
             } => {
-                assert_eq!(delta, "hmm");
+                assert_eq!(content, "the plan");
             }
-            other => panic!("expected thinking delta, got {other:?}"),
+            other => panic!("expected thinking end, got {other:?}"),
         }
-        // toolcall/text_end/start deltas are not individually modeled.
-        assert!(matches!(
-            parse(r#"{"type":"message_update","assistantMessageEvent":{"type":"toolcall_start","contentIndex":0}}"#),
-            Inbound::MessageUpdate {
-                assistant_message_event: AssistantMessageEvent::Other
-            },
-        ));
+        for line in [
+            r#"{"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","contentIndex":0,"delta":"hmm"}}"#,
+            r#"{"type":"message_update","assistantMessageEvent":{"type":"toolcall_start","contentIndex":0}}"#,
+        ] {
+            assert!(matches!(
+                parse(line),
+                Inbound::MessageUpdate {
+                    assistant_message_event: AssistantMessageEvent::Other
+                },
+            ));
+        }
     }
 
     #[test]
