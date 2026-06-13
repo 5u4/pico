@@ -9,7 +9,7 @@ use std::{
 
 use pico_core::omp::{
     client::{OmpClient, SpawnConfig},
-    protocol::{AssistantMessageEvent, OmpEvent},
+    protocol::{AssistantMessageEvent, OmpEvent, ToolCallStart},
 };
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
@@ -111,6 +111,101 @@ async fn streams_a_prompt_reply() {
 
     assert!(saw_start, "never saw agent_start");
     assert!(reply.to_lowercase().contains("pong"), "reply was: {reply:?}");
+
+    client.shutdown().await.expect("shutdown");
+}
+
+/// A real `tool_execution_start` frame must classify through the
+/// `#[serde(from = "ToolCall")]` path; the text-only cases never decode a tool.
+#[tokio::test]
+#[ignore]
+async fn classifies_a_real_tool_call() {
+    let cwd = TempDir::new("pico-omp-tool");
+    let config = SpawnConfig {
+        model: Some("github-copilot/gpt-4o-mini".to_owned()),
+        cwd: Some(cwd.path.clone()),
+        ..SpawnConfig::default()
+    };
+
+    let tracker = TaskTracker::new();
+    let (client, mut events) = OmpClient::spawn(&config, &CancellationToken::new(), &tracker)
+        .await
+        .expect("spawn omp --mode rpc");
+    client
+        .prompt("Run this shell command with the bash tool and report nothing else: echo pong")
+        .await
+        .expect("prompt acked");
+
+    let mut bash_command: Option<String> = None;
+    let mut other_tools: Vec<String> = Vec::new();
+    loop {
+        let event = tokio::time::timeout(Duration::from_secs(90), events.recv())
+            .await
+            .expect("timed out waiting for omp events")
+            .expect("event stream closed before agent_end");
+        match event {
+            OmpEvent::ToolStart(ToolCallStart::Bash(call)) => {
+                bash_command = Some(call.args["command"].as_str().unwrap_or_default().to_owned());
+            }
+            OmpEvent::ToolStart(other) => other_tools.push(other.call().tool_name.clone()),
+            OmpEvent::AgentEnd => break,
+            OmpEvent::Error(e) => panic!("omp reported an error: {e}"),
+            _ => {}
+        }
+    }
+
+    let command = bash_command.unwrap_or_else(|| panic!("no bash tool call decoded; saw tools: {other_tools:?}"));
+    assert!(command.contains("echo"), "bash command was: {command:?}");
+
+    client.shutdown().await.expect("shutdown");
+}
+
+/// A real `task` call's `tool_execution_update` must carry the
+/// `details.progress[]` shape `apply_progress` reads. Slow: spawns a subagent.
+#[tokio::test]
+#[ignore]
+async fn task_update_carries_subagent_progress() {
+    let cwd = TempDir::new("pico-omp-task");
+    let config = SpawnConfig {
+        model: Some("github-copilot/gpt-4o-mini".to_owned()),
+        cwd: Some(cwd.path.clone()),
+        ..SpawnConfig::default()
+    };
+
+    let tracker = TaskTracker::new();
+    let (client, mut events) = OmpClient::spawn(&config, &CancellationToken::new(), &tracker)
+        .await
+        .expect("spawn omp --mode rpc");
+    client
+        .prompt(
+            "Use the task tool to spawn exactly one subagent: agent type \"explore\", one task whose \
+             assignment is to reply with the single word done. Use the task tool — do not do it yourself.",
+        )
+        .await
+        .expect("prompt acked");
+
+    let mut saw_task_start = false;
+    let mut saw_progress = false;
+    loop {
+        let event = tokio::time::timeout(Duration::from_secs(180), events.recv())
+            .await
+            .expect("timed out waiting for omp events")
+            .expect("event stream closed before agent_end");
+        match event {
+            OmpEvent::ToolStart(ToolCallStart::Task(_)) => saw_task_start = true,
+            OmpEvent::ToolUpdate(update) if update.tool_name == "task" => {
+                if update.partial_result["details"]["progress"].is_array() {
+                    saw_progress = true;
+                }
+            }
+            OmpEvent::AgentEnd => break,
+            OmpEvent::Error(e) => panic!("omp reported an error: {e}"),
+            _ => {}
+        }
+    }
+
+    assert!(saw_task_start, "never saw a task tool_execution_start");
+    assert!(saw_progress, "task tool_execution_update never carried details.progress[]");
 
     client.shutdown().await.expect("shutdown");
 }
