@@ -1,6 +1,7 @@
 //! End-to-end test for the message-driven chat path: a driver bot posts in a
 //! channel bound to a profile; pico opens a thread off that message and posts a
-//! buffered OMP (Copilot) reply into it. Also asserts the gateway connects and shuts
+//! buffered OMP (Copilot) reply into it, then a follow-up posted inside the thread
+//! comes back as a native Discord reply referencing it. Also asserts the gateway connects and shuts
 //! down cleanly — folded in from a former standalone gateway test so the pico
 //! bot connects only once per run; two back-to-back connections of the same bot
 //! trip Discord's per-bot identify/session limit and flake on connect.
@@ -132,6 +133,26 @@ async fn bound_message_opens_thread_and_replies() {
         }
     }
 
+    // Second turn inside the thread: pico's reply must natively reference it (the top-level message got none).
+    let mut referenced = false;
+    if let Some(tid) = thread {
+        let followup = tid
+            .say(&driver, format!("Reply with exactly the single word: pong (e2e {marker} b)"))
+            .await
+            .expect("driver failed to post follow-up in thread");
+        for _ in 0..20 {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            if let Ok(messages) = tid.messages(&driver, serenity::GetMessages::new().limit(25)).await
+                && messages
+                    .iter()
+                    .any(|m| m.message_reference.as_ref().and_then(|r| r.message_id) == Some(followup.id))
+            {
+                referenced = true;
+                break;
+            }
+        }
+    }
+
     // Tear down before asserting so a failure still cleans up the thread + bot.
     if let Some(tid) = thread {
         let _ = tid.delete(&driver).await;
@@ -141,6 +162,7 @@ async fn bound_message_opens_thread_and_replies() {
 
     assert!(thread.is_some(), "pico never opened a thread for the bound-channel message");
     assert!(replied, "pico opened a thread but never posted a 'pong' reply");
+    assert!(referenced, "pico's in-thread reply did not reference the follow-up message");
     shutdown
         .expect("pico did not shut down within 15s")
         .expect("run task panicked")
