@@ -5,22 +5,19 @@
 use std::{path::PathBuf, time::Duration};
 
 use color_eyre::eyre::{WrapErr, eyre};
-use pico_shared::proto::{self, DeployTarget, Request, Response};
+use pico_shared::proto::{self, Request, Response};
 use tokio::{io::BufReader, net::UnixStream};
 
 use crate::config::Config;
 
-/// `deploy <bin>` / `deploy path:<bin>` deploys a prebuilt worker binary;
-/// `deploy rev:<git-rev>` builds the revision on the host (needs `repo_path`).
 pub async fn deploy(arg: Option<String>) -> color_eyre::Result<()> {
-    let arg = arg.ok_or_else(|| eyre!("usage: supervisor deploy <worker-binary> | path:<bin> | rev:<git-rev>"))?;
-    let target = match arg.strip_prefix("rev:") {
-        Some(rev) => DeployTarget::Rev { rev: rev.to_owned() },
-        None => DeployTarget::Path {
-            path: PathBuf::from(arg.strip_prefix("path:").unwrap_or(&arg)),
-        },
-    };
-    report(send(Request::Deploy { target }).await?)
+    let arg = arg.ok_or_else(|| eyre!("usage: supervisor deploy <worker-binary>"))?;
+    report(
+        send(Request::Deploy {
+            path: PathBuf::from(arg),
+        })
+        .await?,
+    )
 }
 
 pub async fn status() -> color_eyre::Result<()> {
@@ -33,11 +30,18 @@ pub async fn status() -> color_eyre::Result<()> {
             if let Some(current) = s.current {
                 println!("current:  {current}");
             }
+            if let Some(version) = s.version {
+                println!("version:  {version}");
+            }
+            if let Some(build) = s.build {
+                println!("build:    {build}");
+            }
             if let Some(uptime) = s.uptime_secs {
                 println!("uptime:   {uptime}s");
             }
             for record in s.deploys {
-                println!("deploy:   {} {} @ {}", record.outcome, record.target, record.at_unix);
+                let build = record.build.as_deref().unwrap_or("-");
+                println!("deploy:   {} {} [{build}] @ {}", record.outcome, record.target, record.at_unix);
             }
             Ok(())
         }
@@ -66,7 +70,8 @@ fn report(resp: Response) -> color_eyre::Result<()> {
 
 async fn send(request: Request) -> color_eyre::Result<Response> {
     let dir = pico_shared::paths::supervisor_dir()?;
-    let socket = Config::load(&dir)?.socket_path.unwrap_or_else(|| dir.join("pico.sock"));
+    let config = Config::load(&dir)?;
+    let socket = config.socket_path.clone().unwrap_or_else(|| dir.join("pico.sock"));
     let stream = tokio::time::timeout(Duration::from_secs(5), UnixStream::connect(&socket))
         .await
         .map_err(|_| eyre!("connecting to {} timed out", socket.display()))?
@@ -74,10 +79,10 @@ async fn send(request: Request) -> color_eyre::Result<Response> {
     let (read_half, mut write_half) = stream.into_split();
     proto::write_frame(&mut write_half, &request).await?;
     let mut reader = BufReader::new(read_half);
-    // 10m matches the Discord /deploy read budget so a `deploy rev:` host build
-    // has room; status/stop/rollback reply in milliseconds.
-    tokio::time::timeout(Duration::from_secs(600), proto::read_frame::<Response, _>(&mut reader))
+    // Derived from health_timeout so a large one can't trip a spurious timeout.
+    let budget = Duration::from_secs(config.health_timeout_secs.saturating_mul(4).saturating_add(10).max(180));
+    tokio::time::timeout(budget, proto::read_frame::<Response, _>(&mut reader))
         .await
-        .map_err(|_| eyre!("supervisor did not reply within 10m"))??
+        .map_err(|_| eyre!("supervisor did not reply within {budget:?}"))??
         .ok_or_else(|| eyre!("supervisor closed the connection without replying"))
 }

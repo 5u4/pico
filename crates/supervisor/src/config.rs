@@ -10,16 +10,12 @@ fn default_health_timeout_secs() -> u64 {
 }
 
 /// Supervisor configuration, loaded from `<supervisor_dir>/supervisor.toml`.
-/// A missing file yields all defaults so the socket is usable with zero setup
-/// (`deploy path:` works; `deploy rev:` needs `repo_path`).
 #[derive(Deserialize)]
 pub struct Config {
     /// Control-socket override; `None` means `<supervisor_dir>/pico.sock`,
     /// resolved by the caller that knows the supervisor dir.
     #[serde(default)]
     pub socket_path: Option<PathBuf>,
-    #[serde(default)]
-    pub repo_path: Option<PathBuf>,
     #[serde(default = "default_health_timeout_secs")]
     pub health_timeout_secs: u64,
     #[serde(default)]

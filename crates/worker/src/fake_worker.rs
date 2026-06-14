@@ -10,6 +10,10 @@ use tokio::net::UnixStream;
 
 #[tokio::main]
 async fn main() -> color_eyre::Result<()> {
+    if std::env::args().skip(1).any(|a| a == "--version" || a == "-V") {
+        println!("{}", env!("PICO_VERSION"));
+        return Ok(());
+    }
     let mut socket: Option<PathBuf> = None;
     let mut token = String::new();
     let mut args = std::env::args().skip(1);

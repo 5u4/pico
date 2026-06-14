@@ -39,12 +39,16 @@ fn parse_args() -> color_eyre::Result<Args> {
 
 #[tokio::main]
 async fn main() -> color_eyre::Result<()> {
+    if std::env::args().skip(1).any(|a| a == "--version" || a == "-V") {
+        println!("{}", env!("PICO_VERSION"));
+        return Ok(());
+    }
     color_eyre::install()?;
 
     let args = parse_args()?;
     let _log_guard = pico_shared::logging::init(&args.root.join("logs"), "worker")?;
     tracing::info!(
-        version = env!("CARGO_PKG_VERSION"),
+        version = env!("PICO_VERSION"),
         root = %args.root.display(),
         "pico worker starting"
     );

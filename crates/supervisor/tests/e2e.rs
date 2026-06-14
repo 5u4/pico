@@ -35,16 +35,14 @@ fn fake_worker_bin() -> PathBuf {
     static WORKER: OnceLock<PathBuf> = OnceLock::new();
     WORKER
         .get_or_init(|| {
-            let worker = bin("fake-worker");
-            if !worker.exists() {
-                let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
-                let status = Command::new(cargo)
-                    .args(["build", "-p", "worker", "--features", "test-stub"])
-                    .status()
-                    .expect("run cargo build -p worker --features test-stub");
-                assert!(status.success(), "failed to build fake-worker binary");
-            }
-            worker
+            // Always rebuild: the supervisor runs the stub as `--version`, so it must be current.
+            let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+            let status = Command::new(cargo)
+                .args(["build", "-p", "worker", "--features", "test-stub"])
+                .status()
+                .expect("run cargo build -p worker --features test-stub");
+            assert!(status.success(), "failed to build fake-worker binary");
+            bin("fake-worker")
         })
         .clone()
 }
@@ -168,9 +166,7 @@ impl Fixture {
 
     fn deploy_path(&self, path: &Path) -> Value {
         let path = Value::String(path.to_string_lossy().into_owned());
-        self.request(&format!(
-            "{{\"cmd\":\"deploy\",\"target\":{{\"kind\":\"path\",\"path\":{path}}}}}"
-        ))
+        self.request(&format!("{{\"cmd\":\"deploy\",\"path\":{path}}}"))
     }
 
     fn socket(&self) -> &Path {
@@ -262,17 +258,31 @@ fn redeploy_replaces_worker() {
 }
 
 #[test]
-fn failed_build_keeps_current_worker() {
+fn failed_stage_keeps_current_worker() {
     let fx = Fixture::start(None);
     assert!(status_is(&fx.deploy_path(&fake_worker_bin()), "ok"), "initial deploy failed");
     let worker = fx.running_pid().expect("worker running after deploy");
 
-    // A path that does not exist fails in the build/copy step, before the
-    // running worker is touched.
     let resp = fx.deploy_path(Path::new("/nonexistent/pico-worker"));
     assert!(status_is(&resp, "error"), "missing-path deploy should fail: {resp}");
-    assert!(message(&resp).contains("build failed"), "unexpected error: {resp}");
-    assert_eq!(fx.running_pid(), Some(worker), "running worker changed after a failed build");
+    assert!(message(&resp).contains("stage failed"), "unexpected error: {resp}");
+    assert_eq!(fx.running_pid(), Some(worker), "running worker changed after a failed stage");
+}
+
+#[test]
+fn deploy_reports_worker_version_and_build() {
+    let fx = Fixture::start(None);
+    assert!(status_is(&fx.deploy_path(&fake_worker_bin()), "ok"), "deploy failed");
+    let s = fx.status();
+    assert!(
+        s["version"].as_str().is_some_and(|v| !v.is_empty()),
+        "status did not report the worker's embedded version: {s}"
+    );
+    let build = s["build"].as_str();
+    assert!(
+        build.is_some_and(|b| b.len() == 12 && b.bytes().all(|c| c.is_ascii_hexdigit())),
+        "status did not report a 12-hex build id: {s}"
+    );
 }
 
 #[test]
@@ -317,6 +327,20 @@ fn rollback_restores_previous_slot() {
         Some(slot_a.as_str()),
         "rollback did not restore the previous slot"
     );
+}
+
+#[test]
+fn build_id_is_content_addressed() {
+    let fx = Fixture::start(None);
+    let worker = fake_worker_bin();
+    assert!(status_is(&fx.deploy_path(&worker), "ok"), "deploy A failed");
+    let a = fx.status()["build"].as_str().map(str::to_owned);
+    assert!(status_is(&fx.deploy_path(&worker), "ok"), "deploy B failed");
+    let b = fx.status()["build"].as_str().map(str::to_owned);
+
+    assert!(a.is_some(), "no build id reported");
+    // Same bytes at different slot dirs must hash equal: content-addressed, not path.
+    assert_eq!(a, b, "build id changed for identical binary content (path-addressed?)");
 }
 
 #[test]
