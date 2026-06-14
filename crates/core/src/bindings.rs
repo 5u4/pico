@@ -33,7 +33,7 @@ impl Bindings {
 
 #[derive(Deserialize, Serialize)]
 struct RawBinding {
-    #[serde(deserialize_with = "de_channel_id")]
+    #[serde(deserialize_with = "de_snowflake")]
     channel_id: String,
     profile: String,
     kind: String,
@@ -156,11 +156,11 @@ fn write_atomic(path: &Path, file: &RawFile) -> color_eyre::Result<()> {
     Ok(())
 }
 
-fn is_valid_channel_id(id: &str) -> bool {
+pub(crate) fn is_valid_snowflake(id: &str) -> bool {
     (17..=20).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_digit())
 }
 
-fn is_valid_profile(name: &str) -> bool {
+pub(crate) fn is_valid_profile(name: &str) -> bool {
     !name.is_empty()
         && name
             .bytes()
@@ -172,7 +172,7 @@ fn is_valid_profile(name: &str) -> bool {
 /// at `omp` spawn. The profile check is a security boundary: it becomes a path
 /// component under `<root>/profiles/`, so `..` or an absolute path would escape.
 fn validate_binding(channel_id: &str, profile: &str, cwd: &Path) -> color_eyre::Result<()> {
-    if !is_valid_channel_id(channel_id) {
+    if !is_valid_snowflake(channel_id) {
         return Err(color_eyre::eyre::eyre!(
             "invalid channel id {channel_id:?} (must match ^[0-9]{{17,20}}$)"
         ));
@@ -197,18 +197,18 @@ fn write_lock() -> std::sync::MutexGuard<'static, ()> {
     LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// Accept `channel_id` as a quoted string or a bare TOML integer, per the
+/// Accept a snowflake (channel or guild id) as a quoted string or bare integer, per the
 /// documented `bindings.toml` contract. Bare integers above `i64::MAX` (20-digit
 /// snowflakes, not reachable until ~2084) still require quoting.
-fn de_channel_id<'de, D>(de: D) -> Result<String, D::Error>
+pub(crate) fn de_snowflake<'de, D>(de: D) -> Result<String, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    struct ChannelId;
-    impl<'de> serde::de::Visitor<'de> for ChannelId {
+    struct Snowflake;
+    impl<'de> serde::de::Visitor<'de> for Snowflake {
         type Value = String;
         fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-            f.write_str("a Discord channel id as a quoted string or bare integer")
+            f.write_str("a Discord snowflake id as a quoted string or bare integer")
         }
         fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<String, E> {
             Ok(v.to_owned())
@@ -220,10 +220,10 @@ where
             Ok(v.to_string())
         }
     }
-    de.deserialize_any(ChannelId)
+    de.deserialize_any(Snowflake)
 }
 
-fn expand_home(raw: &str) -> PathBuf {
+pub(crate) fn expand_home(raw: &str) -> PathBuf {
     if raw == "~"
         && let Some(home) = std::env::home_dir()
     {

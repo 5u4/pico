@@ -44,6 +44,7 @@ pub(crate) fn framework(
         .options(poise::FrameworkOptions {
             commands: vec![ping(), bind(), deploy()],
             event_handler: |ctx, event, framework, data| Box::pin(on_event(ctx, event, framework.bot_id, data)),
+            command_check: Some(|ctx| Box::pin(command_in_registered_guild(ctx))),
             ..Default::default()
         })
         .setup(move |ctx, _ready, framework| {
@@ -61,6 +62,30 @@ pub(crate) fn framework(
             })
         })
         .build()
+}
+
+/// Global command gate: slash commands run only inside a configured guild (no
+/// per-user ACL yet). A DM or unregistered guild gets a one-line refusal and the
+/// command is skipped.
+async fn command_in_registered_guild(ctx: Context<'_>) -> Result<bool, Error> {
+    let Some(guild_id) = ctx.guild_id() else {
+        ctx.say("Commands only work inside a configured server.").await?;
+        return Ok(false);
+    };
+    let root_config = match crate::config::load_root(&pico_shared::paths::worker_config(&ctx.data().root)) {
+        Ok(config) => config,
+        Err(e) => {
+            ctx.say(format!("config error: {e}")).await?;
+            return Ok(false);
+        }
+    };
+    if root_config.guild(&guild_id.to_string()).is_some() {
+        Ok(true)
+    } else {
+        ctx.say("This server isn't configured, so I can't run commands here.")
+            .await?;
+        Ok(false)
+    }
 }
 
 /// Liveness check — replies "Pong!".
@@ -261,6 +286,19 @@ async fn on_event(
     Ok(())
 }
 
+/// Pick the `(profile, cwd)` for a message in a served guild: a binding wins;
+/// otherwise the guild's default serves the unbound channel. Guild registration
+/// is gated earlier in `route_message`, before any channel fetch.
+fn resolve_route(
+    guild_default: &crate::config::GuildDefault,
+    binding: Option<&crate::bindings::Binding>,
+) -> (String, std::path::PathBuf) {
+    match binding {
+        Some(b) => (b.profile.clone(), b.cwd.clone()),
+        None => (guild_default.profile.clone(), guild_default.cwd.clone()),
+    }
+}
+
 async fn route_message(
     ctx: serenity::Context,
     root: Arc<std::path::PathBuf>,
@@ -274,11 +312,32 @@ async fn route_message(
         return Ok(());
     }
 
+    // DMs carry no `guild_id` and are never served.
+    let Some(guild_id) = message.guild_id else {
+        return Ok(());
+    };
+    // A broken config can't tell us whether this guild is served, so surface it
+    // in-channel rather than dropping every message into the logs.
+    let root_config = match crate::config::load_root(&pico_shared::paths::worker_config(&root)) {
+        Ok(config) => config,
+        Err(e) => {
+            message.reply(&ctx, format!("❌ worker config error: {e}")).await?;
+            return Ok(());
+        }
+    };
+
+    // Registration gates everything (a binding in an unregistered guild is not
+    // served), checked before the channel fetch so an unserved guild costs nothing.
+    let Some(guild_default) = root_config.guild(&guild_id.to_string()) else {
+        tracing::debug!(%guild_id, "guild not configured; ignoring message");
+        return Ok(());
+    };
+
     let serenity::Channel::Guild(channel) = message.channel_id.to_channel(&ctx).await? else {
         return Ok(());
     };
     // A thread routes via its parent channel's binding; the thread itself is the
-    // session. A top-level message in a bound channel opens a fresh thread.
+    // session. A top-level message opens a fresh thread.
     let in_thread = is_thread(channel.kind);
     let bound_channel = if in_thread {
         match channel.parent_id {
@@ -289,15 +348,25 @@ async fn route_message(
         channel.id
     };
 
-    let Some((profile, cwd)) = ({
+    let (profile, cwd) = {
         let table = bindings.lock();
-        table
-            .get(&bound_channel.to_string())
-            .map(|b| (b.profile.clone(), b.cwd.clone()))
-    }) else {
-        tracing::debug!(%bound_channel, "channel not bound; ignoring message");
-        return Ok(());
+        resolve_route(guild_default, table.get(&bound_channel.to_string()))
     };
+
+    // cwd was valid when configured/bound but may have been torn down since (host
+    // rebuild); tell the user in-channel instead of failing the omp spawn to logs.
+    if !cwd.is_dir() {
+        message
+            .reply(
+                &ctx,
+                format!(
+                    "❌ working directory `{}` is missing or not a directory — fix it on the host and resend.",
+                    cwd.display()
+                ),
+            )
+            .await?;
+        return Ok(());
+    }
 
     let target = if in_thread {
         channel.id
@@ -824,4 +893,43 @@ fn thread_name(prompt: &str) -> String {
     let line = prompt.lines().next().unwrap_or("").trim();
     let name: String = line.chars().take(90).collect();
     if name.is_empty() { "chat".to_owned() } else { name }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use crate::{bindings::Binding, config::GuildDefault};
+
+    fn guild_default(profile: &str, cwd: &str) -> GuildDefault {
+        GuildDefault {
+            profile: profile.to_owned(),
+            cwd: PathBuf::from(cwd),
+        }
+    }
+
+    fn binding(profile: &str, cwd: &str) -> Binding {
+        Binding {
+            channel_id: "123456789012345678".to_owned(),
+            profile: profile.to_owned(),
+            cwd: PathBuf::from(cwd),
+        }
+    }
+
+    #[test]
+    fn binding_wins_over_guild_default() {
+        let d = guild_default("default", "/default");
+        let b = binding("sen", "/work");
+        let (profile, cwd) = super::resolve_route(&d, Some(&b));
+        assert_eq!(profile, "sen");
+        assert_eq!(cwd, PathBuf::from("/work"));
+    }
+
+    #[test]
+    fn unbound_channel_uses_guild_default() {
+        let d = guild_default("default", "/default");
+        let (profile, cwd) = super::resolve_route(&d, None);
+        assert_eq!(profile, "default");
+        assert_eq!(cwd, PathBuf::from("/default"));
+    }
 }
