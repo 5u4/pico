@@ -30,15 +30,16 @@ fn var(key: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| panic!("set {key} in .env.e2e at the workspace root (see .env.e2e.example)"))
 }
 
-/// A throwaway worker root: bot token, a `default` profile, and a binding that
-/// routes the e2e channel to it. Removed on drop so a panicking test leaves
-/// nothing behind.
+/// A throwaway worker root: bot token, a `default` profile, a binding that
+/// routes the e2e channel to it, and a config.toml registering the e2e guild so
+/// the guild gate serves it. Removed on drop so a panicking test leaves nothing
+/// behind.
 struct TempRoot {
     path: PathBuf,
 }
 
 impl TempRoot {
-    fn new(bot_token: &str, channel_id: u64) -> TempRoot {
+    fn new(bot_token: &str, channel_id: u64, guild_id: u64) -> TempRoot {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -62,6 +63,11 @@ impl TempRoot {
             workdir.display()
         );
         std::fs::write(path.join("bindings.toml"), bindings).unwrap();
+        let config = format!(
+            "[[guild]]\nid = \"{guild_id}\"\nprofile = \"default\"\ncwd = \"{}\"\n",
+            workdir.display()
+        );
+        std::fs::write(path.join("config.toml"), config).unwrap();
 
         TempRoot { path }
     }
@@ -85,7 +91,8 @@ async fn bound_message_opens_thread_and_replies() {
     let channel_id: u64 = var("E2E_CHANNEL_ID")
         .parse()
         .expect("E2E_CHANNEL_ID must be a snowflake");
-    let root = TempRoot::new(&pico_token, channel_id);
+    let guild_id: u64 = var("E2E_GUILD_ID").parse().expect("E2E_GUILD_ID must be a snowflake");
+    let root = TempRoot::new(&pico_token, channel_id, guild_id);
 
     let app = App::build(&root.path, None).await.expect("build pico app");
     let (connected_tx, connected_rx) = oneshot::channel();

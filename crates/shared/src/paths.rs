@@ -33,6 +33,12 @@ pub fn worker_bindings(root: &Path) -> PathBuf {
     root.join("bindings.toml")
 }
 
+/// `<root>/config.toml` — worker-root config: the served-guild registry
+/// (`guild_id` → default profile/cwd for unbound channels).
+pub fn worker_config(root: &Path) -> PathBuf {
+    root.join("config.toml")
+}
+
 /// `<root>/profiles/<name>` — a profile's state directory.
 pub fn profile_dir(root: &Path, name: &str) -> PathBuf {
     root.join("profiles").join(name)
