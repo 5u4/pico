@@ -12,20 +12,11 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum Request {
-    Deploy { target: DeployTarget },
+    Deploy { path: PathBuf },
     Rollback,
     Status,
     Stop,
     Ready { token: String },
-}
-
-/// What a `deploy` should run: a git revision built on the host, or a
-/// pre-built binary copied in.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum DeployTarget {
-    Rev { rev: String },
-    Path { path: PathBuf },
 }
 
 /// The supervisor's reply to a control [`Request`]. `ready` gets no reply.
@@ -43,6 +34,9 @@ pub struct StatusReport {
     pub running: bool,
     pub pid: Option<u32>,
     pub current: Option<String>,
+    pub version: Option<String>,
+    /// Per-artifact content hash; separates builds with an identical `version`.
+    pub build: Option<String>,
     pub uptime_secs: Option<u64>,
     pub deploys: Vec<DeployRecord>,
 }
@@ -51,6 +45,7 @@ pub struct StatusReport {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeployRecord {
     pub target: String,
+    pub build: Option<String>,
     pub outcome: String,
     pub at_unix: u64,
 }

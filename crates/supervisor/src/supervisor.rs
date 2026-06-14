@@ -9,7 +9,7 @@ use std::{
 };
 
 use color_eyre::eyre::{WrapErr, eyre};
-use pico_shared::proto::{DeployRecord, DeployTarget, Request, Response, StatusReport};
+use pico_shared::proto::{DeployRecord, Request, Response, StatusReport};
 use tokio::sync::{Mutex as AsyncMutex, oneshot};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
@@ -26,7 +26,16 @@ struct WorkerProc {
     child: tokio::process::Child,
     pid: Option<u32>,
     bin: PathBuf,
+    version: Option<String>,
+    build: Option<String>,
     started_at: Instant,
+}
+
+/// Best-effort provenance probed before spawn: embedded `--version` + content hash.
+#[derive(Default, Clone)]
+struct Meta {
+    version: Option<String>,
+    build: Option<String>,
 }
 
 /// Owns the worker process, the deploy pipeline, and the control socket.
@@ -59,6 +68,14 @@ impl Supervisor {
         }
     }
 
+    async fn inspect(&self, bin: &Path) -> Meta {
+        let (version, build) = tokio::join!(crate::stage::worker_version(bin), crate::stage::build_id(bin));
+        Meta {
+            version: version.ok(),
+            build: build.ok(),
+        }
+    }
+
     /// Adopt the `current` slot binary if one exists. Must run only once the
     /// accept loop is live: the spawned worker validates by sending a ready ping
     /// back over the control socket, so booting before [`Self::serve`] is
@@ -76,7 +93,8 @@ impl Supervisor {
                 return;
             }
         };
-        match self.spawn_and_validate(&current).await {
+        let meta = self.inspect(&current).await;
+        match self.spawn_and_validate(&current, &meta).await {
             Ok(proc) => {
                 let pid = proc.pid;
                 *self.worker.lock().await = Some(proc);
@@ -193,7 +211,7 @@ impl Supervisor {
                 self.signal_ready(&token);
                 return Ok(());
             }
-            Request::Deploy { target } => self.deploy(target).await,
+            Request::Deploy { path } => self.deploy(path).await,
             Request::Rollback => self.rollback().await,
             Request::Status => self.status().await,
             Request::Stop => self.stop().await,
@@ -213,19 +231,21 @@ impl Supervisor {
         }
     }
 
-    async fn deploy(&self, target: DeployTarget) -> Response {
+    async fn deploy(&self, path: PathBuf) -> Response {
         let _guard = self.deploy_lock.lock().await;
-        let desc = describe(&target);
 
-        let bin = match crate::build::resolve(&target, self.config.repo_path.as_deref(), self.slots.builds_dir()).await
-        {
+        let bin = match crate::stage::stage(&path, self.slots.builds_dir()).await {
             Ok(bin) => bin,
             Err(e) => {
                 return Response::Error {
-                    message: format!("build failed: {e:#}"),
+                    message: format!("stage failed: {e:#}"),
                 };
             }
         };
+
+        // Probe before the kill, while the worker still serves.
+        let meta = self.inspect(&bin).await;
+        let desc = meta.version.clone().unwrap_or_else(|| path.display().to_string());
 
         let previous = match self.slots.current_target() {
             Ok(p) => p,
@@ -240,7 +260,7 @@ impl Supervisor {
             self.kill_worker(old).await;
         }
 
-        match self.spawn_and_validate(&bin).await {
+        match self.spawn_and_validate(&bin, &meta).await {
             Ok(proc) => {
                 let pid = proc.pid;
                 *self.worker.lock().await = Some(proc);
@@ -251,29 +271,34 @@ impl Supervisor {
                         format!(" (warning: slot update failed: {e:#})")
                     }
                 };
-                self.record(&desc, "ok");
+                self.record(&desc, meta.build.as_deref(), "ok");
                 Response::Ok {
-                    detail: format!("deployed {} (pid {}){note}", bin.display(), fmt_pid(pid)),
+                    detail: format!("deployed {desc} (pid {}){note}", fmt_pid(pid)),
                 }
             }
             Err(e) => match previous {
-                Some(prev) => match self.spawn_and_validate(&prev).await {
-                    Ok(proc) => {
-                        *self.worker.lock().await = Some(proc);
-                        self.record(&desc, "rolled_back");
-                        Response::Error {
-                            message: format!("deploy failed ({e:#}); rolled back to {}", prev.display()),
+                Some(prev) => {
+                    let prev_meta = self.inspect(&prev).await;
+                    match self.spawn_and_validate(&prev, &prev_meta).await {
+                        Ok(proc) => {
+                            *self.worker.lock().await = Some(proc);
+                            self.record(&desc, meta.build.as_deref(), "rolled_back");
+                            Response::Error {
+                                message: format!("deploy failed ({e:#}); rolled back to {}", prev.display()),
+                            }
+                        }
+                        Err(e2) => {
+                            self.record(&desc, meta.build.as_deref(), "failed");
+                            Response::Error {
+                                message: format!(
+                                    "deploy failed ({e:#}); rollback also failed ({e2:#}); no worker running"
+                                ),
+                            }
                         }
                     }
-                    Err(e2) => {
-                        self.record(&desc, "failed");
-                        Response::Error {
-                            message: format!("deploy failed ({e:#}); rollback also failed ({e2:#}); no worker running"),
-                        }
-                    }
-                },
+                }
                 None => {
-                    self.record(&desc, "failed");
+                    self.record(&desc, meta.build.as_deref(), "failed");
                     Response::Error {
                         message: format!("deploy failed ({e:#}); no previous slot; no worker running"),
                     }
@@ -298,25 +323,29 @@ impl Supervisor {
             }
         };
 
+        // Probe before the kill so a slow `<prev> --version` adds no downtime.
+        let meta = self.inspect(&prev).await;
+        let desc = meta.version.clone().unwrap_or_else(|| prev.display().to_string());
+
         if let Some(old) = self.worker.lock().await.take() {
             self.kill_worker(old).await;
         }
 
-        match self.spawn_and_validate(&prev).await {
+        match self.spawn_and_validate(&prev, &meta).await {
             Ok(proc) => {
                 *self.worker.lock().await = Some(proc);
                 if let Err(e) = self.slots.swap() {
                     return Response::Error {
-                        message: format!("rolled back to {} but slot swap failed: {e:#}", prev.display()),
+                        message: format!("rolled back to {desc} but slot swap failed: {e:#}"),
                     };
                 }
-                self.record("rollback", "ok");
+                self.record(&desc, meta.build.as_deref(), "ok");
                 Response::Ok {
-                    detail: format!("rolled back to {}", prev.display()),
+                    detail: format!("rolled back to {desc}"),
                 }
             }
             Err(e) => {
-                self.record("rollback", "failed");
+                self.record(&desc, meta.build.as_deref(), "failed");
                 Response::Error {
                     message: format!("rollback failed: {e:#}; no worker running"),
                 }
@@ -333,9 +362,15 @@ impl Supervisor {
                 };
             }
         };
-        let (running, pid, uptime_secs) = match &*self.worker.lock().await {
-            Some(w) => (true, w.pid, Some(w.started_at.elapsed().as_secs())),
-            None => (false, None, None),
+        let (running, pid, uptime_secs, version, build) = match &*self.worker.lock().await {
+            Some(w) => (
+                true,
+                w.pid,
+                Some(w.started_at.elapsed().as_secs()),
+                w.version.clone(),
+                w.build.clone(),
+            ),
+            None => (false, None, None, None, None),
         };
         let deploys = self
             .history
@@ -349,6 +384,8 @@ impl Supervisor {
             running,
             pid,
             current,
+            version,
+            build,
             uptime_secs,
             deploys,
         })
@@ -371,7 +408,7 @@ impl Supervisor {
     /// Spawn `worker --path <root> --socket <sock>` from `bin` and wait for its
     /// `ready` ping within `health_timeout`. On any failure the child is killed
     /// before the error returns, so no orphan survives.
-    async fn spawn_and_validate(&self, bin: &Path) -> color_eyre::Result<WorkerProc> {
+    async fn spawn_and_validate(&self, bin: &Path, meta: &Meta) -> color_eyre::Result<WorkerProc> {
         let token = ready_token();
         let (tx, rx) = oneshot::channel();
         *self.pending_ready.lock().expect("pending_ready poisoned") = Some((token.clone(), tx));
@@ -411,6 +448,8 @@ impl Supervisor {
                 child,
                 pid,
                 bin: bin.to_path_buf(),
+                version: meta.version.clone(),
+                build: meta.build.clone(),
                 started_at: Instant::now(),
             }),
             Err(e) => {
@@ -438,10 +477,11 @@ impl Supervisor {
         }
     }
 
-    fn record(&self, target: &str, outcome: &str) {
+    fn record(&self, target: &str, build: Option<&str>, outcome: &str) {
         let mut history = self.history.lock().expect("history poisoned");
         history.push_back(DeployRecord {
             target: target.to_string(),
+            build: build.map(str::to_owned),
             outcome: outcome.to_string(),
             at_unix: now_unix(),
         });
@@ -450,14 +490,6 @@ impl Supervisor {
         }
     }
 }
-
-fn describe(target: &DeployTarget) -> String {
-    match target {
-        DeployTarget::Rev { rev } => format!("rev:{rev}"),
-        DeployTarget::Path { path } => format!("path:{}", path.display()),
-    }
-}
-
 fn fmt_pid(pid: Option<u32>) -> String {
     pid.map(|p| p.to_string()).unwrap_or_else(|| "?".into())
 }

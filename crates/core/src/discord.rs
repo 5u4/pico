@@ -70,25 +70,19 @@ async fn ping(ctx: Context<'_>) -> Result<(), Error> {
     Ok(())
 }
 
-// Standalone runs (no supervisor socket) report `/deploy` as unavailable.
-/// Trigger a supervisor hot-update (deploy a git rev or prebuilt worker binary).
 #[poise::command(slash_command)]
 async fn deploy(
     ctx: Context<'_>,
-    #[description = "worker binary path (or rev:<git-rev> to build a revision)"] target: String,
+    #[description = "path to a prebuilt worker binary on the host"] path: String,
 ) -> Result<(), Error> {
     let Some(socket) = ctx.data().supervisor_socket.clone() else {
         ctx.say("not running under a supervisor (standalone) — `/deploy` is unavailable")
             .await?;
         return Ok(());
     };
-    // A successful deploy replaces this worker before the reply lands, so the
-    // confirmation is the bot reconnecting; a build failure returns here first.
-    ctx.say(format!(
-        "deploying `{target}` — I restart on success; a build error comes back here."
-    ))
-    .await?;
-    match request_deploy(&socket, parse_deploy_target(&target)).await {
+    ctx.say(format!("deploying `{path}` — I restart on success; a failure comes back here."))
+        .await?;
+    match request_deploy(&socket, std::path::PathBuf::from(&path)).await {
         Ok(proto::Response::Ok { detail }) => {
             ctx.say(format!("deployed: {detail}")).await?;
         }
@@ -105,26 +99,18 @@ async fn deploy(
     Ok(())
 }
 
-fn parse_deploy_target(arg: &str) -> proto::DeployTarget {
-    match arg.strip_prefix("rev:") {
-        Some(rev) => proto::DeployTarget::Rev { rev: rev.to_owned() },
-        None => proto::DeployTarget::Path {
-            path: std::path::PathBuf::from(arg.strip_prefix("path:").unwrap_or(arg)),
-        },
-    }
-}
-
-async fn request_deploy(socket: &std::path::Path, target: proto::DeployTarget) -> color_eyre::Result<proto::Response> {
+async fn request_deploy(socket: &std::path::Path, path: std::path::PathBuf) -> color_eyre::Result<proto::Response> {
     let stream = tokio::time::timeout(Duration::from_secs(5), tokio::net::UnixStream::connect(socket))
         .await
         .map_err(|_| eyre!("connecting to supervisor timed out"))?
         .wrap_err("connect to supervisor socket")?;
     let (read_half, mut write_half) = stream.into_split();
-    proto::write_frame(&mut write_half, &proto::Request::Deploy { target }).await?;
+    proto::write_frame(&mut write_half, &proto::Request::Deploy { path }).await?;
     let mut reader = tokio::io::BufReader::new(read_half);
-    tokio::time::timeout(Duration::from_secs(600), proto::read_frame::<proto::Response, _>(&mut reader))
+    // Fixed: the worker can't see the supervisor's health_timeout to derive one.
+    tokio::time::timeout(Duration::from_secs(180), proto::read_frame::<proto::Response, _>(&mut reader))
         .await
-        .map_err(|_| eyre!("deploy did not complete within 10m"))?
+        .map_err(|_| eyre!("deploy did not complete within 180s"))?
         .wrap_err("read deploy response")?
         .ok_or_else(|| eyre!("supervisor closed the connection without replying"))
 }
@@ -777,22 +763,4 @@ fn thread_name(prompt: &str) -> String {
     let line = prompt.lines().next().unwrap_or("").trim();
     let name: String = line.chars().take(90).collect();
     if name.is_empty() { "chat".to_owned() } else { name }
-}
-
-#[cfg(test)]
-mod tests {
-    use pico_shared::proto::DeployTarget;
-
-    use super::parse_deploy_target;
-
-    #[test]
-    fn bare_arg_is_a_path_explicit_prefixes_win() {
-        assert!(
-            matches!(parse_deploy_target("/opt/worker"), DeployTarget::Path { path } if path == std::path::Path::new("/opt/worker"))
-        );
-        assert!(matches!(parse_deploy_target("rev:abc123"), DeployTarget::Rev { rev } if rev == "abc123"));
-        assert!(
-            matches!(parse_deploy_target("path:/opt/worker"), DeployTarget::Path { path } if path == std::path::Path::new("/opt/worker"))
-        );
-    }
 }

@@ -1,7 +1,7 @@
-mod build;
 mod client;
 mod config;
 mod slots;
+mod stage;
 mod supervisor;
 
 use std::sync::Arc;
