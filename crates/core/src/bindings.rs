@@ -197,18 +197,18 @@ fn write_lock() -> std::sync::MutexGuard<'static, ()> {
     LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// Accept `channel_id` as a quoted string or a bare TOML integer, per the
+/// Accept a snowflake (channel or guild id) as a quoted string or bare integer, per the
 /// documented `bindings.toml` contract. Bare integers above `i64::MAX` (20-digit
 /// snowflakes, not reachable until ~2084) still require quoting.
 pub(crate) fn de_snowflake<'de, D>(de: D) -> Result<String, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    struct ChannelId;
-    impl<'de> serde::de::Visitor<'de> for ChannelId {
+    struct Snowflake;
+    impl<'de> serde::de::Visitor<'de> for Snowflake {
         type Value = String;
         fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-            f.write_str("a Discord channel id as a quoted string or bare integer")
+            f.write_str("a Discord snowflake id as a quoted string or bare integer")
         }
         fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<String, E> {
             Ok(v.to_owned())
@@ -220,7 +220,7 @@ where
             Ok(v.to_string())
         }
     }
-    de.deserialize_any(ChannelId)
+    de.deserialize_any(Snowflake)
 }
 
 pub(crate) fn expand_home(raw: &str) -> PathBuf {

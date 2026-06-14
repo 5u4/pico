@@ -238,12 +238,14 @@ mod tests {
 
     #[test]
     fn load_root_expands_home_in_cwd() {
+        let Some(home) = std::env::home_dir() else {
+            return;
+        };
         let dir = temp_dir("roothome");
         let path = dir.join("config.toml");
         std::fs::write(&path, "[[guild]]\nid = \"123456789012345678\"\ncwd = \"~/picotest\"\n").unwrap();
         let cfg = super::load_root(&path).unwrap();
-        let expected = std::env::home_dir().unwrap().join("picotest");
-        assert_eq!(cfg.guild("123456789012345678").unwrap().cwd, expected);
+        assert_eq!(cfg.guild("123456789012345678").unwrap().cwd, home.join("picotest"));
         std::fs::remove_dir_all(&dir).ok();
     }
 

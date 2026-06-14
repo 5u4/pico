@@ -120,14 +120,15 @@ fn read_secret(root: &Path, name: &str) -> color_eyre::Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf};
+    use std::{
+        path::{Path, PathBuf},
+        sync::atomic::{AtomicU64, Ordering},
+    };
 
     fn tmp_root() -> PathBuf {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        std::env::temp_dir().join(format!("pico-secret-{}-{nanos}", std::process::id()))
+        static N: AtomicU64 = AtomicU64::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!("pico-secret-{}-{}", std::process::id(), n))
     }
 
     fn write_secret(root: &Path, body: &str) {
