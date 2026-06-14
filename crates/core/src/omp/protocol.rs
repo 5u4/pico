@@ -53,6 +53,10 @@ pub(crate) enum Command<'a> {
         provider: &'a str,
         model_id: &'a str,
     },
+    SetSessionName {
+        id: &'a RequestId,
+        name: &'a str,
+    },
 }
 
 impl Command<'_> {
@@ -65,6 +69,7 @@ impl Command<'_> {
             Command::Abort { .. } => "abort",
             Command::NewSession { .. } => "new_session",
             Command::SetModel { .. } => "set_model",
+            Command::SetSessionName { .. } => "set_session_name",
         }
     }
 }

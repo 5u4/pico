@@ -26,6 +26,8 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
 const SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 
+const SMOL_RESOLVE_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// One thread's live `omp` child and its event stream. Guarded by a per-thread
 /// async mutex so turns on the same thread serialise; different threads run on
 /// separate children and proceed concurrently.
@@ -52,6 +54,7 @@ pub struct OmpPool {
     sessions: Mutex<HashMap<String, Arc<ThreadHandle>>>,
     cancel: CancellationToken,
     tracker: TaskTracker,
+    smol: tokio::sync::OnceCell<Option<String>>,
 }
 
 impl OmpPool {
@@ -64,6 +67,17 @@ impl OmpPool {
             sessions: Mutex::new(HashMap::new()),
             cancel: cancel.clone(),
             tracker: tracker.clone(),
+            smol: tokio::sync::OnceCell::new(),
+        });
+        // Warm the cache before any `omp` child exists, so the first thread's
+        // title task reads it instead of racing `omp config get` against spawns.
+        let warm = Arc::clone(&pool);
+        tracker.spawn(async move {
+            // Bail on shutdown rather than block the drain on an in-flight call.
+            tokio::select! {
+                () = warm.cancel.cancelled() => {}
+                _ = warm.smol_model() => {}
+            }
         });
         let evictor = Arc::clone(&pool);
         tracker.spawn(async move {
@@ -110,6 +124,15 @@ impl OmpPool {
         self.sessions.lock().remove(thread_id);
     }
 
+    /// The fire-and-forget thread-title model from omp's `modelRoles` (smol, else
+    /// default). Cached — including a stable "disabled" — but transient failures retry.
+    pub async fn smol_model(&self) -> Option<String> {
+        match self.smol.get_or_try_init(resolve_smol_model).await {
+            Ok(model) => model.clone(),
+            Err(()) => None,
+        }
+    }
+
     /// Drop children idle past [`IDLE_TIMEOUT`]. `strong_count == 1` means only
     /// the map references the handle, i.e. no turn is in flight (a turn holds a
     /// clone for its whole duration); checking it under the map lock — which
@@ -131,6 +154,53 @@ fn now_millis() -> u64 {
         .unwrap_or(0)
 }
 
+/// Ask omp for its `smol`/`default` role model. omp owns the config, and `--model`
+/// needs a concrete `provider/modelId`, not the `pi/smol` role alias. `Err` is a
+/// transient failure (retry next thread); `Ok(None)` is a stable "no role" (cache).
+async fn resolve_smol_model() -> Result<Option<String>, ()> {
+    let mut cmd = tokio::process::Command::new("omp");
+    cmd.arg("config")
+        .arg("get")
+        .arg("modelRoles")
+        .arg("--json")
+        .kill_on_drop(true);
+    let raw = match tokio::time::timeout(SMOL_RESOLVE_TIMEOUT, pico_shared::proc::run(&mut cmd)).await {
+        Ok(Ok(raw)) => raw,
+        Ok(Err(e)) => {
+            tracing::warn!(error = %format!("{e:#}"), "resolving omp smol model failed; retrying next thread");
+            return Err(());
+        }
+        Err(_) => {
+            tracing::warn!("resolving omp smol model timed out after {SMOL_RESOLVE_TIMEOUT:?}; retrying next thread");
+            return Err(());
+        }
+    };
+    let roles: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(error = %e, "parsing omp modelRoles failed; retrying next thread");
+            return Err(());
+        }
+    };
+    match smol_from_roles(&roles) {
+        Some(model) => Ok(Some(model)),
+        None => {
+            tracing::warn!("omp modelRoles has no smol/default model; thread titles disabled");
+            Ok(None)
+        }
+    }
+}
+
+/// `value.smol`, else `value.default`. Split out so the parse is unit-testable.
+fn smol_from_roles(roles: &serde_json::Value) -> Option<String> {
+    let value = &roles["value"];
+    ["smol", "default"]
+        .into_iter()
+        .filter_map(|role| value.get(role).and_then(serde_json::Value::as_str))
+        .find(|model| !model.is_empty())
+        .map(str::to_owned)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -145,5 +215,28 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(5), tracker.wait())
             .await
             .expect("evictor ignored cancellation; shutdown drain would hang");
+    }
+
+    #[test]
+    fn smol_from_roles_prefers_smol_then_default() {
+        let roles = serde_json::json!({
+            "value": { "smol": "github-copilot/gpt-4o-mini", "default": "github-copilot/claude-opus" }
+        });
+        assert_eq!(smol_from_roles(&roles).as_deref(), Some("github-copilot/gpt-4o-mini"));
+    }
+
+    #[test]
+    fn smol_from_roles_falls_back_to_default_when_smol_absent_or_empty() {
+        let absent = serde_json::json!({ "value": { "default": "github-copilot/claude-opus" } });
+        assert_eq!(smol_from_roles(&absent).as_deref(), Some("github-copilot/claude-opus"));
+        let empty = serde_json::json!({ "value": { "smol": "", "default": "github-copilot/claude-opus" } });
+        assert_eq!(smol_from_roles(&empty).as_deref(), Some("github-copilot/claude-opus"));
+    }
+
+    #[test]
+    fn smol_from_roles_none_when_unset_or_empty() {
+        assert_eq!(smol_from_roles(&serde_json::json!({ "value": {} })), None);
+        assert_eq!(smol_from_roles(&serde_json::json!({ "value": { "smol": "" } })), None);
+        assert_eq!(smol_from_roles(&serde_json::json!({})), None);
     }
 }
