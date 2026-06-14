@@ -166,17 +166,22 @@ fn split_cells(line: &str) -> Vec<String> {
 
 fn render_table_as_list(headers: &[String], rows: &[Vec<String>], out: &mut Vec<String>) {
     for row in rows {
-        match row.first() {
-            Some(title) if !title.is_empty() => out.push(format!("- **{title}**")),
-            _ => out.push("-".to_string()),
-        }
-        for (j, value) in row.iter().enumerate().skip(1) {
+        // No title cell → flatten its fields to top-level bullets; a bare "-" is
+        // not a valid list marker.
+        let (indent, start) = match row.first() {
+            Some(title) if !title.is_empty() => {
+                out.push(format!("- **{title}**"));
+                ("  ", 1)
+            }
+            _ => ("", 0),
+        };
+        for (j, value) in row.iter().enumerate().skip(start) {
             if value.is_empty() {
                 continue;
             }
             match headers.get(j) {
-                Some(h) if !h.is_empty() => out.push(format!("  - {h}: {value}")),
-                _ => out.push(format!("  - {value}")),
+                Some(h) if !h.is_empty() => out.push(format!("{indent}- {h}: {value}")),
+                _ => out.push(format!("{indent}- {value}")),
             }
         }
     }
@@ -834,6 +839,12 @@ mod tests {
         assert_eq!(tables_to_lists(escaped), "- **`a | b`**\n  - Meaning: or");
         let empty = "| Name | Role | Status |\n| --- | --- | --- |\n| Alice |  | Active |";
         assert_eq!(tables_to_lists(empty), "- **Alice**\n  - Status: Active");
+    }
+
+    #[test]
+    fn empty_title_cell_flattens_instead_of_bare_marker() {
+        let input = "| Name | Role |\n| --- | --- |\n|  | Admin |";
+        assert_eq!(tables_to_lists(input), "- Role: Admin");
     }
 
     fn line(name: &str, args: serde_json::Value) -> String {
