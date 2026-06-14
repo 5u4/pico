@@ -91,6 +91,8 @@ pub enum OmpEvent {
     ToolStart(ToolCallStart),
     ToolUpdate(ToolCallUpdate),
     ToolEnd(ToolCallEnd),
+    /// An extension (notably `ask`) asked the user a question over the RPC UI sub-protocol; the host renders it and replies with a [`UiResponse`].
+    UiRequest(UiRequest),
     /// The agent finished the turn. Terminal for the current prompt.
     AgentEnd,
     /// An asynchronous failure surfaced after the prompt was already acked
@@ -215,6 +217,180 @@ pub struct ToolCallUpdate {
     pub partial_result: serde_json::Value,
 }
 
+/// An `extension_ui_request` frame (the RPC UI sub-protocol the `ask` tool
+/// drives), classified by `method` like [`ToolCallStart`] classifies a
+/// [`ToolCall`]. A recognised method with no Discord surface becomes
+/// [`Self::Ignore`]; a method this build does not model becomes [`Self::Unknown`]
+/// and is auto-cancelled, so a future response-bearing dialog can never hang the
+/// turn waiting on a reply pico doesn't know to send.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(from = "RawUiRequest")]
+pub enum UiRequest {
+    Select {
+        id: String,
+        title: String,
+        options: Vec<String>,
+        timeout: Option<u64>,
+    },
+    Confirm {
+        id: String,
+        title: String,
+        message: String,
+        timeout: Option<u64>,
+    },
+    Input {
+        id: String,
+        title: String,
+        placeholder: Option<String>,
+        timeout: Option<u64>,
+    },
+    Editor {
+        id: String,
+        title: String,
+        prefill: Option<String>,
+    },
+    Notify {
+        message: String,
+        notify_type: Option<String>,
+    },
+    /// OMP withdrawing a still-pending request; no reply.
+    Cancel { target_id: String },
+    /// A recognised fire-and-forget method with no Discord analogue
+    /// (`set_status`, `set_widget`, `set_title`, `set_editor_text`, `open_url`);
+    /// skipped without a reply, exactly as OMP's own headless contexts treat it.
+    Ignore,
+    /// A method this build does not recognise. Replied with `cancelled` (keyed by
+    /// `id`) so a new response-bearing dialog resolves to its dismissed value
+    /// instead of hanging; `method` is retained only for the operator warning.
+    Unknown { id: Option<String>, method: String },
+}
+
+/// Raw wire shape of an `extension_ui_request`, classified into [`UiRequest`] by
+/// [`From`]. Every method's fields are optional here; the classifier supplies the
+/// per-variant requirements (e.g. a response-bearing method without an `id`
+/// falls through to [`UiRequest::Unknown`]).
+#[derive(Deserialize)]
+struct RawUiRequest {
+    method: String,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    options: Vec<String>,
+    #[serde(default)]
+    message: String,
+    #[serde(default)]
+    placeholder: Option<String>,
+    #[serde(default)]
+    prefill: Option<String>,
+    #[serde(default)]
+    timeout: Option<u64>,
+    #[serde(rename = "notifyType", default)]
+    notify_type: Option<String>,
+    #[serde(rename = "targetId", default)]
+    target_id: Option<String>,
+}
+
+impl From<RawUiRequest> for UiRequest {
+    fn from(raw: RawUiRequest) -> Self {
+        let RawUiRequest {
+            method,
+            id,
+            title,
+            options,
+            message,
+            placeholder,
+            prefill,
+            timeout,
+            notify_type,
+            target_id,
+        } = raw;
+        match (method.as_str(), id) {
+            ("select", Some(id)) => Self::Select {
+                id,
+                title,
+                options,
+                timeout,
+            },
+            ("confirm", Some(id)) => Self::Confirm {
+                id,
+                title,
+                message,
+                timeout,
+            },
+            ("input", Some(id)) => Self::Input {
+                id,
+                title,
+                placeholder,
+                timeout,
+            },
+            ("editor", Some(id)) => Self::Editor { id, title, prefill },
+            ("notify", _) => Self::Notify { message, notify_type },
+            ("cancel", _) => Self::Cancel {
+                target_id: target_id.unwrap_or_default(),
+            },
+            ("setStatus" | "setWidget" | "setTitle" | "set_editor_text" | "open_url", _) => Self::Ignore,
+            (_, id) => Self::Unknown { id, method },
+        }
+    }
+}
+
+/// Reply to a [`UiRequest`], written to OMP's stdin and correlated by the
+/// request's `id`. Exactly one of `value` / `confirmed` / `cancelled` is set.
+#[derive(Debug, Serialize)]
+pub struct UiResponse<'a> {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    id: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    value: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    confirmed: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cancelled: Option<bool>,
+    #[serde(rename = "timedOut", skip_serializing_if = "Option::is_none")]
+    timed_out: Option<bool>,
+}
+
+impl<'a> UiResponse<'a> {
+    const KIND: &'static str = "extension_ui_response";
+
+    pub fn value(id: &'a str, value: &'a str) -> Self {
+        Self {
+            kind: Self::KIND,
+            id,
+            value: Some(value),
+            confirmed: None,
+            cancelled: None,
+            timed_out: None,
+        }
+    }
+
+    pub fn confirmed(id: &'a str, confirmed: bool) -> Self {
+        Self {
+            kind: Self::KIND,
+            id,
+            value: None,
+            confirmed: Some(confirmed),
+            cancelled: None,
+            timed_out: None,
+        }
+    }
+
+    /// A dismissed dialog; `timed_out` marks a UI-enforced timeout (OMP fires `onTimeout`) versus a user cancel.
+    pub fn cancelled(id: &'a str, timed_out: bool) -> Self {
+        Self {
+            kind: Self::KIND,
+            id,
+            value: None,
+            confirmed: None,
+            cancelled: Some(true),
+            timed_out: timed_out.then_some(true),
+        }
+    }
+}
+
 /// Every frame the client reads off OMP's stdout; unmodeled frames decode to
 /// [`Inbound::Unknown`].
 #[derive(Debug, Deserialize)]
@@ -230,6 +406,7 @@ pub(crate) enum Inbound {
     ToolExecutionStart(ToolCallStart),
     ToolExecutionUpdate(ToolCallUpdate),
     ToolExecutionEnd(ToolCallEnd),
+    ExtensionUiRequest(UiRequest),
     #[serde(other)]
     Unknown,
 }
@@ -403,9 +580,98 @@ mod tests {
         assert!(matches!(parse(r#"{"type":"agent_end","messages":[]}"#), Inbound::AgentEnd));
         // Frames Stage 1 does not consume must not error out the stream.
         assert!(matches!(parse(r#"{"type":"turn_start"}"#), Inbound::Unknown));
+    }
+
+    #[test]
+    fn decodes_extension_ui_requests() {
+        match parse(
+            r#"{"type":"extension_ui_request","id":"u1","method":"select","title":"Pick","options":["A","B","Other (type your own)"],"timeout":5000}"#,
+        ) {
+            Inbound::ExtensionUiRequest(UiRequest::Select {
+                id,
+                title,
+                options,
+                timeout,
+            }) => {
+                assert_eq!(id, "u1");
+                assert_eq!(title, "Pick");
+                assert_eq!(options, ["A", "B", "Other (type your own)"]);
+                assert_eq!(timeout, Some(5000));
+            }
+            other => panic!("expected select, got {other:?}"),
+        }
+        match parse(r#"{"type":"extension_ui_request","id":"u2","method":"editor","title":"Enter your response:"}"#) {
+            Inbound::ExtensionUiRequest(UiRequest::Editor { id, title, prefill }) => {
+                assert_eq!(id, "u2");
+                assert_eq!(title, "Enter your response:");
+                assert!(prefill.is_none());
+            }
+            other => panic!("expected editor, got {other:?}"),
+        }
+        match parse(r#"{"type":"extension_ui_request","id":"u3","method":"confirm","title":"Sure?","message":"do it"}"#)
+        {
+            Inbound::ExtensionUiRequest(UiRequest::Confirm { id, message, .. }) => {
+                assert_eq!(id, "u3");
+                assert_eq!(message, "do it");
+            }
+            other => panic!("expected confirm, got {other:?}"),
+        }
+        match parse(
+            r#"{"type":"extension_ui_request","id":"u4","method":"input","title":"Name","placeholder":"e.g. foo"}"#,
+        ) {
+            Inbound::ExtensionUiRequest(UiRequest::Input { placeholder, .. }) => {
+                assert_eq!(placeholder.as_deref(), Some("e.g. foo"));
+            }
+            other => panic!("expected input, got {other:?}"),
+        }
+        match parse(
+            r#"{"type":"extension_ui_request","id":"u5","method":"notify","message":"heads up","notifyType":"warning"}"#,
+        ) {
+            Inbound::ExtensionUiRequest(UiRequest::Notify { message, notify_type }) => {
+                assert_eq!(message, "heads up");
+                assert_eq!(notify_type.as_deref(), Some("warning"));
+            }
+            other => panic!("expected notify, got {other:?}"),
+        }
+        match parse(r#"{"type":"extension_ui_request","id":"u6","method":"cancel","targetId":"u1"}"#) {
+            Inbound::ExtensionUiRequest(UiRequest::Cancel { target_id }) => assert_eq!(target_id, "u1"),
+            other => panic!("expected cancel, got {other:?}"),
+        }
+        // A recognised fire-and-forget chrome method → Ignore (no reply).
         assert!(matches!(
-            parse(r#"{"type":"extension_ui_request","id":"x","method":"setWidget"}"#),
-            Inbound::Unknown,
+            parse(
+                r#"{"type":"extension_ui_request","id":"u7","method":"setWidget","widgetKey":"k","widgetLines":["x"]}"#
+            ),
+            Inbound::ExtensionUiRequest(UiRequest::Ignore),
         ));
+        // A method this build doesn't model → Unknown, keeping its id so the host
+        // can auto-cancel it instead of hanging.
+        match parse(r#"{"type":"extension_ui_request","id":"u8","method":"multiselect","options":["a"]}"#) {
+            Inbound::ExtensionUiRequest(UiRequest::Unknown { id, method }) => {
+                assert_eq!(id.as_deref(), Some("u8"));
+                assert_eq!(method, "multiselect");
+            }
+            other => panic!("expected unknown, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn serializes_ui_responses() {
+        assert_eq!(
+            serde_json::to_value(UiResponse::value("u1", "A")).unwrap(),
+            serde_json::json!({"type": "extension_ui_response", "id": "u1", "value": "A"}),
+        );
+        assert_eq!(
+            serde_json::to_value(UiResponse::confirmed("u3", true)).unwrap(),
+            serde_json::json!({"type": "extension_ui_response", "id": "u3", "confirmed": true}),
+        );
+        assert_eq!(
+            serde_json::to_value(UiResponse::cancelled("u1", false)).unwrap(),
+            serde_json::json!({"type": "extension_ui_response", "id": "u1", "cancelled": true}),
+        );
+        assert_eq!(
+            serde_json::to_value(UiResponse::cancelled("u1", true)).unwrap(),
+            serde_json::json!({"type": "extension_ui_response", "id": "u1", "cancelled": true, "timedOut": true}),
+        );
     }
 }

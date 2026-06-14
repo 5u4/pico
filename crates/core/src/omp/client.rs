@@ -1,4 +1,4 @@
-//! RPC client for an `omp --mode rpc` child: spawns the process, frames
+//! RPC client for an `omp --mode rpc-ui` child: spawns the process, frames
 //! newline-delimited JSON over its stdio, sends drive commands, and forwards
 //! the session event stream.
 //!
@@ -19,7 +19,7 @@ use tokio::{
 };
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
-use crate::omp::protocol::{Command, Inbound, OmpEvent, RequestId, RpcResponse};
+use crate::omp::protocol::{Command, Inbound, OmpEvent, RequestId, RpcResponse, UiResponse};
 
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -53,7 +53,7 @@ pub struct OmpClient {
 }
 
 impl OmpClient {
-    /// Spawn `omp --mode rpc`, wait for its `ready` frame, and return the client
+    /// Spawn `omp --mode rpc-ui`, wait for its `ready` frame, and return the client
     /// alongside the session event stream. Errors if the binary cannot be
     /// spawned or it exits / stalls before reporting ready. The stdout reader and
     /// stderr drain run on `tracker` and stop on `cancel`, so worker shutdown
@@ -64,7 +64,9 @@ impl OmpClient {
         tracker: &TaskTracker,
     ) -> color_eyre::Result<(OmpClient, mpsc::UnboundedReceiver<OmpEvent>)> {
         let mut cmd = ProcCommand::new("omp");
-        cmd.arg("--mode").arg("rpc");
+        // `rpc-ui`, not `rpc`: same protocol but `hasUI: true`, so the interactive
+        // `ask` tool is registered and its prompts arrive as `extension_ui_request` frames.
+        cmd.arg("--mode").arg("rpc-ui");
         if let Some(model) = &config.model {
             cmd.arg("--model").arg(model);
         }
@@ -183,6 +185,15 @@ impl OmpClient {
         }
     }
 
+    /// Answer an [`OmpEvent::UiRequest`]: frame the reply onto stdin (no command
+    /// response follows). Shares the stdin lock with [`dispatch`], so bytes never interleave.
+    pub async fn ui_response(&self, response: &UiResponse<'_>) -> color_eyre::Result<()> {
+        let mut stdin = self.stdin.lock().await;
+        pico_shared::proto::write_frame(&mut *stdin, response)
+            .await
+            .wrap_err("write extension_ui_response")
+    }
+
     /// `id` must equal the command's `id` field so the response correlates.
     async fn dispatch(&self, id: &RequestId, cmd: &Command<'_>) -> color_eyre::Result<()> {
         let (tx, rx) = oneshot::channel();
@@ -299,6 +310,9 @@ async fn read_loop(
             }
             Inbound::ToolExecutionEnd(tool) => {
                 let _ = event_tx.send(OmpEvent::ToolEnd(tool));
+            }
+            Inbound::ExtensionUiRequest(req) => {
+                let _ = event_tx.send(OmpEvent::UiRequest(req));
             }
             Inbound::Unknown => {}
         }

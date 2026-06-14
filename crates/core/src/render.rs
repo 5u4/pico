@@ -442,7 +442,7 @@ pub fn format_duration(ms: u64) -> String {
 }
 
 /// Char-aware truncation with a trailing ellipsis; `max` counts the ellipsis.
-fn truncate(s: &str, max: usize) -> String {
+pub(crate) fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         return s.to_owned();
     }
