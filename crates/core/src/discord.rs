@@ -333,6 +333,7 @@ async fn route_message(
             &cancel,
             profile_config.surface_thinking,
             in_thread.then_some(message.id),
+            message.author.id,
         )
         .await?
     };
@@ -349,8 +350,15 @@ enum TurnOutcome {
     Dead,
 }
 
+/// Longest an OMP turn may legitimately stay silent: above the 3600s cap OMP
+/// enforces on its slowest tools (bash/eval/ssh), so a silent max-timeout command
+/// never trips it, yet a turn wedged on an interaction this build can't answer
+/// can't hang the thread forever.
+const STALL_TIMEOUT: Duration = Duration::from_secs(3900);
+
 /// Drive one OMP turn: render tool-call/reasoning activity as silent messages,
 /// then post the buffered answer — only text not followed by a tool survives.
+#[allow(clippy::too_many_arguments)]
 async fn drive_turn(
     ctx: &serenity::Context,
     target: serenity::ChannelId,
@@ -359,6 +367,7 @@ async fn drive_turn(
     cancel: &CancellationToken,
     surface_thinking: bool,
     reply_to: Option<serenity::MessageId>,
+    author: serenity::UserId,
 ) -> color_eyre::Result<TurnOutcome> {
     let _typing = target.start_typing(&ctx.http);
     session.client.prompt(prompt).await?;
@@ -378,7 +387,21 @@ async fn drive_turn(
                     .await;
                 return Ok(TurnOutcome::Live);
             }
-            event = session.events.recv() => event,
+            recv = tokio::time::timeout(STALL_TIMEOUT, session.events.recv()) => match recv {
+                Ok(event) => event,
+                // Wedged past any legitimate silent gap: drop the child so the pool
+                // respawns a fresh one instead of holding the thread until a deploy.
+                Err(_) => {
+                    tracing::warn!(timeout = ?STALL_TIMEOUT, "turn made no progress; resetting wedged OMP session");
+                    activity.flush().await;
+                    subagents.flush_all(true).await;
+                    commit_reply(ctx, target, &reply, reply_to).await;
+                    let _ = target
+                        .say(ctx, "the turn stalled with no progress and was reset; resend your message to continue")
+                        .await;
+                    return Ok(TurnOutcome::Dead);
+                }
+            },
         };
         match event {
             Some(OmpEvent::Message(AssistantMessageEvent::TextDelta { delta })) => {
@@ -394,6 +417,8 @@ async fn drive_turn(
                 reply.clear();
                 match &tool {
                     ToolCallStart::Task(call) => subagents.start(call).await,
+                    // `ask` renders via its UI request below, not the activity feed.
+                    ToolCallStart::Ask(_) => {}
                     _ => activity.start(&tool).await,
                 }
             }
@@ -402,11 +427,24 @@ async fn drive_turn(
                     subagents.update(&tool).await;
                 }
             }
-            Some(OmpEvent::ToolEnd(tool)) => {
-                if tool.tool_name == "task" {
-                    subagents.end(&tool).await;
-                } else {
-                    activity.end(&tool).await;
+            Some(OmpEvent::ToolEnd(tool)) => match tool.tool_name.as_str() {
+                "task" => subagents.end(&tool).await,
+                "ask" => {}
+                _ => activity.end(&tool).await,
+            },
+            Some(OmpEvent::UiRequest(req)) => {
+                // Block the turn on the answer (the agent is paused awaiting it);
+                // `handle_request` races `cancel`, so a restart never strands the turn.
+                activity.flush().await;
+                if let crate::ui::Handled::Cancelled =
+                    crate::ui::handle_request(ctx, target, &session.client, author, &req, cancel).await
+                {
+                    subagents.flush_all(false).await;
+                    commit_reply(ctx, target, &reply, reply_to).await;
+                    let _ = target
+                        .say(ctx, "worker is restarting; resend your message to continue")
+                        .await;
+                    return Ok(TurnOutcome::Live);
                 }
             }
             Some(OmpEvent::AgentEnd) => break,
