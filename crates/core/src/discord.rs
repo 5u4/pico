@@ -552,7 +552,9 @@ async fn commit_reply(
     reply: &str,
     reply_to: Option<serenity::MessageId>,
 ) {
-    let chunks = crate::render::split_to_budget(&crate::render::defang_mentions(reply), crate::render::DISCORD_BUDGET);
+    let listed = crate::render::tables_to_lists(reply);
+    let chunks =
+        crate::render::split_to_budget(&crate::render::defang_mentions(&listed), crate::render::DISCORD_BUDGET);
     for (i, chunk) in chunks.iter().enumerate() {
         let mut message = serenity::CreateMessage::new().content(chunk.clone());
         if i == 0 {
