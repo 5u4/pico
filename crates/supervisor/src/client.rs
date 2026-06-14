@@ -80,7 +80,7 @@ async fn send(request: Request) -> color_eyre::Result<Response> {
     proto::write_frame(&mut write_half, &request).await?;
     let mut reader = BufReader::new(read_half);
     // Derived from health_timeout so a large one can't trip a spurious timeout.
-    let budget = Duration::from_secs((config.health_timeout_secs * 4 + 10).max(180));
+    let budget = Duration::from_secs(config.health_timeout_secs.saturating_mul(4).saturating_add(10).max(180));
     tokio::time::timeout(budget, proto::read_frame::<Response, _>(&mut reader))
         .await
         .map_err(|_| eyre!("supervisor did not reply within {budget:?}"))??

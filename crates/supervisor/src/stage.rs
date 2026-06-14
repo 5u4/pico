@@ -4,7 +4,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use color_eyre::eyre::{bail, eyre};
+use color_eyre::eyre::bail;
 use sha2::{Digest, Sha256};
 use tokio::{io::AsyncReadExt, process::Command};
 
@@ -24,20 +24,31 @@ pub async fn stage(src: &Path, builds_dir: &Path) -> color_eyre::Result<PathBuf>
 
 /// Embedded `<bin> --version`, bounded and reaped on timeout; failure is non-fatal.
 pub async fn worker_version(bin: &Path) -> color_eyre::Result<String> {
-    let child = Command::new(bin)
+    let mut child = Command::new(bin)
         .arg("--version")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .kill_on_drop(true)
         .spawn()?;
-    let output = tokio::time::timeout(VERSION_TIMEOUT, child.wait_with_output())
-        .await
-        .map_err(|_| eyre!("`{} --version` did not exit within {VERSION_TIMEOUT:?}", bin.display()))??;
-    if !output.status.success() {
-        bail!("`{} --version` failed ({})", bin.display(), output.status);
+    match tokio::time::timeout(VERSION_TIMEOUT, child.wait()).await {
+        Ok(status) => {
+            let status = status?;
+            if !status.success() {
+                bail!("`{} --version` failed ({status})", bin.display());
+            }
+        }
+        Err(_) => {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            bail!("`{} --version` did not exit within {VERSION_TIMEOUT:?}", bin.display());
+        }
     }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    let mut out = String::new();
+    if let Some(mut stdout) = child.stdout.take() {
+        stdout.read_to_string(&mut out).await?;
+    }
+    Ok(out.trim().to_owned())
 }
 
 /// SHA-256[:12] of the binary — a per-artifact id that separates same-`--version` builds.

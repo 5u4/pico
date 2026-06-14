@@ -279,12 +279,13 @@ impl Supervisor {
             Err(e) => match previous {
                 Some(prev) => {
                     let prev_meta = self.inspect(&prev).await;
+                    let prev_desc = prev_meta.version.clone().unwrap_or_else(|| prev.display().to_string());
                     match self.spawn_and_validate(&prev, &prev_meta).await {
                         Ok(proc) => {
                             *self.worker.lock().await = Some(proc);
                             self.record(&desc, meta.build.as_deref(), "rolled_back");
                             Response::Error {
-                                message: format!("deploy failed ({e:#}); rolled back to {}", prev.display()),
+                                message: format!("deploy failed ({e:#}); rolled back to {prev_desc}"),
                             }
                         }
                         Err(e2) => {
