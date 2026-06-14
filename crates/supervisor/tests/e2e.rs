@@ -171,7 +171,8 @@ impl Fixture {
 
     fn deploy_path_report(&self, path: &Path, report_to: &str) -> Value {
         let path = Value::String(path.to_string_lossy().into_owned());
-        self.request(&format!("{{\"cmd\":\"deploy\",\"path\":{path},\"report_to\":\"{report_to}\"}}"))
+        let report_to = Value::String(report_to.to_owned());
+        self.request(&format!("{{\"cmd\":\"deploy\",\"path\":{path},\"report_to\":{report_to}}}"))
     }
 
     /// Where the fake worker echoes a relayed deploy report.
