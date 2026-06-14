@@ -119,7 +119,10 @@ async fn bound_message_opens_thread_and_replies() {
         .unwrap()
         .as_millis();
     let prompt = format!("Reply with exactly the single word: pong (e2e {marker})");
-    let posted = channel.say(&driver, prompt).await.expect("driver failed to post");
+    let posted = channel
+        .say(&driver, prompt.clone())
+        .await
+        .expect("driver failed to post");
 
     // pico should open a thread from that message and stream a "pong" reply.
     let mut thread: Option<serenity::ChannelId> = None;
@@ -138,6 +141,21 @@ async fn bound_message_opens_thread_and_replies() {
         {
             replied = true;
             break;
+        }
+    }
+
+    // Mirror thread_name(): the initial name is the first line, trimmed, clamped to 90.
+    let initial_name: String = prompt.lines().next().unwrap_or("").trim().chars().take(90).collect();
+    let mut renamed = false;
+    if let Some(tid) = thread {
+        for _ in 0..20 {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            if let Ok(serenity::Channel::Guild(gc)) = tid.to_channel(&driver).await
+                && gc.name != initial_name
+            {
+                renamed = true;
+                break;
+            }
         }
     }
 
@@ -171,6 +189,7 @@ async fn bound_message_opens_thread_and_replies() {
     assert!(thread.is_some(), "pico never opened a thread for the bound-channel message");
     assert!(replied, "pico opened a thread but never posted a 'pong' reply");
     assert!(referenced, "pico's in-thread reply did not reference the follow-up message");
+    assert!(renamed, "pico opened a thread but never renamed it to a generated title");
     shutdown
         .expect("pico did not shut down within 15s")
         .expect("run task panicked")

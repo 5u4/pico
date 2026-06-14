@@ -166,6 +166,12 @@ impl OmpClient {
         .await
     }
 
+    /// Best-effort sync of omp's persisted session title to the Discord thread name.
+    pub async fn set_session_name(&self, name: &str) -> color_eyre::Result<()> {
+        let id = RequestId::new();
+        self.dispatch(&id, &Command::SetSessionName { id: &id, name }).await
+    }
+
     /// Close stdin (OMP exits cleanly on EOF) and reap the process, killing it
     /// if it does not exit within [`SHUTDOWN_TIMEOUT`].
     pub async fn shutdown(self) -> color_eyre::Result<()> {
