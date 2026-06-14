@@ -169,6 +169,16 @@ impl Fixture {
         self.request(&format!("{{\"cmd\":\"deploy\",\"path\":{path}}}"))
     }
 
+    fn deploy_path_report(&self, path: &Path, report_to: &str) -> Value {
+        let path = Value::String(path.to_string_lossy().into_owned());
+        self.request(&format!("{{\"cmd\":\"deploy\",\"path\":{path},\"report_to\":\"{report_to}\"}}"))
+    }
+
+    /// Where the fake worker echoes a relayed deploy report.
+    fn relay_report(&self) -> PathBuf {
+        self.home.join(".pico/workers/default/relay-report.txt")
+    }
+
     fn socket(&self) -> &Path {
         &self.socket
     }
@@ -363,5 +373,43 @@ fn stop_terminates_worker() {
     assert!(
         poll(Duration::from_secs(5), || (!alive(worker)).then_some(())).is_some(),
         "worker {worker} survived stop",
+    );
+}
+
+#[test]
+fn deploy_relays_report_to_live_worker() {
+    let fx = Fixture::start(None);
+    let worker = fake_worker_bin();
+    assert!(status_is(&fx.deploy_path(&worker), "ok"), "initial deploy failed");
+    // The new worker should echo the relayed "deployed ..." report to its root.
+    let resp = fx.deploy_path_report(&worker, "987654321");
+    assert!(status_is(&resp, "ok"), "deploy with report failed: {resp}");
+
+    let report = poll(Duration::from_secs(5), || std::fs::read_to_string(fx.relay_report()).ok());
+    let report = report.expect("relayed report file was never written");
+    assert!(report.contains("deployed"), "unexpected relay text: {report}");
+}
+
+#[test]
+fn rollback_relays_failure_report() {
+    let fx = Fixture::start(None);
+    let worker = fake_worker_bin();
+    assert!(status_is(&fx.deploy_path(&worker), "ok"), "initial deploy failed");
+
+    // Real but non-executable: staging copies it, the spawn fails, then rollback.
+    let junk = fx.home.join("not-a-binary");
+    std::fs::write(&junk, b"not a binary").unwrap();
+    let resp = fx.deploy_path_report(&junk, "987654321");
+    assert!(status_is(&resp, "error"), "expected rollback error: {resp}");
+
+    let report = poll(Duration::from_secs(5), || {
+        std::fs::read_to_string(fx.relay_report())
+            .ok()
+            .filter(|t| t.contains("rolled back"))
+    });
+    assert!(
+        report.is_some(),
+        "rollback report not relayed; file = {:?}",
+        std::fs::read_to_string(fx.relay_report())
     );
 }

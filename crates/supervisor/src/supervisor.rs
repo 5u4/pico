@@ -9,7 +9,7 @@ use std::{
 };
 
 use color_eyre::eyre::{WrapErr, eyre};
-use pico_shared::proto::{DeployRecord, Request, Response, StatusReport};
+use pico_shared::proto::{DeployRecord, DeployReport, ReadyAck, Request, Response, StatusReport};
 use tokio::sync::{Mutex as AsyncMutex, oneshot};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
@@ -38,6 +38,10 @@ struct Meta {
     build: Option<String>,
 }
 
+/// In-flight spawn's readiness slot: its token, the ready signal, and an
+/// optional report to hand back on the ready ping.
+type PendingReady = (String, oneshot::Sender<()>, Option<DeployReport>);
+
 /// Owns the worker process, the deploy pipeline, and the control socket.
 pub struct Supervisor {
     config: Config,
@@ -47,7 +51,7 @@ pub struct Supervisor {
     worker: AsyncMutex<Option<WorkerProc>>,
     history: Mutex<VecDeque<DeployRecord>>,
     deploy_lock: AsyncMutex<()>,
-    pending_ready: Mutex<Option<(String, oneshot::Sender<()>)>>,
+    pending_ready: Mutex<Option<PendingReady>>,
     cancel: CancellationToken,
     tracker: TaskTracker,
 }
@@ -94,7 +98,7 @@ impl Supervisor {
             }
         };
         let meta = self.inspect(&current).await;
-        match self.spawn_and_validate(&current, &meta).await {
+        match self.spawn_and_validate(&current, &meta, None).await {
             Ok(proc) => {
                 let pid = proc.pid;
                 *self.worker.lock().await = Some(proc);
@@ -163,7 +167,11 @@ impl Supervisor {
             let me = Arc::clone(&self);
             self.tracker.spawn(async move {
                 if let Err(e) = me.handle_conn(stream).await {
-                    tracing::warn!(error = %format!("{e:#}"), "connection error");
+                    if is_peer_disconnect(&e) {
+                        tracing::debug!(error = %format!("{e:#}"), "control peer disconnected before reply");
+                    } else {
+                        tracing::warn!(error = %format!("{e:#}"), "connection error");
+                    }
                 }
             });
         }
@@ -208,10 +216,10 @@ impl Supervisor {
         };
         let resp = match req {
             Request::Ready { token } => {
-                self.signal_ready(&token);
-                return Ok(());
+                let report = self.signal_ready(&token);
+                return pico_shared::proto::write_frame(&mut write_half, &ReadyAck { report }).await;
             }
-            Request::Deploy { path } => self.deploy(path).await,
+            Request::Deploy { path, report_to } => self.deploy(path, report_to).await,
             Request::Rollback => self.rollback().await,
             Request::Status => self.status().await,
             Request::Stop => self.stop().await,
@@ -219,19 +227,19 @@ impl Supervisor {
         pico_shared::proto::write_frame(&mut write_half, &resp).await
     }
 
-    fn signal_ready(&self, token: &str) {
+    fn signal_ready(&self, token: &str) -> Option<DeployReport> {
         let mut pending = self.pending_ready.lock().expect("pending_ready poisoned");
-        let matches = pending.as_ref().is_some_and(|(expected, _)| expected == token);
-        if matches {
-            if let Some((_, tx)) = pending.take() {
-                let _ = tx.send(());
-            }
+        if pending.as_ref().is_some_and(|(expected, ..)| expected == token) {
+            let (_, tx, report) = pending.take().expect("pending_ready checked non-empty");
+            let _ = tx.send(());
+            report
         } else {
             tracing::debug!("ignoring ready ping with unknown token");
+            None
         }
     }
 
-    async fn deploy(&self, path: PathBuf) -> Response {
+    async fn deploy(&self, path: PathBuf, report_to: Option<String>) -> Response {
         let _guard = self.deploy_lock.lock().await;
 
         let bin = match crate::stage::stage(&path, self.slots.builds_dir()).await {
@@ -260,7 +268,11 @@ impl Supervisor {
             self.kill_worker(old).await;
         }
 
-        match self.spawn_and_validate(&bin, &meta).await {
+        let report_fresh = report_to.clone().map(|to| DeployReport {
+            report_to: to,
+            text: format!("deployed {desc}"),
+        });
+        match self.spawn_and_validate(&bin, &meta, report_fresh).await {
             Ok(proc) => {
                 let pid = proc.pid;
                 *self.worker.lock().await = Some(proc);
@@ -280,7 +292,11 @@ impl Supervisor {
                 Some(prev) => {
                     let prev_meta = self.inspect(&prev).await;
                     let prev_desc = prev_meta.version.clone().unwrap_or_else(|| prev.display().to_string());
-                    match self.spawn_and_validate(&prev, &prev_meta).await {
+                    let report_rollback = report_to.map(|to| DeployReport {
+                        report_to: to,
+                        text: format!("deploy failed ({e:#}); rolled back to {prev_desc}"),
+                    });
+                    match self.spawn_and_validate(&prev, &prev_meta, report_rollback).await {
                         Ok(proc) => {
                             *self.worker.lock().await = Some(proc);
                             self.record(&desc, meta.build.as_deref(), "rolled_back");
@@ -290,6 +306,11 @@ impl Supervisor {
                         }
                         Err(e2) => {
                             self.record(&desc, meta.build.as_deref(), "failed");
+                            tracing::error!(
+                                deploy_error = %format!("{e:#}"),
+                                rollback_error = %format!("{e2:#}"),
+                                "deploy failed and rollback failed — NO WORKER RUNNING"
+                            );
                             Response::Error {
                                 message: format!(
                                     "deploy failed ({e:#}); rollback also failed ({e2:#}); no worker running"
@@ -300,6 +321,10 @@ impl Supervisor {
                 }
                 None => {
                     self.record(&desc, meta.build.as_deref(), "failed");
+                    tracing::error!(
+                        deploy_error = %format!("{e:#}"),
+                        "deploy failed and no previous slot — NO WORKER RUNNING"
+                    );
                     Response::Error {
                         message: format!("deploy failed ({e:#}); no previous slot; no worker running"),
                     }
@@ -332,7 +357,7 @@ impl Supervisor {
             self.kill_worker(old).await;
         }
 
-        match self.spawn_and_validate(&prev, &meta).await {
+        match self.spawn_and_validate(&prev, &meta, None).await {
             Ok(proc) => {
                 *self.worker.lock().await = Some(proc);
                 if let Err(e) = self.slots.swap() {
@@ -347,6 +372,7 @@ impl Supervisor {
             }
             Err(e) => {
                 self.record(&desc, meta.build.as_deref(), "failed");
+                tracing::error!(error = %format!("{e:#}"), "rollback failed — NO WORKER RUNNING");
                 Response::Error {
                     message: format!("rollback failed: {e:#}; no worker running"),
                 }
@@ -409,10 +435,15 @@ impl Supervisor {
     /// Spawn `worker --path <root> --socket <sock>` from `bin` and wait for its
     /// `ready` ping within `health_timeout`. On any failure the child is killed
     /// before the error returns, so no orphan survives.
-    async fn spawn_and_validate(&self, bin: &Path, meta: &Meta) -> color_eyre::Result<WorkerProc> {
+    async fn spawn_and_validate(
+        &self,
+        bin: &Path,
+        meta: &Meta,
+        report: Option<DeployReport>,
+    ) -> color_eyre::Result<WorkerProc> {
         let token = ready_token();
         let (tx, rx) = oneshot::channel();
-        *self.pending_ready.lock().expect("pending_ready poisoned") = Some((token.clone(), tx));
+        *self.pending_ready.lock().expect("pending_ready poisoned") = Some((token.clone(), tx, report));
 
         let mut child = match tokio::process::Command::new(bin)
             .arg("--path")
@@ -510,4 +541,14 @@ fn ready_token() -> String {
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     format!("{}-{nanos}-{seq}", std::process::id())
+}
+
+/// A peer hangup on the control socket (initiator closed before reading the
+/// reply). Expected for a worker self-deploy, so logged at debug, not warn.
+fn is_peer_disconnect(e: &color_eyre::Report) -> bool {
+    e.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| matches!(io.kind(), std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset))
+    })
 }

@@ -80,13 +80,17 @@ async fn deploy(
             .await?;
         return Ok(());
     };
-    ctx.say(format!("deploying `{path}` — I restart on success; a failure comes back here."))
+    ctx.say(format!("deploying `{path}` — I'll post the result here when it lands."))
         .await?;
-    match request_deploy(&socket, std::path::PathBuf::from(&path)).await {
+    let report_to = ctx.channel_id().get().to_string();
+    match request_deploy(&socket, std::path::PathBuf::from(&path), Some(report_to)).await {
         Ok(proto::Response::Ok { detail }) => {
-            ctx.say(format!("deployed: {detail}")).await?;
+            // Unreachable on a self-deploy (it kills me first); if it lands, the
+            // new worker's relay already posted the outcome — don't double-post.
+            tracing::info!(%detail, "deploy ok; outcome relayed to channel");
         }
         Ok(proto::Response::Error { message }) => {
+            // Pre-kill failure (bad path / staging): no relay, so report it myself.
             ctx.say(format!("deploy failed: {message}")).await?;
         }
         Ok(proto::Response::Status(_)) => {
@@ -99,13 +103,17 @@ async fn deploy(
     Ok(())
 }
 
-async fn request_deploy(socket: &std::path::Path, path: std::path::PathBuf) -> color_eyre::Result<proto::Response> {
+async fn request_deploy(
+    socket: &std::path::Path,
+    path: std::path::PathBuf,
+    report_to: Option<String>,
+) -> color_eyre::Result<proto::Response> {
     let stream = tokio::time::timeout(Duration::from_secs(5), tokio::net::UnixStream::connect(socket))
         .await
         .map_err(|_| eyre!("connecting to supervisor timed out"))?
         .wrap_err("connect to supervisor socket")?;
     let (read_half, mut write_half) = stream.into_split();
-    proto::write_frame(&mut write_half, &proto::Request::Deploy { path }).await?;
+    proto::write_frame(&mut write_half, &proto::Request::Deploy { path, report_to }).await?;
     let mut reader = tokio::io::BufReader::new(read_half);
     // Fixed: the worker can't see the supervisor's health_timeout to derive one.
     tokio::time::timeout(Duration::from_secs(180), proto::read_frame::<proto::Response, _>(&mut reader))
@@ -113,6 +121,21 @@ async fn request_deploy(socket: &std::path::Path, path: std::path::PathBuf) -> c
         .map_err(|_| eyre!("deploy did not complete within 180s"))?
         .wrap_err("read deploy response")?
         .ok_or_else(|| eyre!("supervisor closed the connection without replying"))
+}
+
+/// Post a relayed deploy outcome to the channel it was initiated from.
+/// Best-effort: a bad id or a failed send is logged, not propagated.
+pub(crate) async fn post_deploy_report(http: &Arc<serenity::Http>, report: proto::DeployReport) {
+    let id: u64 = match report.report_to.parse() {
+        Ok(id) if id != 0 => id,
+        _ => {
+            tracing::warn!(report_to = %report.report_to, "deploy report has an invalid channel id; dropping");
+            return;
+        }
+    };
+    if let Err(e) = serenity::ChannelId::new(id).say(http, &report.text).await {
+        tracing::warn!(error = %format!("{e:#}"), channel = id, "failed to post deploy report to Discord");
+    }
 }
 
 #[poise::command(

@@ -15,6 +15,7 @@ pub async fn deploy(arg: Option<String>) -> color_eyre::Result<()> {
     report(
         send(Request::Deploy {
             path: PathBuf::from(arg),
+            report_to: None,
         })
         .await?,
     )
