@@ -203,8 +203,10 @@ async fn confirm(
             return Handled::Cancelled;
         }
         Collected::Ended { timed_out } => {
-            finalize(ctx, channel, msg.id, &resolved_line(title, Some("No"))).await;
-            // A timed-out confirm is `false`, but flag the timeout for OMP's `onTimeout`.
+            // No interaction (a timeout, or shard drop): show it as cancelled, not a
+            // chosen "No". OMP still resolves confirm to `false`; flag the timeout
+            // so it can run `onTimeout`.
+            finalize(ctx, channel, msg.id, &resolved_line(title, None)).await;
             let _ = if timed_out {
                 client.ui_response(&UiResponse::cancelled(id, true)).await
             } else {

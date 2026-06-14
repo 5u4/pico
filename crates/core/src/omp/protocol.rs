@@ -255,8 +255,8 @@ pub enum UiRequest {
     },
     /// OMP withdrawing a still-pending request; no reply.
     Cancel { target_id: String },
-    /// A recognised fire-and-forget method with no Discord analogue
-    /// (`set_status`, `set_widget`, `set_title`, `set_editor_text`, `open_url`);
+    /// A recognised fire-and-forget method with no Discord analogue (the wire
+    /// names `setStatus`, `setWidget`, `setTitle`, `set_editor_text`, `open_url`);
     /// skipped without a reply, exactly as OMP's own headless contexts treat it.
     Ignore,
     /// A method this build does not recognise. Replied with `cancelled` (keyed by
