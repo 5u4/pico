@@ -96,6 +96,7 @@ async fn bound_message_opens_thread_and_replies() {
         },
         move || async move {
             let _ = connected_tx.send(());
+            None
         },
     ));
     tokio::time::timeout(Duration::from_secs(30), connected_rx)

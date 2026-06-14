@@ -61,10 +61,19 @@ async fn main() -> color_eyre::Result<()> {
         move || async move {
             match socket {
                 Some(socket) => match report_ready(&socket, &token).await {
-                    Ok(()) => tracing::info!(socket = %socket.display(), "reported ready to supervisor"),
-                    Err(e) => tracing::warn!(error = %format!("{e:#}"), "failed to report ready to supervisor"),
+                    Ok(report) => {
+                        tracing::info!(socket = %socket.display(), "reported ready to supervisor");
+                        report
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %format!("{e:#}"), "failed to report ready to supervisor");
+                        None
+                    }
                 },
-                None => tracing::warn!("standalone (no --socket): hot-update disabled"),
+                None => {
+                    tracing::warn!("standalone (no --socket): hot-update disabled");
+                    None
+                }
             }
         }
     };
@@ -83,13 +92,33 @@ async fn main() -> color_eyre::Result<()> {
     Ok(())
 }
 
-async fn report_ready(socket: &Path, token: &str) -> color_eyre::Result<()> {
-    let mut stream = UnixStream::connect(socket).await?;
+async fn report_ready(socket: &Path, token: &str) -> color_eyre::Result<Option<proto::DeployReport>> {
+    let stream = UnixStream::connect(socket).await?;
+    let (read_half, mut write_half) = stream.into_split();
     proto::write_frame(
-        &mut stream,
+        &mut write_half,
         &Request::Ready {
             token: token.to_owned(),
         },
     )
+    .await?;
+    // Best-effort: the ping above already validated readiness, so a missing or
+    // late reply (older supervisor, clean EOF) just means no report.
+    let mut reader = tokio::io::BufReader::new(read_half);
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        proto::read_frame::<proto::ReadyAck, _>(&mut reader),
+    )
     .await
+    {
+        Ok(Ok(ack)) => Ok(ack.and_then(|a| a.report)),
+        Ok(Err(e)) => {
+            tracing::debug!(error = %format!("{e:#}"), "malformed ready ack; ignoring");
+            Ok(None)
+        }
+        Err(_) => {
+            tracing::debug!("no ready ack within 10s; ignoring");
+            Ok(None)
+        }
+    }
 }

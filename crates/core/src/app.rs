@@ -61,7 +61,7 @@ impl App {
     where
         S: Future<Output = ()> + Send + 'static,
         R: FnOnce() -> Rf + Send + 'static,
-        Rf: Future<Output = ()> + Send + 'static,
+        Rf: Future<Output = Option<pico_shared::proto::DeployReport>> + Send + 'static,
     {
         let App {
             mut client,
@@ -70,6 +70,7 @@ impl App {
             tracker,
         } = self;
         let shard_manager = client.shard_manager.clone();
+        let http = client.http.clone();
         {
             let cancel = cancel.clone();
             tracker.spawn(async move {
@@ -88,8 +89,10 @@ impl App {
                 tokio::select! {
                     () = cancel.cancelled() => {}
                     ready = ready_rx => {
-                        if ready.is_ok() {
-                            on_connected().await;
+                        if ready.is_ok()
+                            && let Some(report) = on_connected().await
+                        {
+                            crate::discord::post_deploy_report(&http, report).await;
                         }
                     }
                 }
