@@ -53,6 +53,7 @@ expected until step 4.
 ```sh
 mkdir -p ~/.pico/workers/default/secrets
 printf '%s' 'YOUR_BOT_TOKEN' > ~/.pico/workers/default/secrets/discord_bot_token
+chmod 600 ~/.pico/workers/default/secrets/discord_bot_token
 
 cat > ~/.pico/workers/default/config.toml <<'EOF'
 [[guild]]

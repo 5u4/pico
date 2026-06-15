@@ -11,7 +11,7 @@ use tokio::{io::BufReader, net::UnixStream};
 use crate::config::Config;
 
 pub async fn deploy(arg: Option<String>) -> color_eyre::Result<()> {
-    let arg = arg.ok_or_else(|| eyre!("usage: supervisor deploy <worker-binary>"))?;
+    let arg = arg.ok_or_else(|| eyre!("usage: pico-supervisor deploy <worker-binary>"))?;
     report(
         send(Request::Deploy {
             path: PathBuf::from(arg),
