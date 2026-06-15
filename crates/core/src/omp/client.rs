@@ -96,7 +96,7 @@ impl OmpClient {
     ) -> color_eyre::Result<(OmpClient, mpsc::UnboundedReceiver<OmpEvent>)> {
         let mut cmd = build_command(config);
 
-        let mut child = cmd.spawn().wrap_err("spawn `omp --mode rpc`")?;
+        let mut child = cmd.spawn().wrap_err("spawn `omp --mode rpc-ui`")?;
         let stdin = child.stdin.take().ok_or_else(|| eyre!("omp child has no stdin"))?;
         let stdout = child.stdout.take().ok_or_else(|| eyre!("omp child has no stdout"))?;
         let stderr = child.stderr.take().ok_or_else(|| eyre!("omp child has no stderr"))?;
@@ -359,12 +359,13 @@ mod tests {
 
     #[test]
     fn build_command_starts_child_in_configured_cwd() {
+        let cwd = std::env::temp_dir().join("pico-cwd");
         let config = SpawnConfig {
-            cwd: Some(PathBuf::from("/tmp/pico-cwd")),
+            cwd: Some(cwd.clone()),
             ..SpawnConfig::default()
         };
         let cmd = build_command(&config);
-        assert_eq!(cmd.as_std().get_current_dir(), Some(std::path::Path::new("/tmp/pico-cwd")));
+        assert_eq!(cmd.as_std().get_current_dir(), Some(cwd.as_path()));
     }
 
     #[test]
