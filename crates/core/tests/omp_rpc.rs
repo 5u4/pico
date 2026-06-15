@@ -278,6 +278,74 @@ async fn ask_tool_round_trips_a_selection() {
     client.shutdown().await.expect("shutdown");
 }
 
+/// Picking "Other" chains the select into an `editor` request; the host answers
+/// it with free text and the ask must resolve with that custom input. Grounds the
+/// editor round-trip that `ui::text_prompt`'s modal loop drives.
+#[tokio::test]
+#[ignore]
+async fn ask_tool_round_trips_custom_input() {
+    let cwd = TempDir::new("pico-omp-ask-custom");
+    let config = SpawnConfig {
+        model: Some("github-copilot/gpt-4o-mini".to_owned()),
+        cwd: Some(cwd.path.clone()),
+        ..SpawnConfig::default()
+    };
+
+    let tracker = TaskTracker::new();
+    let (client, mut events) = OmpClient::spawn(&config, &CancellationToken::new(), &tracker)
+        .await
+        .expect("spawn omp --mode rpc-ui");
+    client
+        .prompt(
+            "Use the ask tool — and nothing else — to ask me to pick a color. Provide exactly two \
+             options: \"Red\" and \"Blue\". You MUST call the ask tool and wait for my selection; do \
+             not answer yourself or pick for me.",
+        )
+        .await
+        .expect("prompt acked");
+
+    const CUSTOM: &str = "Chartreuse";
+    let mut saw_editor = false;
+    let mut ask_succeeded = false;
+    loop {
+        let event = tokio::time::timeout(Duration::from_secs(120), events.recv())
+            .await
+            .expect("timed out waiting for omp events")
+            .expect("event stream closed before agent_end");
+        match event {
+            // Choose "Other (type your own)" to force the editor follow-up.
+            OmpEvent::UiRequest(UiRequest::Select { id, options, .. }) => {
+                let other = options
+                    .iter()
+                    .find(|o| o.contains("Other"))
+                    .cloned()
+                    .expect("select offered no Other option");
+                client
+                    .ui_response(&UiResponse::value(&id, &other))
+                    .await
+                    .expect("send select response");
+            }
+            OmpEvent::UiRequest(UiRequest::Editor { id, .. }) => {
+                saw_editor = true;
+                client
+                    .ui_response(&UiResponse::value(&id, CUSTOM))
+                    .await
+                    .expect("send editor response");
+            }
+            OmpEvent::ToolEnd(end) if end.tool_name == "ask" => {
+                ask_succeeded = !end.is_error;
+            }
+            OmpEvent::AgentEnd => break,
+            OmpEvent::Error(e) => panic!("omp reported an error: {e}"),
+            _ => {}
+        }
+    }
+    assert!(saw_editor, "picking Other never produced an editor request");
+    assert!(ask_succeeded, "ask tool did not resolve after the custom input was sent");
+
+    client.shutdown().await.expect("shutdown");
+}
+
 /// The hardening for unrecognised UI methods replies `cancelled` keyed by the
 /// request's `id`. That is only safe if OMP ignores a response whose `id` has no
 /// pending dialog (a fire-and-forget method, or a method this build doesn't

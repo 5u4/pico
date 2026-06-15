@@ -23,6 +23,7 @@ pub(crate) struct Data {
     cancel: CancellationToken,
     tracker: TaskTracker,
     supervisor_socket: Option<std::path::PathBuf>,
+    pending_answers: crate::ui::PendingAnswers,
 }
 
 pub(crate) type Error = Box<dyn std::error::Error + Send + Sync>;
@@ -58,6 +59,7 @@ pub(crate) fn framework(
                     supervisor_socket,
                     cancel,
                     tracker,
+                    pending_answers: crate::ui::PendingAnswers::default(),
                 })
             })
         })
@@ -278,8 +280,9 @@ async fn on_event(
         let cancel = data.cancel.clone();
         let message = new_message.clone();
         let tracker = data.tracker.clone();
+        let pending_answers = data.pending_answers.clone();
         data.tracker.spawn(async move {
-            if let Err(e) = route_message(ctx, root, bindings, pool, cancel, tracker, message).await {
+            if let Err(e) = route_message(ctx, root, bindings, pool, cancel, tracker, pending_answers, message).await {
                 tracing::warn!(error = %format!("{e:#}"), "message turn failed");
             }
         });
@@ -300,6 +303,7 @@ fn resolve_route(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn route_message(
     ctx: serenity::Context,
     root: Arc<std::path::PathBuf>,
@@ -307,6 +311,7 @@ async fn route_message(
     pool: Arc<OmpPool>,
     cancel: CancellationToken,
     tracker: TaskTracker,
+    pending_answers: crate::ui::PendingAnswers,
     message: serenity::Message,
 ) -> color_eyre::Result<()> {
     let prompt = message.content.trim();
@@ -349,6 +354,13 @@ async fn route_message(
     } else {
         channel.id
     };
+
+    // An open `ask` on this thread takes the asker's next message (raw, not the
+    // trimmed prompt) as its typed answer instead of a lock-blocked second turn.
+    if in_thread && crate::ui::deliver_pending_answer(&pending_answers, channel.id, message.author.id, &message.content)
+    {
+        return Ok(());
+    }
 
     let (profile, cwd) = {
         let table = bindings.lock();
@@ -423,6 +435,7 @@ async fn route_message(
             profile_config.surface_thinking,
             in_thread.then_some(message.id),
             message.author.id,
+            &pending_answers,
         )
         .await?
     };
@@ -457,6 +470,7 @@ async fn drive_turn(
     surface_thinking: bool,
     reply_to: Option<serenity::MessageId>,
     author: serenity::UserId,
+    pending: &crate::ui::PendingAnswers,
 ) -> color_eyre::Result<TurnOutcome> {
     let _typing = target.start_typing(&ctx.http);
     session.client.prompt(prompt).await?;
@@ -526,12 +540,15 @@ async fn drive_turn(
                 // `handle_request` races `cancel`, so a restart never strands the turn.
                 activity.flush().await;
                 if let crate::ui::Handled::Cancelled =
-                    crate::ui::handle_request(ctx, target, &session.client, author, &req, cancel).await
+                    crate::ui::handle_request(ctx, target, &session.client, author, &req, cancel, pending).await
                 {
                     subagents.flush_all(false).await;
                     commit_reply(ctx, target, &reply, reply_to).await;
                     let _ = target
-                        .say(ctx, "worker is restarting; resend your message to continue")
+                        .say(
+                            ctx,
+                            "worker restarted, so the pending question was discarded; resend your message to continue",
+                        )
                         .await;
                     return Ok(TurnOutcome::Live);
                 }
