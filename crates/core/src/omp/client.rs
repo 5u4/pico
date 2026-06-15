@@ -52,6 +52,37 @@ pub struct OmpClient {
     pending: Pending,
 }
 
+/// Build the `omp --mode rpc-ui` command (split out from spawn to unit-test cwd wiring).
+fn build_command(config: &SpawnConfig) -> ProcCommand {
+    let mut cmd = ProcCommand::new("omp");
+    // `rpc-ui`, not `rpc`: same protocol but `hasUI: true`, so the interactive
+    // `ask` tool is registered and its prompts arrive as `extension_ui_request` frames.
+    cmd.arg("--mode").arg("rpc-ui");
+    if let Some(model) = &config.model {
+        cmd.arg("--model").arg(model);
+    }
+    if let Some(cwd) = &config.cwd {
+        // omp does not chdir to `--cwd`, so without this the child inherits the
+        // worker's launch dir and the binding/guild-default cwd is ignored.
+        cmd.current_dir(cwd);
+        cmd.arg("--cwd").arg(cwd);
+    }
+    if let Some(session_dir) = &config.session_dir {
+        cmd.arg("--session-dir").arg(session_dir);
+    }
+    if config.continue_session {
+        cmd.arg("--continue");
+    }
+    if let Some(prompt) = &config.append_system_prompt {
+        cmd.arg("--append-system-prompt").arg(prompt);
+    }
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    cmd
+}
+
 impl OmpClient {
     /// Spawn `omp --mode rpc-ui`, wait for its `ready` frame, and return the client
     /// alongside the session event stream. Errors if the binary cannot be
@@ -63,31 +94,9 @@ impl OmpClient {
         cancel: &CancellationToken,
         tracker: &TaskTracker,
     ) -> color_eyre::Result<(OmpClient, mpsc::UnboundedReceiver<OmpEvent>)> {
-        let mut cmd = ProcCommand::new("omp");
-        // `rpc-ui`, not `rpc`: same protocol but `hasUI: true`, so the interactive
-        // `ask` tool is registered and its prompts arrive as `extension_ui_request` frames.
-        cmd.arg("--mode").arg("rpc-ui");
-        if let Some(model) = &config.model {
-            cmd.arg("--model").arg(model);
-        }
-        if let Some(cwd) = &config.cwd {
-            cmd.arg("--cwd").arg(cwd);
-        }
-        if let Some(session_dir) = &config.session_dir {
-            cmd.arg("--session-dir").arg(session_dir);
-        }
-        if config.continue_session {
-            cmd.arg("--continue");
-        }
-        if let Some(prompt) = &config.append_system_prompt {
-            cmd.arg("--append-system-prompt").arg(prompt);
-        }
-        cmd.stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
+        let mut cmd = build_command(config);
 
-        let mut child = cmd.spawn().wrap_err("spawn `omp --mode rpc`")?;
+        let mut child = cmd.spawn().wrap_err("spawn `omp --mode rpc-ui`")?;
         let stdin = child.stdin.take().ok_or_else(|| eyre!("omp child has no stdin"))?;
         let stdout = child.stdout.take().ok_or_else(|| eyre!("omp child has no stdout"))?;
         let stderr = child.stderr.take().ok_or_else(|| eyre!("omp child has no stderr"))?;
@@ -341,5 +350,27 @@ async fn drain_stderr(stderr: ChildStderr, cancel: CancellationToken) {
             Ok(0) | Err(_) => break,
             Ok(_) => tracing::debug!(target: "omp_stderr", "{}", line.trim_end()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_command_starts_child_in_configured_cwd() {
+        let cwd = std::env::temp_dir().join("pico-cwd");
+        let config = SpawnConfig {
+            cwd: Some(cwd.clone()),
+            ..SpawnConfig::default()
+        };
+        let cmd = build_command(&config);
+        assert_eq!(cmd.as_std().get_current_dir(), Some(cwd.as_path()));
+    }
+
+    #[test]
+    fn build_command_without_cwd_inherits_worker_dir() {
+        let cmd = build_command(&SpawnConfig::default());
+        assert_eq!(cmd.as_std().get_current_dir(), None);
     }
 }

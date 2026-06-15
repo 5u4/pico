@@ -194,10 +194,10 @@ async fn task_update_carries_subagent_progress() {
             .expect("event stream closed before agent_end");
         match event {
             OmpEvent::ToolStart(ToolCallStart::Task(_)) => saw_task_start = true,
-            OmpEvent::ToolUpdate(update) if update.tool_name == "task" => {
-                if update.partial_result["details"]["progress"].is_array() {
-                    saw_progress = true;
-                }
+            OmpEvent::ToolUpdate(update)
+                if update.tool_name == "task" && update.partial_result["details"]["progress"].is_array() =>
+            {
+                saw_progress = true;
             }
             OmpEvent::AgentEnd => break,
             OmpEvent::Error(e) => panic!("omp reported an error: {e}"),
