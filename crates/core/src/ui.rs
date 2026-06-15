@@ -256,7 +256,7 @@ async fn text_prompt(
         return Handled::Continue;
     };
 
-    let interaction = match collect(ctx, msg.id, author, timeout, cancel).await {
+    let mut interaction = match collect(ctx, msg.id, author, timeout, cancel).await {
         Collected::Cancelled => {
             let _ = client.ui_response(&UiResponse::cancelled(id, false)).await;
             return Handled::Cancelled;
@@ -269,42 +269,86 @@ async fn text_prompt(
         Collected::Interaction(i) => *i,
     };
 
-    if interaction.data.custom_id != ID_ANSWER {
-        ack_update(ctx, &interaction, &resolved_line(title, None)).await;
-        let _ = client.ui_response(&UiResponse::cancelled(id, false)).await;
-        return Handled::Continue;
+    loop {
+        if interaction.data.custom_id != ID_ANSWER {
+            ack_update(ctx, &interaction, &resolved_line(title, None)).await;
+            let _ = client.ui_response(&UiResponse::cancelled(id, false)).await;
+            return Handled::Continue;
+        }
+        match run_modal(ctx, msg.id, author, title, &field, interaction, cancel).await {
+            ModalStep::Answered(text) => {
+                finalize(ctx, channel, msg.id, &resolved_line(title, Some(&text))).await;
+                let _ = client.ui_response(&UiResponse::value(id, &text)).await;
+                return Handled::Continue;
+            }
+            ModalStep::Restart => {
+                let _ = client.ui_response(&UiResponse::cancelled(id, false)).await;
+                return Handled::Cancelled;
+            }
+            ModalStep::Reclick(next) => interaction = *next,
+            // Modal closed with no click: keep the prompt open for the next click.
+            ModalStep::Closed => {
+                interaction = match collect(ctx, msg.id, author, None, cancel).await {
+                    Collected::Interaction(i) => *i,
+                    Collected::Cancelled => {
+                        let _ = client.ui_response(&UiResponse::cancelled(id, false)).await;
+                        return Handled::Cancelled;
+                    }
+                    Collected::Ended { .. } => {
+                        finalize(ctx, channel, msg.id, &resolved_line(title, None)).await;
+                        let _ = client.ui_response(&UiResponse::cancelled(id, false)).await;
+                        return Handled::Continue;
+                    }
+                };
+            }
+        }
     }
+}
 
-    // Opening the modal acks the Answer click; `quick_modal` then awaits the
-    // submit. Race `cancel` so a restart isn't stuck behind the long modal window.
+/// Outcome of opening one modal off a still-live carrier message.
+enum ModalStep {
+    Answered(String),
+    Reclick(Box<serenity::ComponentInteraction>),
+    /// Modal closed with no carrier click; the prompt stays open.
+    Closed,
+    Restart,
+}
+
+/// Open a modal off the Answer-click `interaction` and await its submit while a
+/// fresh carrier collector runs concurrently: Discord emits no event on modal
+/// dismiss, so the concurrent collector is what keeps Answer/cancel responsive.
+async fn run_modal(
+    ctx: &serenity::Context,
+    message_id: serenity::MessageId,
+    author: serenity::UserId,
+    title: &str,
+    field: &TextField<'_>,
+    interaction: serenity::ComponentInteraction,
+    cancel: &CancellationToken,
+) -> ModalStep {
     let modal = serenity::CreateQuickModal::new(modal_title(title))
         .timeout(MODAL_SUBMIT_WINDOW)
-        .field(modal_field(title, &field));
-    let result = tokio::select! {
-        () = cancel.cancelled() => {
-            let _ = client.ui_response(&UiResponse::cancelled(id, false)).await;
-            return Handled::Cancelled;
-        }
-        r = interaction.quick_modal(ctx, modal) => r,
-    };
-
-    match result {
-        Ok(Some(response)) => {
-            let text = response.inputs.into_iter().next().unwrap_or_default();
-            // Ack the submit (else "interaction failed"); the carrier is edited separately.
-            let _ = response
-                .interaction
-                .create_response(ctx, serenity::CreateInteractionResponse::Acknowledge)
-                .await;
-            finalize(ctx, channel, msg.id, &resolved_line(title, Some(&text))).await;
-            let _ = client.ui_response(&UiResponse::value(id, &text)).await;
-        }
-        Ok(None) | Err(_) => {
-            finalize(ctx, channel, msg.id, &resolved_line(title, None)).await;
-            let _ = client.ui_response(&UiResponse::cancelled(id, false)).await;
-        }
+        .field(modal_field(title, field));
+    tokio::select! {
+        () = cancel.cancelled() => ModalStep::Restart,
+        r = interaction.quick_modal(ctx, modal) => match r {
+            Ok(Some(response)) => {
+                let text = response.inputs.into_iter().next().unwrap_or_default();
+                // Ack the submit (else "interaction failed"); the carrier is edited separately.
+                let _ = response
+                    .interaction
+                    .create_response(ctx, serenity::CreateInteractionResponse::Acknowledge)
+                    .await;
+                ModalStep::Answered(text)
+            }
+            Ok(None) | Err(_) => ModalStep::Closed,
+        },
+        next = collect(ctx, message_id, author, None, cancel) => match next {
+            Collected::Interaction(i) => ModalStep::Reclick(i),
+            Collected::Cancelled => ModalStep::Restart,
+            Collected::Ended { .. } => ModalStep::Closed,
+        },
     }
-    Handled::Continue
 }
 
 async fn notify(ctx: &serenity::Context, channel: serenity::ChannelId, message: &str, notify_type: Option<&str>) {

@@ -531,7 +531,10 @@ async fn drive_turn(
                     subagents.flush_all(false).await;
                     commit_reply(ctx, target, &reply, reply_to).await;
                     let _ = target
-                        .say(ctx, "worker is restarting; resend your message to continue")
+                        .say(
+                            ctx,
+                            "worker restarted, so the pending question was discarded; resend your message to continue",
+                        )
                         .await;
                     return Ok(TurnOutcome::Live);
                 }
