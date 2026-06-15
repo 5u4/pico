@@ -1124,6 +1124,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "pico-supervisor"
+version = "0.1.0"
+dependencies = [
+ "color-eyre",
+ "libc",
+ "pico-shared",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "tracing",
+]
+
+[[package]]
+name = "pico-worker"
+version = "0.1.0"
+dependencies = [
+ "color-eyre",
+ "pico-core",
+ "pico-shared",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "pin-project-lite"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1788,22 +1815,6 @@ name = "subtle"
 version = "2.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
-
-[[package]]
-name = "supervisor"
-version = "0.1.0"
-dependencies = [
- "color-eyre",
- "libc",
- "pico-shared",
- "serde",
- "serde_json",
- "sha2",
- "tokio",
- "tokio-util",
- "toml",
- "tracing",
-]
 
 [[package]]
 name = "symlink"
@@ -2880,17 +2891,6 @@ dependencies = [
  "serde_json",
  "unicode-xid",
  "wasmparser",
-]
-
-[[package]]
-name = "worker"
-version = "0.1.0"
-dependencies = [
- "color-eyre",
- "pico-core",
- "pico-shared",
- "tokio",
- "tracing",
 ]
 
 [[package]]

@@ -1,11 +1,11 @@
 [package]
-name = "worker"
+name = "pico-worker"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 
 [[bin]]
-name = "worker"
+name = "pico-worker"
 path = "src/main.rs"
 
 [[bin]]

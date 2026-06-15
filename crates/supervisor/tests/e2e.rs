@@ -22,14 +22,14 @@ use serde_json::Value;
 
 /// A sibling binary in the same target dir as this test's supervisor binary.
 fn bin(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_supervisor")).with_file_name(name)
+    PathBuf::from(env!("CARGO_BIN_EXE_pico-supervisor")).with_file_name(name)
 }
 
 /// Path to the fake test-double worker (`crates/worker`'s `fake-worker` bin,
 /// behind the `test-stub` feature). The real worker only reaches "ready" by
 /// connecting to Discord, which a hermetic test can't do; the supervisor needs
 /// nothing but the ready ping, so these orchestration tests deploy the stub.
-/// Built on demand — `cargo test -p supervisor` builds no worker bin — with a
+/// Built on demand — `cargo test -p pico-supervisor` builds no worker bin — with a
 /// `OnceLock` so concurrent tests don't race the build.
 fn fake_worker_bin() -> PathBuf {
     static WORKER: OnceLock<PathBuf> = OnceLock::new();
@@ -38,9 +38,9 @@ fn fake_worker_bin() -> PathBuf {
             // Always rebuild: the supervisor runs the stub as `--version`, so it must be current.
             let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
             let status = Command::new(cargo)
-                .args(["build", "-p", "worker", "--features", "test-stub"])
+                .args(["build", "-p", "pico-worker", "--features", "test-stub"])
                 .status()
-                .expect("run cargo build -p worker --features test-stub");
+                .expect("run cargo build -p pico-worker --features test-stub");
             assert!(status.success(), "failed to build fake-worker binary");
             bin("fake-worker")
         })
@@ -115,7 +115,7 @@ impl Fixture {
             std::os::unix::fs::symlink(slot, slots.join("current")).unwrap();
         }
 
-        let sup = Command::new(bin("supervisor"))
+        let sup = Command::new(bin("pico-supervisor"))
             .env("HOME", &home)
             .spawn()
             .expect("spawn supervisor");
