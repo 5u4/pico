@@ -20,25 +20,35 @@ use tokio::sync::oneshot;
 
 /// The scripted `omp` stand-in, built once on demand beside this test binary.
 static SCRIPTED_OMP: LazyLock<PathBuf> = LazyLock::new(|| {
-    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
-    let status = Command::new(cargo)
-        .args([
-            "build",
-            "-p",
-            "pico-worker",
-            "--bin",
-            "scripted-omp",
-            "--features",
-            "test-stub",
-        ])
-        .status()
-        .expect("run cargo build -p pico-worker --bin scripted-omp --features test-stub");
-    assert!(status.success(), "failed to build scripted-omp binary");
     let exe = std::env::current_exe().expect("current_exe");
-    exe.parent()
+    let profile_dir = exe
+        .parent()
         .and_then(Path::parent)
-        .expect("test binary under <target>/<profile>/deps")
-        .join("scripted-omp")
+        .expect("test binary under <target>/<profile>/deps");
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+    let mut cmd = Command::new(cargo);
+    cmd.args([
+        "build",
+        "-p",
+        "pico-worker",
+        "--bin",
+        "scripted-omp",
+        "--features",
+        "test-stub",
+    ]);
+    // Match the test's own profile so the built bin lands in `profile_dir`.
+    match profile_dir.file_name().and_then(|n| n.to_str()) {
+        Some("debug") | None => {}
+        Some("release") => {
+            cmd.arg("--release");
+        }
+        Some(other) => {
+            cmd.args(["--profile", other]);
+        }
+    }
+    let status = cmd.status().expect("run cargo build scripted-omp");
+    assert!(status.success(), "failed to build scripted-omp binary");
+    profile_dir.join("scripted-omp")
 });
 
 fn load_env() {
@@ -106,12 +116,12 @@ async fn wait_msg(
     pred: impl Fn(&serenity::Message) -> bool,
 ) -> bool {
     for _ in 0..attempts {
-        tokio::time::sleep(Duration::from_secs(3)).await;
         if let Ok(messages) = tid.messages(driver, serenity::GetMessages::new().limit(25)).await
             && messages.iter().any(&pred)
         {
             return true;
         }
+        tokio::time::sleep(Duration::from_secs(3)).await;
     }
     false
 }
@@ -124,7 +134,7 @@ async fn answer_carrier(tid: serenity::ChannelId, driver: &serenity::Http, marke
     tid.say(driver, answer).await.is_ok()
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 #[ignore]
 async fn scripted_omp_drives_thread_and_ask_flows() {
     let _ = tracing_subscriber::fmt()
