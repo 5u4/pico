@@ -13,10 +13,16 @@ name = "fake-worker"
 path = "src/fake_worker.rs"
 required-features = ["test-stub"]
 
+[[bin]]
+name = "scripted-omp"
+path = "src/scripted_omp.rs"
+required-features = ["test-stub"]
+
 [dependencies]
 color-eyre.workspace = true
 pico-core.workspace = true
 pico-shared.workspace = true
+serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 

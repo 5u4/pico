@@ -1146,6 +1146,7 @@ dependencies = [
  "color-eyre",
  "pico-core",
  "pico-shared",
+ "serde_json",
  "tokio",
  "tracing",
 ]
