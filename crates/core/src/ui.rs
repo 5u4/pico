@@ -1,7 +1,7 @@
 //! Renders OMP's extension-UI requests (the `ask` tool's `select`/`editor`
 //! prompts, plus confirm/input/notify) as Discord components and replies over
 //! RPC. The host MUST answer: `ask.timeout` is `0`, so an unanswered prompt
-//! blocks the turn forever. Handled inline — `ask` is `exclusive` and turns
+//! is bounded at [`ASK_TIMEOUT`], not infinite. Handled inline — `ask` is `exclusive` and turns
 //! serialise, so one prompt is open at a time; the collector races `cancel`.
 
 use std::{fmt::Write as _, time::Duration};
@@ -26,6 +26,8 @@ const ANSWER_PREVIEW_CAP: usize = 200;
 const SELECT_MAX_OPTIONS: usize = 25;
 /// Below Discord's ~15 min modal auto-close, so an abandoned modal can't pin a turn.
 const MODAL_SUBMIT_WINDOW: Duration = Duration::from_secs(14 * 60);
+/// Host ceiling bounding an otherwise-infinite ask, so an unanswered prompt can't pin the omp child. see also: crate::omp::pool.
+const ASK_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
 const ID_SELECT: &str = "ui:select";
 const ID_CANCEL: &str = "ui:cancel";
@@ -460,6 +462,10 @@ enum Collected {
     Cancelled,
 }
 
+fn answer_window(timeout: Option<u64>) -> Duration {
+    timeout.filter(|&ms| ms > 0).map_or(ASK_TIMEOUT, Duration::from_millis)
+}
+
 async fn collect(
     ctx: &serenity::Context,
     message_id: serenity::MessageId,
@@ -471,9 +477,7 @@ async fn collect(
     let mut collector = serenity::ComponentInteractionCollector::new(ctx)
         .message_id(message_id)
         .author_id(author);
-    if let Some(ms) = timeout {
-        collector = collector.timeout(Duration::from_millis(ms));
-    }
+    collector = collector.timeout(answer_window(timeout));
     let answered = async {
         match answer {
             Some(rx) => rx.recv().await,
@@ -489,7 +493,7 @@ async fn collect(
         },
         result = collector.next() => match result {
             Some(interaction) => Collected::Interaction(Box::new(interaction)),
-            None => Collected::Ended { timed_out: timeout.is_some() },
+            None => Collected::Ended { timed_out: timeout.is_some_and(|ms| ms > 0) },
         },
     }
 }
@@ -700,5 +704,16 @@ mod tests {
         }
         assert!(!pending.lock().contains_key(&channel));
         assert!(!deliver_pending_answer(&pending, channel, author, "blue"));
+    }
+
+    #[test]
+    fn answer_window_bounds_infinite_ask() {
+        assert_eq!(answer_window(None), ASK_TIMEOUT);
+        assert_eq!(answer_window(Some(0)), ASK_TIMEOUT);
+    }
+
+    #[test]
+    fn answer_window_honors_finite_omp_timeout() {
+        assert_eq!(answer_window(Some(5000)), Duration::from_millis(5000));
     }
 }
