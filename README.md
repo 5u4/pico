@@ -25,7 +25,7 @@ This guide targets **Linux** (systemd). macOS/Windows are not covered.
 │   ├── slots/
 │   │   ├── current             # symlink to builds/<id>/worker (absolute), booted on startup
 │   │   └── previous            # symlink to the prior build, rollback target
-│   ├── builds/<id>/worker       # deploy copies each binary here
+│   ├── builds/<id>/worker       # each deploy stages the worker binary here
 │   └── logs/                    # supervisor.<date>.log
 └── workers/
     └── default/                 # the worker root
@@ -94,7 +94,7 @@ here is ignored entirely, so this file is required to do anything useful:
 cat > ~/.pico/workers/default/config.toml <<'EOF'
 # One block per served Discord server.
 [[guild]]
-id = "123456789012345678"            # the guild (server) id, 17–20 digits, quoted
+id = "123456789012345678"            # guild (server) id; quoted or a bare integer, quote to be safe
 cwd = "/home/you/projects/app"        # absolute dir omp runs in for this guild
 profile = "default"                   # optional; defaults to "default"
 EOF
