@@ -40,6 +40,59 @@ pub enum Handled {
     Cancelled,
 }
 
+/// One thread's open value-bearing `ask` dialog: the router hands the asker's
+/// next message to `tx` so it answers the dialog instead of starting a turn.
+pub struct PendingAnswer {
+    author: serenity::UserId,
+    tx: tokio::sync::mpsc::UnboundedSender<String>,
+}
+
+/// Per-thread registry of open `select`/`input`/`editor` dialogs, keyed by the
+/// Discord thread channel. see also: crate::discord (route_message delivers here).
+pub type PendingAnswers =
+    std::sync::Arc<parking_lot::Mutex<std::collections::HashMap<serenity::ChannelId, PendingAnswer>>>;
+
+/// Deliver `text` as the answer to the dialog open on `channel`, if one waits on
+/// `author`. Returns whether consumed. Consuming *takes* the entry, so a same-author
+/// follow-up before the guard drops falls through to a new turn, not a dead buffer.
+pub fn deliver_pending_answer(
+    pending: &PendingAnswers,
+    channel: serenity::ChannelId,
+    author: serenity::UserId,
+    text: &str,
+) -> bool {
+    let mut registry = pending.lock();
+    if !matches!(registry.get(&channel), Some(p) if p.author == author) {
+        return false;
+    }
+    let entry = registry
+        .remove(&channel)
+        .expect("entry present: just matched under the lock");
+    entry.tx.send(text.to_owned()).is_ok()
+}
+
+/// Removes its `channel` entry on drop, so a post-dialog message starts a new turn.
+struct AnswerGuard<'a> {
+    pending: &'a PendingAnswers,
+    channel: serenity::ChannelId,
+}
+
+impl Drop for AnswerGuard<'_> {
+    fn drop(&mut self) {
+        self.pending.lock().remove(&self.channel);
+    }
+}
+
+fn register_answer(
+    pending: &PendingAnswers,
+    channel: serenity::ChannelId,
+    author: serenity::UserId,
+) -> (AnswerGuard<'_>, tokio::sync::mpsc::UnboundedReceiver<String>) {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    pending.lock().insert(channel, PendingAnswer { author, tx });
+    (AnswerGuard { pending, channel }, rx)
+}
+
 /// Render `req` on Discord and reply over RPC. Only `author` (this turn's sender) can answer.
 pub async fn handle_request(
     ctx: &serenity::Context,
@@ -48,6 +101,7 @@ pub async fn handle_request(
     author: serenity::UserId,
     req: &UiRequest,
     cancel: &CancellationToken,
+    pending: &PendingAnswers,
 ) -> Handled {
     match req {
         UiRequest::Select {
@@ -55,7 +109,10 @@ pub async fn handle_request(
             title,
             options,
             timeout,
-        } => select(ctx, channel, client, author, id, title, options, *timeout, cancel).await,
+        } => {
+            let (_guard, mut rx) = register_answer(pending, channel, author);
+            select(ctx, channel, client, author, id, title, options, *timeout, cancel, &mut rx).await
+        }
         UiRequest::Confirm {
             id,
             title,
@@ -68,20 +125,22 @@ pub async fn handle_request(
             placeholder,
             timeout,
         } => {
+            let (_guard, mut rx) = register_answer(pending, channel, author);
             let field = TextField {
                 multiline: false,
                 value: None,
                 placeholder: placeholder.as_deref(),
             };
-            text_prompt(ctx, channel, client, author, id, title, field, *timeout, cancel).await
+            text_prompt(ctx, channel, client, author, id, title, field, *timeout, cancel, &mut rx).await
         }
         UiRequest::Editor { id, title, prefill } => {
+            let (_guard, mut rx) = register_answer(pending, channel, author);
             let field = TextField {
                 multiline: true,
                 value: prefill.as_deref(),
                 placeholder: None,
             };
-            text_prompt(ctx, channel, client, author, id, title, field, None, cancel).await
+            text_prompt(ctx, channel, client, author, id, title, field, None, cancel, &mut rx).await
         }
         UiRequest::Notify { message, notify_type } => {
             notify(ctx, channel, message, notify_type.as_deref()).await;
@@ -115,6 +174,7 @@ async fn select(
     options: &[String],
     timeout: Option<u64>,
     cancel: &CancellationToken,
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
 ) -> Handled {
     // Empty list: OMP's `select` resolves to a cancel, so mirror it, not a dead menu.
     if options.is_empty() {
@@ -127,7 +187,7 @@ async fn select(
         return Handled::Continue;
     };
 
-    let interaction = match collect(ctx, msg.id, author, timeout, cancel).await {
+    let interaction = match collect(ctx, msg.id, author, timeout, cancel, Some(rx)).await {
         Collected::Cancelled => {
             let _ = client.ui_response(&UiResponse::cancelled(id, false)).await;
             return Handled::Cancelled;
@@ -135,6 +195,11 @@ async fn select(
         Collected::Ended { timed_out } => {
             finalize(ctx, channel, msg.id, &resolved_line(title, None)).await;
             let _ = client.ui_response(&UiResponse::cancelled(id, timed_out)).await;
+            return Handled::Continue;
+        }
+        Collected::Text(text) => {
+            finalize(ctx, channel, msg.id, &resolved_line(title, Some(&text))).await;
+            let _ = client.ui_response(&UiResponse::value(id, &text)).await;
             return Handled::Continue;
         }
         Collected::Interaction(i) => *i,
@@ -197,7 +262,7 @@ async fn confirm(
         return Handled::Continue;
     };
 
-    let interaction = match collect(ctx, msg.id, author, timeout, cancel).await {
+    let interaction = match collect(ctx, msg.id, author, timeout, cancel, None).await {
         Collected::Cancelled => {
             let _ = client.ui_response(&UiResponse::cancelled(id, false)).await;
             return Handled::Cancelled;
@@ -214,6 +279,8 @@ async fn confirm(
             };
             return Handled::Continue;
         }
+        // `confirm` is button-only (yes/no), so it registers no answer channel.
+        Collected::Text(_) => unreachable!("confirm registers no text answer channel"),
         Collected::Interaction(i) => *i,
     };
 
@@ -240,9 +307,10 @@ async fn text_prompt(
     field: TextField<'_>,
     timeout: Option<u64>,
     cancel: &CancellationToken,
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
 ) -> Handled {
     let hint = field.placeholder.map(|p| format!(" ({p})")).unwrap_or_default();
-    let content = clamp_content(&format!("❓ {title}{hint}\n_Click **Answer** to reply._"));
+    let content = clamp_content(&format!("❓ {title}{hint}\n_Reply here, or click **Answer** for a form._"));
     let components = vec![serenity::CreateActionRow::Buttons(vec![
         serenity::CreateButton::new(ID_ANSWER)
             .label("Answer")
@@ -256,7 +324,7 @@ async fn text_prompt(
         return Handled::Continue;
     };
 
-    let mut interaction = match collect(ctx, msg.id, author, timeout, cancel).await {
+    let mut interaction = match collect(ctx, msg.id, author, timeout, cancel, Some(&mut *rx)).await {
         Collected::Cancelled => {
             let _ = client.ui_response(&UiResponse::cancelled(id, false)).await;
             return Handled::Cancelled;
@@ -264,6 +332,11 @@ async fn text_prompt(
         Collected::Ended { timed_out } => {
             finalize(ctx, channel, msg.id, &resolved_line(title, None)).await;
             let _ = client.ui_response(&UiResponse::cancelled(id, timed_out)).await;
+            return Handled::Continue;
+        }
+        Collected::Text(text) => {
+            finalize(ctx, channel, msg.id, &resolved_line(title, Some(&text))).await;
+            let _ = client.ui_response(&UiResponse::value(id, &text)).await;
             return Handled::Continue;
         }
         Collected::Interaction(i) => *i,
@@ -275,7 +348,7 @@ async fn text_prompt(
             let _ = client.ui_response(&UiResponse::cancelled(id, false)).await;
             return Handled::Continue;
         }
-        match run_modal(ctx, msg.id, author, title, &field, interaction, cancel).await {
+        match run_modal(ctx, msg.id, author, title, &field, interaction, cancel, &mut *rx).await {
             ModalStep::Answered(text) => {
                 finalize(ctx, channel, msg.id, &resolved_line(title, Some(&text))).await;
                 let _ = client.ui_response(&UiResponse::value(id, &text)).await;
@@ -288,7 +361,7 @@ async fn text_prompt(
             ModalStep::Reclick(next) => interaction = *next,
             // Modal closed with no click: keep the prompt open for the next click.
             ModalStep::Closed => {
-                interaction = match collect(ctx, msg.id, author, None, cancel).await {
+                interaction = match collect(ctx, msg.id, author, None, cancel, Some(&mut *rx)).await {
                     Collected::Interaction(i) => *i,
                     Collected::Cancelled => {
                         let _ = client.ui_response(&UiResponse::cancelled(id, false)).await;
@@ -297,6 +370,11 @@ async fn text_prompt(
                     Collected::Ended { .. } => {
                         finalize(ctx, channel, msg.id, &resolved_line(title, None)).await;
                         let _ = client.ui_response(&UiResponse::cancelled(id, false)).await;
+                        return Handled::Continue;
+                    }
+                    Collected::Text(text) => {
+                        finalize(ctx, channel, msg.id, &resolved_line(title, Some(&text))).await;
+                        let _ = client.ui_response(&UiResponse::value(id, &text)).await;
                         return Handled::Continue;
                     }
                 };
@@ -316,7 +394,10 @@ enum ModalStep {
 
 /// Open a modal off the Answer-click `interaction` and await its submit while a
 /// fresh carrier collector runs concurrently: Discord emits no event on modal
-/// dismiss, so the concurrent collector is what keeps Answer/cancel responsive.
+/// dismiss, so the concurrent collector keeps Answer/cancel — and a typed answer
+/// in the channel — responsive instead of stranding the turn until the modal's
+/// 14-minute timeout.
+#[allow(clippy::too_many_arguments)]
 async fn run_modal(
     ctx: &serenity::Context,
     message_id: serenity::MessageId,
@@ -325,6 +406,7 @@ async fn run_modal(
     field: &TextField<'_>,
     interaction: serenity::ComponentInteraction,
     cancel: &CancellationToken,
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
 ) -> ModalStep {
     let modal = serenity::CreateQuickModal::new(modal_title(title))
         .timeout(MODAL_SUBMIT_WINDOW)
@@ -343,10 +425,12 @@ async fn run_modal(
             }
             Ok(None) | Err(_) => ModalStep::Closed,
         },
-        next = collect(ctx, message_id, author, None, cancel) => match next {
+        next = collect(ctx, message_id, author, None, cancel, Some(&mut *rx)) => match next {
             Collected::Interaction(i) => ModalStep::Reclick(i),
             Collected::Cancelled => ModalStep::Restart,
             Collected::Ended { .. } => ModalStep::Closed,
+            // A typed answer resolves the editor; a still-open modal becomes a stale submit.
+            Collected::Text(text) => ModalStep::Answered(text),
         },
     }
 }
@@ -368,6 +452,7 @@ async fn notify(ctx: &serenity::Context, channel: serenity::ChannelId, message: 
 
 enum Collected {
     Interaction(Box<serenity::ComponentInteraction>),
+    Text(String),
     /// Ended with no pick. `timed_out` only when a timeout was set and fired.
     Ended {
         timed_out: bool,
@@ -381,6 +466,7 @@ async fn collect(
     author: serenity::UserId,
     timeout: Option<u64>,
     cancel: &CancellationToken,
+    answer: Option<&mut tokio::sync::mpsc::UnboundedReceiver<String>>,
 ) -> Collected {
     let mut collector = serenity::ComponentInteractionCollector::new(ctx)
         .message_id(message_id)
@@ -388,8 +474,19 @@ async fn collect(
     if let Some(ms) = timeout {
         collector = collector.timeout(Duration::from_millis(ms));
     }
+    let answered = async {
+        match answer {
+            Some(rx) => rx.recv().await,
+            None => std::future::pending::<Option<String>>().await,
+        }
+    };
     tokio::select! {
         () = cancel.cancelled() => Collected::Cancelled,
+        text = answered => match text {
+            Some(t) => Collected::Text(t),
+            // Sender dropped (dialog ending): treat as a plain end, not a pick.
+            None => Collected::Ended { timed_out: false },
+        },
         result = collector.next() => match result {
             Some(interaction) => Collected::Interaction(Box::new(interaction)),
             None => Collected::Ended { timed_out: timeout.is_some() },
@@ -565,5 +662,43 @@ mod tests {
     fn resolved_line_marks_choice_and_cancel() {
         assert!(resolved_line("Pick", Some("Option A")).contains("→ Option A"));
         assert!(resolved_line("Pick", None).contains("cancelled"));
+    }
+
+    #[test]
+    fn deliver_pending_answer_routes_text_to_the_asker() {
+        let pending = PendingAnswers::default();
+        let channel = serenity::ChannelId::new(7);
+        let author = serenity::UserId::new(42);
+        let (_guard, mut rx) = register_answer(&pending, channel, author);
+
+        assert!(deliver_pending_answer(&pending, channel, author, "blue"));
+        assert_eq!(rx.try_recv().ok(), Some("blue".to_owned()));
+        assert!(!deliver_pending_answer(&pending, channel, author, "green"));
+        assert!(!pending.lock().contains_key(&channel));
+    }
+
+    #[test]
+    fn deliver_pending_answer_ignores_other_authors_and_channels() {
+        let pending = PendingAnswers::default();
+        let channel = serenity::ChannelId::new(7);
+        let author = serenity::UserId::new(42);
+        let (_guard, _rx) = register_answer(&pending, channel, author);
+
+        assert!(!deliver_pending_answer(&pending, channel, serenity::UserId::new(99), "blue"));
+        assert!(!deliver_pending_answer(&pending, serenity::ChannelId::new(8), author, "blue"));
+        assert!(deliver_pending_answer(&pending, channel, author, "blue"));
+    }
+
+    #[test]
+    fn answer_guard_deregisters_on_drop() {
+        let pending = PendingAnswers::default();
+        let channel = serenity::ChannelId::new(7);
+        let author = serenity::UserId::new(42);
+        {
+            let (_guard, _rx) = register_answer(&pending, channel, author);
+            assert!(pending.lock().contains_key(&channel));
+        }
+        assert!(!pending.lock().contains_key(&channel));
+        assert!(!deliver_pending_answer(&pending, channel, author, "blue"));
     }
 }

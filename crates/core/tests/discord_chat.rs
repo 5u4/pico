@@ -1,7 +1,8 @@
 //! End-to-end test for the message-driven chat path: a driver bot posts in a
 //! channel bound to a profile; pico opens a thread off that message and posts a
 //! buffered OMP (Copilot) reply into it, then a follow-up posted inside the thread
-//! comes back as a native Discord reply referencing it. Also asserts the gateway connects and shuts
+//! comes back as a native Discord reply referencing it, and an `ask` is answered
+//! by typing a reply (not a button). Also asserts the gateway connects and shuts
 //! down cleanly — folded in from a former standalone gateway test so the pico
 //! bot connects only once per run; two back-to-back connections of the same bot
 //! trip Discord's per-bot identify/session limit and flake on connect.
@@ -179,6 +180,52 @@ async fn bound_message_opens_thread_and_replies() {
         }
     }
 
+    // Third turn: agent opens an `ask` select; a typed reply (no click) must resolve it.
+    let mut ask_answered = false;
+    if let Some(tid) = thread {
+        tid.say(
+            &driver,
+            format!(
+                "Use the ask tool — and nothing else — to ask me to pick a color, with exactly two \
+                 options \"Red\" and \"Blue\". You MUST call the ask tool and wait for my answer; do \
+                 not pick for me. (e2e {marker} c)"
+            ),
+        )
+        .await
+        .expect("driver failed to post ask prompt");
+
+        // The carrier appears only after pico registers the pending answer.
+        let mut carrier_seen = false;
+        for _ in 0..40 {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            if let Ok(messages) = tid.messages(&driver, serenity::GetMessages::new().limit(25)).await
+                && messages
+                    .iter()
+                    .any(|m| m.content.contains('❓') && m.content.contains("Blue"))
+            {
+                carrier_seen = true;
+                break;
+            }
+        }
+
+        if carrier_seen {
+            tid.say(&driver, "Blue")
+                .await
+                .expect("driver failed to post the typed answer");
+            for _ in 0..20 {
+                tokio::time::sleep(Duration::from_secs(3)).await;
+                if let Ok(messages) = tid.messages(&driver, serenity::GetMessages::new().limit(25)).await
+                    && messages
+                        .iter()
+                        .any(|m| m.content.contains('✅') && m.content.contains("Blue"))
+                {
+                    ask_answered = true;
+                    break;
+                }
+            }
+        }
+    }
+
     // Tear down before asserting so a failure still cleans up the thread + bot.
     if let Some(tid) = thread {
         let _ = tid.delete(&driver).await;
@@ -190,6 +237,10 @@ async fn bound_message_opens_thread_and_replies() {
     assert!(replied, "pico opened a thread but never posted a 'pong' reply");
     assert!(referenced, "pico's in-thread reply did not reference the follow-up message");
     assert!(renamed, "pico opened a thread but never renamed it to a generated title");
+    assert!(
+        ask_answered,
+        "a plain-text message did not resolve the ask select (carrier never reached its ✅ resolved line)"
+    );
     shutdown
         .expect("pico did not shut down within 15s")
         .expect("run task panicked")
