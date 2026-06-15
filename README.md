@@ -1,245 +1,113 @@
 # pico
 
-A Discord bot that fronts the Oh My Pi coding agent (`omp`). Two binaries:
+A self-hosted Discord bot that fronts the Oh My Pi coding agent (`omp`): each
+Discord thread drives one `omp` session. A small **supervisor** daemon keeps the
+**worker** (the bot) alive and hot-swaps it on deploy, rolling back automatically
+if a new build fails to come up.
 
-- **`supervisor`** — a long-running daemon. It owns the control socket, manages
-  the worker binary in `current`/`previous` slots, and hot-deploys / rolls back
-  the worker without losing in-flight work. Run with **no arguments** to start
-  the daemon; the same binary with a subcommand (`deploy`, `status`, `stop`,
-  `rollback`) is a thin client that talks to a running daemon over its socket.
-- **`worker`** — the Discord client. One per host. It connects to the gateway,
-  routes each thread to an `omp --mode rpc-ui` child, and reports `ready` back to
-  the supervisor so a bad deploy fails its health check and rolls back instead
-  of half-starting. Spawned and supervised by the daemon; you never launch it by
-  hand after the first deploy.
+## Quickstart (Linux)
 
-This guide targets **Linux** (systemd). macOS/Windows are not covered.
+Prerequisites: a Rust toolchain, `omp` on your `PATH`, and a Discord bot token
+with the **Message Content** intent enabled.
 
-## How it fits together
-
-```
-~/.pico/
-├── supervisor/
-│   ├── supervisor.toml          # optional daemon config (see below)
-│   ├── pico.sock                # control socket (created at runtime)
-│   ├── slots/
-│   │   ├── current             # symlink to builds/<id>/worker (absolute), booted on startup
-│   │   └── previous            # symlink to the prior build, rollback target
-│   ├── builds/<id>/worker       # each deploy stages the worker binary here
-│   └── logs/                    # supervisor.<date>.log
-└── workers/
-    └── default/                 # the worker root
-        ├── secrets/
-        │   └── discord_bot_token   # REQUIRED — the bot token, nothing else
-        ├── config.toml             # which guilds are served (see below)
-        ├── bindings.toml           # per-channel routing, managed by /bind
-        ├── profiles/<name>/
-        │   ├── config.toml         # model + display options
-        │   └── identity.md         # appended system prompt
-        └── logs/                   # worker.<date>.log
-```
-
-Everything hangs off `$HOME/.pico`, resolved from the running user's home — so
-the supervisor and your `supervisor status` client must run as the **same user**.
-That is also why the recommended deployment is a **systemd user service**: `$HOME`
-is correct automatically, no dedicated account or root is needed.
-
-## Prerequisites
-
-- **Rust 1.92+** (`rustup`) to build the binaries.
-- **`omp` on the service's `PATH`.** The worker spawns `omp --mode rpc-ui` per
-  thread; if it is not reachable, every turn fails. systemd services do **not**
-  inherit your interactive shell `PATH`, so the unit below sets it explicitly —
-  make sure the directory holding `omp` is in it.
-- **An `omp` model provider configured for the service user.** The worker passes
-  no provider credentials; `omp` resolves its own from its `$HOME`-based
-  credential store (or env). Because the user service runs as you, an `omp`
-  login you already did on the box works as-is.
-- **A Discord bot application** with a token and the **Message Content** intent
-  enabled (Developer Portal → Bot → Privileged Gateway Intents). Invite it to
-  your server with the `bot` and `applications.commands` scopes.
-
-## 1. Build
+### 1. Clone and install the binaries
 
 ```sh
-cargo build --release -p supervisor -p worker
+git clone https://github.com/5u4/pico.git
+cd pico
+cargo install --path crates/supervisor   # -> ~/.cargo/bin/pico-supervisor
+cargo install --path crates/worker       # -> ~/.cargo/bin/pico-worker
 ```
 
-This produces `target/release/supervisor` and `target/release/worker`.
+Make sure `~/.cargo/bin` is on your `PATH`.
 
-## 2. Install the supervisor binary
-
-Only the **supervisor** needs a stable install path — the worker binary is taken
-over by `deploy` (copied into `~/.pico/supervisor/builds/`). Put it somewhere on
-your `PATH`:
+### 2. Run the supervisor under systemd
 
 ```sh
-mkdir -p ~/.local/bin
-install -m755 target/release/supervisor ~/.local/bin/supervisor
-# ensure ~/.local/bin is on your interactive PATH (add to ~/.profile if needed)
-```
-
-## 3. Configure the worker root
-
-```sh
-mkdir -p ~/.pico/workers/default/secrets
-printf '%s' 'YOUR_DISCORD_BOT_TOKEN' > ~/.pico/workers/default/secrets/discord_bot_token
-chmod 600 ~/.pico/workers/default/secrets/discord_bot_token
-```
-
-Then declare which Discord servers the bot serves. A guild **without** an entry
-here is ignored entirely, so this file is required to do anything useful:
-
-```sh
-cat > ~/.pico/workers/default/config.toml <<'EOF'
-# One block per served Discord server.
-[[guild]]
-id = "123456789012345678"            # guild (server) id; quoted or a bare integer, quote to be safe
-cwd = "/home/you/projects/app"        # absolute dir omp runs in for this guild
-profile = "default"                   # optional; defaults to "default"
-EOF
-```
-
-Channels inside a served guild default to that guild's `(profile, cwd)`; the
-in-Discord `/bind` command overrides a single channel and writes `bindings.toml`
-for you. A profile is optional — `profiles/<name>/config.toml` can set
-`[llm] model = "provider/model"` and `[discord] surface_thinking = true`, and
-`identity.md` is appended to the system prompt — but the defaults work with no
-profile directory at all.
-
-### Optional: `supervisor.toml`
-
-Drop `~/.pico/supervisor/supervisor.toml` only to override defaults; every field
-is optional:
-
-```toml
-# socket_path = "/run/user/1000/pico.sock"   # default: ~/.pico/supervisor/pico.sock
-health_timeout_secs = 30                       # worker readiness + shutdown grace
-
-# [[workers]]                                  # default: ~/.pico/workers/default
-# root = "/home/you/.pico/workers/default"
-```
-
-## 4. Run the supervisor under systemd (user service)
-
-Create `~/.config/systemd/user/pico-supervisor.service`:
-
-```ini
+mkdir -p ~/.config/systemd/user
+cat > ~/.config/systemd/user/pico-supervisor.service <<'EOF'
 [Unit]
-Description=pico supervisor (Discord worker manager)
+Description=pico supervisor
 
 [Service]
-Type=simple
-ExecStart=%h/.local/bin/supervisor
+ExecStart=%h/.cargo/bin/pico-supervisor
 Restart=always
 RestartSec=2
 # The worker spawns `omp` from this PATH — include the dir omp lives in.
-Environment=PATH=%h/.local/bin:%h/.bun/bin:%h/.cargo/bin:/usr/local/bin:/usr/bin:/bin
-# Environment=RUST_LOG=info
+Environment=PATH=%h/.cargo/bin:%h/.bun/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 
 [Install]
 WantedBy=default.target
-```
+EOF
 
-`Type=simple` fits: the supervisor stays in the foreground and shuts down
-cleanly on `SIGTERM` (drains in-flight deploys, stops the worker, removes the
-socket), so `systemctl stop` is graceful. The unit is intentionally **not**
-sandboxed (`ProtectHome`, etc.) — `omp` needs broad filesystem access to do its
-work.
-
-Enable it, and make it survive logout and reboot:
-
-```sh
-sudo loginctl enable-linger "$USER"        # run without an active login session
+sudo loginctl enable-linger "$USER"        # keep it running across logout/reboot
 systemctl --user daemon-reload
 systemctl --user enable --now pico-supervisor
 ```
 
-Check it and follow logs:
+It comes up with no worker yet and logs `no current slot; awaiting deploy` —
+expected until step 4.
+
+### 3. Add the bot token and server config
 
 ```sh
-systemctl --user status pico-supervisor
-journalctl --user -u pico-supervisor -f    # daemon journal
-tail -f ~/.pico/supervisor/logs/supervisor.*.log
-tail -f ~/.pico/workers/default/logs/worker.*.log
+mkdir -p ~/.pico/workers/default/secrets
+printf '%s' 'YOUR_BOT_TOKEN' > ~/.pico/workers/default/secrets/discord_bot_token
+
+cat > ~/.pico/workers/default/config.toml <<'EOF'
+[[guild]]
+id = "YOUR_DISCORD_SERVER_ID"        # 17–20 digit snowflake
+cwd = "/abs/path/the/bot/works/in"   # where omp runs for this server
+EOF
 ```
 
-On a fresh box the daemon starts, binds the socket, finds no `current` slot, and
-logs `no current slot; awaiting deploy` — that is expected until the first
-deploy. A `status`/`deploy` fired in the first moment after start can race the
-socket bind and report "is the supervisor running?"; just retry.
+A server with no `[[guild]]` entry is ignored.
 
-## 5. First deploy
-
-With the daemon running, hand it a freshly built worker binary. It copies the
-binary into its own tree, spawns it, waits for the `ready` ping, and only then
-promotes the `current` slot — so the next reboot re-spawns this worker
-automatically. (That boot re-spawn still has to connect to Discord and report
-`ready` within `health_timeout_secs`; on a cold boot where the network isn't up
-in time the supervisor logs the failure and awaits a manual deploy — it does not
-auto-retry. Raise `health_timeout_secs`, or order the unit after the network, if
-that bites.)
+### 4. Deploy the worker
 
 ```sh
-cargo build --release -p worker
-supervisor deploy "$(pwd)/target/release/worker"   # path MUST be absolute
-supervisor status
+pico-supervisor deploy "$(command -v pico-worker)"
+pico-supervisor status
 ```
 
-You can also deploy from a configured Discord channel:
-
-```
-/deploy path:/abs/path/to/target/release/worker
-```
-
-The new worker posts the deploy outcome back to the channel it was triggered
-from.
+The supervisor copies the binary into its own tree, starts it, and waits for it
+to connect to Discord before going live; on the next reboot it brings this worker
+back automatically. The bot is up — try `/ping` in a configured channel.
 
 ## Operating
 
 ```sh
-supervisor status      # running pid, current slot, version/build, recent deploys
-supervisor deploy <abs-path-to-worker>   # roll forward; auto-rolls-back if it fails health check
-supervisor rollback    # swap back to the previous slot
-supervisor stop        # stop the worker (the daemon keeps running)
-systemctl --user restart pico-supervisor # restart the daemon itself
+pico-supervisor status               # pid, current build, recent deploys
+pico-supervisor deploy <abs-path>    # roll forward (auto-rolls-back on failure)
+pico-supervisor rollback             # return to the previous build
+pico-supervisor stop                 # stop the worker; the daemon keeps running
+journalctl --user -u pico-supervisor -f
 ```
 
-**Updating the worker:** rebuild (`cargo build --release -p worker`) and
-`supervisor deploy` the new binary. If it boots but misbehaves, `supervisor
-rollback` returns to the previous slot. A deploy that fails to report `ready`
-within `health_timeout_secs` is rolled back for you.
-
-## Alternative: system-wide service
-
-If you would rather not enable lingering — e.g. a shared or headless host — run
-it as a system service instead. Install the binary under the target user's home,
-then create `/etc/systemd/system/pico-supervisor.service`:
-
-```ini
-[Unit]
-Description=pico supervisor
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=pico
-Environment=HOME=/home/pico
-Environment=PATH=/home/pico/.local/bin:/home/pico/.bun/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=/home/pico/.local/bin/supervisor
-Restart=always
-RestartSec=2
-
-[Install]
-WantedBy=multi-user.target
-```
+**Update the bot** (from the repo): `git pull`, then
 
 ```sh
-sudo systemctl enable --now pico-supervisor
+cargo install --path crates/worker
+pico-supervisor deploy "$(command -v pico-worker)"
 ```
 
-`User=pico` already makes systemd populate `$HOME` from the account database, so
-the explicit `Environment=HOME=` is redundant — it just pins the value visibly,
-since every path resolves from it. Run the `supervisor` client as that same user
-(`sudo -u pico supervisor status`) so it finds the same socket.
+or `/deploy path:<abs-path>` from a configured Discord channel.
+
+## Layout & config
+
+Everything lives under `~/.pico`, split into two trees the daemon and bot never
+write across:
+
+- `~/.pico/supervisor/` — the daemon's own state: control socket, build slots,
+  staged worker binaries, logs. Optional `supervisor.toml` overrides defaults
+  (`health_timeout_secs`, `socket_path`, worker `root`).
+- `~/.pico/workers/default/` — the worker root: `secrets/discord_bot_token`,
+  `config.toml` (served servers), `bindings.toml` (per-channel routing, written
+  by the in-Discord `/bind` command), optional `profiles/<name>/`, and logs.
+
+## Running as a system service
+
+Prefer not to enable lingering (e.g. a shared host)? Install the unit at
+`/etc/systemd/system/pico-supervisor.service` with `User=you` and an explicit
+`Environment=PATH=…` instead of a user unit, then `sudo systemctl enable --now
+pico-supervisor`. Everything still resolves from that user's `$HOME`.
