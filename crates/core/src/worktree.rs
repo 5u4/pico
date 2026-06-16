@@ -38,9 +38,7 @@ pub fn worktree_path(worktrees_dir: &Path, channel_id: &str, thread_id: &str) ->
 }
 
 /// Resolve the git worktree for a thread, creating it if absent, and return its
-/// path for use as the turn's cwd. Idempotent: an existing worktree is reused; a
-/// missing one is forked off `default_branch` (after a best-effort `git fetch
-/// origin` when that ref is an `origin/…` form).
+/// derived path for use as the turn's cwd.
 pub async fn ensure(
     worktrees_dir: &Path,
     channel_id: &str,
@@ -49,10 +47,18 @@ pub async fn ensure(
     default_branch: &str,
 ) -> color_eyre::Result<PathBuf> {
     let path = worktree_path(worktrees_dir, channel_id, thread_id);
+    ensure_at(&path, thread_id, base_repo, default_branch).await?;
+    Ok(path)
+}
 
+/// Create the worktree at an explicit `path` (idempotent: an existing worktree is
+/// reused; a missing one is forked off `default_branch` after a best-effort `git
+/// fetch origin` for `origin/…` refs). Used to recreate a thread's frozen
+/// worktree path if it was torn down out from under the worker.
+pub async fn ensure_at(path: &Path, thread_id: &str, base_repo: &Path, default_branch: &str) -> color_eyre::Result<()> {
     let _guard = CREATE_LOCK.lock().await;
     if path.join(".git").exists() {
-        return Ok(path);
+        return Ok(());
     }
     if path.exists() {
         bail!(
@@ -112,7 +118,7 @@ pub async fn ensure(
         .await
         .wrap_err("git worktree add")?;
     }
-    Ok(path)
+    Ok(())
 }
 
 /// Validate a worktree base at bind time so `/bind worktree` rejects a bad setup

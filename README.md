@@ -130,6 +130,11 @@ dir = "/abs/path/for/worktrees"
 Worktrees persist across restarts (threads resume in place) and aren't torn down
 automatically.
 
+A thread's route (profile + cwd/worktree) is frozen on its first message, so
+rebinding or unbinding a channel only affects new threads, not ones already
+running. To re-point an existing thread, delete its marker at
+`<root>/threads/<thread-id>.toml`; its next message re-adopts the channel binding.
+
 ## Running as a system service
 
 Prefer not to enable lingering (e.g. a shared host)? Install the unit at

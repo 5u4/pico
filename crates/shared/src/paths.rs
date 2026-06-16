@@ -67,3 +67,10 @@ pub fn profile_session_dir(root: &Path, name: &str, thread_id: &str) -> PathBuf 
 pub fn default_worktrees_dir(root: &Path) -> PathBuf {
     root.join("worktrees")
 }
+
+/// `<root>/threads/<thread_id>.toml` — a thread's frozen route marker (profile +
+/// cwd, plus worktree origin), pinning it so a later channel rebind doesn't
+/// migrate an existing thread. Keyed by thread id, independent of profile.
+pub fn thread_marker(root: &Path, thread_id: &str) -> PathBuf {
+    root.join("threads").join(format!("{thread_id}.toml"))
+}

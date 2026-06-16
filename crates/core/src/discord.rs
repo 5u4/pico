@@ -450,10 +450,11 @@ async fn route_message(
         resolve_route(guild_default, table.get(&bound_channel.to_string()))
     };
 
-    // A regular cwd was valid when bound but may have been torn down since (host
-    // rebuild); reject it before opening a thread. A worktree's cwd doesn't exist
-    // until creation, which needs the thread id, so it's resolved after.
-    if let Route::Regular { cwd, .. } = &route
+    // A top-level message must not open a thread for a regular binding whose cwd
+    // was torn down (host rebuild). In-thread turns instead use the thread's
+    // frozen marker below; a worktree's cwd is created after the thread id exists.
+    if !in_thread
+        && let Route::Regular { cwd, .. } = &route
         && !cwd.is_dir()
     {
         message
@@ -484,34 +485,92 @@ async fn route_message(
     };
     let thread_id = target.to_string();
 
-    // A worktree binding forks (or reuses) a per-thread git worktree as the cwd;
-    // setup failures post in-thread rather than failing the omp spawn to logs.
-    let (profile, cwd) = match route {
-        Route::Regular { profile, cwd } => (profile, cwd),
-        Route::Worktree {
-            profile,
-            base_repo,
-            default_branch,
-        } => {
-            let worktrees_dir = root_config
-                .worktrees_dir()
-                .map(std::path::Path::to_path_buf)
-                .unwrap_or_else(|| pico_shared::paths::default_worktrees_dir(root.as_path()));
-            match crate::worktree::ensure(
-                &worktrees_dir,
-                &bound_channel.to_string(),
-                &thread_id,
-                &base_repo,
-                &default_branch,
-            )
-            .await
-            {
-                Ok(path) => (profile, path),
-                Err(e) => {
+    // An existing thread runs its frozen route (recorded on its first turn), so a
+    // later channel rebind never migrates it; a new thread resolves from the
+    // binding and persists a marker. An unreadable marker self-heals to the binding.
+    let (profile, cwd) = match crate::thread_marker::load(root.as_path(), &thread_id) {
+        Some(marker) => {
+            if let Some(wt) = &marker.worktree {
+                if let Err(e) =
+                    crate::worktree::ensure_at(&marker.cwd, &thread_id, &wt.base_repo, &wt.default_branch).await
+                {
                     target.say(&ctx, format!("❌ worktree setup failed: {e}")).await?;
                     return Ok(());
                 }
+            } else if !marker.cwd.is_dir() {
+                target
+                    .say(
+                        &ctx,
+                        format!(
+                            "❌ working directory `{}` is missing or not a directory — fix it on the host and resend.",
+                            marker.cwd.display()
+                        ),
+                    )
+                    .await?;
+                return Ok(());
             }
+            (marker.profile, marker.cwd)
+        }
+        None => {
+            let (profile, cwd, worktree) = match route {
+                Route::Regular { profile, cwd } => {
+                    if !cwd.is_dir() {
+                        target
+                            .say(
+                                &ctx,
+                                format!(
+                                    "❌ working directory `{}` is missing or not a directory — fix it on the host and resend.",
+                                    cwd.display()
+                                ),
+                            )
+                            .await?;
+                        return Ok(());
+                    }
+                    (profile, cwd, None)
+                }
+                Route::Worktree {
+                    profile,
+                    base_repo,
+                    default_branch,
+                } => {
+                    let worktrees_dir = root_config
+                        .worktrees_dir()
+                        .map(std::path::Path::to_path_buf)
+                        .unwrap_or_else(|| pico_shared::paths::default_worktrees_dir(root.as_path()));
+                    match crate::worktree::ensure(
+                        &worktrees_dir,
+                        &bound_channel.to_string(),
+                        &thread_id,
+                        &base_repo,
+                        &default_branch,
+                    )
+                    .await
+                    {
+                        Ok(path) => (
+                            profile,
+                            path,
+                            Some(crate::thread_marker::WorktreeOrigin {
+                                base_repo,
+                                default_branch,
+                            }),
+                        ),
+                        Err(e) => {
+                            target.say(&ctx, format!("❌ worktree setup failed: {e}")).await?;
+                            return Ok(());
+                        }
+                    }
+                }
+            };
+            crate::thread_marker::save(
+                root.as_path(),
+                &thread_id,
+                &crate::thread_marker::ThreadMarker {
+                    profile: profile.clone(),
+                    cwd: cwd.clone(),
+                    worktree,
+                },
+            );
+            (profile, cwd)
         }
     };
     tracing::info!(%thread_id, %profile, in_thread, "driving omp turn");
