@@ -62,11 +62,18 @@ pub struct GuildDefault {
 /// default `(profile, cwd)`.
 pub struct RootConfig {
     guilds: HashMap<String, GuildDefault>,
+    worktrees_dir: Option<PathBuf>,
 }
 
 impl RootConfig {
     pub fn guild(&self, guild_id: &str) -> Option<&GuildDefault> {
         self.guilds.get(guild_id)
+    }
+
+    /// Parent dir for per-thread git worktrees (`[worktree] dir`). `None` means
+    /// unset — the worker then falls back to `<root>/worktrees`.
+    pub fn worktrees_dir(&self) -> Option<&Path> {
+        self.worktrees_dir.as_deref()
     }
 }
 
@@ -74,6 +81,13 @@ impl RootConfig {
 struct RawRootConfig {
     #[serde(default)]
     guild: Vec<RawGuild>,
+    #[serde(default)]
+    worktree: Option<RawWorktree>,
+}
+
+#[derive(serde::Deserialize)]
+struct RawWorktree {
+    dir: String,
 }
 
 #[derive(serde::Deserialize)]
@@ -94,7 +108,10 @@ pub fn load_root(config_path: &Path) -> color_eyre::Result<RootConfig> {
     let text = match std::fs::read_to_string(config_path) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(RootConfig { guilds: HashMap::new() });
+            return Ok(RootConfig {
+                guilds: HashMap::new(),
+                worktrees_dir: None,
+            });
         }
         Err(e) => {
             return Err(e).wrap_err_with(|| format!("reading {}", config_path.display()));
@@ -132,7 +149,20 @@ pub fn load_root(config_path: &Path) -> color_eyre::Result<RootConfig> {
         }
         guilds.insert(g.id, GuildDefault { profile, cwd });
     }
-    Ok(RootConfig { guilds })
+    let worktrees_dir = match raw.worktree {
+        Some(w) => {
+            let dir = crate::bindings::expand_home(&w.dir);
+            if !dir.is_absolute() {
+                return Err(color_eyre::eyre::eyre!(
+                    "[worktree] dir {} must be an absolute path",
+                    dir.display()
+                ));
+            }
+            Some(dir)
+        }
+        None => None,
+    };
+    Ok(RootConfig { guilds, worktrees_dir })
 }
 
 #[cfg(test)]
@@ -276,6 +306,34 @@ mod tests {
             "[[guild]]\nid = \"123456789012345678\"\ncwd = \"/tmp\"\n\n[[guild]]\nid = \"123456789012345678\"\ncwd = \"/var\"\n",
         )
         .unwrap();
+        assert!(super::load_root(&path).is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn load_root_reads_worktrees_dir() {
+        let dir = temp_dir("rootwt");
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "[worktree]\ndir = \"/srv/worktrees\"\n").unwrap();
+        let cfg = super::load_root(&path).unwrap();
+        assert_eq!(cfg.worktrees_dir(), Some(PathBuf::from("/srv/worktrees").as_path()));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn load_root_worktrees_dir_absent_is_none() {
+        let dir = temp_dir("rootwtnone");
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "[[guild]]\nid = \"123456789012345678\"\ncwd = \"/tmp\"\n").unwrap();
+        assert!(super::load_root(&path).unwrap().worktrees_dir().is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn load_root_rejects_relative_worktrees_dir() {
+        let dir = temp_dir("rootwtrel");
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "[worktree]\ndir = \"relative/wt\"\n").unwrap();
         assert!(super::load_root(&path).is_err());
         std::fs::remove_dir_all(&dir).ok();
     }

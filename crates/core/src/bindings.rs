@@ -10,8 +10,20 @@ use serde::{Deserialize, Serialize};
 pub struct Binding {
     pub channel_id: String,
     pub profile: String,
-    pub cwd: PathBuf,
+    pub kind: BindingKind,
 }
+
+/// What a bound channel's threads run against. `Regular` pins one cwd for every
+/// thread; `Worktree` forks a fresh git worktree per thread off `base_repo`.
+pub enum BindingKind {
+    Regular { cwd: PathBuf },
+    Worktree { base_repo: PathBuf, default_branch: String },
+}
+
+/// Start ref a worktree binding forks from when the entry names none. The
+/// `origin/` prefix forks freshly-fetched remote main; a bare local branch
+/// (e.g. `main`) opts out of the fetch and forks offline.
+pub const DEFAULT_BRANCH: &str = "origin/main";
 
 pub struct Bindings {
     inner: HashMap<String, Binding>,
@@ -37,7 +49,12 @@ struct RawBinding {
     channel_id: String,
     profile: String,
     kind: String,
-    cwd: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    base_repo: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    default_branch: Option<String>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -56,29 +73,64 @@ pub fn load(path: &Path) -> color_eyre::Result<Bindings> {
 
     let mut inner = HashMap::with_capacity(file.binding.len());
     for raw in file.binding {
-        if raw.kind != "regular" {
-            return Err(color_eyre::eyre::eyre!(
-                "binding for channel {id}: unsupported kind {kind:?} (only \"regular\" in stage 1)",
-                id = raw.channel_id,
-                kind = raw.kind,
-            ));
+        let binding = binding_from_raw(raw)?;
+        if inner.contains_key(&binding.channel_id) {
+            return Err(color_eyre::eyre::eyre!("duplicate binding for channel {}", binding.channel_id));
         }
-        let cwd = expand_home(&raw.cwd);
-        validate_binding(&raw.channel_id, &raw.profile, &cwd)?;
-        if inner.contains_key(&raw.channel_id) {
-            return Err(color_eyre::eyre::eyre!("duplicate binding for channel {}", raw.channel_id));
-        }
-        inner.insert(
-            raw.channel_id.clone(),
-            Binding {
-                channel_id: raw.channel_id,
-                profile: raw.profile,
-                cwd,
-            },
-        );
+        inner.insert(binding.channel_id.clone(), binding);
     }
 
     Ok(Bindings { inner })
+}
+
+/// Parse + validate one raw entry. Cheap, sync invariants run here (ids, profile,
+/// absolute existing paths, branch syntax) so a hand-edited file fails at load,
+/// not at spawn. A worktree `base_repo`'s git-repo-ness is *not* checked here
+/// (that's an async check in `/bind worktree`; otherwise it surfaces as a runtime
+/// `git worktree` error).
+fn binding_from_raw(raw: RawBinding) -> color_eyre::Result<Binding> {
+    let RawBinding {
+        channel_id,
+        profile,
+        kind,
+        cwd,
+        base_repo,
+        default_branch,
+    } = raw;
+    validate_identity(&channel_id, &profile)?;
+    let kind = match kind.as_str() {
+        "regular" => {
+            let cwd = cwd.ok_or_else(|| {
+                color_eyre::eyre::eyre!("binding for channel {channel_id}: kind \"regular\" requires cwd")
+            })?;
+            let cwd = expand_home(&cwd);
+            validate_existing_dir("cwd", &cwd)?;
+            BindingKind::Regular { cwd }
+        }
+        "worktree" => {
+            let base_repo = base_repo.ok_or_else(|| {
+                color_eyre::eyre::eyre!("binding for channel {channel_id}: kind \"worktree\" requires base_repo")
+            })?;
+            let base_repo = expand_home(&base_repo);
+            validate_existing_dir("base_repo", &base_repo)?;
+            let default_branch = default_branch.unwrap_or_else(|| DEFAULT_BRANCH.to_owned());
+            validate_branch(&default_branch)?;
+            BindingKind::Worktree {
+                base_repo,
+                default_branch,
+            }
+        }
+        other => {
+            return Err(color_eyre::eyre::eyre!(
+                "binding for channel {channel_id}: unsupported kind {other:?} (\"regular\" or \"worktree\")"
+            ));
+        }
+    };
+    Ok(Binding {
+        channel_id,
+        profile,
+        kind,
+    })
 }
 
 pub fn set(path: &Path, channel_id: &str, profile: &str, cwd: &Path) -> color_eyre::Result<()> {
@@ -86,23 +138,63 @@ pub fn set(path: &Path, channel_id: &str, profile: &str, cwd: &Path) -> color_ey
         Some(s) => expand_home(s),
         None => cwd.to_path_buf(),
     };
-    validate_binding(channel_id, profile, &cwd)?;
+    validate_identity(channel_id, profile)?;
+    validate_existing_dir("cwd", &cwd)?;
 
-    // Serialize the whole read-modify-write so two concurrent /bind commands
-    // can't lose each other's update (last writer wins on the file otherwise).
+    upsert(
+        path,
+        RawBinding {
+            channel_id: channel_id.to_string(),
+            profile: profile.to_string(),
+            kind: "regular".to_string(),
+            cwd: Some(cwd.to_string_lossy().into_owned()),
+            base_repo: None,
+            default_branch: None,
+        },
+    )
+}
+
+/// Write a worktree binding: every thread in `channel_id` forks a fresh git
+/// worktree off `base_repo` at `default_branch`. The caller verifies `base_repo`
+/// is a git repo (async `git`) first; this re-checks only the cheap filesystem
+/// invariants `load` also enforces.
+pub fn set_worktree(
+    path: &Path,
+    channel_id: &str,
+    profile: &str,
+    base_repo: &Path,
+    default_branch: &str,
+) -> color_eyre::Result<()> {
+    let base_repo = match base_repo.to_str() {
+        Some(s) => expand_home(s),
+        None => base_repo.to_path_buf(),
+    };
+    validate_identity(channel_id, profile)?;
+    validate_existing_dir("base_repo", &base_repo)?;
+    validate_branch(default_branch)?;
+
+    upsert(
+        path,
+        RawBinding {
+            channel_id: channel_id.to_string(),
+            profile: profile.to_string(),
+            kind: "worktree".to_string(),
+            cwd: None,
+            base_repo: Some(base_repo.to_string_lossy().into_owned()),
+            default_branch: Some(default_branch.to_string()),
+        },
+    )
+}
+
+/// Upsert one entry by channel id under the write lock — so two concurrent
+/// `/bind`s can't lose each other's update — then atomically rewrite the file.
+fn upsert(path: &Path, entry: RawBinding) -> color_eyre::Result<()> {
     let _guard = write_lock();
     let mut file = read_raw(path)?.unwrap_or(RawFile { binding: Vec::new() });
-    let entry = RawBinding {
-        channel_id: channel_id.to_string(),
-        profile: profile.to_string(),
-        kind: "regular".to_string(),
-        cwd: cwd.to_string_lossy().into_owned(),
-    };
-    match file.binding.iter_mut().find(|b| b.channel_id == channel_id) {
+    match file.binding.iter_mut().find(|b| b.channel_id == entry.channel_id) {
         Some(existing) => *existing = entry,
         None => file.binding.push(entry),
     }
-
     write_atomic(path, &file)
 }
 
@@ -167,11 +259,32 @@ pub(crate) fn is_valid_profile(name: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
-/// Invariants for a binding, enforced both when `/bind set` writes one and when
-/// `load` reads the file, so a hand-edited `bindings.toml` fails fast instead of
-/// at `omp` spawn. The profile check is a security boundary: it becomes a path
-/// component under `<root>/profiles/`, so `..` or an absolute path would escape.
-fn validate_binding(channel_id: &str, profile: &str, cwd: &Path) -> color_eyre::Result<()> {
+/// A worktree start ref reaches `git worktree add … <ref>` (and a thread marker
+/// reaches it from disk) as an option-parseable positional, so reject anything
+/// option-like (leading `-`) or outside git-ref-safe chars — blocks
+/// `--upload-pack=…`-style arg injection.
+pub(crate) fn is_valid_branch(branch: &str) -> bool {
+    !branch.is_empty()
+        && !branch.starts_with('-')
+        && !branch.contains("..")
+        && branch
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'/' | b'-'))
+}
+
+fn validate_branch(branch: &str) -> color_eyre::Result<()> {
+    if !is_valid_branch(branch) {
+        return Err(color_eyre::eyre::eyre!(
+            "invalid branch {branch:?} (no leading '-', chars [A-Za-z0-9._/-], no \"..\")"
+        ));
+    }
+    Ok(())
+}
+
+/// Identity invariants shared by every binding kind. The profile check is a
+/// security boundary: it becomes a path component under `<root>/profiles/`, so
+/// `..` or an absolute path would escape.
+fn validate_identity(channel_id: &str, profile: &str) -> color_eyre::Result<()> {
     if !is_valid_snowflake(channel_id) {
         return Err(color_eyre::eyre::eyre!(
             "invalid channel id {channel_id:?} (must match ^[0-9]{{17,20}}$)"
@@ -182,13 +295,19 @@ fn validate_binding(channel_id: &str, profile: &str, cwd: &Path) -> color_eyre::
             "invalid profile {profile:?} (must match ^[A-Za-z0-9_-]+$)"
         ));
     }
-    if !cwd.is_absolute() {
-        return Err(color_eyre::eyre::eyre!("cwd {} must be an absolute path", cwd.display()));
+    Ok(())
+}
+
+/// A binding path (`cwd` for regular, `base_repo` for worktree) must be an
+/// absolute, existing directory; `label` names it in the error.
+fn validate_existing_dir(label: &str, path: &Path) -> color_eyre::Result<()> {
+    if !path.is_absolute() {
+        return Err(color_eyre::eyre::eyre!("{label} {} must be an absolute path", path.display()));
     }
-    match std::fs::metadata(cwd) {
+    match std::fs::metadata(path) {
         Ok(meta) if meta.is_dir() => Ok(()),
-        Ok(_) => Err(color_eyre::eyre::eyre!("cwd {} is not a directory", cwd.display())),
-        Err(e) => Err(e).wrap_err_with(|| format!("cwd {} is not accessible", cwd.display())),
+        Ok(_) => Err(color_eyre::eyre::eyre!("{label} {} is not a directory", path.display())),
+        Err(e) => Err(e).wrap_err_with(|| format!("{label} {} is not accessible", path.display())),
     }
 }
 
@@ -278,7 +397,8 @@ cwd = "/var"
         assert_eq!(bindings.len(), 2);
         assert!(!bindings.is_empty());
         assert_eq!(bindings.get("1234567890123456789").unwrap().profile, "sen");
-        assert_eq!(bindings.get("9876543210987654321").unwrap().cwd, PathBuf::from("/var"));
+        let b = bindings.get("9876543210987654321").unwrap();
+        assert!(matches!(&b.kind, super::BindingKind::Regular { cwd } if cwd == &PathBuf::from("/var")));
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -319,21 +439,121 @@ cwd = "/var"
     }
 
     #[test]
-    fn unsupported_kind_errors() {
+    fn unknown_kind_errors() {
         let dir = temp_dir("kind");
         let path = dir.join("bindings.toml");
         std::fs::write(
             &path,
-            r#"
-[[binding]]
-channel_id = "1234567890123456789"
-profile = "sen"
-kind = "worktree"
-cwd = "/tmp"
-"#,
+            "[[binding]]\nchannel_id = \"1234567890123456789\"\nprofile = \"sen\"\nkind = \"bogus\"\ncwd = \"/tmp\"\n",
         )
         .unwrap();
+        assert!(super::load(&path).is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
+    #[test]
+    fn loads_worktree_binding() {
+        let dir = temp_dir("wt");
+        let repo = dir.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let path = dir.join("bindings.toml");
+        std::fs::write(
+            &path,
+            format!(
+                "[[binding]]\nchannel_id = \"1234567890123456789\"\nprofile = \"sen\"\nkind = \"worktree\"\nbase_repo = {repo:?}\ndefault_branch = \"trunk\"\n"
+            ),
+        )
+        .unwrap();
+        let bindings = super::load(&path).unwrap();
+        match &bindings.get("1234567890123456789").unwrap().kind {
+            super::BindingKind::Worktree {
+                base_repo,
+                default_branch,
+            } => {
+                assert_eq!(base_repo, &repo);
+                assert_eq!(default_branch, "trunk");
+            }
+            _ => panic!("expected worktree"),
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn worktree_defaults_branch_to_origin_main() {
+        let dir = temp_dir("wtdefault");
+        let path = dir.join("bindings.toml");
+        std::fs::write(
+            &path,
+            format!(
+                "[[binding]]\nchannel_id = \"1234567890123456789\"\nprofile = \"sen\"\nkind = \"worktree\"\nbase_repo = {dir:?}\n"
+            ),
+        )
+        .unwrap();
+        let bindings = super::load(&path).unwrap();
+        match &bindings.get("1234567890123456789").unwrap().kind {
+            super::BindingKind::Worktree { default_branch, .. } => assert_eq!(default_branch, super::DEFAULT_BRANCH),
+            _ => panic!("expected worktree"),
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn worktree_requires_base_repo() {
+        let dir = temp_dir("wtnorepo");
+        let path = dir.join("bindings.toml");
+        std::fs::write(
+            &path,
+            "[[binding]]\nchannel_id = \"1234567890123456789\"\nprofile = \"sen\"\nkind = \"worktree\"\n",
+        )
+        .unwrap();
+        assert!(super::load(&path).is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn set_worktree_roundtrips() {
+        let dir = temp_dir("setwt");
+        let path = dir.join("bindings.toml");
+        super::set_worktree(&path, "11111111111111111", "sen", &dir, "main").unwrap();
+        let bindings = super::load(&path).unwrap();
+        match &bindings.get("11111111111111111").unwrap().kind {
+            super::BindingKind::Worktree {
+                base_repo,
+                default_branch,
+            } => {
+                assert_eq!(base_repo, &dir);
+                assert_eq!(default_branch, "main");
+            }
+            _ => panic!("expected worktree"),
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn set_worktree_rejects_option_like_branch() {
+        let dir = temp_dir("wtbadbranch");
+        let path = dir.join("bindings.toml");
+        for bad in ["--upload-pack=touch /tmp/x", "-", "--all", "a b", "x..y", ""] {
+            assert!(
+                super::set_worktree(&path, "11111111111111111", "sen", &dir, bad).is_err(),
+                "branch {bad:?} should be rejected"
+            );
+        }
+        super::set_worktree(&path, "11111111111111111", "sen", &dir, "release/1.x").unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn load_rejects_option_like_default_branch() {
+        let dir = temp_dir("wtbadload");
+        let path = dir.join("bindings.toml");
+        std::fs::write(
+            &path,
+            format!(
+                "[[binding]]\nchannel_id = \"1234567890123456789\"\nprofile = \"sen\"\nkind = \"worktree\"\nbase_repo = {dir:?}\ndefault_branch = \"--upload-pack=x\"\n"
+            ),
+        )
+        .unwrap();
         assert!(super::load(&path).is_err());
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -347,7 +567,7 @@ cwd = "/tmp"
         let bindings = super::load(&path).unwrap();
         let binding = bindings.get("11111111111111111").unwrap();
         assert_eq!(binding.profile, "sen");
-        assert_eq!(binding.cwd, dir);
+        assert!(matches!(&binding.kind, super::BindingKind::Regular { cwd } if cwd == &dir));
 
         std::fs::remove_dir_all(&dir).ok();
     }

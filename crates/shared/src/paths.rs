@@ -60,3 +60,17 @@ pub fn profile_identity(root: &Path, name: &str) -> PathBuf {
 pub fn profile_session_dir(root: &Path, name: &str, thread_id: &str) -> PathBuf {
     profile_dir(root, name).join("sessions").join(thread_id)
 }
+
+/// `<root>/worktrees` — default parent for per-thread git worktrees when the
+/// worker config's `[worktree] dir` is unset. Taken from the root (like every
+/// other worker path) so it honors a `worker --path` override.
+pub fn default_worktrees_dir(root: &Path) -> PathBuf {
+    root.join("worktrees")
+}
+
+/// `<root>/threads/<thread_id>.toml` — a thread's frozen route marker (profile +
+/// cwd, plus worktree origin), pinning it so a later channel rebind doesn't
+/// migrate an existing thread. Keyed by thread id, independent of profile.
+pub fn thread_marker(root: &Path, thread_id: &str) -> PathBuf {
+    root.join("threads").join(format!("{thread_id}.toml"))
+}
