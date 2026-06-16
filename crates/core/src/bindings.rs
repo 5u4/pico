@@ -83,9 +83,11 @@ pub fn load(path: &Path) -> color_eyre::Result<Bindings> {
     Ok(Bindings { inner })
 }
 
-/// Parse + validate one raw entry. Validation runs here, not only at `/bind`
-/// write time, so a hand-edited `bindings.toml` fails fast at load instead of at
-/// `omp`/`git` spawn.
+/// Parse + validate one raw entry. Cheap, sync invariants run here (ids, profile,
+/// absolute existing paths, branch syntax) so a hand-edited file fails at load,
+/// not at spawn. A worktree `base_repo`'s git-repo-ness is *not* checked here
+/// (that's an async check in `/bind worktree`; otherwise it surfaces as a runtime
+/// `git worktree` error).
 fn binding_from_raw(raw: RawBinding) -> color_eyre::Result<Binding> {
     let RawBinding {
         channel_id,
