@@ -29,6 +29,8 @@ jobs:
       - run: cargo test --workspace
       - name: lint-comments tests
         run: bash scripts/lint-comments.test.sh
+      - name: worktree-ambient-link tests
+        run: bash scripts/link-worktree-ambient.test.sh
       - name: lint-comments
         env:
           BASE_REF: ${{ github.base_ref }}
