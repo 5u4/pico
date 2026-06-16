@@ -6,5 +6,5 @@
 # a failing post-checkout must never break `git worktree add`.
 main="$(git worktree list --porcelain 2>/dev/null | awk '/^worktree /{sub(/^worktree /, ""); print; exit}')"
 script="$main/scripts/link-worktree-ambient.sh"
-[ -x "$script" ] && exec "$script" "$@"
+[ -n "$main" ] && [ -x "$script" ] && exec "$script" "$@"
 exit 0

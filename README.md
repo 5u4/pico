@@ -146,8 +146,8 @@ This repo ships a `post-checkout` hook (`.githooks/post-checkout` →
 `scripts/link-worktree-ambient.sh`) that symlinks those local files from the main
 checkout into each new worktree. Wire the repo's hooks once with `scripts/install-hooks.sh`
 (it points `core.hooksPath` at `.githooks`); your `.omp`/`.env.e2e` stay
-gitignored and uncommitted — only the hook and its script are tracked. Mirror more paths by editing the `LINK=(…)`
-list at the top of the script.
+gitignored and uncommitted — only the hook and its script are tracked. Mirror more paths by editing the
+`LINK=(.omp .env.e2e)` list at the top of the script.
 
 Build cache is already shared under Docker: the image sets
 `CARGO_TARGET_DIR=/build/target`, which the worker passes down to the `omp` child
