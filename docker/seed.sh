@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# Seed the pico-state and omp-state Docker volumes from this host's ~/.pico and
+# ~/.omp, rewriting host absolute paths to their in-container equivalents. Run
+# once before `docker compose up`. Re-running is safe — it overwrites the seeded
+# files in place.
+#
+#   ~/.pico/workers          -> volume pico-state at /root/.pico/workers
+#   ~/.omp/agent/{agent.db,   -> volume omp-state at /root/.omp/agent/...
+#     config.yml,rules}          (auth + settings only; not the 19GB blob cache)
+#
+# The supervisor tree (~/.pico/supervisor) is intentionally NOT seeded: its
+# build slots hold host-arch binaries and are rebuilt in the container.
+set -euo pipefail
+
+PICO_HOME="${PICO_HOME:-$HOME/.pico}"
+OMP_HOME="${OMP_HOME:-$HOME/.omp}"
+REPO_MOUNT="/workspace/pico"
+
+WORKERS="$PICO_HOME/workers"
+[ -d "$WORKERS" ] || { echo "no $WORKERS to seed" >&2; exit 1; }
+[ -f "$OMP_HOME/agent/agent.db" ] || { echo "no $OMP_HOME/agent/agent.db (omp auth)" >&2; exit 1; }
+
+docker volume create pico-state >/dev/null
+docker volume create omp-state >/dev/null
+
+stage="$(mktemp -d)"
+trap 'rm -rf "$stage"' EXIT
+
+# --- pico worker state -------------------------------------------------------
+mkdir -p "$stage/pico"
+cp -a "$WORKERS" "$stage/pico/workers"
+# config.toml (guild cwd) and bindings.toml (channel cwd) carry host paths.
+for f in "$stage/pico/workers/default/config.toml" "$stage/pico/workers/default/bindings.toml"; do
+  [ -f "$f" ] || continue
+  tmp="$(mktemp)"
+  sed -e "s#$HOME/Workspaces/pico#$REPO_MOUNT#g" \
+      -e "s#$HOME/.pico#/root/.pico#g" \
+      "$f" > "$tmp"
+  mv "$tmp" "$f"
+done
+
+# --- omp auth + config (consistent snapshot via .backup; WAL may be mid-write) ---
+mkdir -p "$stage/omp/agent"
+sqlite3 "$OMP_HOME/agent/agent.db" ".backup '$stage/omp/agent/agent.db'"
+cp -a "$OMP_HOME/agent/config.yml" "$stage/omp/agent/config.yml"
+[ -d "$OMP_HOME/agent/rules" ] && cp -a "$OMP_HOME/agent/rules" "$stage/omp/agent/rules"
+
+# --- load staged trees into the named volumes --------------------------------
+docker run --rm -v pico-state:/v -v "$stage/pico":/src:ro busybox \
+  sh -c 'cp -a /src/. /v/'
+docker run --rm -v omp-state:/v -v "$stage/omp":/src:ro busybox \
+  sh -c 'mkdir -p /v/agent && cp -a /src/agent/. /v/agent/'
+
+echo "seeded pico-state ($(du -sh "$WORKERS" | cut -f1)) and omp-state (auth + config)."

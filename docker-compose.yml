@@ -1,0 +1,28 @@
+services:
+  pico:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    # tini as PID 1 reaps the omp grandchildren the worker spawns.
+    init: true
+    restart: unless-stopped
+    working_dir: /workspace/pico
+    volumes:
+      # The repo: build source for the supervisor's deploys and the cwd the bot
+      # operates on for the bound channel. Read-write — omp edits/commits here.
+      - ./:/workspace/pico
+      # Worker state: bot token, config, bindings, profiles, migrated sessions.
+      - pico-state:/root/.pico
+      # omp's store: seeded with the Copilot auth + config (not the 19GB cache).
+      - omp-state:/root/.omp
+      # Cargo registry + target, so restarts build incrementally.
+      - pico-build:/build
+
+volumes:
+  # Seeded once from the host by docker/seed.sh; `external` keeps `compose down
+  # -v` from wiping the token and conversation history.
+  pico-state:
+    external: true
+  omp-state:
+    external: true
+  pico-build:

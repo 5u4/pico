@@ -112,3 +112,62 @@ Prefer not to enable lingering (e.g. a shared host)? Install the unit at
 `/etc/systemd/system/pico-supervisor.service` with `User=you` and an explicit
 `Environment=PATH=…` instead of a user unit, then `sudo systemctl enable --now
 pico-supervisor`. Everything still resolves from that user's `$HOME`.
+
+## Running in Docker
+
+An alternative to the systemd setup: the supervisor and worker run together in
+one container, building the worker from the bind-mounted repo on start. State
+lives on Docker volumes, so `docker compose down` (even `-v`) never loses the
+token or sessions.
+
+- the repo is bind-mounted at `/workspace/pico` — build source, and the cwd the
+  bot works in for bound channels;
+- `pico-state` → `~/.pico` (token, config, bindings, profiles, sessions);
+- `omp-state` → `~/.omp` (omp's Copilot auth + config, not its blob cache);
+- `pico-build` → cargo registry + `target`, so restarts build incrementally.
+
+### 1. Seed the volumes from an existing install
+
+`docker/seed.sh` copies this host's `~/.pico/workers` and the omp credentials
+from `~/.omp/agent` into the `pico-state` and `omp-state` volumes, rewriting the
+guild/channel `cwd`s to their in-container paths. omp's multi-GB blob cache is
+left behind — only auth + config cross over.
+
+```sh
+bash docker/seed.sh
+```
+
+Starting fresh instead? Skip the seed, drop a `discord_bot_token` and
+`config.toml` into the `pico-state` volume by hand (see "Layout & config"), and
+set up omp auth by logging in once with `docker compose exec pico omp` after the
+container is up.
+
+### 2. Build and run
+
+```sh
+docker compose up -d --build
+docker compose logs -f          # the first run is a cold cargo build
+```
+
+The container builds both binaries, deploys the worker, and connects to Discord.
+A later restart with unchanged code reuses the live build slot instead of
+redeploying. Only one instance may hold the bot token at a time — stop the
+host/systemd supervisor before bringing the container up.
+
+### Operating
+
+`pico-supervisor` is on the container's PATH, so the usual verbs work:
+
+```sh
+docker compose exec pico pico-supervisor status
+docker compose exec pico pico-supervisor rollback
+```
+
+To roll a code change forward, edit it on the host (the repo is mounted) and
+either `docker compose restart pico` (rebuilds, then redeploys if the binary
+changed) or do a health-checked, auto-rolling-back swap in place:
+
+```sh
+docker compose exec pico sh -lc \
+  'cargo build --release -p pico-worker && pico-supervisor deploy "$(command -v pico-worker)"'
+```
