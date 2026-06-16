@@ -14,10 +14,11 @@ RUN apt-get update \
       git ripgrep ca-certificates curl unzip \
  && rm -rf /var/lib/apt/lists/*
 
-# omp ships as a bun-run Node CLI. Pin to the host's version so the seeded
-# `agent.db` auth schema matches.
+# omp ships as a bun-run Node CLI. Pin bun for reproducible images, and omp to
+# the host's version so the seeded `agent.db` auth schema matches (keep the omp
+# pin in sync with docker/seed.sh).
 ENV BUN_INSTALL=/root/.bun
-RUN curl -fsSL https://bun.sh/install | bash \
+RUN curl -fsSL https://bun.sh/install | bash -s "bun-v1.3.14" \
  && /root/.bun/bin/bun add -g @oh-my-pi/pi-coding-agent@16.0.1
 
 # Build cache (CARGO_HOME registry + target) lands on the /build volume so deps

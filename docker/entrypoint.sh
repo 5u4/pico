@@ -30,6 +30,14 @@ echo "[entrypoint] starting supervisor daemon…"
 "$SUP" &
 SUP_PID=$!
 
+# Container stop delivers SIGTERM to PID 1 (tini), which relays it only to this
+# bash — not the backgrounded supervisor. Forward it ourselves and block until
+# the supervisor finishes its graceful shutdown (drain deploys, SIGTERM the
+# worker so it closes the Discord gateway and reaps its omp children); otherwise
+# bash exits, PID 1 follows, and everything is SIGKILLed mid-flight.
+shutdown() { trap - TERM INT; kill -TERM "$SUP_PID" 2>/dev/null || true; wait "$SUP_PID" 2>/dev/null || true; exit 0; }
+trap shutdown TERM INT
+
 # Wait until the supervisor actually answers — not just until its socket file
 # exists. That file lives on the persistent volume, so a stale one from the
 # previous container can be present before this supervisor has bound, and acting

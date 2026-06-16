@@ -126,12 +126,18 @@ token or sessions.
 - `omp-state` → `~/.omp` (omp's Copilot auth + config, not its blob cache);
 - `pico-build` → cargo registry + `target`, so restarts build incrementally.
 
+The container runs as root and the repo mount is read-write, so files omp writes
+in a bound channel land root-owned on the host.
+
 ### 1. Seed the volumes from an existing install
 
 `docker/seed.sh` copies this host's `~/.pico/workers` and the omp credentials
 from `~/.omp/agent` into the `pico-state` and `omp-state` volumes, rewriting the
-guild/channel `cwd`s to their in-container paths. omp's blob cache is
-left behind — only auth + config cross over.
+`cwd`s under the repo and `~/.pico` to their in-container paths (omp's blob cache
+is left behind — only auth + config cross over). A `cwd` pointing elsewhere on
+the host won't exist in the container — the script warns, and you must add a bind
+mount for it. Seed before the first `up`: re-running reverts in-container `/bind`
+edits and refreshed auth back to the host copies.
 
 ```sh
 bash docker/seed.sh
