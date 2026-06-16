@@ -257,17 +257,21 @@ pub(crate) fn is_valid_profile(name: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
-/// A worktree binding's branch reaches `git fetch origin <branch>` as an
-/// option-parseable positional, so reject anything option-like (leading `-`) or
-/// outside git-ref-safe chars — blocks `--upload-pack=…`-style arg injection.
-fn validate_branch(branch: &str) -> color_eyre::Result<()> {
-    let safe = !branch.is_empty()
+/// A worktree start ref reaches `git worktree add … <ref>` (and a thread marker
+/// reaches it from disk) as an option-parseable positional, so reject anything
+/// option-like (leading `-`) or outside git-ref-safe chars — blocks
+/// `--upload-pack=…`-style arg injection.
+pub(crate) fn is_valid_branch(branch: &str) -> bool {
+    !branch.is_empty()
         && !branch.starts_with('-')
         && !branch.contains("..")
         && branch
             .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'/' | b'-'));
-    if !safe {
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'/' | b'-'))
+}
+
+fn validate_branch(branch: &str) -> color_eyre::Result<()> {
+    if !is_valid_branch(branch) {
         return Err(color_eyre::eyre::eyre!(
             "invalid branch {branch:?} (no leading '-', chars [A-Za-z0-9._/-], no \"..\")"
         ));

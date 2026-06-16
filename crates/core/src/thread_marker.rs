@@ -69,10 +69,22 @@ fn parse(text: &str) -> Option<ThreadMarker> {
         return None;
     }
     let worktree = match (raw.base_repo, raw.default_branch) {
-        (Some(base_repo), Some(default_branch)) => Some(WorktreeOrigin {
-            base_repo: crate::bindings::expand_home(&base_repo),
-            default_branch,
-        }),
+        (Some(base_repo), Some(default_branch)) => {
+            // Re-validate the worktree origin like the binding does: the ref
+            // reaches `git worktree add` and base_repo is a `git -C` target, so a
+            // tampered marker must self-heal, never inject an option-like ref/path.
+            if !crate::bindings::is_valid_branch(&default_branch) {
+                return None;
+            }
+            let base_repo = crate::bindings::expand_home(&base_repo);
+            if !base_repo.is_absolute() {
+                return None;
+            }
+            Some(WorktreeOrigin {
+                base_repo,
+                default_branch,
+            })
+        }
         (None, None) => None,
         // A half-written worktree origin can't recreate the cwd: self-heal.
         _ => return None,
@@ -218,6 +230,24 @@ mod tests {
             "profile = \"sen\"\ncwd = \"/wt/c/t\"\nbase_repo = \"/repo\"\n",
         );
         assert!(super::load(&root, "222222222222222222").is_none());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn tampered_worktree_origin_is_rejected() {
+        let root = temp_root("tampwt");
+        write_raw(
+            &root,
+            "222222222222222222",
+            "profile = \"sen\"\ncwd = \"/wt/c/t\"\nbase_repo = \"/repo\"\ndefault_branch = \"--upload-pack=x\"\n",
+        );
+        assert!(super::load(&root, "222222222222222222").is_none());
+        write_raw(
+            &root,
+            "333333333333333333",
+            "profile = \"sen\"\ncwd = \"/wt/c/t\"\nbase_repo = \"rel/repo\"\ndefault_branch = \"origin/main\"\n",
+        );
+        assert!(super::load(&root, "333333333333333333").is_none());
         std::fs::remove_dir_all(&root).ok();
     }
 }

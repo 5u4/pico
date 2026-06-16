@@ -71,7 +71,7 @@ impl RootConfig {
     }
 
     /// Parent dir for per-thread git worktrees (`[worktree] dir`). `None` means
-    /// unconfigured — a worktree binding can't run without it (no default).
+    /// unset — the worker then falls back to `<root>/worktrees`.
     pub fn worktrees_dir(&self) -> Option<&Path> {
         self.worktrees_dir.as_deref()
     }
