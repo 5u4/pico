@@ -130,7 +130,7 @@ token or sessions.
 
 `docker/seed.sh` copies this host's `~/.pico/workers` and the omp credentials
 from `~/.omp/agent` into the `pico-state` and `omp-state` volumes, rewriting the
-guild/channel `cwd`s to their in-container paths. omp's multi-GB blob cache is
+guild/channel `cwd`s to their in-container paths. omp's blob cache is
 left behind — only auth + config cross over.
 
 ```sh
@@ -149,10 +149,11 @@ docker compose up -d --build
 docker compose logs -f          # the first run is a cold cargo build
 ```
 
-The container builds both binaries, deploys the worker, and connects to Discord.
-A later restart with unchanged code reuses the live build slot instead of
-redeploying. Only one instance may hold the bot token at a time — stop the
-host/systemd supervisor before bringing the container up.
+On first run the container builds both binaries, deploys the worker, and
+connects to Discord. A later restart just restores the current slot (the last
+deployed build) — roll new code forward with an explicit deploy (see Operating).
+Only one instance may hold the bot token at a time — stop the host/systemd
+supervisor before bringing the container up.
 
 ### Operating
 
@@ -164,8 +165,8 @@ docker compose exec pico pico-supervisor rollback
 ```
 
 To roll a code change forward, edit it on the host (the repo is mounted) and
-either `docker compose restart pico` (rebuilds, then redeploys if the binary
-changed) or do a health-checked, auto-rolling-back swap in place:
+deploy explicitly — a plain `docker compose restart pico` rebuilds but keeps
+running the current slot until you deploy:
 
 ```sh
 docker compose exec pico sh -lc \

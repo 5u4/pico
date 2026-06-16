@@ -13,7 +13,7 @@ services:
       - ./:/workspace/pico
       # Worker state: bot token, config, bindings, profiles, migrated sessions.
       - pico-state:/root/.pico
-      # omp's store: seeded with the Copilot auth + config (not the 19GB cache).
+      # omp's store: seeded with the Copilot auth + config.
       - omp-state:/root/.omp
       # Cargo registry + target, so restarts build incrementally.
       - pico-build:/build

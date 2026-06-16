@@ -6,7 +6,7 @@
 #
 #   ~/.pico/workers          -> volume pico-state at /root/.pico/workers
 #   ~/.omp/agent/{agent.db,   -> volume omp-state at /root/.omp/agent/...
-#     config.yml,rules}          (auth + settings only; not the 19GB blob cache)
+#     config.yml,rules}          (auth + settings only; not the blob cache)
 #
 # The supervisor tree (~/.pico/supervisor) is intentionally NOT seeded: its
 # build slots hold host-arch binaries and are rebuilt in the container.
@@ -15,10 +15,14 @@ set -euo pipefail
 PICO_HOME="${PICO_HOME:-$HOME/.pico}"
 OMP_HOME="${OMP_HOME:-$HOME/.omp}"
 REPO_MOUNT="/workspace/pico"
+# The host checkout compose bind-mounts at $REPO_MOUNT — derived from this
+# script's own location, not hard-coded, so any checkout path still seeds.
+REPO_SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 WORKERS="$PICO_HOME/workers"
 [ -d "$WORKERS" ] || { echo "no $WORKERS to seed" >&2; exit 1; }
 [ -f "$OMP_HOME/agent/agent.db" ] || { echo "no $OMP_HOME/agent/agent.db (omp auth)" >&2; exit 1; }
+command -v sqlite3 >/dev/null || { echo "sqlite3 not found (needed for the omp auth snapshot)" >&2; exit 1; }
 
 docker volume create pico-state >/dev/null
 docker volume create omp-state >/dev/null
@@ -33,8 +37,8 @@ cp -a "$WORKERS" "$stage/pico/workers"
 for f in "$stage/pico/workers/default/config.toml" "$stage/pico/workers/default/bindings.toml"; do
   [ -f "$f" ] || continue
   tmp="$(mktemp)"
-  sed -e "s#$HOME/Workspaces/pico#$REPO_MOUNT#g" \
-      -e "s#$HOME/.pico#/root/.pico#g" \
+  sed -e "s#$REPO_SRC#$REPO_MOUNT#g" \
+      -e "s#$PICO_HOME#/root/.pico#g" \
       "$f" > "$tmp"
   mv "$tmp" "$f"
 done
