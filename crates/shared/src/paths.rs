@@ -60,3 +60,10 @@ pub fn profile_identity(root: &Path, name: &str) -> PathBuf {
 pub fn profile_session_dir(root: &Path, name: &str, thread_id: &str) -> PathBuf {
     profile_dir(root, name).join("sessions").join(thread_id)
 }
+
+/// `<root>/worktrees` — default parent for per-thread git worktrees when the
+/// worker config's `[worktree] dir` is unset. Taken from the root (like every
+/// other worker path) so it honors a `worker --path` override.
+pub fn default_worktrees_dir(root: &Path) -> PathBuf {
+    root.join("worktrees")
+}

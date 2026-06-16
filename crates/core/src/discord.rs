@@ -9,7 +9,7 @@ use poise::serenity_prelude as serenity;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::{
-    bindings::Bindings,
+    bindings::{Binding, BindingKind, Bindings},
     omp::{
         pool::{OmpPool, ThreadHandle, ThreadSession},
         protocol::{AssistantMessageEvent, OmpEvent, ToolCall, ToolCallEnd, ToolCallStart, ToolCallUpdate},
@@ -167,7 +167,7 @@ pub(crate) async fn post_deploy_report(http: &Arc<serenity::Http>, report: proto
 
 #[poise::command(
     slash_command,
-    subcommands("bind_set", "bind_unset", "bind_show"),
+    subcommands("bind_set", "bind_worktree", "bind_unset", "bind_show"),
     subcommand_required
 )]
 async fn bind(_ctx: Context<'_>) -> Result<(), Error> {
@@ -195,6 +195,49 @@ async fn bind_set(
                 *data.bindings.lock() = reloaded;
                 ctx.say(format!("bound <#{channel}> → profile `{profile}`, cwd `{cwd}`"))
                     .await?;
+            }
+            Err(e) => {
+                ctx.say(format!("written to disk, but reload failed: {e}")).await?;
+            }
+        },
+        Err(e) => {
+            ctx.say(format!("bind failed: {e}")).await?;
+        }
+    }
+    Ok(())
+}
+
+#[poise::command(slash_command, rename = "worktree")]
+async fn bind_worktree(
+    ctx: Context<'_>,
+    #[description = "Absolute path to a git repo to fork worktrees from"] base_repo: String,
+    #[description = "Ref to fork from (default: \"origin/main\"); a local branch like \"main\" forks offline"]
+    branch: Option<String>,
+    #[description = "Profile name (default: \"default\")"] profile: Option<String>,
+) -> Result<(), Error> {
+    let data = ctx.data();
+    let channel = bindable_channel(ctx).await?;
+    let profile = profile.unwrap_or_else(|| pico_shared::paths::DEFAULT_WORKER.to_owned());
+    if !pico_shared::paths::profile_dir(&data.root, &profile).is_dir() {
+        ctx.say(format!("profile `{profile}` does not exist under this root"))
+            .await?;
+        return Ok(());
+    }
+    let branch = branch.unwrap_or_else(|| crate::bindings::DEFAULT_BRANCH.to_owned());
+    let base_path = crate::bindings::expand_home(&base_repo);
+    if let Err(e) = crate::worktree::validate_base_repo(&base_path, &branch).await {
+        ctx.say(format!("not a usable worktree base: {e}")).await?;
+        return Ok(());
+    }
+    let path = pico_shared::paths::worker_bindings(&data.root);
+    match crate::bindings::set_worktree(&path, &channel.to_string(), &profile, &base_path, &branch) {
+        Ok(()) => match crate::bindings::load(&path) {
+            Ok(reloaded) => {
+                *data.bindings.lock() = reloaded;
+                ctx.say(format!(
+                    "bound <#{channel}> → worktree profile `{profile}`, base `{base_repo}`, branch `{branch}`"
+                ))
+                .await?;
             }
             Err(e) => {
                 ctx.say(format!("written to disk, but reload failed: {e}")).await?;
@@ -239,7 +282,20 @@ async fn bind_show(ctx: Context<'_>) -> Result<(), Error> {
     let reply = {
         let bindings = data.bindings.lock();
         match bindings.get(&channel.to_string()) {
-            Some(b) => format!("<#{channel}> → profile `{}`, cwd `{}`", b.profile, b.cwd.display()),
+            Some(b) => match &b.kind {
+                BindingKind::Regular { cwd } => {
+                    format!("<#{channel}> → profile `{}`, cwd `{}`", b.profile, cwd.display())
+                }
+                BindingKind::Worktree {
+                    base_repo,
+                    default_branch,
+                } => format!(
+                    "<#{channel}> → worktree profile `{}`, base `{}`, branch `{}`",
+                    b.profile,
+                    base_repo.display(),
+                    default_branch
+                ),
+            },
             None => "this channel is not bound".to_owned(),
         }
     };
@@ -290,16 +346,43 @@ async fn on_event(
     Ok(())
 }
 
-/// Pick the `(profile, cwd)` for a message in a served guild: a binding wins;
-/// otherwise the guild's default serves the unbound channel. Guild registration
-/// is gated earlier in `route_message`, before any channel fetch.
-fn resolve_route(
-    guild_default: &crate::config::GuildDefault,
-    binding: Option<&crate::bindings::Binding>,
-) -> (String, std::path::PathBuf) {
+/// A resolved turn target: which profile drives it and how its cwd is sourced —
+/// a fixed dir (regular binding / guild default) or a per-thread git worktree.
+enum Route {
+    Regular {
+        profile: String,
+        cwd: std::path::PathBuf,
+    },
+    Worktree {
+        profile: String,
+        base_repo: std::path::PathBuf,
+        default_branch: String,
+    },
+}
+
+/// Pick the [`Route`] for a message in a served guild: a binding wins; otherwise
+/// the guild's default (always a regular cwd) serves the unbound channel. Guild
+/// registration is gated earlier in `route_message`, before any channel fetch.
+fn resolve_route(guild_default: &crate::config::GuildDefault, binding: Option<&Binding>) -> Route {
     match binding {
-        Some(b) => (b.profile.clone(), b.cwd.clone()),
-        None => (guild_default.profile.clone(), guild_default.cwd.clone()),
+        Some(b) => match &b.kind {
+            BindingKind::Regular { cwd } => Route::Regular {
+                profile: b.profile.clone(),
+                cwd: cwd.clone(),
+            },
+            BindingKind::Worktree {
+                base_repo,
+                default_branch,
+            } => Route::Worktree {
+                profile: b.profile.clone(),
+                base_repo: base_repo.clone(),
+                default_branch: default_branch.clone(),
+            },
+        },
+        None => Route::Regular {
+            profile: guild_default.profile.clone(),
+            cwd: guild_default.cwd.clone(),
+        },
     }
 }
 
@@ -362,14 +445,17 @@ async fn route_message(
         return Ok(());
     }
 
-    let (profile, cwd) = {
+    let route = {
         let table = bindings.lock();
         resolve_route(guild_default, table.get(&bound_channel.to_string()))
     };
 
-    // cwd was valid when configured/bound but may have been torn down since (host
-    // rebuild); tell the user in-channel instead of failing the omp spawn to logs.
-    if !cwd.is_dir() {
+    // A regular cwd was valid when bound but may have been torn down since (host
+    // rebuild); reject it before opening a thread. A worktree's cwd doesn't exist
+    // until creation, which needs the thread id, so it's resolved after.
+    if let Route::Regular { cwd, .. } = &route
+        && !cwd.is_dir()
+    {
         message
             .reply(
                 &ctx,
@@ -397,6 +483,37 @@ async fn route_message(
         }
     };
     let thread_id = target.to_string();
+
+    // A worktree binding forks (or reuses) a per-thread git worktree as the cwd;
+    // setup failures post in-thread rather than failing the omp spawn to logs.
+    let (profile, cwd) = match route {
+        Route::Regular { profile, cwd } => (profile, cwd),
+        Route::Worktree {
+            profile,
+            base_repo,
+            default_branch,
+        } => {
+            let worktrees_dir = root_config
+                .worktrees_dir()
+                .map(std::path::Path::to_path_buf)
+                .unwrap_or_else(|| pico_shared::paths::default_worktrees_dir(root.as_path()));
+            match crate::worktree::ensure(
+                &worktrees_dir,
+                &bound_channel.to_string(),
+                &thread_id,
+                &base_repo,
+                &default_branch,
+            )
+            .await
+            {
+                Ok(path) => (profile, path),
+                Err(e) => {
+                    target.say(&ctx, format!("❌ worktree setup failed: {e}")).await?;
+                    return Ok(());
+                }
+            }
+        }
+    };
     tracing::info!(%thread_id, %profile, in_thread, "driving omp turn");
 
     let session_dir = pico_shared::paths::profile_session_dir(&root, &profile, &thread_id);
@@ -1060,7 +1177,10 @@ fn strip_wrapping_quotes(s: &str) -> &str {
 mod tests {
     use std::path::PathBuf;
 
-    use crate::{bindings::Binding, config::GuildDefault};
+    use crate::{
+        bindings::{Binding, BindingKind},
+        config::GuildDefault,
+    };
 
     fn guild_default(profile: &str, cwd: &str) -> GuildDefault {
         GuildDefault {
@@ -1073,7 +1193,9 @@ mod tests {
         Binding {
             channel_id: "123456789012345678".to_owned(),
             profile: profile.to_owned(),
-            cwd: PathBuf::from(cwd),
+            kind: BindingKind::Regular {
+                cwd: PathBuf::from(cwd),
+            },
         }
     }
 
@@ -1081,17 +1203,50 @@ mod tests {
     fn binding_wins_over_guild_default() {
         let d = guild_default("default", "/default");
         let b = binding("sen", "/work");
-        let (profile, cwd) = super::resolve_route(&d, Some(&b));
-        assert_eq!(profile, "sen");
-        assert_eq!(cwd, PathBuf::from("/work"));
+        match super::resolve_route(&d, Some(&b)) {
+            super::Route::Regular { profile, cwd } => {
+                assert_eq!(profile, "sen");
+                assert_eq!(cwd, PathBuf::from("/work"));
+            }
+            _ => panic!("expected regular route"),
+        }
     }
 
     #[test]
     fn unbound_channel_uses_guild_default() {
         let d = guild_default("default", "/default");
-        let (profile, cwd) = super::resolve_route(&d, None);
-        assert_eq!(profile, "default");
-        assert_eq!(cwd, PathBuf::from("/default"));
+        match super::resolve_route(&d, None) {
+            super::Route::Regular { profile, cwd } => {
+                assert_eq!(profile, "default");
+                assert_eq!(cwd, PathBuf::from("/default"));
+            }
+            _ => panic!("expected regular route"),
+        }
+    }
+
+    #[test]
+    fn worktree_binding_routes_to_worktree() {
+        let d = guild_default("default", "/default");
+        let b = Binding {
+            channel_id: "123456789012345678".to_owned(),
+            profile: "sen".to_owned(),
+            kind: BindingKind::Worktree {
+                base_repo: PathBuf::from("/repo"),
+                default_branch: "trunk".to_owned(),
+            },
+        };
+        match super::resolve_route(&d, Some(&b)) {
+            super::Route::Worktree {
+                profile,
+                base_repo,
+                default_branch,
+            } => {
+                assert_eq!(profile, "sen");
+                assert_eq!(base_repo, PathBuf::from("/repo"));
+                assert_eq!(default_branch, "trunk");
+            }
+            _ => panic!("expected worktree route"),
+        }
     }
 
     #[test]

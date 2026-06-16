@@ -106,6 +106,30 @@ write across:
   `config.toml` (served servers), `bindings.toml` (per-channel routing, written
   by the in-Discord `/bind` command), optional `profiles/<name>/`, and logs.
 
+## Channels & worktrees
+
+A bound channel runs every thread in one cwd, set by `/bind set cwd:<abs>` (or a
+guild default in `config.toml`).
+
+A **worktree channel** forks a throwaway git worktree per thread, so parallel
+threads never share a checkout. Bind one with `/bind worktree
+base_repo:<abs-git-repo> [branch:<ref>] [profile:<name>]`: each new thread forks
+`branch` (default `origin/main`) onto a fresh branch `pico/<thread-id>` at
+`<dir>/<channel-id>/<thread-id>`. When `branch` is an `origin/…` ref the worker
+runs a best-effort `git fetch origin` first (a failed fetch logs a warning and
+forks the possibly-stale ref); a bare local branch like `branch:main` forks
+offline and needs no remote.
+
+`<dir>` defaults to `<root>/worktrees`; override it in the worker `config.toml`:
+
+```toml
+[worktree]
+dir = "/abs/path/for/worktrees"
+```
+
+Worktrees persist across restarts (threads resume in place) and aren't torn down
+automatically.
+
 ## Running as a system service
 
 Prefer not to enable lingering (e.g. a shared host)? Install the unit at
