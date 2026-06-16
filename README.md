@@ -112,3 +112,69 @@ Prefer not to enable lingering (e.g. a shared host)? Install the unit at
 `/etc/systemd/system/pico-supervisor.service` with `User=you` and an explicit
 `Environment=PATH=…` instead of a user unit, then `sudo systemctl enable --now
 pico-supervisor`. Everything still resolves from that user's `$HOME`.
+
+## Running in Docker
+
+An alternative to the systemd setup: the supervisor and worker run together in
+one container, building the worker from the bind-mounted repo on start. State
+lives on Docker volumes, so `docker compose down` (even `-v`) never loses the
+token or sessions.
+
+- the repo is bind-mounted at `/workspace/pico` — build source, and the cwd the
+  bot works in for bound channels;
+- `pico-state` → `~/.pico` (token, config, bindings, profiles, sessions);
+- `omp-state` → `~/.omp` (omp's Copilot auth + config, not its blob cache);
+- `pico-build` → cargo registry + `target`, so restarts build incrementally.
+
+The container runs as root and the repo mount is read-write, so files omp writes
+in a bound channel land root-owned on the host.
+
+### 1. Seed the volumes from an existing install
+
+`docker/seed.sh` copies this host's `~/.pico/workers` and the omp credentials
+from `~/.omp/agent` into the `pico-state` and `omp-state` volumes, rewriting the
+`cwd`s under the repo and `~/.pico` to their in-container paths (omp's blob cache
+is left behind — only auth + config cross over). A `cwd` pointing elsewhere on
+the host won't exist in the container — the script warns, and you must add a bind
+mount for it. Seed before the first `up`: re-running reverts in-container `/bind`
+edits and refreshed auth back to the host copies.
+
+```sh
+bash docker/seed.sh
+```
+
+Starting fresh instead? Skip the seed, drop a `discord_bot_token` and
+`config.toml` into the `pico-state` volume by hand (see "Layout & config"), and
+set up omp auth by logging in once with `docker compose exec pico omp` after the
+container is up.
+
+### 2. Build and run
+
+```sh
+docker compose up -d --build
+docker compose logs -f          # the first run is a cold cargo build
+```
+
+On first run the container builds both binaries, deploys the worker, and
+connects to Discord. A later restart just restores the current slot (the last
+deployed build) — roll new code forward with an explicit deploy (see Operating).
+Only one instance may hold the bot token at a time — stop the host/systemd
+supervisor before bringing the container up.
+
+### Operating
+
+`pico-supervisor` is on the container's PATH, so the usual verbs work:
+
+```sh
+docker compose exec pico pico-supervisor status
+docker compose exec pico pico-supervisor rollback
+```
+
+To roll a code change forward, edit it on the host (the repo is mounted) and
+deploy explicitly — a plain `docker compose restart pico` rebuilds but keeps
+running the current slot until you deploy:
+
+```sh
+docker compose exec pico sh -lc \
+  'cargo build --release -p pico-worker && pico-supervisor deploy "$(command -v pico-worker)"'
+```
