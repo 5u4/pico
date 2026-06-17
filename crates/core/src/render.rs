@@ -508,8 +508,9 @@ pub fn detach_rows(rows: &mut [SubagentRow]) {
     }
 }
 
-/// The `task` batch message: a header (emoji + `Running`/`Spawned`/`Ran`, ❌ if any
-/// subagent failed — never ✅) then one row per subagent.
+/// The `task` batch message: a header (emoji + `Running`/`Spawned`/`Ran`; `👥` while
+/// any row is live, else `❌` if one failed / `🚀` if backgrounded — never `✅`) then
+/// one row per subagent.
 pub fn render_subagent_batch(rows: &[SubagentRow], elapsed_ms: u64) -> String {
     let elapsed = format_duration(elapsed_ms);
     let plural = if rows.len() == 1 { "" } else { "s" };
