@@ -154,6 +154,7 @@ pub enum ToolCallStart {
     Eval(ToolCall),
     WebSearch(ToolCall),
     Task(ToolCall),
+    Job(ToolCall),
     Ask(ToolCall),
     Unknown(ToolCall),
 }
@@ -172,6 +173,7 @@ impl From<ToolCall> for ToolCallStart {
             "eval" => Self::Eval(call),
             "web_search" => Self::WebSearch(call),
             "task" => Self::Task(call),
+            "job" => Self::Job(call),
             "ask" => Self::Ask(call),
             _ => Self::Unknown(call),
         }
@@ -193,6 +195,7 @@ impl ToolCallStart {
             | Self::Eval(c)
             | Self::WebSearch(c)
             | Self::Task(c)
+            | Self::Job(c)
             | Self::Ask(c)
             | Self::Unknown(c) => c,
         }
