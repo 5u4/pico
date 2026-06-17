@@ -508,21 +508,30 @@ pub fn detach_rows(rows: &mut [SubagentRow]) {
     }
 }
 
-/// The `task` batch message: header (`👥 Running`/`👥 Ran`, swapped to `❌ Ran`
-/// only when a subagent failed — never `✅`) then one row per subagent.
+/// The `task` batch message: a header (emoji + `Running`/`Spawned`/`Ran`, ❌ if any
+/// subagent failed — never ✅) then one row per subagent.
 pub fn render_subagent_batch(rows: &[SubagentRow], elapsed_ms: u64) -> String {
     let elapsed = format_duration(elapsed_ms);
     let plural = if rows.len() == 1 { "" } else { "s" };
     let n = rows.len();
-    let mut out = if rows.iter().any(|r| r.status == SubagentStatus::InProgress) {
-        format!("👥 Running {n} task{plural} · {elapsed}")
-    } else if rows.iter().any(|r| r.status == SubagentStatus::Failed) {
-        format!("❌ Ran {n} task{plural} · {elapsed}")
-    } else if rows.iter().any(|r| r.status == SubagentStatus::Detached) {
-        format!("🚀 Spawned {n} task{plural} · {elapsed}")
+    let live = rows.iter().any(|r| r.status == SubagentStatus::InProgress);
+    let failed = rows.iter().any(|r| r.status == SubagentStatus::Failed);
+    let detached = rows.iter().any(|r| r.status == SubagentStatus::Detached);
+    let emoji = if live || (!failed && !detached) {
+        "👥"
+    } else if failed {
+        "❌"
     } else {
-        format!("👥 Ran {n} task{plural} · {elapsed}")
+        "🚀"
     };
+    let verb = if live {
+        "Running"
+    } else if detached {
+        "Spawned"
+    } else {
+        "Ran"
+    };
+    let mut out = format!("{emoji} {verb} {n} task{plural} · {elapsed}");
     for row in rows {
         out.push('\n');
         out.push_str(&render_subagent_row(row));
@@ -592,7 +601,7 @@ pub fn is_spawn_ack(result: &serde_json::Value) -> bool {
 }
 
 /// Terminal outcome of an async `task` update: `Some(false)` completed, `Some(true)`
-/// failed/aborted, `None` while still running or for a non-async frame.
+/// failed (cancel/abort also fold to `failed`), `None` while running or non-async.
 pub fn async_terminal(partial: &serde_json::Value) -> Option<bool> {
     match async_state(partial)? {
         "completed" => Some(false),
@@ -1237,5 +1246,22 @@ mod tests {
         settle_rows(&mut done, false);
         detach_rows(&mut done);
         assert!(render_subagent_batch(&done, 1_000).contains("✅ done"));
+    }
+
+    #[test]
+    fn failed_plus_detached_header_keeps_failure_emoji_with_spawned_verb() {
+        let mut rows = extract_subagent_rows(&batch_args());
+        apply_progress(
+            &mut rows,
+            &progress(serde_json::json!([
+                { "index": 0, "status": "failed", "toolCount": 1 },
+                { "index": 1, "status": "running" },
+            ])),
+        );
+        detach_rows(&mut rows);
+        let out = render_subagent_batch(&rows, 5_000);
+        assert!(out.starts_with("❌ Spawned 2 tasks · 5s"), "got: {out:?}");
+        assert!(out.contains("❌ failed"));
+        assert!(out.contains("🚀 backgrounded"));
     }
 }
