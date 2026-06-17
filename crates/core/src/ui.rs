@@ -34,7 +34,8 @@ const ID_NO: &str = "ui:no";
 
 /// Outcome of handling one UI request.
 pub enum Handled {
-    Continue,
+    /// `posted`: handling left a fixed-position channel message (dialog/notify) → seal the feed.
+    Continue { posted: bool },
     /// The worker `cancel` token fired mid-prompt; the caller runs the restart cleanup.
     Cancelled,
 }
@@ -141,13 +142,12 @@ pub async fn handle_request(
             };
             text_prompt(ctx, channel, client, author, id, title, field, None, cancel, &mut rx).await
         }
-        UiRequest::Notify { message, notify_type } => {
-            notify(ctx, channel, message, notify_type.as_deref()).await;
-            Handled::Continue
-        }
+        UiRequest::Notify { message, notify_type } => Handled::Continue {
+            posted: notify(ctx, channel, message, notify_type.as_deref()).await,
+        },
         // Recognised but with no Discord surface (`set_status`, …), or OMP
         // withdrawing a pending request: nothing to reply.
-        UiRequest::Cancel { .. } | UiRequest::Ignore => Handled::Continue,
+        UiRequest::Cancel { .. } | UiRequest::Ignore => Handled::Continue { posted: false },
         // A method this build doesn't recognise: reply `cancelled` so a new
         // response-bearing dialog resolves to its dismissed value instead of
         // hanging the turn. Harmless for a fire-and-forget method — OMP drops a
@@ -157,7 +157,7 @@ pub async fn handle_request(
             if let Some(id) = id {
                 let _ = client.ui_response(&UiResponse::cancelled(id, false)).await;
             }
-            Handled::Continue
+            Handled::Continue { posted: false }
         }
     }
 }
@@ -178,12 +178,12 @@ async fn select(
     // Empty list: OMP's `select` resolves to a cancel, so mirror it, not a dead menu.
     if options.is_empty() {
         let _ = client.ui_response(&UiResponse::cancelled(id, false)).await;
-        return Handled::Continue;
+        return Handled::Continue { posted: false };
     }
 
     let Some(msg) = post(ctx, channel, &select_prompt_text(title, options), select_components(options)).await else {
         let _ = client.ui_response(&UiResponse::cancelled(id, false)).await;
-        return Handled::Continue;
+        return Handled::Continue { posted: false };
     };
 
     let interaction = match collect(ctx, msg.id, author, timeout, cancel, Some(rx)).await {
@@ -194,12 +194,12 @@ async fn select(
         Collected::Ended { timed_out } => {
             finalize(ctx, channel, msg.id, &resolved_line(title, None)).await;
             let _ = client.ui_response(&UiResponse::cancelled(id, timed_out)).await;
-            return Handled::Continue;
+            return Handled::Continue { posted: true };
         }
         Collected::Text(text) => {
             finalize(ctx, channel, msg.id, &resolved_line(title, Some(&text))).await;
             let _ = client.ui_response(&UiResponse::value(id, &text)).await;
-            return Handled::Continue;
+            return Handled::Continue { posted: true };
         }
         Collected::Interaction(i) => *i,
     };
@@ -227,7 +227,7 @@ async fn select(
             let _ = client.ui_response(&UiResponse::cancelled(id, false)).await;
         }
     }
-    Handled::Continue
+    Handled::Continue { posted: true }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -257,7 +257,7 @@ async fn confirm(
     ])];
     let Some(msg) = post(ctx, channel, &content, components).await else {
         let _ = client.ui_response(&UiResponse::cancelled(id, false)).await;
-        return Handled::Continue;
+        return Handled::Continue { posted: false };
     };
 
     let interaction = match collect(ctx, msg.id, author, timeout, cancel, None).await {
@@ -275,7 +275,7 @@ async fn confirm(
             } else {
                 client.ui_response(&UiResponse::confirmed(id, false)).await
             };
-            return Handled::Continue;
+            return Handled::Continue { posted: true };
         }
         // `confirm` is button-only (yes/no), so it registers no answer channel.
         Collected::Text(_) => unreachable!("confirm registers no text answer channel"),
@@ -285,7 +285,7 @@ async fn confirm(
     let yes = interaction.data.custom_id == ID_YES;
     ack_update(ctx, &interaction, &resolved_line(title, Some(if yes { "Yes" } else { "No" }))).await;
     let _ = client.ui_response(&UiResponse::confirmed(id, yes)).await;
-    Handled::Continue
+    Handled::Continue { posted: true }
 }
 
 struct TextField<'a> {
@@ -319,7 +319,7 @@ async fn text_prompt(
     ])];
     let Some(msg) = post(ctx, channel, &content, components).await else {
         let _ = client.ui_response(&UiResponse::cancelled(id, false)).await;
-        return Handled::Continue;
+        return Handled::Continue { posted: false };
     };
 
     let mut interaction = match collect(ctx, msg.id, author, timeout, cancel, Some(&mut *rx)).await {
@@ -330,12 +330,12 @@ async fn text_prompt(
         Collected::Ended { timed_out } => {
             finalize(ctx, channel, msg.id, &resolved_line(title, None)).await;
             let _ = client.ui_response(&UiResponse::cancelled(id, timed_out)).await;
-            return Handled::Continue;
+            return Handled::Continue { posted: true };
         }
         Collected::Text(text) => {
             finalize(ctx, channel, msg.id, &resolved_line(title, Some(&text))).await;
             let _ = client.ui_response(&UiResponse::value(id, &text)).await;
-            return Handled::Continue;
+            return Handled::Continue { posted: true };
         }
         Collected::Interaction(i) => *i,
     };
@@ -344,13 +344,13 @@ async fn text_prompt(
         if interaction.data.custom_id != ID_ANSWER {
             ack_update(ctx, &interaction, &resolved_line(title, None)).await;
             let _ = client.ui_response(&UiResponse::cancelled(id, false)).await;
-            return Handled::Continue;
+            return Handled::Continue { posted: true };
         }
         match run_modal(ctx, msg.id, author, title, &field, interaction, cancel, &mut *rx).await {
             ModalStep::Answered(text) => {
                 finalize(ctx, channel, msg.id, &resolved_line(title, Some(&text))).await;
                 let _ = client.ui_response(&UiResponse::value(id, &text)).await;
-                return Handled::Continue;
+                return Handled::Continue { posted: true };
             }
             ModalStep::Restart => {
                 let _ = client.ui_response(&UiResponse::cancelled(id, false)).await;
@@ -368,12 +368,12 @@ async fn text_prompt(
                     Collected::Ended { .. } => {
                         finalize(ctx, channel, msg.id, &resolved_line(title, None)).await;
                         let _ = client.ui_response(&UiResponse::cancelled(id, false)).await;
-                        return Handled::Continue;
+                        return Handled::Continue { posted: true };
                     }
                     Collected::Text(text) => {
                         finalize(ctx, channel, msg.id, &resolved_line(title, Some(&text))).await;
                         let _ = client.ui_response(&UiResponse::value(id, &text)).await;
-                        return Handled::Continue;
+                        return Handled::Continue { posted: true };
                     }
                 };
             }
@@ -433,7 +433,12 @@ async fn run_modal(
     }
 }
 
-async fn notify(ctx: &serenity::Context, channel: serenity::ChannelId, message: &str, notify_type: Option<&str>) {
+async fn notify(
+    ctx: &serenity::Context,
+    channel: serenity::ChannelId,
+    message: &str,
+    notify_type: Option<&str>,
+) -> bool {
     let emoji = match notify_type {
         Some("warning") => "⚠️",
         Some("error") => "❌",
@@ -443,8 +448,12 @@ async fn notify(ctx: &serenity::Context, channel: serenity::ChannelId, message: 
     let msg = serenity::CreateMessage::new()
         .content(content)
         .flags(serenity::MessageFlags::SUPPRESS_NOTIFICATIONS);
-    if let Err(e) = channel.send_message(ctx, msg).await {
-        tracing::warn!(error = %e, "ui notify send failed");
+    match channel.send_message(ctx, msg).await {
+        Ok(_) => true,
+        Err(e) => {
+            tracing::warn!(error = %e, "ui notify send failed");
+            false
+        }
     }
 }
 

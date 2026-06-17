@@ -856,7 +856,12 @@ async fn drive_turn(
             Some(OmpEvent::ToolStart(tool)) => {
                 reply.clear();
                 match &tool {
-                    ToolCallStart::Task(call) => subagents.start(call).await,
+                    ToolCallStart::Task(call) => {
+                        activity.flush().await;
+                        if subagents.start(call).await {
+                            activity.seal();
+                        }
+                    }
                     _ => activity.start(&tool).await,
                 }
             }
@@ -873,18 +878,23 @@ async fn drive_turn(
                 // Block the turn on the answer (the agent is paused awaiting it);
                 // `handle_request` races `cancel`, so a restart never strands the turn.
                 activity.flush().await;
-                if let crate::ui::Handled::Cancelled =
-                    crate::ui::handle_request(ctx, target, &session.client, author, &req, cancel, pending).await
-                {
-                    subagents.flush_all(false).await;
-                    commit_reply(ctx, target, &reply, reply_to).await;
-                    let _ = target
-                        .say(
-                            ctx,
-                            "worker restarted, so the pending question was discarded; resend your message to continue",
-                        )
-                        .await;
-                    return Ok(TurnOutcome::Live);
+                match crate::ui::handle_request(ctx, target, &session.client, author, &req, cancel, pending).await {
+                    crate::ui::Handled::Cancelled => {
+                        subagents.flush_all(false).await;
+                        commit_reply(ctx, target, &reply, reply_to).await;
+                        let _ = target
+                            .say(
+                                ctx,
+                                "worker restarted, so the pending question was discarded; resend your message to continue",
+                            )
+                            .await;
+                        return Ok(TurnOutcome::Live);
+                    }
+                    crate::ui::Handled::Continue { posted } => {
+                        if posted {
+                            activity.seal();
+                        }
+                    }
                 }
             }
             Some(OmpEvent::AgentEnd) => break,
@@ -961,6 +971,8 @@ struct Activity<'a> {
     /// the exact line it started.
     placements: std::collections::HashMap<String, (usize, usize)>,
     last_edit: Instant,
+    /// Forces the next [`append`](Activity::append) to open a fresh host (see [`Activity::seal`]).
+    sealed: bool,
 }
 
 struct ActivityHost {
@@ -997,7 +1009,14 @@ impl<'a> Activity<'a> {
             hosts: Vec::new(),
             placements: std::collections::HashMap::new(),
             last_edit: Instant::now(),
+            sealed: false,
         }
+    }
+
+    /// Force the next [`append`](Activity::append) to open a new host message, so
+    /// activity after an out-of-band message (`task` batch, UI dialog) sorts below it.
+    fn seal(&mut self) {
+        self.sealed = true;
     }
 
     async fn start(&mut self, tool: &ToolCallStart) {
@@ -1038,14 +1057,15 @@ impl<'a> Activity<'a> {
     }
 
     async fn append(&mut self, line: String) -> Option<(usize, usize)> {
-        let rollover = match self.hosts.last() {
-            None => true,
-            Some(host) => {
-                let count = host.lines.len();
-                let projected = host.char_count() + line.chars().count() + usize::from(count > 0);
-                count + 1 > crate::render::ACTIVITY_LINE_CAP || projected > crate::render::ACTIVITY_CHAR_CAP
-            }
-        };
+        let rollover = self.sealed
+            || match self.hosts.last() {
+                None => true,
+                Some(host) => {
+                    let count = host.lines.len();
+                    let projected = host.char_count() + line.chars().count() + usize::from(count > 0);
+                    count + 1 > crate::render::ACTIVITY_LINE_CAP || projected > crate::render::ACTIVITY_CHAR_CAP
+                }
+            };
         if rollover {
             let sent = crate::render::defang_mentions(&line);
             let message = self.post(&sent).await?;
@@ -1055,6 +1075,7 @@ impl<'a> Activity<'a> {
                 rendered: sent,
                 dirty: false,
             });
+            self.sealed = false;
             self.last_edit = Instant::now();
             return Some((self.hosts.len() - 1, 0));
         }
@@ -1151,14 +1172,14 @@ impl<'a> SubagentFeed<'a> {
         }
     }
 
-    async fn start(&mut self, call: &ToolCall) {
+    async fn start(&mut self, call: &ToolCall) -> bool {
         let rows = crate::render::extract_subagent_rows(&call.args);
         if rows.is_empty() {
-            return;
+            return false;
         }
         let content = subagent_send_text(&crate::render::render_subagent_batch(&rows, 0));
         let Some(message) = self.post(&content).await else {
-            return;
+            return false;
         };
         let now = Instant::now();
         self.batches.insert(
@@ -1172,6 +1193,7 @@ impl<'a> SubagentFeed<'a> {
                 backgrounded: false,
             },
         );
+        true
     }
 
     async fn update(&mut self, tool: &ToolCallUpdate) {
