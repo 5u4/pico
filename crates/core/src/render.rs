@@ -228,7 +228,6 @@ pub fn tool_activity_line(tool: &ToolCallStart) -> String {
             }
         }
         ToolCallStart::WebSearch(_) => locate("🔎", a.query),
-        ToolCallStart::Ask(_) => format!("❓ {}", truncate(&json_preview(raw), ACTIVITY_DETAIL)),
         ToolCallStart::Job(call) => job_line(&call.args),
         ToolCallStart::Task(call) | ToolCallStart::Unknown(call) => {
             format!("🛠️ {}", truncate(&call.tool_name, ACTIVITY_DETAIL))
@@ -664,10 +663,6 @@ fn first_line(s: &str) -> &str {
     s.split('\n').next().unwrap_or(s)
 }
 
-fn json_preview(args: &serde_json::Value) -> String {
-    serde_json::to_string(args).unwrap_or_default()
-}
-
 /// The edit tool's target path: an explicit `path` arg, else the path parsed
 /// from the first hashline header (`[path#TAG]`) or apply-patch directive
 /// (`*** Update File: path`) in its `input`. Borrows from the inputs; `""` when
@@ -944,7 +939,6 @@ mod tests {
             "🧪 py print(1)"
         );
         assert_eq!(line("web_search", json!({ "query": "rust" })), "🔎 rust");
-        assert!(line("ask", json!({ "questions": [] })).starts_with("❓ "));
         assert_eq!(line("totally_unknown", json!({ "a": 1 })), "🛠️ totally_unknown");
         // task is routed to the subagent renderer; reaching the activity feed it renders generically.
         assert_eq!(line("task", json!({ "agent": "explore" })), "🛠️ task");

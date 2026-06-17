@@ -1,8 +1,6 @@
 //! End-to-end chat-path test mostly driven by a deterministic scripted `omp`
 //! (PATH-shadowed; see crates/worker/src/scripted_omp.rs); a trailing phase
-//! swaps PATH back to the real omp for one Copilot smoke. The `ask` text-answer
-//! matrix is answered by typing — Discord has no API for a bot to click a
-//! component, so typing is the only bot-drivable path. `#[ignore]`d (two live
+//! swaps PATH back to the real omp for one Copilot smoke. `#[ignore]`d (two live
 //! bots, MESSAGE_CONTENT intent); run `--include-ignored` with `.env.e2e`. The
 //! pico bot connects once — a re-connect trips identify, so the smoke rides here.
 
@@ -126,17 +124,9 @@ async fn wait_msg(
     false
 }
 
-/// Wait for the `❓` carrier (posted only after pico registers the answer), then type `answer`.
-async fn answer_carrier(tid: serenity::ChannelId, driver: &serenity::Http, marker: &str, answer: &str) -> bool {
-    if !wait_msg(tid, driver, 40, |m| m.content.contains('❓') && m.content.contains(marker)).await {
-        return false;
-    }
-    tid.say(driver, answer).await.is_ok()
-}
-
 #[tokio::test(flavor = "current_thread")]
 #[ignore]
-async fn scripted_omp_drives_thread_and_ask_flows() {
+async fn scripted_omp_drives_thread_and_real_smoke() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter("pico_core=debug,info")
         .try_init();
@@ -230,27 +220,6 @@ async fn scripted_omp_drives_thread_and_ask_flows() {
         .await;
     }
 
-    let mut select_ok = false;
-    let mut editor_ok = false;
-    let mut multi_ok = false;
-    if let Some(tid) = thread {
-        let _ = tid.say(&driver, format!("ASK_SELECT cD-{marker}")).await;
-        select_ok = answer_carrier(tid, &driver, &format!("cD-{marker}"), &format!("aD-{marker}")).await
-            && wait_msg(tid, &driver, 20, |m| m.content.contains(&format!("DONE:aD-{marker}"))).await;
-
-        let _ = tid.say(&driver, format!("ASK_EDITOR cE-{marker}")).await;
-        editor_ok = answer_carrier(tid, &driver, &format!("cE-{marker}"), &format!("aE-{marker}")).await
-            && wait_msg(tid, &driver, 20, |m| m.content.contains(&format!("DONE:aE-{marker}"))).await;
-
-        let _ = tid.say(&driver, format!("ASK_MULTI cF1-{marker} cF2-{marker}")).await;
-        multi_ok = answer_carrier(tid, &driver, &format!("cF1-{marker}"), &format!("aF1-{marker}")).await
-            && answer_carrier(tid, &driver, &format!("cF2-{marker}"), &format!("aF2-{marker}")).await
-            && wait_msg(tid, &driver, 20, |m| {
-                m.content.contains(&format!("DONE:aF1-{marker}|aF2-{marker}"))
-            })
-            .await;
-    }
-
     // Real-LLM smoke on the same gateway: swap PATH back so a fresh thread spawns
     // the real omp, and confirm one Copilot turn round-trips through Discord.
     unsafe { std::env::set_var("PATH", original_path) };
@@ -296,12 +265,6 @@ async fn scripted_omp_drives_thread_and_ask_flows() {
     assert!(replied, "pico opened a thread but never posted the scripted reply");
     assert!(renamed, "pico opened a thread but never renamed it to the generated title");
     assert!(referenced, "pico's in-thread reply did not reference the follow-up message");
-    assert!(select_ok, "typing an answer did not resolve a `select` ask (no DONE echo)");
-    assert!(editor_ok, "typing an answer did not resolve an `editor` ask (no DONE echo)");
-    assert!(
-        multi_ok,
-        "typing answers did not resolve the two-question sequence (no DONE echo)"
-    );
     assert!(smoke_ok, "the real omp + Copilot smoke never replied through Discord");
     shutdown
         .expect("pico did not shut down within 15s")

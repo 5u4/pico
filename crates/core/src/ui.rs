@@ -1,8 +1,7 @@
-//! Renders OMP's extension-UI requests (the `ask` tool's `select`/`editor`
-//! prompts, plus confirm/input/notify) as Discord components and replies over
-//! RPC. The host MUST answer: `ask.timeout` is `0`, so an unanswered prompt
-//! blocks the turn forever. Handled inline — `ask` is `exclusive` and turns
-//! serialise, so one prompt is open at a time; the collector races `cancel`.
+//! Renders OMP's extension-UI requests (`select`/`confirm`/`input`/`editor`/
+//! `notify`) as Discord components and replies over RPC. A value-bearing request
+//! with no timeout blocks the turn until answered; turns serialise, so one is
+//! open at a time and the collector races `cancel`.
 
 use std::{fmt::Write as _, time::Duration};
 
@@ -40,7 +39,7 @@ pub enum Handled {
     Cancelled,
 }
 
-/// One thread's open value-bearing `ask` dialog: the router hands the asker's
+/// One thread's open value-bearing dialog: the router hands the asker's
 /// next message to `tx` so it answers the dialog instead of starting a turn.
 pub struct PendingAnswer {
     author: serenity::UserId,
@@ -205,8 +204,7 @@ async fn select(
         Collected::Interaction(i) => *i,
     };
 
-    // Option values are indices into the full list; map back to the verbatim
-    // label so the `ask` tool can match it. The cancel button yields no pick.
+    // Option values are select indices; map back to the verbatim label.
     let picked = if interaction.data.custom_id == ID_SELECT {
         match &interaction.data.kind {
             serenity::ComponentInteractionDataKind::StringSelect { values } => values

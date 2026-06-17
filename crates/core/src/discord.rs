@@ -438,7 +438,7 @@ async fn route_message(
         channel.id
     };
 
-    // An open `ask` on this thread takes the asker's next message (raw, not the
+    // An open extension-UI dialog on this thread takes the asker's next message (raw, not the
     // trimmed prompt) as its typed answer instead of a lock-blocked second turn.
     if in_thread && crate::ui::deliver_pending_answer(&pending_answers, channel.id, message.author.id, &message.content)
     {
@@ -696,8 +696,6 @@ async fn drive_turn(
                 reply.clear();
                 match &tool {
                     ToolCallStart::Task(call) => subagents.start(call).await,
-                    // `ask` renders via its UI request below, not the activity feed.
-                    ToolCallStart::Ask(_) => {}
                     _ => activity.start(&tool).await,
                 }
             }
@@ -708,7 +706,6 @@ async fn drive_turn(
             }
             Some(OmpEvent::ToolEnd(tool)) => match tool.tool_name.as_str() {
                 "task" => subagents.end(&tool).await,
-                "ask" => {}
                 _ => activity.end(&tool).await,
             },
             Some(OmpEvent::UiRequest(req)) => {

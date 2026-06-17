@@ -1,4 +1,4 @@
-//! RPC client for an `omp --mode rpc-ui` child: spawns the process, frames
+//! RPC client for an `omp --mode rpc` child: spawns the process, frames
 //! newline-delimited JSON over its stdio, sends drive commands, and forwards
 //! the session event stream.
 //!
@@ -52,12 +52,12 @@ pub struct OmpClient {
     pending: Pending,
 }
 
-/// Build the `omp --mode rpc-ui` command (split out from spawn to unit-test cwd wiring).
+/// Build the `omp --mode rpc` command (split out from spawn to unit-test cwd wiring).
 fn build_command(config: &SpawnConfig) -> ProcCommand {
     let mut cmd = ProcCommand::new("omp");
-    // `rpc-ui`, not `rpc`: same protocol but `hasUI: true`, so the interactive
-    // `ask` tool is registered and its prompts arrive as `extension_ui_request` frames.
-    cmd.arg("--mode").arg("rpc-ui");
+    // `rpc`, not `rpc-ui`: `hasUI` off drops omp's interactive `ask` tool (questions
+    // become plain text); the `extension_ui_request` UI sub-protocol still works in `rpc`.
+    cmd.arg("--mode").arg("rpc");
     if let Some(model) = &config.model {
         cmd.arg("--model").arg(model);
     }
@@ -84,7 +84,7 @@ fn build_command(config: &SpawnConfig) -> ProcCommand {
 }
 
 impl OmpClient {
-    /// Spawn `omp --mode rpc-ui`, wait for its `ready` frame, and return the client
+    /// Spawn `omp --mode rpc`, wait for its `ready` frame, and return the client
     /// alongside the session event stream. Errors if the binary cannot be
     /// spawned or it exits / stalls before reporting ready. The stdout reader and
     /// stderr drain run on `tracker` and stop on `cancel`, so worker shutdown
@@ -96,7 +96,7 @@ impl OmpClient {
     ) -> color_eyre::Result<(OmpClient, mpsc::UnboundedReceiver<OmpEvent>)> {
         let mut cmd = build_command(config);
 
-        let mut child = cmd.spawn().wrap_err("spawn `omp --mode rpc-ui`")?;
+        let mut child = cmd.spawn().wrap_err("spawn `omp --mode rpc`")?;
         let stdin = child.stdin.take().ok_or_else(|| eyre!("omp child has no stdin"))?;
         let stdout = child.stdout.take().ok_or_else(|| eyre!("omp child has no stdout"))?;
         let stderr = child.stderr.take().ok_or_else(|| eyre!("omp child has no stderr"))?;
