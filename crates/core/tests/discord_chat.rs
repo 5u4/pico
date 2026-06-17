@@ -224,26 +224,28 @@ async fn scripted_omp_drives_thread_and_real_smoke() {
     // activity opens a new message below the task (its id above the task message's).
     let mut ordered = false;
     let mut seq_thread: Option<serenity::ChannelId> = None;
-    if let Ok(seq_msg) = channel.say(&driver, format!("SEQ {marker}")).await {
-        for _ in 0..30 {
-            tokio::time::sleep(Duration::from_secs(3)).await;
-            if seq_thread.is_none()
-                && let Ok(m) = channel.message(&driver, seq_msg.id).await
-                && let Some(started) = m.thread
-            {
-                seq_thread = Some(started.id);
-            }
-            if let Some(tid) = seq_thread
-                && let Ok(messages) = tid.messages(&driver, serenity::GetMessages::new().limit(25)).await
-            {
-                let act_b = messages.iter().find(|m| m.content.contains(&format!("ACT-B-{marker}")));
-                let task_msg = messages
-                    .iter()
-                    .find(|m| m.content.contains(&format!("SEQCHILD-{marker}")));
-                if let (Some(b), Some(t)) = (act_b, task_msg) {
-                    ordered = b.id > t.id;
-                    break;
-                }
+    let seq_msg = channel
+        .say(&driver, format!("SEQ {marker}"))
+        .await
+        .expect("driver failed to post SEQ message");
+    for _ in 0..30 {
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        if seq_thread.is_none()
+            && let Ok(m) = channel.message(&driver, seq_msg.id).await
+            && let Some(started) = m.thread
+        {
+            seq_thread = Some(started.id);
+        }
+        if let Some(tid) = seq_thread
+            && let Ok(messages) = tid.messages(&driver, serenity::GetMessages::new().limit(25)).await
+        {
+            let act_b = messages.iter().find(|m| m.content.contains(&format!("ACT-B-{marker}")));
+            let task_msg = messages
+                .iter()
+                .find(|m| m.content.contains(&format!("SEQCHILD-{marker}")));
+            if let (Some(b), Some(t)) = (act_b, task_msg) {
+                ordered = b.id > t.id;
+                break;
             }
         }
     }
