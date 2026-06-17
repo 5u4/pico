@@ -220,6 +220,37 @@ async fn scripted_omp_drives_thread_and_real_smoke() {
         .await;
     }
 
+    // Timeline: activity tool → `task` → activity tool. With the seal, the post-task
+    // activity opens a new message below the task (its id above the task message's).
+    let mut ordered = false;
+    let mut seq_thread: Option<serenity::ChannelId> = None;
+    if let Ok(seq_msg) = channel.say(&driver, format!("SEQ {marker}")).await {
+        for _ in 0..30 {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            if seq_thread.is_none()
+                && let Ok(m) = channel.message(&driver, seq_msg.id).await
+                && let Some(started) = m.thread
+            {
+                seq_thread = Some(started.id);
+            }
+            if let Some(tid) = seq_thread
+                && let Ok(messages) = tid.messages(&driver, serenity::GetMessages::new().limit(25)).await
+            {
+                let act_b = messages.iter().find(|m| m.content.contains(&format!("ACT-B-{marker}")));
+                let task_msg = messages
+                    .iter()
+                    .find(|m| m.content.contains(&format!("SEQCHILD-{marker}")));
+                if let (Some(b), Some(t)) = (act_b, task_msg) {
+                    ordered = b.id > t.id;
+                    break;
+                }
+            }
+        }
+    }
+    if let Some(tid) = seq_thread {
+        let _ = tid.delete(&driver).await;
+    }
+
     // Real-LLM smoke on the same gateway: swap PATH back so a fresh thread spawns
     // the real omp, and confirm one Copilot turn round-trips through Discord.
     unsafe { std::env::set_var("PATH", original_path) };
@@ -266,6 +297,10 @@ async fn scripted_omp_drives_thread_and_real_smoke() {
     assert!(renamed, "pico opened a thread but never renamed it to the generated title");
     assert!(referenced, "pico's in-thread reply did not reference the follow-up message");
     assert!(smoke_ok, "the real omp + Copilot smoke never replied through Discord");
+    assert!(
+        ordered,
+        "post-task activity did not open a new message below the task message (timeline seal)"
+    );
     shutdown
         .expect("pico did not shut down within 15s")
         .expect("run task panicked")

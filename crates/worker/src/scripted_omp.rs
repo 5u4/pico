@@ -29,6 +29,22 @@ fn reply_for(message: &str) -> String {
     }
 }
 
+/// Emits `read → task → read` for the timeline e2e: the host must seal the activity
+/// feed after the `task` so the second `read` opens a new message below the task.
+fn emit_seq(out: &mut impl Write, marker: &str) {
+    let frames = [
+        json!({ "type": "tool_execution_start", "toolCallId": "seq-a", "toolName": "read", "args": { "path": format!("ACT-A-{marker}") } }),
+        json!({ "type": "tool_execution_end", "toolCallId": "seq-a", "toolName": "read", "result": {}, "isError": false }),
+        json!({ "type": "tool_execution_start", "toolCallId": "seq-task", "toolName": "task", "args": { "agent": "task", "tasks": [{ "id": "seq-child", "description": format!("SEQCHILD-{marker}") }] } }),
+        json!({ "type": "tool_execution_end", "toolCallId": "seq-task", "toolName": "task", "result": {}, "isError": false }),
+        json!({ "type": "tool_execution_start", "toolCallId": "seq-b", "toolName": "read", "args": { "path": format!("ACT-B-{marker}") } }),
+        json!({ "type": "tool_execution_end", "toolCallId": "seq-b", "toolName": "read", "result": {}, "isError": false }),
+    ];
+    for frame in &frames {
+        emit(out, frame);
+    }
+}
+
 fn run_rpc() {
     let stdin = std::io::stdin();
     let mut out = std::io::stdout();
@@ -50,13 +66,16 @@ fn run_rpc() {
                 ack(&mut out, "prompt", id);
                 emit(&mut out, &json!({ "type": "agent_start" }));
                 let message = frame.get("message").and_then(Value::as_str).unwrap_or_default();
-                emit(
-                    &mut out,
-                    &json!({
-                        "type": "message_update",
-                        "assistantMessageEvent": { "type": "text_delta", "delta": reply_for(message) },
-                    }),
-                );
+                match message.trim().split_once(' ') {
+                    Some(("SEQ", marker)) => emit_seq(&mut out, marker),
+                    _ => emit(
+                        &mut out,
+                        &json!({
+                            "type": "message_update",
+                            "assistantMessageEvent": { "type": "text_delta", "delta": reply_for(message) },
+                        }),
+                    ),
+                }
                 emit(&mut out, &json!({ "type": "agent_end" }));
             }
             // Any other drive command just needs an ack, or dispatch() would time out.
