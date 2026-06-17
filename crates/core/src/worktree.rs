@@ -144,6 +144,98 @@ pub async fn validate_base_repo(base_repo: &Path, default_branch: &str) -> color
     Ok(())
 }
 
+/// What `/worktree close` would permanently destroy for a thread's worktree.
+pub struct LossSummary {
+    pub dirty: bool,
+    /// Commits on the thread's branch beyond `default_branch`; `None` if it can't
+    /// be resolved (treated conservatively as "has unmerged work").
+    pub unmerged: Option<u32>,
+}
+
+impl LossSummary {
+    pub fn needs_confirmation(&self) -> bool {
+        self.dirty || self.unmerged.is_none_or(|n| n > 0)
+    }
+
+    pub fn describe(&self) -> String {
+        let mut parts = Vec::new();
+        if self.dirty {
+            parts.push("uncommitted changes".to_owned());
+        }
+        match self.unmerged {
+            Some(n) if n > 0 => parts.push(format!("{n} unmerged commit(s)")),
+            None => parts.push("possibly-unmerged commits".to_owned()),
+            Some(_) => {}
+        }
+        if parts.is_empty() {
+            "uncommitted or unmerged work".to_owned()
+        } else {
+            parts.join(" and ")
+        }
+    }
+}
+
+/// Inspect — read-only — what closing the thread's worktree would destroy. The
+/// unmerged probe uses `base_repo`'s branch ref, so it reports even if the dir is gone.
+pub async fn close_would_lose(
+    base_repo: &Path,
+    worktree: &Path,
+    thread_id: &str,
+    default_branch: &str,
+) -> color_eyre::Result<LossSummary> {
+    let dirty = if worktree.join(".git").exists() {
+        let out = git_output(worktree, ["status", "--porcelain"], GIT_TIMEOUT).await?;
+        !String::from_utf8_lossy(&out.stdout).trim().is_empty()
+    } else {
+        false
+    };
+    let branch = branch_name(thread_id);
+    let unmerged = if branch_exists(base_repo, &branch).await? {
+        let range = format!("{default_branch}..{branch}");
+        let out = git_output(base_repo, ["rev-list", "--count", &range], GIT_TIMEOUT).await?;
+        // A failed rev-list means `default_branch` didn't resolve: confirm to be safe.
+        out.status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).trim().parse().unwrap_or(0))
+    } else {
+        Some(0)
+    };
+    Ok(LossSummary { dirty, unmerged })
+}
+
+/// Tear down a thread's worktree: force-remove the working tree, then delete its
+/// branch. Idempotent; `--force` so a dirty tree can't block the close. Serialised
+/// against [`ensure_at`] so a concurrent recreate can't race the removal.
+pub async fn remove(base_repo: &Path, worktree: &Path, thread_id: &str) -> color_eyre::Result<()> {
+    let _guard = CREATE_LOCK.lock().await;
+    if worktree.exists() {
+        run_git(
+            base_repo,
+            [
+                OsStr::new("worktree"),
+                OsStr::new("remove"),
+                OsStr::new("--force"),
+                worktree.as_os_str(),
+            ],
+            GIT_TIMEOUT,
+        )
+        .await
+        .wrap_err("git worktree remove")?;
+    } else {
+        // Dir deleted out from under git (host rebuild): drop the stale registration.
+        run_git(base_repo, ["worktree", "prune"], GIT_TIMEOUT)
+            .await
+            .wrap_err("git worktree prune")?;
+    }
+    let branch = branch_name(thread_id);
+    if branch_exists(base_repo, &branch).await? {
+        run_git(base_repo, ["branch", "-D", &branch], GIT_TIMEOUT)
+            .await
+            .wrap_err("git branch -D")?;
+    }
+    Ok(())
+}
+
 async fn branch_exists(repo: &Path, branch: &str) -> color_eyre::Result<bool> {
     git_ok(
         repo,
@@ -345,6 +437,125 @@ mod tests {
             .await
             .unwrap();
         assert!(path.join("seed.txt").exists());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn loss_summary_confirmation_and_describe() {
+        use super::LossSummary;
+        assert!(
+            !LossSummary {
+                dirty: false,
+                unmerged: Some(0)
+            }
+            .needs_confirmation()
+        );
+        assert!(
+            LossSummary {
+                dirty: true,
+                unmerged: Some(0)
+            }
+            .needs_confirmation()
+        );
+        assert!(
+            LossSummary {
+                dirty: false,
+                unmerged: Some(2)
+            }
+            .needs_confirmation()
+        );
+        assert!(
+            LossSummary {
+                dirty: false,
+                unmerged: None
+            }
+            .needs_confirmation()
+        );
+        assert_eq!(
+            LossSummary {
+                dirty: true,
+                unmerged: Some(2)
+            }
+            .describe(),
+            "uncommitted changes and 2 unmerged commit(s)"
+        );
+        assert_eq!(
+            LossSummary {
+                dirty: false,
+                unmerged: None
+            }
+            .describe(),
+            "possibly-unmerged commits"
+        );
+    }
+
+    #[tokio::test]
+    async fn close_would_lose_clean_worktree_needs_no_confirmation() {
+        let root = temp_dir("loss-clean");
+        let base = local_repo(&root);
+        let wt_dir = root.join("worktrees");
+        let (channel, thread) = ("111111111111111111", "222222222222222222");
+        let path = super::ensure(&wt_dir, channel, thread, &base, "main").await.unwrap();
+
+        let loss = super::close_would_lose(&base, &path, thread, "main").await.unwrap();
+        assert!(!loss.dirty);
+        assert_eq!(loss.unmerged, Some(0));
+        assert!(!loss.needs_confirmation());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn close_would_lose_flags_uncommitted_changes() {
+        let root = temp_dir("loss-dirty");
+        let base = local_repo(&root);
+        let wt_dir = root.join("worktrees");
+        let (channel, thread) = ("111111111111111111", "222222222222222222");
+        let path = super::ensure(&wt_dir, channel, thread, &base, "main").await.unwrap();
+        std::fs::write(path.join("scratch.txt"), "wip").unwrap();
+
+        let loss = super::close_would_lose(&base, &path, thread, "main").await.unwrap();
+        assert!(loss.dirty, "untracked file should read as dirty");
+        assert!(loss.needs_confirmation());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn close_would_lose_counts_unmerged_commits() {
+        let root = temp_dir("loss-unmerged");
+        let base = local_repo(&root);
+        let wt_dir = root.join("worktrees");
+        let (channel, thread) = ("111111111111111111", "222222222222222222");
+        let path = super::ensure(&wt_dir, channel, thread, &base, "main").await.unwrap();
+        std::fs::write(path.join("work.txt"), "wip").unwrap();
+        git(&path, &["config", "user.email", "test@pico"]);
+        git(&path, &["config", "user.name", "pico test"]);
+        git(&path, &["add", "."]);
+        git(&path, &["commit", "-m", "wip"]);
+
+        let loss = super::close_would_lose(&base, &path, thread, "main").await.unwrap();
+        assert!(!loss.dirty, "a committed tree is clean");
+        assert_eq!(loss.unmerged, Some(1));
+        assert!(loss.needs_confirmation());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn remove_deletes_worktree_and_branch_idempotently() {
+        let root = temp_dir("remove");
+        let base = local_repo(&root);
+        let wt_dir = root.join("worktrees");
+        let (channel, thread) = ("111111111111111111", "222222222222222222");
+        let path = super::ensure(&wt_dir, channel, thread, &base, "main").await.unwrap();
+        assert!(path.join(".git").exists());
+
+        super::remove(&base, &path, thread).await.unwrap();
+        assert!(!path.exists(), "worktree dir should be gone");
+        assert!(
+            !super::branch_exists(&base, &super::branch_name(thread)).await.unwrap(),
+            "branch should be deleted"
+        );
+
+        super::remove(&base, &path, thread).await.unwrap();
         std::fs::remove_dir_all(&root).ok();
     }
 }

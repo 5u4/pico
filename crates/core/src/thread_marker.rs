@@ -18,6 +18,9 @@ pub struct ThreadMarker {
     /// Present iff the thread is a worktree thread — lets `cwd` be recreated if
     /// the worktree was torn down out from under the worker.
     pub worktree: Option<WorktreeOrigin>,
+    /// Set (ISO8601) when the worktree thread was closed via `/worktree close`;
+    /// its presence tombstones the thread so `route_message` refuses further turns.
+    pub closed_at: Option<String>,
 }
 
 pub struct WorktreeOrigin {
@@ -33,6 +36,8 @@ struct RawMarker {
     base_repo: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     default_branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    closed_at: Option<String>,
 }
 
 /// Read a thread's marker. `None` means "resolve from the channel binding": the
@@ -93,6 +98,7 @@ fn parse(text: &str) -> Option<ThreadMarker> {
         profile: raw.profile,
         cwd,
         worktree,
+        closed_at: raw.closed_at,
     })
 }
 
@@ -113,6 +119,7 @@ fn write(root: &Path, thread_id: &str, marker: &ThreadMarker) -> color_eyre::Res
             .as_ref()
             .map(|w| w.base_repo.to_string_lossy().into_owned()),
         default_branch: marker.worktree.as_ref().map(|w| w.default_branch.clone()),
+        closed_at: marker.closed_at.clone(),
     };
     let text = toml::to_string(&raw).wrap_err("serializing thread marker")?;
     let path = pico_shared::paths::thread_marker(root, thread_id);
@@ -127,6 +134,16 @@ fn write(root: &Path, thread_id: &str, marker: &ThreadMarker) -> color_eyre::Res
     std::fs::write(&tmp, text).wrap_err_with(|| format!("writing {}", tmp.display()))?;
     std::fs::rename(&tmp, &path).wrap_err_with(|| format!("renaming {} -> {}", tmp.display(), path.display()))?;
     Ok(())
+}
+
+/// Tombstone a worktree thread: stamp `closed_at` on its marker and persist it.
+/// Surfaces write failures (unlike best-effort [`save`]) so a failed close aborts.
+pub fn tombstone(root: &Path, thread_id: &str, marker: ThreadMarker, closed_at: String) -> color_eyre::Result<()> {
+    let marker = ThreadMarker {
+        closed_at: Some(closed_at),
+        ..marker
+    };
+    write(root, thread_id, &marker)
 }
 
 #[cfg(test)]
@@ -160,6 +177,7 @@ mod tests {
                 profile: "sen".into(),
                 cwd: PathBuf::from("/work"),
                 worktree: None,
+                closed_at: None,
             },
         );
         let m = super::load(&root, "222222222222222222").unwrap();
@@ -182,6 +200,7 @@ mod tests {
                     base_repo: PathBuf::from("/repo"),
                     default_branch: "origin/main".into(),
                 }),
+                closed_at: None,
             },
         );
         let wt = super::load(&root, "222222222222222222").unwrap().worktree.unwrap();
@@ -248,6 +267,33 @@ mod tests {
             "profile = \"sen\"\ncwd = \"/wt/c/t\"\nbase_repo = \"rel/repo\"\ndefault_branch = \"origin/main\"\n",
         );
         assert!(super::load(&root, "333333333333333333").is_none());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn tombstone_sets_closed_at_and_keeps_origin() {
+        let root = temp_root("tomb");
+        super::save(
+            &root,
+            "222222222222222222",
+            &super::ThreadMarker {
+                profile: "sen".into(),
+                cwd: PathBuf::from("/wt/c/t"),
+                worktree: Some(super::WorktreeOrigin {
+                    base_repo: PathBuf::from("/repo"),
+                    default_branch: "origin/main".into(),
+                }),
+                closed_at: None,
+            },
+        );
+        let marker = super::load(&root, "222222222222222222").unwrap();
+        assert!(marker.closed_at.is_none());
+        super::tombstone(&root, "222222222222222222", marker, "2026-06-17T00:00:00Z".into()).unwrap();
+        let reloaded = super::load(&root, "222222222222222222").unwrap();
+        assert_eq!(reloaded.closed_at.as_deref(), Some("2026-06-17T00:00:00Z"));
+        let wt = reloaded.worktree.unwrap();
+        assert_eq!(wt.base_repo, PathBuf::from("/repo"));
+        assert_eq!(wt.default_branch, "origin/main");
         std::fs::remove_dir_all(&root).ok();
     }
 }
