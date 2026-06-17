@@ -96,7 +96,7 @@ pub enum OmpEvent {
     ToolStart(ToolCallStart),
     ToolUpdate(ToolCallUpdate),
     ToolEnd(ToolCallEnd),
-    /// An extension (notably `ask`) asked the user a question over the RPC UI sub-protocol; the host renders it and replies with a [`UiResponse`].
+    /// An extension asked the user a question over the RPC UI sub-protocol (e.g. a tool-approval prompt); the host renders it and replies with a [`UiResponse`].
     UiRequest(UiRequest),
     /// The agent finished the turn. Terminal for the current prompt.
     AgentEnd,
@@ -155,7 +155,6 @@ pub enum ToolCallStart {
     WebSearch(ToolCall),
     Task(ToolCall),
     Job(ToolCall),
-    Ask(ToolCall),
     Unknown(ToolCall),
 }
 
@@ -174,7 +173,6 @@ impl From<ToolCall> for ToolCallStart {
             "web_search" => Self::WebSearch(call),
             "task" => Self::Task(call),
             "job" => Self::Job(call),
-            "ask" => Self::Ask(call),
             _ => Self::Unknown(call),
         }
     }
@@ -196,7 +194,6 @@ impl ToolCallStart {
             | Self::WebSearch(c)
             | Self::Task(c)
             | Self::Job(c)
-            | Self::Ask(c)
             | Self::Unknown(c) => c,
         }
     }
@@ -225,8 +222,8 @@ pub struct ToolCallUpdate {
     pub partial_result: serde_json::Value,
 }
 
-/// An `extension_ui_request` frame (the RPC UI sub-protocol the `ask` tool
-/// drives), classified by `method` like [`ToolCallStart`] classifies a
+/// An `extension_ui_request` frame (the RPC UI sub-protocol), classified by
+/// `method` like [`ToolCallStart`] classifies a
 /// [`ToolCall`]. A recognised method with no Discord surface becomes
 /// [`Self::Ignore`]; a method this build does not model becomes [`Self::Unknown`]
 /// and is auto-cancelled, so a future response-bearing dialog can never hang the

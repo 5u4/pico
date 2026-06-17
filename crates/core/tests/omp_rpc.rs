@@ -1,6 +1,6 @@
 //! End-to-end tests for the OMP RPC client. `#[ignore]`d by default: they spawn
-//! the real `omp --mode rpc-ui` binary (Bun), and `streams_a_prompt_reply` /
-//! `ask_tool_round_trips_a_selection` also hit GitHub Copilot over the network.
+//! the real `omp --mode rpc` binary (Bun), and `streams_a_prompt_reply` /
+//! `classifies_a_real_tool_call` also hit GitHub Copilot over the network.
 //! Run with `--include-ignored`.
 
 use std::{
@@ -10,7 +10,7 @@ use std::{
 
 use pico_core::omp::{
     client::{OmpClient, SpawnConfig},
-    protocol::{AssistantMessageEvent, OmpEvent, ToolCallStart, UiRequest, UiResponse},
+    protocol::{AssistantMessageEvent, OmpEvent, ToolCallStart, UiResponse},
 };
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
@@ -52,7 +52,7 @@ async fn roundtrip_commands_without_model_calls() {
     let tracker = TaskTracker::new();
     let (client, _events) = OmpClient::spawn(&config, &CancellationToken::new(), &tracker)
         .await
-        .expect("spawn omp --mode rpc-ui");
+        .expect("spawn omp --mode rpc");
 
     client.new_session().await.expect("new_session");
     client
@@ -88,7 +88,7 @@ async fn streams_a_prompt_reply() {
     let tracker = TaskTracker::new();
     let (client, mut events) = OmpClient::spawn(&config, &CancellationToken::new(), &tracker)
         .await
-        .expect("spawn omp --mode rpc-ui");
+        .expect("spawn omp --mode rpc");
     client
         .prompt("Reply with exactly the word: pong")
         .await
@@ -131,7 +131,7 @@ async fn classifies_a_real_tool_call() {
     let tracker = TaskTracker::new();
     let (client, mut events) = OmpClient::spawn(&config, &CancellationToken::new(), &tracker)
         .await
-        .expect("spawn omp --mode rpc-ui");
+        .expect("spawn omp --mode rpc");
     client
         .prompt("Run this shell command with the bash tool and report nothing else: echo pong")
         .await
@@ -176,7 +176,7 @@ async fn task_update_carries_subagent_progress() {
     let tracker = TaskTracker::new();
     let (client, mut events) = OmpClient::spawn(&config, &CancellationToken::new(), &tracker)
         .await
-        .expect("spawn omp --mode rpc-ui");
+        .expect("spawn omp --mode rpc");
     client
         .prompt(
             "Use the task tool to spawn exactly one subagent: agent type \"explore\", one task whose \
@@ -211,141 +211,6 @@ async fn task_update_carries_subagent_progress() {
     client.shutdown().await.expect("shutdown");
 }
 
-/// The `ask` tool blocks (no default timeout) until the host answers its
-/// `extension_ui_request`; drive a real call, reply, and assert it resolves.
-#[tokio::test]
-#[ignore]
-async fn ask_tool_round_trips_a_selection() {
-    let cwd = TempDir::new("pico-omp-ask");
-    let config = SpawnConfig {
-        model: Some("github-copilot/gpt-4o-mini".to_owned()),
-        cwd: Some(cwd.path.clone()),
-        ..SpawnConfig::default()
-    };
-
-    let tracker = TaskTracker::new();
-    let (client, mut events) = OmpClient::spawn(&config, &CancellationToken::new(), &tracker)
-        .await
-        .expect("spawn omp --mode rpc-ui");
-    client
-        .prompt(
-            "Use the ask tool — and nothing else — to ask me to pick a color. Provide exactly two \
-             options: \"Red\" and \"Blue\". You MUST call the ask tool and wait for my selection; do \
-             not answer yourself or pick for me.",
-        )
-        .await
-        .expect("prompt acked");
-
-    let mut chosen: Option<String> = None;
-    let mut ask_succeeded = false;
-    loop {
-        let event = tokio::time::timeout(Duration::from_secs(120), events.recv())
-            .await
-            .expect("timed out waiting for omp events")
-            .expect("event stream closed before agent_end");
-        match event {
-            // Pick a real option (not "Other", which would chain into an editor).
-            OmpEvent::UiRequest(UiRequest::Select { id, options, .. }) => {
-                let choice = options
-                    .iter()
-                    .find(|o| !o.contains("Other"))
-                    .cloned()
-                    .unwrap_or_else(|| options.first().cloned().unwrap_or_default());
-                client
-                    .ui_response(&UiResponse::value(&id, &choice))
-                    .await
-                    .expect("send extension_ui_response");
-                chosen = Some(choice);
-            }
-            OmpEvent::ToolEnd(end) if end.tool_name == "ask" => {
-                ask_succeeded = !end.is_error;
-            }
-            OmpEvent::AgentEnd => break,
-            OmpEvent::Error(e) => panic!("omp reported an error: {e}"),
-            _ => {}
-        }
-    }
-    let chosen = chosen.expect("never received an `ask` select request to answer");
-    assert!(
-        chosen.contains("Red") || chosen.contains("Blue"),
-        "unexpected option set: {chosen:?}"
-    );
-    assert!(
-        ask_succeeded,
-        "ask tool did not resolve successfully after the selection was sent"
-    );
-
-    client.shutdown().await.expect("shutdown");
-}
-
-/// Picking "Other" chains the select into an `editor` request; the host answers
-/// it with free text and the ask must resolve with that custom input. Grounds the
-/// editor round-trip that `ui::text_prompt`'s modal loop drives.
-#[tokio::test]
-#[ignore]
-async fn ask_tool_round_trips_custom_input() {
-    let cwd = TempDir::new("pico-omp-ask-custom");
-    let config = SpawnConfig {
-        model: Some("github-copilot/gpt-4o-mini".to_owned()),
-        cwd: Some(cwd.path.clone()),
-        ..SpawnConfig::default()
-    };
-
-    let tracker = TaskTracker::new();
-    let (client, mut events) = OmpClient::spawn(&config, &CancellationToken::new(), &tracker)
-        .await
-        .expect("spawn omp --mode rpc-ui");
-    client
-        .prompt(
-            "Use the ask tool — and nothing else — to ask me to pick a color. Provide exactly two \
-             options: \"Red\" and \"Blue\". You MUST call the ask tool and wait for my selection; do \
-             not answer yourself or pick for me.",
-        )
-        .await
-        .expect("prompt acked");
-
-    const CUSTOM: &str = "Chartreuse";
-    let mut saw_editor = false;
-    let mut ask_succeeded = false;
-    loop {
-        let event = tokio::time::timeout(Duration::from_secs(120), events.recv())
-            .await
-            .expect("timed out waiting for omp events")
-            .expect("event stream closed before agent_end");
-        match event {
-            // Choose "Other (type your own)" to force the editor follow-up.
-            OmpEvent::UiRequest(UiRequest::Select { id, options, .. }) => {
-                let other = options
-                    .iter()
-                    .find(|o| o.contains("Other"))
-                    .cloned()
-                    .expect("select offered no Other option");
-                client
-                    .ui_response(&UiResponse::value(&id, &other))
-                    .await
-                    .expect("send select response");
-            }
-            OmpEvent::UiRequest(UiRequest::Editor { id, .. }) => {
-                saw_editor = true;
-                client
-                    .ui_response(&UiResponse::value(&id, CUSTOM))
-                    .await
-                    .expect("send editor response");
-            }
-            OmpEvent::ToolEnd(end) if end.tool_name == "ask" => {
-                ask_succeeded = !end.is_error;
-            }
-            OmpEvent::AgentEnd => break,
-            OmpEvent::Error(e) => panic!("omp reported an error: {e}"),
-            _ => {}
-        }
-    }
-    assert!(saw_editor, "picking Other never produced an editor request");
-    assert!(ask_succeeded, "ask tool did not resolve after the custom input was sent");
-
-    client.shutdown().await.expect("shutdown");
-}
-
 /// The hardening for unrecognised UI methods replies `cancelled` keyed by the
 /// request's `id`. That is only safe if OMP ignores a response whose `id` has no
 /// pending dialog (a fire-and-forget method, or a method this build doesn't
@@ -364,7 +229,7 @@ async fn stale_ui_response_is_ignored() {
     let tracker = TaskTracker::new();
     let (client, mut events) = OmpClient::spawn(&config, &CancellationToken::new(), &tracker)
         .await
-        .expect("spawn omp --mode rpc-ui");
+        .expect("spawn omp --mode rpc");
 
     // No dialog is pending, so this id matches nothing — OMP must drop it.
     client

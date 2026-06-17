@@ -1,12 +1,9 @@
 //! Scripted `omp` stand-in for the Discord chat e2e: speaks enough of the
-//! `rpc-ui` protocol to drive deterministic `ask` flows without Copilot, plus
-//! the `config get`/`-p` title one-shots. The driver's message is the script;
-//! answers echo back as `DONE:<answers>`. see also: crates/core/tests/discord_chat.rs.
+//! `rpc` protocol to drive a deterministic thread reply without Copilot, plus
+//! the `config get`/`-p` title one-shots. The driver's `TELL <text>` message is
+//! echoed back as the assistant reply. see also: crates/core/tests/discord_chat.rs.
 
-use std::{
-    collections::VecDeque,
-    io::{BufRead, Write},
-};
+use std::io::{BufRead, Write};
 
 use serde_json::{Value, json};
 
@@ -24,55 +21,11 @@ fn main() {
     }
 }
 
-struct Script {
-    asks: VecDeque<Ask>,
-    answers: Vec<String>,
-    reply: String,
-    had_asks: bool,
-}
-
-struct Ask {
-    method: &'static str,
-    title: String,
-}
-
-impl Script {
-    fn parse(message: &str) -> Script {
-        let message = message.trim();
-        let (head, rest) = message.split_once(' ').unwrap_or((message, ""));
-        let mut asks = VecDeque::new();
-        let mut reply = message.to_owned();
-        match head {
-            "TELL" => reply = rest.to_owned(),
-            "ASK_SELECT" => asks.push_back(Ask {
-                method: "select",
-                title: rest.to_owned(),
-            }),
-            "ASK_EDITOR" => asks.push_back(Ask {
-                method: "editor",
-                title: rest.to_owned(),
-            }),
-            "ASK_INPUT" => asks.push_back(Ask {
-                method: "input",
-                title: rest.to_owned(),
-            }),
-            "ASK_MULTI" => {
-                for title in rest.split_whitespace() {
-                    asks.push_back(Ask {
-                        method: "select",
-                        title: title.to_owned(),
-                    });
-                }
-            }
-            _ => {}
-        }
-        let had_asks = !asks.is_empty();
-        Script {
-            asks,
-            answers: Vec::new(),
-            reply,
-            had_asks,
-        }
+fn reply_for(message: &str) -> String {
+    let message = message.trim();
+    match message.split_once(' ') {
+        Some(("TELL", rest)) => rest.to_owned(),
+        _ => message.to_owned(),
     }
 }
 
@@ -81,7 +34,6 @@ fn run_rpc() {
     let mut out = std::io::stdout();
     emit(&mut out, &json!({ "type": "ready" }));
 
-    let mut pending: Option<Script> = None;
     for line in stdin.lock().lines() {
         let Ok(line) = line else { break };
         let trimmed = line.trim();
@@ -98,57 +50,20 @@ fn run_rpc() {
                 ack(&mut out, "prompt", id);
                 emit(&mut out, &json!({ "type": "agent_start" }));
                 let message = frame.get("message").and_then(Value::as_str).unwrap_or_default();
-                let mut script = Script::parse(message);
-                pending = (!advance(&mut out, &mut script)).then_some(script);
-            }
-            "extension_ui_response" => {
-                if let Some(mut script) = pending.take() {
-                    let answer = frame.get("value").and_then(Value::as_str).unwrap_or_default();
-                    script.answers.push(answer.to_owned());
-                    pending = (!advance(&mut out, &mut script)).then_some(script);
-                }
+                emit(
+                    &mut out,
+                    &json!({
+                        "type": "message_update",
+                        "assistantMessageEvent": { "type": "text_delta", "delta": reply_for(message) },
+                    }),
+                );
+                emit(&mut out, &json!({ "type": "agent_end" }));
             }
             // Any other drive command just needs an ack, or dispatch() would time out.
             _ if !id.is_empty() => ack(&mut out, kind, id),
             _ => {}
         }
     }
-}
-
-fn advance(out: &mut impl Write, script: &mut Script) -> bool {
-    if let Some(ask) = script.asks.pop_front() {
-        let id = format!("ask-{}", script.answers.len());
-        let frame = match ask.method {
-            "select" => json!({
-                "type": "extension_ui_request", "method": "select",
-                "id": id, "title": ask.title, "options": ["A", "B"],
-            }),
-            "input" => json!({
-                "type": "extension_ui_request", "method": "input",
-                "id": id, "title": ask.title, "placeholder": "type here",
-            }),
-            _ => json!({
-                "type": "extension_ui_request", "method": "editor",
-                "id": id, "title": ask.title,
-            }),
-        };
-        emit(out, &frame);
-        return false;
-    }
-    let text = if script.had_asks {
-        format!("DONE:{}", script.answers.join("|"))
-    } else {
-        script.reply.clone()
-    };
-    emit(
-        out,
-        &json!({
-            "type": "message_update",
-            "assistantMessageEvent": { "type": "text_delta", "delta": text },
-        }),
-    );
-    emit(out, &json!({ "type": "agent_end" }));
-    true
 }
 
 fn ack(out: &mut impl Write, command: &str, id: &str) {
