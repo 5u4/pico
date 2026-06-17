@@ -43,7 +43,7 @@ pub(crate) fn framework(
 ) -> poise::Framework<Data, Error> {
     poise::Framework::builder()
         .options(poise::FrameworkOptions {
-            commands: vec![ping(), bind(), deploy()],
+            commands: vec![ping(), bind(), deploy(), worktree()],
             event_handler: |ctx, event, framework, data| Box::pin(on_event(ctx, event, framework.bot_id, data)),
             command_check: Some(|ctx| Box::pin(command_in_registered_guild(ctx))),
             ..Default::default()
@@ -317,6 +317,155 @@ async fn bindable_channel(ctx: Context<'_>) -> Result<serenity::ChannelId, Error
     Ok(id)
 }
 
+const CLOSE_YES: &str = "worktree_close:yes";
+const CLOSE_NO: &str = "worktree_close:no";
+const CLOSE_CONFIRM_TIMEOUT: Duration = Duration::from_secs(60);
+
+#[poise::command(slash_command, subcommands("worktree_close"), subcommand_required)]
+async fn worktree(_ctx: Context<'_>) -> Result<(), Error> {
+    Ok(())
+}
+
+/// Close the current worktree thread: remove its git worktree + branch and archive it.
+#[poise::command(slash_command, rename = "close", ephemeral)]
+async fn worktree_close(ctx: Context<'_>) -> Result<(), Error> {
+    let data = ctx.data();
+    let thread_id = ctx.channel_id().to_string();
+    // Slow path ahead (git probes + teardown); ack now so the token can't expire.
+    ctx.defer_ephemeral().await?;
+
+    // Identify the target from the thread's frozen marker (never re-derived from
+    // bindings): only a worktree thread that has taken a turn has one.
+    let marker = match crate::thread_marker::load(&data.root, &thread_id) {
+        Some(marker) if marker.worktree.is_some() => marker,
+        _ => {
+            ctx.say("❌ not a worktree thread; nothing to close.").await?;
+            return Ok(());
+        }
+    };
+    if let Some(closed_at) = &marker.closed_at {
+        ctx.say(format!("this worktree thread was already closed at {closed_at}."))
+            .await?;
+        return Ok(());
+    }
+    let origin = marker.worktree.as_ref().expect("worktree origin checked above");
+    let base_repo = origin.base_repo.clone();
+    let default_branch = origin.default_branch.clone();
+    let worktree_path = marker.cwd.clone();
+
+    let loss = match crate::worktree::close_would_lose(&base_repo, &worktree_path, &thread_id, &default_branch).await {
+        Ok(loss) => loss,
+        Err(e) => {
+            ctx.say(format!("❌ worktree inspection failed: {e}")).await?;
+            return Ok(());
+        }
+    };
+    if loss.needs_confirmation() && !confirm_close(ctx, &loss).await? {
+        return Ok(());
+    }
+
+    // Stop the child, refusing if a turn is mid-flight (its files are live).
+    if data.pool.close(&thread_id) == crate::omp::pool::CloseOutcome::Busy {
+        ctx.say("⏳ a turn is running on this thread; wait for it to finish and retry.")
+            .await?;
+        return Ok(());
+    }
+
+    if let Err(e) = crate::worktree::remove(&base_repo, &worktree_path, &thread_id).await {
+        ctx.say(format!("❌ teardown failed: {e}")).await?;
+        return Ok(());
+    }
+
+    // Tombstone the marker — the authoritative terminal state. A failure here
+    // leaves the worktree gone but the thread reusable, so surface it for a retry.
+    let closed_at = serenity::Timestamp::now().to_string();
+    if let Err(e) = crate::thread_marker::tombstone(&data.root, &thread_id, marker, closed_at) {
+        ctx.say(format!(
+            "❌ worktree removed, but writing the closed marker failed: {e} — retry to finish."
+        ))
+        .await?;
+        return Ok(());
+    }
+
+    // Public record in the thread, then archive+lock it (best-effort cosmetics —
+    // the tombstone above already makes the thread terminal).
+    let channel = ctx.channel_id();
+    let _ = channel
+        .say(
+            ctx.serenity_context(),
+            format!("✅ Worktree thread closed. Removed worktree and branch `pico/{thread_id}`. Conversation history preserved."),
+        )
+        .await;
+    if let Err(e) = channel
+        .edit_thread(ctx.serenity_context(), serenity::EditThread::new().archived(true).locked(true))
+        .await
+    {
+        tracing::warn!(%thread_id, error = %e, "archive+lock after close failed");
+    }
+    ctx.say("Closed.").await?;
+    Ok(())
+}
+
+/// Ephemeral Yes/No confirm for a destructive close. Returns whether the invoker
+/// confirmed. Only the invoker can click; No / a 60s timeout / a shard drop all
+/// cancel. Sends a new ephemeral followup with the prompt (we already deferred).
+async fn confirm_close(ctx: Context<'_>, loss: &crate::worktree::LossSummary) -> Result<bool, Error> {
+    let handle = ctx
+        .send(
+            poise::CreateReply::default()
+                .ephemeral(true)
+                .content(format!(
+                    "⚠️ This worktree has {} that will be permanently deleted. Close anyway?",
+                    loss.describe()
+                ))
+                .components(vec![serenity::CreateActionRow::Buttons(vec![
+                    serenity::CreateButton::new(CLOSE_YES)
+                        .label("Delete & close")
+                        .style(serenity::ButtonStyle::Danger),
+                    serenity::CreateButton::new(CLOSE_NO)
+                        .label("Cancel")
+                        .style(serenity::ButtonStyle::Secondary),
+                ])]),
+        )
+        .await?;
+    let message = handle.message().await?;
+    let interaction = serenity::ComponentInteractionCollector::new(ctx.serenity_context())
+        .message_id(message.id)
+        .author_id(ctx.author().id)
+        .timeout(CLOSE_CONFIRM_TIMEOUT)
+        .next()
+        .await;
+    let Some(interaction) = interaction else {
+        // Timeout / shard drop: collapse the prompt and drop the now-dead buttons.
+        handle
+            .edit(
+                ctx,
+                poise::CreateReply::default()
+                    .content("Cancelled — confirmation timed out, nothing deleted.")
+                    .components(vec![]),
+            )
+            .await?;
+        return Ok(false);
+    };
+    let yes = interaction.data.custom_id == CLOSE_YES;
+    let line = if yes {
+        "⚠️ Confirmed — closing…"
+    } else {
+        "Cancelled — nothing deleted."
+    };
+    interaction
+        .create_response(
+            ctx.serenity_context(),
+            serenity::CreateInteractionResponse::UpdateMessage(
+                serenity::CreateInteractionResponseMessage::new()
+                    .content(line)
+                    .components(vec![]),
+            ),
+        )
+        .await?;
+    Ok(yes)
+}
+
 async fn on_event(
     ctx: &serenity::Context,
     event: &serenity::FullEvent,
@@ -490,6 +639,17 @@ async fn route_message(
     // binding and persists a marker. An unreadable marker self-heals to the binding.
     let (profile, cwd) = match crate::thread_marker::load(root.as_path(), &thread_id) {
         Some(marker) => {
+            // A closed worktree thread is a tombstone: refuse the turn instead of
+            // letting `ensure_at` silently rebuild the worktree we just tore down.
+            if let Some(closed_at) = &marker.closed_at {
+                target
+                    .say(
+                        &ctx,
+                        format!("❌ this worktree thread was closed at {closed_at}; open a new thread."),
+                    )
+                    .await?;
+                return Ok(());
+            }
             if let Some(wt) = &marker.worktree {
                 if let Err(e) =
                     crate::worktree::ensure_at(&marker.cwd, &thread_id, &wt.base_repo, &wt.default_branch).await
@@ -568,6 +728,7 @@ async fn route_message(
                     profile: profile.clone(),
                     cwd: cwd.clone(),
                     worktree,
+                    closed_at: None,
                 },
             );
             (profile, cwd)

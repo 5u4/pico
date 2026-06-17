@@ -57,6 +57,15 @@ pub struct OmpPool {
     smol: tokio::sync::OnceCell<Option<String>>,
 }
 
+#[derive(PartialEq, Eq, Debug)]
+pub(crate) enum CloseOutcome {
+    /// No child for this thread (never spawned or already evicted).
+    Absent,
+    Closed,
+    /// A turn is in flight (holds an extra `Arc`); the child was left running.
+    Busy,
+}
+
 impl OmpPool {
     /// Build the pool and spawn its idle-evictor on `tracker`. The sweep stops
     /// at the next tick once `cancel` fires, so worker shutdown joins it via the
@@ -124,6 +133,17 @@ impl OmpPool {
         self.sessions.lock().remove(thread_id);
     }
 
+    /// Stop a thread's child for `/worktree close`, refusing while a turn is in
+    /// flight. The map lock makes the [`close_decision`] check + removal atomic.
+    pub(crate) fn close(&self, thread_id: &str) -> CloseOutcome {
+        let mut map = self.sessions.lock();
+        let outcome = close_decision(map.get(thread_id).map(Arc::strong_count));
+        if outcome == CloseOutcome::Closed {
+            map.remove(thread_id);
+        }
+        outcome
+    }
+
     /// The fire-and-forget thread-title model from omp's `modelRoles` (smol, else
     /// default). Cached — including a stable "disabled" — but transient failures retry.
     pub async fn smol_model(&self) -> Option<String> {
@@ -152,6 +172,17 @@ fn now_millis() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+/// Busy-guard decision from a thread's `Arc` strong count: `None` (no child) ⇒
+/// Absent; `> 1` (a live turn holds a clone) ⇒ Busy; `== 1` (only the pool map
+/// holds it) ⇒ Closed. Split out so the threshold is testable without a child.
+fn close_decision(strong_count: Option<usize>) -> CloseOutcome {
+    match strong_count {
+        None => CloseOutcome::Absent,
+        Some(c) if c > 1 => CloseOutcome::Busy,
+        Some(_) => CloseOutcome::Closed,
+    }
 }
 
 /// Ask omp for its `smol`/`default` role model. omp owns the config, and `--model`
@@ -215,6 +246,25 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(5), tracker.wait())
             .await
             .expect("evictor ignored cancellation; shutdown drain would hang");
+    }
+
+    #[tokio::test]
+    async fn close_absent_thread_reports_absent() {
+        // Common real path: the idle evictor has usually already dropped the child.
+        let cancel = CancellationToken::new();
+        let tracker = TaskTracker::new();
+        let pool = OmpPool::new(cancel.clone(), &tracker);
+        assert_eq!(pool.close("222222222222222222"), CloseOutcome::Absent);
+        cancel.cancel();
+        tracker.close();
+    }
+
+    #[test]
+    fn close_decision_busy_guard_thresholds() {
+        assert_eq!(close_decision(None), CloseOutcome::Absent);
+        assert_eq!(close_decision(Some(1)), CloseOutcome::Closed);
+        // A turn in flight holds a second clone; the threshold must refuse at > 1.
+        assert_eq!(close_decision(Some(2)), CloseOutcome::Busy);
     }
 
     #[test]
