@@ -297,6 +297,7 @@ async fn scripted_omp_drives_thread_and_real_smoke() {
     assert!(renamed, "pico opened a thread but never renamed it to the generated title");
     assert!(referenced, "pico's in-thread reply did not reference the follow-up message");
     assert!(smoke_ok, "the real omp + Copilot smoke never replied through Discord");
+    assert!(seq_thread.is_some(), "pico never opened a thread for the SEQ message");
     assert!(
         ordered,
         "post-task activity did not open a new message below the task message (timeline seal)"

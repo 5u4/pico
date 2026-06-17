@@ -341,21 +341,6 @@ impl From<RawUiRequest> for UiRequest {
     }
 }
 
-impl UiRequest {
-    /// Whether handling this leaves a fixed-position channel message (a dialog or
-    /// `notify`); the activity feed seals after one so later activity sorts below it.
-    pub fn posts_channel_message(&self) -> bool {
-        match self {
-            Self::Select { .. }
-            | Self::Confirm { .. }
-            | Self::Input { .. }
-            | Self::Editor { .. }
-            | Self::Notify { .. } => true,
-            Self::Cancel { .. } | Self::Ignore | Self::Unknown { .. } => false,
-        }
-    }
-}
-
 /// Reply to a [`UiRequest`], written to OMP's stdin and correlated by the
 /// request's `id`. Exactly one of `value` / `confirmed` / `cancelled` is set.
 #[derive(Debug, Serialize)]
@@ -673,31 +658,6 @@ mod tests {
             }
             other => panic!("expected unknown, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn posts_channel_message_flags_only_surfacing_variants() {
-        fn ui(frame: &str) -> UiRequest {
-            match parse(frame) {
-                Inbound::ExtensionUiRequest(req) => req,
-                other => panic!("expected ui request, got {other:?}"),
-            }
-        }
-        assert!(
-            ui(r#"{"type":"extension_ui_request","id":"u1","method":"select","options":["A"]}"#)
-                .posts_channel_message()
-        );
-        assert!(
-            ui(r#"{"type":"extension_ui_request","id":"u2","method":"confirm","message":"go"}"#)
-                .posts_channel_message()
-        );
-        assert!(ui(r#"{"type":"extension_ui_request","id":"u3","method":"input"}"#).posts_channel_message());
-        assert!(ui(r#"{"type":"extension_ui_request","id":"u4","method":"editor"}"#).posts_channel_message());
-        assert!(ui(r#"{"type":"extension_ui_request","method":"notify","message":"hi"}"#).posts_channel_message());
-        // No channel message → must not seal; `setStatus`-style chrome can be frequent.
-        assert!(!ui(r#"{"type":"extension_ui_request","method":"cancel","targetId":"u1"}"#).posts_channel_message());
-        assert!(!ui(r#"{"type":"extension_ui_request","id":"u5","method":"setStatus"}"#).posts_channel_message());
-        assert!(!ui(r#"{"type":"extension_ui_request","id":"u6","method":"multiselect"}"#).posts_channel_message());
     }
 
     #[test]

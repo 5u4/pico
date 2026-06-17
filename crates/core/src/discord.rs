@@ -878,21 +878,23 @@ async fn drive_turn(
                 // Block the turn on the answer (the agent is paused awaiting it);
                 // `handle_request` races `cancel`, so a restart never strands the turn.
                 activity.flush().await;
-                if let crate::ui::Handled::Cancelled =
-                    crate::ui::handle_request(ctx, target, &session.client, author, &req, cancel, pending).await
-                {
-                    subagents.flush_all(false).await;
-                    commit_reply(ctx, target, &reply, reply_to).await;
-                    let _ = target
-                        .say(
-                            ctx,
-                            "worker restarted, so the pending question was discarded; resend your message to continue",
-                        )
-                        .await;
-                    return Ok(TurnOutcome::Live);
-                }
-                if req.posts_channel_message() {
-                    activity.seal();
+                match crate::ui::handle_request(ctx, target, &session.client, author, &req, cancel, pending).await {
+                    crate::ui::Handled::Cancelled => {
+                        subagents.flush_all(false).await;
+                        commit_reply(ctx, target, &reply, reply_to).await;
+                        let _ = target
+                            .say(
+                                ctx,
+                                "worker restarted, so the pending question was discarded; resend your message to continue",
+                            )
+                            .await;
+                        return Ok(TurnOutcome::Live);
+                    }
+                    crate::ui::Handled::Continue { posted } => {
+                        if posted {
+                            activity.seal();
+                        }
+                    }
                 }
             }
             Some(OmpEvent::AgentEnd) => break,
