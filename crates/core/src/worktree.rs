@@ -193,10 +193,13 @@ pub async fn close_would_lose(
     let unmerged = if branch_exists(base_repo, &branch).await? {
         let range = format!("{default_branch}..{branch}");
         let out = git_output(base_repo, ["rev-list", "--count", &range], GIT_TIMEOUT).await?;
-        // A failed rev-list means `default_branch` didn't resolve: confirm to be safe.
-        out.status
-            .success()
-            .then(|| String::from_utf8_lossy(&out.stdout).trim().parse().unwrap_or(0))
+        // Unknown count (rev-list failed, or success with unparseable output) ⇒
+        // `None`: can't prove the commits are merged, so the caller still confirms.
+        if out.status.success() {
+            String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+        } else {
+            None
+        }
     } else {
         Some(0)
     };
