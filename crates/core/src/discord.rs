@@ -752,6 +752,7 @@ async fn drive_turn(
         }
     }
     activity.flush().await;
+    subagents.settle_backgrounded();
     subagents.flush_all(false).await;
     commit_reply(ctx, target, &reply, reply_to).await;
     Ok(TurnOutcome::Live)
@@ -979,6 +980,8 @@ struct SubagentBatch {
     last_edit: Instant,
     /// Last text actually sent (defanged + clamped) so an unchanged edit no-ops.
     rendered: String,
+    /// Set when the `task` end is an async spawn-ack, so turn-end flush detaches it.
+    backgrounded: bool,
 }
 
 impl<'a> SubagentFeed<'a> {
@@ -1008,6 +1011,7 @@ impl<'a> SubagentFeed<'a> {
                 started_at: now,
                 last_edit: now,
                 rendered: content,
+                backgrounded: false,
             },
         );
     }
@@ -1017,13 +1021,24 @@ impl<'a> SubagentFeed<'a> {
             return;
         };
         crate::render::apply_progress(&mut batch.rows, &tool.partial_result);
-        let due = batch.last_edit.elapsed() >= SUBAGENT_THROTTLE;
-        if due {
+        // The async terminal lands here, not on the (spawn-ack) end.
+        if let Some(is_error) = crate::render::async_terminal(&tool.partial_result) {
+            crate::render::settle_rows(&mut batch.rows, is_error);
+            self.edit(&tool.tool_call_id).await;
+            self.batches.remove(&tool.tool_call_id);
+        } else if batch.last_edit.elapsed() >= SUBAGENT_THROTTLE {
             self.edit(&tool.tool_call_id).await;
         }
     }
 
     async fn end(&mut self, tool: &ToolCallEnd) {
+        // Spawn-ack only: mark backgrounded, keep open for the later terminal (see `update`).
+        if crate::render::is_spawn_ack(&tool.result) {
+            if let Some(batch) = self.batches.get_mut(&tool.tool_call_id) {
+                batch.backgrounded = true;
+            }
+            return;
+        }
         let Some(batch) = self.batches.get_mut(&tool.tool_call_id) else {
             return;
         };
@@ -1044,6 +1059,16 @@ impl<'a> SubagentFeed<'a> {
                 crate::render::settle_rows(&mut batch.rows, true);
             }
             self.edit(&key).await;
+        }
+    }
+
+    /// Detach batches the agent left backgrounded at a clean turn end, so they stop
+    /// at `Detached` instead of a frozen "Running". Call before the turn-end `flush_all`.
+    fn settle_backgrounded(&mut self) {
+        for batch in self.batches.values_mut() {
+            if batch.backgrounded {
+                crate::render::detach_rows(&mut batch.rows);
+            }
         }
     }
 

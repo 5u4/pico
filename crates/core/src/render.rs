@@ -229,10 +229,36 @@ pub fn tool_activity_line(tool: &ToolCallStart) -> String {
         }
         ToolCallStart::WebSearch(_) => locate("🔎", a.query),
         ToolCallStart::Ask(_) => format!("❓ {}", truncate(&json_preview(raw), ACTIVITY_DETAIL)),
+        ToolCallStart::Job(call) => job_line(&call.args),
         ToolCallStart::Task(call) | ToolCallStart::Unknown(call) => {
             format!("🛠️ {}", truncate(&call.tool_name, ACTIVITY_DETAIL))
         }
     }
+}
+
+/// The `job` activity line: ⚙️ plus the action, so a poll never renders as a bare emoji.
+fn job_line(args: &serde_json::Value) -> String {
+    let ids = |key: &str| {
+        args.get(key)
+            .and_then(serde_json::Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .filter(|s| !s.is_empty())
+    };
+    let detail = if args.get("list").and_then(serde_json::Value::as_bool) == Some(true) {
+        "list".to_owned()
+    } else if let Some(cancel) = ids("cancel") {
+        format!("cancel {cancel}")
+    } else if let Some(poll) = ids("poll") {
+        format!("poll {poll}")
+    } else {
+        return "⚙️ job".to_owned();
+    };
+    format!("⚙️ job {}", truncate(&detail, ACTIVITY_DETAIL))
 }
 
 /// Borrowed view over the `args` fields the activity line reads. serde fills
@@ -350,12 +376,13 @@ const SUBAGENT_MODEL_MAX: usize = 30;
 /// Lifecycle of one subagent row, folded from `AgentProgress.status`:
 /// `completed` → [`SubagentStatus::Done`], `failed`/`aborted` →
 /// [`SubagentStatus::Failed`], `running`/`pending` →
-/// [`SubagentStatus::InProgress`].
+/// [`SubagentStatus::InProgress`]. `Detached` is assigned at turn end (see [`detach_rows`]).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum SubagentStatus {
     InProgress,
     Done,
     Failed,
+    Detached,
 }
 
 /// One subagent's live render state in a `task` batch. Seeded from the tool args
@@ -474,19 +501,38 @@ pub fn settle_rows(rows: &mut [SubagentRow], is_error: bool) {
     }
 }
 
-/// The `task` batch message: header (`👥 Running`/`👥 Ran`, swapped to `❌ Ran`
-/// only when a subagent failed — never `✅`) then one row per subagent.
+/// Settle still-running rows to [`SubagentStatus::Detached`] at a backgrounded turn end.
+pub fn detach_rows(rows: &mut [SubagentRow]) {
+    for row in rows.iter_mut().filter(|r| r.status == SubagentStatus::InProgress) {
+        row.status = SubagentStatus::Detached;
+    }
+}
+
+/// The `task` batch message: a header (emoji + `Running`/`Spawned`/`Ran`; `👥` while
+/// any row is live, else `❌` if one failed / `🚀` if backgrounded — never `✅`) then
+/// one row per subagent.
 pub fn render_subagent_batch(rows: &[SubagentRow], elapsed_ms: u64) -> String {
     let elapsed = format_duration(elapsed_ms);
     let plural = if rows.len() == 1 { "" } else { "s" };
     let n = rows.len();
-    let mut out = if rows.iter().any(|r| r.status == SubagentStatus::InProgress) {
-        format!("👥 Running {n} task{plural} · {elapsed}")
-    } else if rows.iter().any(|r| r.status == SubagentStatus::Failed) {
-        format!("❌ Ran {n} task{plural} · {elapsed}")
+    let live = rows.iter().any(|r| r.status == SubagentStatus::InProgress);
+    let failed = rows.iter().any(|r| r.status == SubagentStatus::Failed);
+    let detached = rows.iter().any(|r| r.status == SubagentStatus::Detached);
+    let emoji = if live || (!failed && !detached) {
+        "👥"
+    } else if failed {
+        "❌"
     } else {
-        format!("👥 Ran {n} task{plural} · {elapsed}")
+        "🚀"
     };
+    let verb = if live {
+        "Running"
+    } else if detached {
+        "Spawned"
+    } else {
+        "Ran"
+    };
+    let mut out = format!("{emoji} {verb} {n} task{plural} · {elapsed}");
     for row in rows {
         out.push('\n');
         out.push_str(&render_subagent_row(row));
@@ -503,6 +549,7 @@ fn render_subagent_row(row: &SubagentRow) -> String {
     let action = match row.status {
         SubagentStatus::Done => "✅ done".to_owned(),
         SubagentStatus::Failed => "❌ failed".to_owned(),
+        SubagentStatus::Detached => "🚀 backgrounded".to_owned(),
         SubagentStatus::InProgress => match &row.current_tool {
             Some(tool) => {
                 let preview = match &row.current_tool_args {
@@ -537,6 +584,31 @@ fn read_progress(partial: &serde_json::Value) -> Option<&Vec<serde_json::Value>>
         _ => partial,
     };
     scope.get("progress").and_then(serde_json::Value::as_array)
+}
+
+/// `details.async.state` from a `task` frame, tolerating a bare or `details`-wrapped envelope.
+fn async_state(scope: &serde_json::Value) -> Option<&str> {
+    let inner = match scope.get("details") {
+        Some(details) if details.is_object() => details,
+        _ => scope,
+    };
+    inner.get("async")?.get("state")?.as_str()
+}
+
+/// Whether a `task` end is only the async spawn-ack (`async.state == "running"`):
+/// the batch must stay open for the terminal that lands later via `update`.
+pub fn is_spawn_ack(result: &serde_json::Value) -> bool {
+    async_state(result) == Some("running")
+}
+
+/// Terminal outcome of an async `task` update: `Some(false)` completed, `Some(true)`
+/// failed (cancel/abort also fold to `failed`), `None` while running or non-async.
+pub fn async_terminal(partial: &serde_json::Value) -> Option<bool> {
+    match async_state(partial)? {
+        "completed" => Some(false),
+        "failed" => Some(true),
+        _ => None,
+    }
 }
 
 fn str_field(entry: &serde_json::Value, key: &str) -> Option<String> {
@@ -1087,5 +1159,110 @@ mod tests {
         assert_eq!(format_duration(65_000), "1m5s");
         assert_eq!(format_duration(3_600_000), "1h");
         assert_eq!(format_duration(90_000_000), "1d1h");
+    }
+
+    #[test]
+    fn job_lines_label_the_action_never_bare_emoji() {
+        use serde_json::json;
+        assert_eq!(line("job", json!({ "poll": ["ReadHello"] })), "⚙️ job poll ReadHello");
+        assert_eq!(line("job", json!({ "poll": ["A", "B"] })), "⚙️ job poll A, B");
+        assert_eq!(line("job", json!({ "list": true })), "⚙️ job list");
+        assert_eq!(line("job", json!({ "cancel": ["Stuck"] })), "⚙️ job cancel Stuck");
+        assert_eq!(line("job", json!({})), "⚙️ job");
+        assert_eq!(line("job", json!({ "poll": [] })), "⚙️ job");
+    }
+
+    #[test]
+    fn task_decision_helpers_classify_frames() {
+        use serde_json::json;
+        let frame = |state: &str| json!({ "details": { "async": { "state": state } } });
+        assert!(is_spawn_ack(&frame("running")));
+        assert_eq!(async_terminal(&frame("running")), None);
+        assert!(!is_spawn_ack(&frame("completed")));
+        assert_eq!(async_terminal(&frame("completed")), Some(false));
+        assert_eq!(async_terminal(&frame("failed")), Some(true));
+        assert!(is_spawn_ack(&json!({ "async": { "state": "running" } })));
+        assert!(!is_spawn_ack(&json!({ "details": { "progress": [] } })));
+        assert_eq!(async_terminal(&json!({ "content": [] })), None);
+    }
+
+    #[test]
+    fn async_task_settles_on_terminal_update_not_spawn_ack() {
+        use serde_json::json;
+        let args = json!({ "agent": "explore", "tasks": [{ "id": "ReadHello", "description": "read the file" }] });
+        let frame = |astate: &str, pstatus: &str| {
+            json!({
+                "content": [{ "type": "text", "text": "..." }],
+                "details": {
+                    "async": { "state": astate, "jobId": "ReadHello", "type": "task" },
+                    "progress": [{ "index": 0, "id": "ReadHello", "agent": "explore", "status": pstatus }],
+                }
+            })
+        };
+        let mut rows = extract_subagent_rows(&args);
+        for f in [frame("running", "pending"), frame("running", "running")] {
+            apply_progress(&mut rows, &f);
+            assert_eq!(async_terminal(&f), None);
+        }
+        assert!(render_subagent_batch(&rows, 0).contains("⏳"));
+        let term = frame("completed", "completed");
+        apply_progress(&mut rows, &term);
+        assert_eq!(async_terminal(&term), Some(false));
+        settle_rows(&mut rows, false);
+        let done = render_subagent_batch(&rows, 14_000);
+        assert!(done.starts_with("👥 Ran 1 task · 14s"), "got: {done:?}");
+        assert!(done.contains("✅ done"));
+    }
+
+    #[test]
+    fn async_task_terminal_failed_renders_failed() {
+        use serde_json::json;
+        let args = json!({ "agent": "task", "tasks": [{ "id": "SleepAgent", "description": "sleep" }] });
+        let term = json!({
+            "details": {
+                "async": { "state": "failed", "jobId": "SleepAgent", "type": "task" },
+                "progress": [{ "index": 0, "id": "SleepAgent", "agent": "task", "status": "aborted" }],
+            }
+        });
+        let mut rows = extract_subagent_rows(&args);
+        apply_progress(&mut rows, &term);
+        assert_eq!(async_terminal(&term), Some(true));
+        settle_rows(&mut rows, true);
+        let out = render_subagent_batch(&rows, 8_000);
+        assert!(out.starts_with("❌ Ran 1 task · 8s"), "got: {out:?}");
+        assert!(out.contains("❌ failed"));
+    }
+
+    #[test]
+    fn detached_backgrounded_task_settles_off_running() {
+        use serde_json::json;
+        let args = json!({ "agent": "reviewer", "tasks": [{ "id": "Rev", "description": "review the diff" }] });
+        let mut rows = extract_subagent_rows(&args);
+        detach_rows(&mut rows);
+        let out = render_subagent_batch(&rows, 12_000);
+        assert!(out.starts_with("🚀 Spawned 1 task · 12s"), "got: {out:?}");
+        assert!(out.contains("🚀 backgrounded"));
+        assert!(!out.contains("Running"));
+        let mut done = extract_subagent_rows(&args);
+        settle_rows(&mut done, false);
+        detach_rows(&mut done);
+        assert!(render_subagent_batch(&done, 1_000).contains("✅ done"));
+    }
+
+    #[test]
+    fn failed_plus_detached_header_keeps_failure_emoji_with_spawned_verb() {
+        let mut rows = extract_subagent_rows(&batch_args());
+        apply_progress(
+            &mut rows,
+            &progress(serde_json::json!([
+                { "index": 0, "status": "failed", "toolCount": 1 },
+                { "index": 1, "status": "running" },
+            ])),
+        );
+        detach_rows(&mut rows);
+        let out = render_subagent_batch(&rows, 5_000);
+        assert!(out.starts_with("❌ Spawned 2 tasks · 5s"), "got: {out:?}");
+        assert!(out.contains("❌ failed"));
+        assert!(out.contains("🚀 backgrounded"));
     }
 }
