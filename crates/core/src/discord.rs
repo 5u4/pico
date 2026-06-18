@@ -1,5 +1,5 @@
 use std::{
-    sync::Arc,
+    sync::{Arc, atomic::Ordering},
     time::{Duration, Instant},
 };
 
@@ -10,6 +10,7 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::{
     bindings::{Binding, BindingKind, Bindings},
+    cancel::CancelRegistry,
     config::StreamingBehavior,
     mid_turn::MidTurnQueue,
     omp::{
@@ -27,6 +28,7 @@ pub(crate) struct Data {
     supervisor_socket: Option<std::path::PathBuf>,
     pending_answers: crate::ui::PendingAnswers,
     mid_turn: MidTurnQueue,
+    cancels: CancelRegistry,
 }
 
 pub(crate) type Error = Box<dyn std::error::Error + Send + Sync>;
@@ -46,7 +48,7 @@ pub(crate) fn framework(
 ) -> poise::Framework<Data, Error> {
     poise::Framework::builder()
         .options(poise::FrameworkOptions {
-            commands: vec![ping(), bind(), deploy(), worktree()],
+            commands: vec![ping(), bind(), deploy(), worktree(), cancel_turn()],
             event_handler: |ctx, event, framework, data| Box::pin(on_event(ctx, event, framework.bot_id, data)),
             command_check: Some(|ctx| Box::pin(command_in_registered_guild(ctx))),
             ..Default::default()
@@ -64,6 +66,7 @@ pub(crate) fn framework(
                     tracker,
                     pending_answers: crate::ui::PendingAnswers::default(),
                     mid_turn: MidTurnQueue::default(),
+                    cancels: CancelRegistry::default(),
                 })
             })
         })
@@ -98,6 +101,17 @@ async fn command_in_registered_guild(ctx: Context<'_>) -> Result<bool, Error> {
 #[poise::command(slash_command)]
 async fn ping(ctx: Context<'_>) -> Result<(), Error> {
     ctx.say("Pong!").await?;
+    Ok(())
+}
+
+/// Interrupt the turn streaming on this thread, if any.
+#[poise::command(slash_command, rename = "cancel")]
+async fn cancel_turn(ctx: Context<'_>) -> Result<(), Error> {
+    if ctx.data().cancels.request(ctx.channel_id()) {
+        ctx.say("🛑 Turn cancelled.").await?;
+    } else {
+        ctx.say("Nothing to cancel.").await?;
+    }
     Ok(())
 }
 
@@ -490,9 +504,21 @@ async fn on_event(
         let tracker = data.tracker.clone();
         let pending_answers = data.pending_answers.clone();
         let mid_turn = data.mid_turn.clone();
+        let cancels = data.cancels.clone();
         data.tracker.spawn(async move {
-            if let Err(e) =
-                route_message(ctx, root, bindings, pool, cancel, tracker, pending_answers, mid_turn, message).await
+            if let Err(e) = route_message(
+                ctx,
+                root,
+                bindings,
+                pool,
+                cancel,
+                tracker,
+                pending_answers,
+                mid_turn,
+                cancels,
+                message,
+            )
+            .await
             {
                 tracing::warn!(error = %format!("{e:#}"), "message turn failed");
             }
@@ -551,6 +577,7 @@ async fn route_message(
     tracker: TaskTracker,
     pending_answers: crate::ui::PendingAnswers,
     mid_turn: MidTurnQueue,
+    cancels: CancelRegistry,
     message: serenity::Message,
 ) -> color_eyre::Result<()> {
     let prompt = message.content.trim();
@@ -787,6 +814,7 @@ async fn route_message(
             message.author.id,
             &pending_answers,
             &mid_turn,
+            &cancels,
             profile_config.streaming_behavior,
         )
         .await?
@@ -841,12 +869,15 @@ async fn drive_turn(
     author: serenity::UserId,
     pending: &crate::ui::PendingAnswers,
     mid_turn: &MidTurnQueue,
+    cancels: &CancelRegistry,
     mode: StreamingBehavior,
 ) -> color_eyre::Result<TurnOutcome> {
     let _typing = target.start_typing(&ctx.http);
     session.client.prompt(prompt).await?;
     // first_commit: only the first answer pings, via its reply reference; later ones omit it.
     let (mut rx, _sink_guard) = mid_turn.register(target, mode);
+    let (interrupt, streaming, _cancel_guard) = cancels.register(target);
+    let mut aborted = false;
     let mut first_commit = true;
 
     let mut reply = String::new();
@@ -863,6 +894,13 @@ async fn drive_turn(
                     .say(ctx, "worker is restarting; resend your message to continue")
                     .await;
                 return Ok(TurnOutcome::Live);
+            }
+            () = interrupt.cancelled(), if !aborted => {
+                aborted = true;
+                if let Err(e) = session.client.abort().await {
+                    tracing::warn!(error = %format!("{e:#}"), "abort on /cancel failed");
+                }
+                continue;
             }
             Some(text) = rx.recv() => {
                 let forwarded = match mode {
@@ -925,7 +963,12 @@ async fn drive_turn(
                 // Block the turn on the answer (the agent is paused awaiting it);
                 // `handle_request` races `cancel`, so a restart never strands the turn.
                 activity.flush().await;
-                match crate::ui::handle_request(ctx, target, &session.client, author, &req, cancel, pending).await {
+                // /cancel is for streaming, not a paused approval dialog.
+                streaming.store(false, Ordering::Release);
+                let handled =
+                    crate::ui::handle_request(ctx, target, &session.client, author, &req, cancel, pending).await;
+                streaming.store(true, Ordering::Release);
+                match handled {
                     crate::ui::Handled::Cancelled => {
                         subagents.flush_all(false).await;
                         commit_reply(ctx, target, &reply, reply_to.filter(|_| first_commit)).await;
