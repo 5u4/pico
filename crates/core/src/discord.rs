@@ -354,10 +354,9 @@ async fn worktree_close(ctx: Context<'_>) -> Result<(), Error> {
     }
     let origin = marker.worktree.as_ref().expect("worktree origin checked above");
     let base_repo = origin.base_repo.clone();
-    let default_branch = origin.default_branch.clone();
     let worktree_path = marker.cwd.clone();
 
-    let loss = match crate::worktree::close_would_lose(&base_repo, &worktree_path, &thread_id, &default_branch).await {
+    let loss = match crate::worktree::close_would_lose(&base_repo, &worktree_path, &thread_id).await {
         Ok(loss) => loss,
         Err(e) => {
             ctx.say(format!("❌ worktree inspection failed: {e}")).await?;
