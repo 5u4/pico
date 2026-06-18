@@ -820,7 +820,10 @@ async fn react_queued(ctx: &serenity::Context, message: &serenity::Message, mode
         StreamingBehavior::FollowUp => REACT_FOLLOW_UP,
         StreamingBehavior::Steer => REACT_STEER,
     };
-    if let Err(e) = message.react(ctx, serenity::ReactionType::Unicode(emoji.to_owned())).await {
+    if let Err(e) = message
+        .react(ctx, serenity::ReactionType::Unicode(emoji.to_owned()))
+        .await
+    {
         tracing::warn!(error = %e, "mid-turn ack reaction failed");
     }
 }
@@ -843,7 +846,7 @@ async fn drive_turn(
 ) -> color_eyre::Result<TurnOutcome> {
     let _typing = target.start_typing(&ctx.http);
     session.client.prompt(prompt).await?;
-    // first_commit: only the first answer pings; a follow_up's answer posts silently.
+    // first_commit: only the first answer pings, via its reply reference; later ones omit it.
     let (mut rx, _sink_guard) = mid_turn.register(target, mode);
     let mut first_commit = true;
 

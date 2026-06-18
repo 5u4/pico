@@ -137,7 +137,10 @@ async fn queue_scenario(
     emoji: &str,
 ) -> (bool, bool, bool) {
     let mut thread: Option<serenity::ChannelId> = None;
-    let q_msg = channel.say(driver, queue_prompt).await.expect("driver failed to post QUEUE message");
+    let q_msg = channel
+        .say(driver, queue_prompt)
+        .await
+        .expect("driver failed to post QUEUE message");
     for _ in 0..20 {
         tokio::time::sleep(Duration::from_secs(3)).await;
         if let Ok(m) = channel.message(driver, q_msg.id).await
@@ -152,13 +155,14 @@ async fn queue_scenario(
     };
     // Let the host register the mid-turn sink before forwarding into the held-open turn.
     tokio::time::sleep(Duration::from_secs(5)).await;
-    let fu = tid.say(driver, followup).await.expect("driver failed to post QUEUE follow-up");
+    let fu = tid
+        .say(driver, followup)
+        .await
+        .expect("driver failed to post QUEUE follow-up");
     let (mut acked, mut saw_alpha, mut separate) = (false, false, false);
     for _ in 0..20 {
         tokio::time::sleep(Duration::from_secs(3)).await;
-        if !acked
-            && let Ok(m) = tid.message(driver, fu.id).await
-        {
+        if !acked && let Ok(m) = tid.message(driver, fu.id).await {
             acked = m
                 .reactions
                 .iter()

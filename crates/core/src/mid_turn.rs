@@ -41,7 +41,13 @@ impl MidTurnQueue {
     ) -> (mpsc::UnboundedReceiver<String>, SinkGuard) {
         let (tx, rx) = mpsc::unbounded_channel();
         self.inner.lock().insert(channel, Sink { tx, mode });
-        (rx, SinkGuard { queue: self.clone(), channel })
+        (
+            rx,
+            SinkGuard {
+                queue: self.clone(),
+                channel,
+            },
+        )
     }
 
     /// At `agent_end`, under the registry lock: hand back a message that raced the
