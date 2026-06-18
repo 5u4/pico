@@ -4,6 +4,7 @@ pub mod config;
 mod discord;
 pub mod omp;
 pub mod render;
+mod mid_turn;
 mod thread_marker;
 mod ui;
 pub mod worktree;

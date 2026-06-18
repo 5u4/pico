@@ -6,9 +6,20 @@ use std::{
 use color_eyre::eyre::WrapErr;
 use serde::Deserialize;
 
+/// What a mid-turn message does (omp's per-prompt `streamingBehavior`): `follow_up`
+/// queues it behind the running turn, `steer` folds it in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StreamingBehavior {
+    #[default]
+    FollowUp,
+    Steer,
+}
+
 pub struct ProfileConfig {
     pub model: Option<String>,
     pub surface_thinking: bool,
+    pub streaming_behavior: StreamingBehavior,
 }
 
 #[derive(Deserialize)]
@@ -25,10 +36,12 @@ struct RawLlm {
     model: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 struct RawDiscord {
     #[serde(default)]
     surface_thinking: bool,
+    #[serde(default)]
+    streaming_behavior: StreamingBehavior,
 }
 
 pub fn load(config_path: &Path) -> color_eyre::Result<ProfileConfig> {
@@ -38,6 +51,7 @@ pub fn load(config_path: &Path) -> color_eyre::Result<ProfileConfig> {
             return Ok(ProfileConfig {
                 model: None,
                 surface_thinking: false,
+                streaming_behavior: StreamingBehavior::default(),
             });
         }
         Err(e) => {
@@ -46,9 +60,11 @@ pub fn load(config_path: &Path) -> color_eyre::Result<ProfileConfig> {
     };
 
     let raw: RawConfig = toml::from_str(&text).wrap_err_with(|| format!("parsing {}", config_path.display()))?;
+    let discord = raw.discord.unwrap_or_default();
     Ok(ProfileConfig {
         model: raw.llm.and_then(|llm| llm.model),
-        surface_thinking: raw.discord.is_some_and(|d| d.surface_thinking),
+        surface_thinking: discord.surface_thinking,
+        streaming_behavior: discord.streaming_behavior,
     })
 }
 
@@ -222,6 +238,30 @@ mod tests {
         let bare = dir.join("bare.toml");
         std::fs::write(&bare, "[llm]\nmodel = \"x\"\n").unwrap();
         assert!(!super::load(&bare).unwrap().surface_thinking);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn reads_streaming_behavior_and_defaults_follow_up() {
+        use super::StreamingBehavior;
+        let dir = temp_dir("streaming");
+
+        let bare = dir.join("bare.toml");
+        std::fs::write(&bare, "[llm]\nmodel = \"x\"\n").unwrap();
+        assert_eq!(super::load(&bare).unwrap().streaming_behavior, StreamingBehavior::FollowUp);
+
+        let fu = dir.join("fu.toml");
+        std::fs::write(&fu, "[discord]\nstreaming_behavior = \"follow_up\"\n").unwrap();
+        assert_eq!(super::load(&fu).unwrap().streaming_behavior, StreamingBehavior::FollowUp);
+
+        let st = dir.join("steer.toml");
+        std::fs::write(&st, "[discord]\nstreaming_behavior = \"steer\"\n").unwrap();
+        assert_eq!(super::load(&st).unwrap().streaming_behavior, StreamingBehavior::Steer);
+
+        let bad = dir.join("bad.toml");
+        std::fs::write(&bad, "[discord]\nstreaming_behavior = \"replace\"\n").unwrap();
+        assert!(super::load(&bad).is_err());
 
         std::fs::remove_dir_all(&dir).ok();
     }

@@ -10,6 +10,8 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::{
     bindings::{Binding, BindingKind, Bindings},
+    config::StreamingBehavior,
+    mid_turn::MidTurnQueue,
     omp::{
         pool::{OmpPool, ThreadHandle, ThreadSession},
         protocol::{AssistantMessageEvent, OmpEvent, ToolCall, ToolCallEnd, ToolCallStart, ToolCallUpdate},
@@ -24,6 +26,7 @@ pub(crate) struct Data {
     tracker: TaskTracker,
     supervisor_socket: Option<std::path::PathBuf>,
     pending_answers: crate::ui::PendingAnswers,
+    mid_turn: MidTurnQueue,
 }
 
 pub(crate) type Error = Box<dyn std::error::Error + Send + Sync>;
@@ -60,6 +63,7 @@ pub(crate) fn framework(
                     cancel,
                     tracker,
                     pending_answers: crate::ui::PendingAnswers::default(),
+                    mid_turn: MidTurnQueue::default(),
                 })
             })
         })
@@ -486,8 +490,11 @@ async fn on_event(
         let message = new_message.clone();
         let tracker = data.tracker.clone();
         let pending_answers = data.pending_answers.clone();
+        let mid_turn = data.mid_turn.clone();
         data.tracker.spawn(async move {
-            if let Err(e) = route_message(ctx, root, bindings, pool, cancel, tracker, pending_answers, message).await {
+            if let Err(e) =
+                route_message(ctx, root, bindings, pool, cancel, tracker, pending_answers, mid_turn, message).await
+            {
                 tracing::warn!(error = %format!("{e:#}"), "message turn failed");
             }
         });
@@ -544,6 +551,7 @@ async fn route_message(
     cancel: CancellationToken,
     tracker: TaskTracker,
     pending_answers: crate::ui::PendingAnswers,
+    mid_turn: MidTurnQueue,
     message: serenity::Message,
 ) -> color_eyre::Result<()> {
     let prompt = message.content.trim();
@@ -591,6 +599,12 @@ async fn route_message(
     // trimmed prompt) as its typed answer instead of a lock-blocked second turn.
     if in_thread && crate::ui::deliver_pending_answer(&pending_answers, channel.id, message.author.id, &message.content)
     {
+        return Ok(());
+    }
+
+    // Fold a message that lands mid-stream into the running turn instead of a fresh one.
+    if in_thread && let Some(mode) = mid_turn.deliver(channel.id, prompt) {
+        react_queued(&ctx, &message, mode).await;
         return Ok(());
     }
 
@@ -773,6 +787,8 @@ async fn route_message(
             in_thread.then_some(message.id),
             message.author.id,
             &pending_answers,
+            &mid_turn,
+            profile_config.streaming_behavior,
         )
         .await?
     };
@@ -795,6 +811,20 @@ enum TurnOutcome {
 /// can't hang the thread forever.
 const STALL_TIMEOUT: Duration = Duration::from_secs(3900);
 
+const REACT_FOLLOW_UP: &str = "📥";
+const REACT_STEER: &str = "↪️";
+
+/// Best-effort ack reaction; a failure (e.g. missing perm) is logged, not propagated.
+async fn react_queued(ctx: &serenity::Context, message: &serenity::Message, mode: StreamingBehavior) {
+    let emoji = match mode {
+        StreamingBehavior::FollowUp => REACT_FOLLOW_UP,
+        StreamingBehavior::Steer => REACT_STEER,
+    };
+    if let Err(e) = message.react(ctx, serenity::ReactionType::Unicode(emoji.to_owned())).await {
+        tracing::warn!(error = %e, "mid-turn ack reaction failed");
+    }
+}
+
 /// Drive one OMP turn: render tool-call/reasoning activity as silent messages,
 /// then post the buffered answer — only text not followed by a tool survives.
 #[allow(clippy::too_many_arguments)]
@@ -808,9 +838,14 @@ async fn drive_turn(
     reply_to: Option<serenity::MessageId>,
     author: serenity::UserId,
     pending: &crate::ui::PendingAnswers,
+    mid_turn: &MidTurnQueue,
+    mode: StreamingBehavior,
 ) -> color_eyre::Result<TurnOutcome> {
     let _typing = target.start_typing(&ctx.http);
     session.client.prompt(prompt).await?;
+    // first_commit: only the first answer pings; a follow_up's answer posts silently.
+    let (mut rx, _sink_guard) = mid_turn.register(target, mode);
+    let mut first_commit = true;
 
     let mut reply = String::new();
     let mut activity = Activity::new(ctx, target);
@@ -821,11 +856,21 @@ async fn drive_turn(
             () = cancel.cancelled() => {
                 activity.flush().await;
                 subagents.flush_all(false).await;
-                commit_reply(ctx, target, &reply, reply_to).await;
+                commit_reply(ctx, target, &reply, reply_to.filter(|_| first_commit)).await;
                 let _ = target
                     .say(ctx, "worker is restarting; resend your message to continue")
                     .await;
                 return Ok(TurnOutcome::Live);
+            }
+            Some(text) = rx.recv() => {
+                let forwarded = match mode {
+                    StreamingBehavior::FollowUp => session.client.follow_up(&text).await,
+                    StreamingBehavior::Steer => session.client.steer(&text).await,
+                };
+                if let Err(e) = forwarded {
+                    tracing::warn!(error = %format!("{e:#}"), ?mode, "forwarding mid-turn message to omp failed");
+                }
+                continue;
             }
             recv = tokio::time::timeout(STALL_TIMEOUT, session.events.recv()) => match recv {
                 Ok(event) => event,
@@ -835,7 +880,7 @@ async fn drive_turn(
                     tracing::warn!(timeout = ?STALL_TIMEOUT, "turn made no progress; resetting wedged OMP session");
                     activity.flush().await;
                     subagents.flush_all(true).await;
-                    commit_reply(ctx, target, &reply, reply_to).await;
+                    commit_reply(ctx, target, &reply, reply_to.filter(|_| first_commit)).await;
                     let _ = target
                         .say(ctx, "the turn stalled with no progress and was reset; resend your message to continue")
                         .await;
@@ -881,7 +926,7 @@ async fn drive_turn(
                 match crate::ui::handle_request(ctx, target, &session.client, author, &req, cancel, pending).await {
                     crate::ui::Handled::Cancelled => {
                         subagents.flush_all(false).await;
-                        commit_reply(ctx, target, &reply, reply_to).await;
+                        commit_reply(ctx, target, &reply, reply_to.filter(|_| first_commit)).await;
                         let _ = target
                             .say(
                                 ctx,
@@ -897,7 +942,22 @@ async fn drive_turn(
                     }
                 }
             }
-            Some(OmpEvent::AgentEnd) => break,
+            Some(OmpEvent::TurnEnd) => {
+                // Commit each turn's answer now (preamble already cleared on ToolStart)
+                // so a dequeued follow_up's reply posts on its own, not concatenated.
+                if !reply.trim().is_empty() {
+                    activity.flush().await;
+                    commit_reply(ctx, target, &reply, reply_to.filter(|_| first_commit)).await;
+                    first_commit = false;
+                    reply.clear();
+                    activity.seal();
+                }
+            }
+            Some(OmpEvent::AgentEnd) => match mid_turn.drain_or_close(target, &mut rx) {
+                // Raced the close: rerun as a fresh prompt and keep draining.
+                Some(text) => session.client.prompt(&text).await?,
+                None => break,
+            },
             Some(OmpEvent::Error(e)) => {
                 activity.flush().await;
                 subagents.flush_all(true).await;
@@ -911,7 +971,7 @@ async fn drive_turn(
             None => {
                 activity.flush().await;
                 subagents.flush_all(true).await;
-                commit_reply(ctx, target, &reply, reply_to).await;
+                commit_reply(ctx, target, &reply, reply_to.filter(|_| first_commit)).await;
                 let _ = target
                     .say(ctx, "the OMP session ended unexpectedly; send another message to restart it")
                     .await;
@@ -922,7 +982,7 @@ async fn drive_turn(
     activity.flush().await;
     subagents.settle_backgrounded();
     subagents.flush_all(false).await;
-    commit_reply(ctx, target, &reply, reply_to).await;
+    commit_reply(ctx, target, &reply, reply_to.filter(|_| first_commit)).await;
     Ok(TurnOutcome::Live)
 }
 

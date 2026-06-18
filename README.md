@@ -106,6 +106,25 @@ write across:
   `config.toml` (served servers), `bindings.toml` (per-channel routing, written
   by the in-Discord `/bind` command), optional `profiles/<name>/`, and logs.
 
+### Profiles
+
+A channel binds to a profile (`/bind … profile:<name>`, default `default`); its
+optional `profiles/<name>/config.toml` tunes that profile's turns:
+
+```toml
+[llm]
+model = "provider/model"           # omp model for this profile
+
+[discord]
+surface_thinking = false           # stream the agent's reasoning as activity
+streaming_behavior = "follow_up"   # mid-turn message: follow_up | steer
+```
+
+`streaming_behavior` controls what a message you send **while a turn is still
+running** does: `follow_up` (default) queues it behind the current turn; `steer`
+folds it into the running turn at the next step boundary. Either way the message
+is acked with a reaction (📥 queued, ↪️ steered).
+
 ## Channels & worktrees
 
 A bound channel runs every thread in one cwd, set by `/bind set cwd:<abs>` (or a

@@ -312,6 +312,9 @@ async fn read_loop(
             Inbound::AgentEnd => {
                 let _ = event_tx.send(OmpEvent::AgentEnd);
             }
+            Inbound::TurnEnd => {
+                let _ = event_tx.send(OmpEvent::TurnEnd);
+            }
             Inbound::MessageUpdate {
                 assistant_message_event,
             } => {
