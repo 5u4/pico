@@ -222,6 +222,11 @@ pub fn load_root(config_path: &Path) -> color_eyre::Result<RootConfig> {
                     "[approval] approver id {id:?} is not a valid snowflake (^[0-9]{{17,20}}$)"
                 ));
             }
+            if id.parse::<u64>().is_err() {
+                return Err(color_eyre::eyre::eyre!(
+                    "[approval] approver id {id:?} overflows a 64-bit Discord snowflake"
+                ));
+            }
             approvers.push(id);
         }
         if let Some(secs) = approval.timeout_secs {
@@ -478,6 +483,17 @@ mod tests {
         let dir = temp_dir("rootapprbad");
         let path = dir.join("config.toml");
         std::fs::write(&path, "[approval]\napprovers = [\"nope\"]\n").unwrap();
+        assert!(super::load_root(&path).is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn load_root_rejects_u64_overflow_approver() {
+        // 20 digits passes the snowflake length/shape check but overflows u64,
+        // so it must fail config load rather than be silently dropped at runtime.
+        let dir = temp_dir("rootapproverflow");
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "[approval]\napprovers = [\"99999999999999999999\"]\n").unwrap();
         assert!(super::load_root(&path).is_err());
         std::fs::remove_dir_all(&dir).ok();
     }
