@@ -25,6 +25,13 @@ impl App {
     pub async fn build(root: &Path, supervisor_socket: Option<std::path::PathBuf>) -> color_eyre::Result<App> {
         let token = read_secret(root, "discord_bot_token")?;
         let bindings = crate::bindings::load(&pico_shared::paths::worker_bindings(root))?;
+        let db = crate::db::open(root).await.wrap_err("opening worker database")?;
+        match crate::approval::reconcile_pending_aborted(&db).await {
+            Ok(0) => {}
+            Ok(n) => tracing::info!(count = n, "reconciled abandoned approval requests to aborted"),
+            Err(e) => tracing::warn!(error = %format!("{e:#}"), "reconciling pending approvals failed"),
+        }
+        db.close().await;
         let cancel = CancellationToken::new();
         let tracker = TaskTracker::new();
         let pool = OmpPool::new(cancel.clone(), &tracker);

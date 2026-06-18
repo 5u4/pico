@@ -5,7 +5,7 @@ members = ["crates/core", "crates/shared", "crates/worker", "crates/supervisor"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.92"
+rust-version = "1.94"
 
 [workspace.dependencies]
 color-eyre = "0.6.5"
