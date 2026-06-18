@@ -147,8 +147,7 @@ pub async fn validate_base_repo(base_repo: &Path, default_branch: &str) -> color
 /// What `/worktree close` would permanently destroy for a thread's worktree.
 pub struct LossSummary {
     pub dirty: bool,
-    /// Commits on the thread's branch beyond `default_branch`; `None` if it can't
-    /// be resolved (treated conservatively as "has unmerged work").
+    /// Branch commits reachable from neither a remote-tracking ref (pushed) nor HEAD (in trunk) — the work this close would not preserve; `None` ⇒ unknown count, treated as loss.
     pub unmerged: Option<u32>,
 }
 
@@ -163,8 +162,8 @@ impl LossSummary {
             parts.push("uncommitted changes".to_owned());
         }
         match self.unmerged {
-            Some(n) if n > 0 => parts.push(format!("{n} unmerged commit(s)")),
-            None => parts.push("possibly-unmerged commits".to_owned()),
+            Some(n) if n > 0 => parts.push(format!("{n} commit(s) not pushed or merged")),
+            None => parts.push("possibly-unsaved commits".to_owned()),
             Some(_) => {}
         }
         if parts.is_empty() {
@@ -177,12 +176,7 @@ impl LossSummary {
 
 /// Inspect — read-only — what closing the thread's worktree would destroy. The
 /// unmerged probe uses `base_repo`'s branch ref, so it reports even if the dir is gone.
-pub async fn close_would_lose(
-    base_repo: &Path,
-    worktree: &Path,
-    thread_id: &str,
-    default_branch: &str,
-) -> color_eyre::Result<LossSummary> {
+pub async fn close_would_lose(base_repo: &Path, worktree: &Path, thread_id: &str) -> color_eyre::Result<LossSummary> {
     let dirty = if worktree.join(".git").exists() {
         let out = git_output(worktree, ["status", "--porcelain"], GIT_TIMEOUT).await?;
         !String::from_utf8_lossy(&out.stdout).trim().is_empty()
@@ -191,10 +185,13 @@ pub async fn close_would_lose(
     };
     let branch = branch_name(thread_id);
     let unmerged = if branch_exists(base_repo, &branch).await? {
-        let range = format!("{default_branch}..{branch}");
-        let out = git_output(base_repo, ["rev-list", "--count", &range], GIT_TIMEOUT).await?;
-        // Unknown count (rev-list failed, or success with unparseable output) ⇒
-        // `None`: can't prove the commits are merged, so the caller still confirms.
+        // Pushed to any remote (recoverable even after a squash-merge) or reachable from HEAD (in trunk) ⇒ safe; the rest is work this close would not preserve.
+        let out = git_output(
+            base_repo,
+            ["rev-list", "--count", &branch, "--not", "--remotes", "HEAD"],
+            GIT_TIMEOUT,
+        )
+        .await?;
         if out.status.success() {
             String::from_utf8_lossy(&out.stdout).trim().parse().ok()
         } else {
@@ -480,7 +477,7 @@ mod tests {
                 unmerged: Some(2)
             }
             .describe(),
-            "uncommitted changes and 2 unmerged commit(s)"
+            "uncommitted changes and 2 commit(s) not pushed or merged"
         );
         assert_eq!(
             LossSummary {
@@ -488,7 +485,7 @@ mod tests {
                 unmerged: None
             }
             .describe(),
-            "possibly-unmerged commits"
+            "possibly-unsaved commits"
         );
     }
 
@@ -500,7 +497,7 @@ mod tests {
         let (channel, thread) = ("111111111111111111", "222222222222222222");
         let path = super::ensure(&wt_dir, channel, thread, &base, "main").await.unwrap();
 
-        let loss = super::close_would_lose(&base, &path, thread, "main").await.unwrap();
+        let loss = super::close_would_lose(&base, &path, thread).await.unwrap();
         assert!(!loss.dirty);
         assert_eq!(loss.unmerged, Some(0));
         assert!(!loss.needs_confirmation());
@@ -516,7 +513,7 @@ mod tests {
         let path = super::ensure(&wt_dir, channel, thread, &base, "main").await.unwrap();
         std::fs::write(path.join("scratch.txt"), "wip").unwrap();
 
-        let loss = super::close_would_lose(&base, &path, thread, "main").await.unwrap();
+        let loss = super::close_would_lose(&base, &path, thread).await.unwrap();
         assert!(loss.dirty, "untracked file should read as dirty");
         assert!(loss.needs_confirmation());
         std::fs::remove_dir_all(&root).ok();
@@ -535,9 +532,71 @@ mod tests {
         git(&path, &["add", "."]);
         git(&path, &["commit", "-m", "wip"]);
 
-        let loss = super::close_would_lose(&base, &path, thread, "main").await.unwrap();
+        let loss = super::close_would_lose(&base, &path, thread).await.unwrap();
         assert!(!loss.dirty, "a committed tree is clean");
         assert_eq!(loss.unmerged, Some(1));
+        assert!(loss.needs_confirmation());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn close_would_lose_treats_pushed_commits_as_safe() {
+        let root = temp_dir("loss-pushed");
+        let base = base_repo_with_origin(&root);
+        let wt_dir = root.join("worktrees");
+        let (channel, thread) = ("111111111111111111", "222222222222222222");
+        let path = super::ensure(&wt_dir, channel, thread, &base, "origin/main")
+            .await
+            .unwrap();
+        // Push the branch (opening a PR): its commit never lands in trunk — the squash-merge case the old `trunk..branch` range falsely flagged.
+        std::fs::write(path.join("work.txt"), "wip").unwrap();
+        git(&path, &["config", "user.email", "test@pico"]);
+        git(&path, &["config", "user.name", "pico test"]);
+        git(&path, &["add", "."]);
+        git(&path, &["commit", "-m", "wip"]);
+        let branch = super::branch_name(thread);
+        git(&path, &["push", "origin", &branch]);
+
+        let loss = super::close_would_lose(&base, &path, thread).await.unwrap();
+        assert_eq!(loss.unmerged, Some(0), "pushed commits must read as safe");
+        assert!(!loss.needs_confirmation());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn close_would_lose_treats_merged_commits_as_safe() {
+        let root = temp_dir("loss-merged");
+        let base = local_repo(&root);
+        let wt_dir = root.join("worktrees");
+        let (channel, thread) = ("111111111111111111", "222222222222222222");
+        let path = super::ensure(&wt_dir, channel, thread, &base, "main").await.unwrap();
+        std::fs::write(path.join("work.txt"), "wip").unwrap();
+        git(&path, &["config", "user.email", "test@pico"]);
+        git(&path, &["config", "user.name", "pico test"]);
+        git(&path, &["add", "."]);
+        git(&path, &["commit", "-m", "wip"]);
+        // Fast-forward base trunk (HEAD) onto the branch tip: now reachable from HEAD ⇒ safe.
+        git(&base, &["merge", "--ff-only", &super::branch_name(thread)]);
+
+        let loss = super::close_would_lose(&base, &path, thread).await.unwrap();
+        assert_eq!(loss.unmerged, Some(0), "commits merged into trunk are safe");
+        assert!(!loss.needs_confirmation());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn close_would_lose_fails_closed_when_count_uncomputable() {
+        let root = temp_dir("loss-failclosed");
+        let base = local_repo(&root);
+        let wt_dir = root.join("worktrees");
+        let (channel, thread) = ("111111111111111111", "222222222222222222");
+        let path = super::ensure(&wt_dir, channel, thread, &base, "main").await.unwrap();
+        // Point base HEAD at an unborn branch so `rev-list … HEAD` errors while
+        // pico/<thread> still resolves: an uncomputable count must fail closed (confirm).
+        git(&base, &["symbolic-ref", "HEAD", "refs/heads/does-not-exist"]);
+
+        let loss = super::close_would_lose(&base, &path, thread).await.unwrap();
+        assert_eq!(loss.unmerged, None, "uncomputable count must fail closed");
         assert!(loss.needs_confirmation());
         std::fs::remove_dir_all(&root).ok();
     }
