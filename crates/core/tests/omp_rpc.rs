@@ -263,3 +263,61 @@ async fn stale_ui_response_is_ignored() {
 
     client.shutdown().await.expect("shutdown");
 }
+
+/// Aborting an in-flight turn must end it promptly: `abort()` while a tool runs
+/// cancels the running command and the session emits `agent_end` instead of
+/// letting the tool run to completion. This is the omp behavior `/cancel` relies
+/// on (see `pico_core::cancel` + `drive_turn`'s interrupt arm).
+#[tokio::test]
+#[ignore]
+async fn abort_ends_an_in_flight_turn() {
+    let cwd = TempDir::new("pico-omp-abort");
+    let config = SpawnConfig {
+        model: Some("github-copilot/gpt-4o-mini".to_owned()),
+        cwd: Some(cwd.path.clone()),
+        ..SpawnConfig::default()
+    };
+
+    let tracker = TaskTracker::new();
+    let (client, mut events) = OmpClient::spawn(&config, &CancellationToken::new(), &tracker)
+        .await
+        .expect("spawn omp --mode rpc");
+    client
+        .prompt("Use the bash tool to run exactly this command and report its output: sleep 60 && echo done")
+        .await
+        .expect("prompt acked");
+
+    // Abort only once the bash tool is actually running — aborting before the
+    // tool starts would race ahead of the turn and prove nothing.
+    loop {
+        let event = tokio::time::timeout(Duration::from_secs(90), events.recv())
+            .await
+            .expect("timed out waiting for the bash tool to start")
+            .expect("event stream closed before the tool started");
+        match event {
+            OmpEvent::ToolStart(ToolCallStart::Bash(_)) => break,
+            OmpEvent::AgentEnd => panic!("turn ended before the bash tool started"),
+            OmpEvent::Error(e) => panic!("omp reported an error: {e}"),
+            _ => {}
+        }
+    }
+
+    client.abort().await.expect("abort");
+
+    // The 60s sleep is cancelled, so agent_end must arrive far sooner than the
+    // sleep would allow; 25s is a generous ceiling that still proves the cut.
+    let mut saw_end = false;
+    while let Ok(recv) = tokio::time::timeout(Duration::from_secs(25), events.recv()).await {
+        match recv.expect("event stream closed before agent_end") {
+            OmpEvent::AgentEnd => {
+                saw_end = true;
+                break;
+            }
+            OmpEvent::Error(e) => panic!("omp reported an error: {e}"),
+            _ => {}
+        }
+    }
+    assert!(saw_end, "abort did not end the turn; agent_end never arrived");
+
+    client.shutdown().await.expect("shutdown");
+}

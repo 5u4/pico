@@ -125,6 +125,12 @@ running** does: `follow_up` (default) queues it behind the current turn; `steer`
 folds it into the running turn at the next step boundary. Either way the message
 is acked with a reaction (📥 queued, ↪️ steered).
 
+A turn that's still running can be cut short with `/cancel` in its thread: it
+aborts the in-flight turn (cancelling any running tool) and frees the thread for
+your next message while keeping the omp session warm. Any answer text already
+streamed is kept, and `/cancel` posts `🛑 Turn cancelled.` in the thread (or
+`Nothing to cancel.` when nothing is running).
+
 ## Channels & worktrees
 
 A bound channel runs every thread in one cwd, set by `/bind set cwd:<abs>` (or a
