@@ -98,8 +98,11 @@ pub enum OmpEvent {
     ToolEnd(ToolCallEnd),
     /// An extension asked the user a question over the RPC UI sub-protocol (e.g. a tool-approval prompt); the host renders it and replies with a [`UiResponse`].
     UiRequest(UiRequest),
-    /// The agent finished the turn. Terminal for the current prompt.
+    /// The agent run ended (all queued work drained). pico's drive loop exits here.
     AgentEnd,
+    /// One turn within the agent run ended. pico commits the buffered answer here so
+    /// each prompt's reply (incl. a dequeued follow_up's) posts as its own message.
+    TurnEnd,
     /// An asynchronous failure surfaced after the prompt was already acked
     /// (e.g. the model rejected the request). Terminal for the current turn.
     Error(String),
@@ -405,6 +408,7 @@ pub(crate) enum Inbound {
     Response(RpcResponse),
     AgentStart,
     AgentEnd,
+    TurnEnd,
     MessageUpdate {
         assistant_message_event: AssistantMessageEvent,
     },

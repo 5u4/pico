@@ -124,6 +124,65 @@ async fn wait_msg(
     false
 }
 
+/// Drive a held-open `QUEUE` turn, forward a mid-turn message, and report (acked
+/// with `emoji`, ALPHA posted, queued answer separate). `alpha` echoes the command kind.
+#[allow(clippy::too_many_arguments)]
+async fn queue_scenario(
+    channel: serenity::ChannelId,
+    driver: &serenity::Http,
+    queue_prompt: &str,
+    followup: &str,
+    alpha: &str,
+    beta: &str,
+    emoji: &str,
+) -> (bool, bool, bool) {
+    let mut thread: Option<serenity::ChannelId> = None;
+    let q_msg = channel
+        .say(driver, queue_prompt)
+        .await
+        .expect("driver failed to post QUEUE message");
+    for _ in 0..20 {
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        if let Ok(m) = channel.message(driver, q_msg.id).await
+            && let Some(started) = m.thread
+        {
+            thread = Some(started.id);
+            break;
+        }
+    }
+    let Some(tid) = thread else {
+        return (false, false, false);
+    };
+    // Let the host register the mid-turn sink before forwarding into the held-open turn.
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    let fu = tid
+        .say(driver, followup)
+        .await
+        .expect("driver failed to post QUEUE follow-up");
+    let (mut acked, mut saw_alpha, mut separate) = (false, false, false);
+    for _ in 0..20 {
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        if !acked && let Ok(m) = tid.message(driver, fu.id).await {
+            acked = m
+                .reactions
+                .iter()
+                .any(|r| matches!(&r.reaction_type, serenity::ReactionType::Unicode(u) if u.as_str() == emoji));
+        }
+        if let Ok(messages) = tid.messages(driver, serenity::GetMessages::new().limit(25)).await {
+            let a = messages.iter().find(|m| m.content.contains(alpha));
+            // Exclude the driver's own echo (also contains `beta`) so `b` is pico's answer.
+            let b = messages.iter().find(|m| m.id != fu.id && m.content.contains(beta));
+            saw_alpha = a.is_some();
+            separate = matches!((a, b), (Some(x), Some(y)) if x.id != y.id);
+        }
+        if acked && saw_alpha && separate {
+            break;
+        }
+    }
+    let _ = tid.delete(driver).await;
+    (acked, saw_alpha, separate)
+}
+
 #[tokio::test(flavor = "current_thread")]
 #[ignore]
 async fn scripted_omp_drives_thread_and_real_smoke() {
@@ -253,6 +312,35 @@ async fn scripted_omp_drives_thread_and_real_smoke() {
         let _ = tid.delete(&driver).await;
     }
 
+    // Mid-turn delivery: forward a second message into the held-open QUEUE turn.
+    let (fu_acked, fu_alpha, fu_separate) = queue_scenario(
+        channel,
+        &driver,
+        &format!("QUEUE {marker}"),
+        &format!("TELL QBETA-{marker}"),
+        &format!("ALPHA-{marker}-follow_up"),
+        &format!("QBETA-{marker}"),
+        "📥",
+    )
+    .await;
+
+    // steer: same path with the profile flipped (config is read per turn).
+    std::fs::write(
+        root.path.join("profiles").join("default").join("config.toml"),
+        "[llm]\nmodel = \"github-copilot/gpt-4o-mini\"\n\n[discord]\nstreaming_behavior = \"steer\"\n",
+    )
+    .unwrap();
+    let (st_acked, st_alpha, st_separate) = queue_scenario(
+        channel,
+        &driver,
+        &format!("QUEUE steer{marker}"),
+        &format!("TELL SBETA-{marker}"),
+        &format!("ALPHA-steer{marker}-steer"),
+        &format!("SBETA-{marker}"),
+        "↪️",
+    )
+    .await;
+
     // Real-LLM smoke on the same gateway: swap PATH back so a fresh thread spawns
     // the real omp, and confirm one Copilot turn round-trips through Discord.
     unsafe { std::env::set_var("PATH", original_path) };
@@ -303,6 +391,16 @@ async fn scripted_omp_drives_thread_and_real_smoke() {
     assert!(
         ordered,
         "post-task activity did not open a new message below the task message (timeline seal)"
+    );
+    assert!(fu_acked, "follow_up mid-turn message was not acked with the 📥 reaction");
+    assert!(
+        fu_alpha && fu_separate,
+        "follow_up's two answers did not post as separate messages (or the wrong command was forwarded)"
+    );
+    assert!(st_acked, "steer mid-turn message was not acked with the ↪️ reaction");
+    assert!(
+        st_alpha && st_separate,
+        "steer's two answers did not post as separate messages (or the wrong command was forwarded)"
     );
     shutdown
         .expect("pico did not shut down within 15s")

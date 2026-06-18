@@ -386,9 +386,17 @@ fn deploy_relays_report_to_live_worker() {
     let resp = fx.deploy_path_report(&worker, "987654321");
     assert!(status_is(&resp, "ok"), "deploy with report failed: {resp}");
 
-    let report = poll(Duration::from_secs(5), || std::fs::read_to_string(fx.relay_report()).ok());
-    let report = report.expect("relayed report file was never written");
-    assert!(report.contains("deployed"), "unexpected relay text: {report}");
+    // Poll for the relayed content, not just the file: a bare read can race an empty write.
+    let report = poll(Duration::from_secs(5), || {
+        std::fs::read_to_string(fx.relay_report())
+            .ok()
+            .filter(|t| t.contains("deployed"))
+    });
+    assert!(
+        report.is_some(),
+        "deploy report not relayed; file = {:?}",
+        std::fs::read_to_string(fx.relay_report())
+    );
 }
 
 #[test]

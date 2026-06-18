@@ -2,6 +2,7 @@ pub mod app;
 pub mod bindings;
 pub mod config;
 mod discord;
+mod mid_turn;
 pub mod omp;
 pub mod render;
 mod thread_marker;

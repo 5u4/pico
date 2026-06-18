@@ -50,8 +50,8 @@ fn run_rpc() {
     let mut out = std::io::stdout();
     emit(&mut out, &json!({ "type": "ready" }));
 
-    for line in stdin.lock().lines() {
-        let Ok(line) = line else { break };
+    let mut lines = stdin.lock().lines();
+    while let Some(Ok(line)) = lines.next() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
@@ -68,6 +68,10 @@ fn run_rpc() {
                 let message = frame.get("message").and_then(Value::as_str).unwrap_or_default();
                 match message.trim().split_once(' ') {
                     Some(("SEQ", marker)) => emit_seq(&mut out, marker),
+                    Some(("QUEUE", marker)) => {
+                        run_queue(&mut out, &mut lines, marker);
+                        continue;
+                    }
                     _ => emit(
                         &mut out,
                         &json!({
@@ -83,6 +87,57 @@ fn run_rpc() {
             _ => {}
         }
     }
+}
+
+/// Holds a turn open until the host forwards a queued `follow_up`/`steer`, then emits
+/// the two answers as `turn_end`-delimited turns. An activity tool opens the window first.
+fn run_queue<R: std::io::BufRead>(out: &mut impl Write, lines: &mut std::io::Lines<R>, marker: &str) {
+    emit(
+        out,
+        &json!({ "type": "tool_execution_start", "toolCallId": format!("q-{marker}"), "toolName": "read", "args": { "path": format!("QWAIT-{marker}") } }),
+    );
+    emit(
+        out,
+        &json!({ "type": "tool_execution_end", "toolCallId": format!("q-{marker}"), "toolName": "read", "result": {}, "isError": false }),
+    );
+
+    let mut queued: Option<(String, String)> = None;
+    for line in lines {
+        let Ok(line) = line else { break };
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(frame) = serde_json::from_str::<Value>(trimmed) else {
+            continue;
+        };
+        let kind = frame.get("type").and_then(Value::as_str).unwrap_or_default();
+        let id = frame.get("id").and_then(Value::as_str).unwrap_or_default();
+        if !id.is_empty() {
+            ack(out, kind, id);
+        }
+        if kind == "follow_up" || kind == "steer" {
+            let message = frame.get("message").and_then(Value::as_str).unwrap_or_default();
+            queued = Some((kind.to_owned(), message.to_owned()));
+            break;
+        }
+    }
+
+    // Echo the command kind so the e2e can prove follow_up vs steer was forwarded.
+    let cmd = queued.as_ref().map_or("none", |(kind, _)| kind.as_str());
+    emit(
+        out,
+        &json!({ "type": "message_update", "assistantMessageEvent": { "type": "text_delta", "delta": format!("ALPHA-{marker}-{cmd}") } }),
+    );
+    emit(out, &json!({ "type": "turn_end" }));
+    if let Some((_, msg)) = &queued {
+        emit(
+            out,
+            &json!({ "type": "message_update", "assistantMessageEvent": { "type": "text_delta", "delta": reply_for(msg) } }),
+        );
+        emit(out, &json!({ "type": "turn_end" }));
+    }
+    emit(out, &json!({ "type": "agent_end" }));
 }
 
 fn ack(out: &mut impl Write, command: &str, id: &str) {
