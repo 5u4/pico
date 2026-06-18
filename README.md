@@ -149,7 +149,7 @@ dir = "/abs/path/for/worktrees"
 Worktrees persist across restarts (threads resume in place) and aren't torn down
 automatically. Run `/worktree close` inside a worktree thread to clean one up: it
 stops the thread's omp child, removes the worktree and its `pico/<thread-id>`
-branch, then archives and locks the thread. Uncommitted changes, or commits not
+branch, then archives and locks the thread. Uncommitted changes, or commits neither
 pushed to any remote nor merged into trunk, prompt a confirmation first; the omp
 session history is kept. A closed thread is tombstoned
 — a later message in it is refused instead of rebuilding the worktree.

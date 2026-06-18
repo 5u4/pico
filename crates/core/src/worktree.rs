@@ -147,7 +147,7 @@ pub async fn validate_base_repo(base_repo: &Path, default_branch: &str) -> color
 /// What `/worktree close` would permanently destroy for a thread's worktree.
 pub struct LossSummary {
     pub dirty: bool,
-    /// Commits on the branch neither pushed to a remote nor in trunk (HEAD) — what `git branch -D` would orphan; `None` ⇒ unknown, treated as loss.
+    /// Branch commits reachable from neither a remote-tracking ref (pushed) nor HEAD (in trunk) — the work this close would not preserve; `None` ⇒ unknown count, treated as loss.
     pub unmerged: Option<u32>,
 }
 
@@ -185,7 +185,7 @@ pub async fn close_would_lose(base_repo: &Path, worktree: &Path, thread_id: &str
     };
     let branch = branch_name(thread_id);
     let unmerged = if branch_exists(base_repo, &branch).await? {
-        // Pushed to any remote (even when squash-merged) or in HEAD ⇒ recoverable; the rest is what `git branch -D` orphans.
+        // Pushed to any remote (recoverable even after a squash-merge) or reachable from HEAD (in trunk) ⇒ safe; the rest is work this close would not preserve.
         let out = git_output(
             base_repo,
             ["rev-list", "--count", &branch, "--not", "--remotes", "HEAD"],
