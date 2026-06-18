@@ -9,7 +9,9 @@ use color_eyre::eyre::WrapErr;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 
 /// Open (creating if absent) the worker's SQLite pool and apply embedded
-/// migrations. WAL + a busy timeout let concurrent turns share the one file.
+/// migrations. This is the worker's single-writer store: under WAL readers never
+/// block the lone writer, and the busy timeout makes a contending writer wait
+/// rather than fail.
 pub async fn open(root: &Path) -> color_eyre::Result<sqlx::SqlitePool> {
     let options = SqliteConnectOptions::new()
         .filename(pico_shared::paths::worker_db(root))

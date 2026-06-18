@@ -151,7 +151,7 @@ pub async fn request(
 /// Startup reconcile: rows left `pending` lost their in-memory awaiter when the
 /// previous worker stopped, so settle them to `aborted` in one statement. Returns
 /// the count changed.
-pub async fn reconcile_pending_aborted(db: &SqlitePool) -> color_eyre::Result<u64> {
+pub(crate) async fn reconcile_pending_aborted(db: &SqlitePool) -> color_eyre::Result<u64> {
     let result = sqlx::query("UPDATE approvals SET status = 'aborted', resolved_at = ? WHERE status = 'pending'")
         .bind(now())
         .execute(db)
