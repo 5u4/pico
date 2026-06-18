@@ -1,6 +1,8 @@
 pub mod app;
+pub mod approval;
 pub mod bindings;
 pub mod config;
+pub mod db;
 mod discord;
 mod mid_turn;
 pub mod omp;

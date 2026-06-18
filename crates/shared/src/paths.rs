@@ -74,3 +74,9 @@ pub fn default_worktrees_dir(root: &Path) -> PathBuf {
 pub fn thread_marker(root: &Path, thread_id: &str) -> PathBuf {
     root.join("threads").join(format!("{thread_id}.toml"))
 }
+
+/// `<root>/pico.db` — the worker's SQLite store (approvals + future subsystems).
+/// WAL sidecars (`pico.db-wal`, `pico.db-shm`) sit alongside.
+pub fn worker_db(root: &Path) -> PathBuf {
+    root.join("pico.db")
+}

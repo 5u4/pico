@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use color_eyre::eyre::WrapErr;
@@ -79,6 +80,8 @@ pub struct GuildDefault {
 pub struct RootConfig {
     guilds: HashMap<String, GuildDefault>,
     worktrees_dir: Option<PathBuf>,
+    approvers: Vec<String>,
+    approval_timeout: Duration,
 }
 
 impl RootConfig {
@@ -91,6 +94,18 @@ impl RootConfig {
     pub fn worktrees_dir(&self) -> Option<&Path> {
         self.worktrees_dir.as_deref()
     }
+
+    /// Discord user ids allowed to resolve approval requests (`[approval] approvers`).
+    /// Empty ⇒ the approval gate fails closed (nothing can be approved).
+    pub fn approvers(&self) -> &[String] {
+        &self.approvers
+    }
+
+    /// How long an approval prompt waits before expiring (`[approval] timeout_secs`,
+    /// default 1h).
+    pub fn approval_timeout(&self) -> Duration {
+        self.approval_timeout
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -99,12 +114,30 @@ struct RawRootConfig {
     guild: Vec<RawGuild>,
     #[serde(default)]
     worktree: Option<RawWorktree>,
+    #[serde(default)]
+    approval: Option<RawApproval>,
 }
 
 #[derive(serde::Deserialize)]
 struct RawWorktree {
     dir: String,
 }
+
+const DEFAULT_APPROVAL_TIMEOUT_SECS: u64 = 3600;
+
+#[derive(serde::Deserialize)]
+struct RawApproval {
+    #[serde(default)]
+    approvers: Vec<Approver>,
+    #[serde(default)]
+    timeout_secs: Option<u64>,
+}
+
+/// One allowlisted approver id; accepts a quoted snowflake or a bare integer,
+/// exactly like a guild id.
+#[derive(serde::Deserialize)]
+#[serde(transparent)]
+struct Approver(#[serde(deserialize_with = "crate::bindings::de_snowflake")] String);
 
 #[derive(serde::Deserialize)]
 struct RawGuild {
@@ -127,6 +160,8 @@ pub fn load_root(config_path: &Path) -> color_eyre::Result<RootConfig> {
             return Ok(RootConfig {
                 guilds: HashMap::new(),
                 worktrees_dir: None,
+                approvers: Vec::new(),
+                approval_timeout: Duration::from_secs(DEFAULT_APPROVAL_TIMEOUT_SECS),
             });
         }
         Err(e) => {
@@ -178,7 +213,35 @@ pub fn load_root(config_path: &Path) -> color_eyre::Result<RootConfig> {
         }
         None => None,
     };
-    Ok(RootConfig { guilds, worktrees_dir })
+    let mut approvers = Vec::new();
+    let mut approval_timeout = Duration::from_secs(DEFAULT_APPROVAL_TIMEOUT_SECS);
+    if let Some(approval) = raw.approval {
+        for Approver(id) in approval.approvers {
+            if !crate::bindings::is_valid_snowflake(&id) {
+                return Err(color_eyre::eyre::eyre!(
+                    "[approval] approver id {id:?} is not a valid snowflake (^[0-9]{{17,20}}$)"
+                ));
+            }
+            if id.parse::<u64>().is_err() {
+                return Err(color_eyre::eyre::eyre!(
+                    "[approval] approver id {id:?} overflows a 64-bit Discord snowflake"
+                ));
+            }
+            approvers.push(id);
+        }
+        if let Some(secs) = approval.timeout_secs {
+            if secs == 0 {
+                return Err(color_eyre::eyre::eyre!("[approval] timeout_secs must be greater than 0"));
+            }
+            approval_timeout = Duration::from_secs(secs);
+        }
+    }
+    Ok(RootConfig {
+        guilds,
+        worktrees_dir,
+        approvers,
+        approval_timeout,
+    })
 }
 
 #[cfg(test)]
@@ -186,6 +249,7 @@ mod tests {
     use std::{
         path::PathBuf,
         sync::atomic::{AtomicU64, Ordering},
+        time::Duration,
     };
 
     fn temp_dir(tag: &str) -> PathBuf {
@@ -374,6 +438,71 @@ mod tests {
         let dir = temp_dir("rootwtrel");
         let path = dir.join("config.toml");
         std::fs::write(&path, "[worktree]\ndir = \"relative/wt\"\n").unwrap();
+        assert!(super::load_root(&path).is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn load_root_reads_approvers_quoted_and_bare_with_timeout() {
+        let dir = temp_dir("rootapprovers");
+        let path = dir.join("config.toml");
+        std::fs::write(
+            &path,
+            "[approval]\napprovers = [\"123456789012345678\", 234567890123456789]\ntimeout_secs = 120\n",
+        )
+        .unwrap();
+        let cfg = super::load_root(&path).unwrap();
+        assert_eq!(cfg.approvers(), ["123456789012345678", "234567890123456789"]);
+        assert_eq!(cfg.approval_timeout(), Duration::from_secs(120));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn load_root_approval_defaults_when_absent() {
+        let dir = temp_dir("rootapprnone");
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "[[guild]]\nid = \"123456789012345678\"\ncwd = \"/tmp\"\n").unwrap();
+        let cfg = super::load_root(&path).unwrap();
+        assert!(cfg.approvers().is_empty());
+        assert_eq!(cfg.approval_timeout(), Duration::from_secs(3600));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn load_root_approval_timeout_defaults_when_omitted() {
+        let dir = temp_dir("rootapprtimeoutdefault");
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "[approval]\napprovers = [\"123456789012345678\"]\n").unwrap();
+        let cfg = super::load_root(&path).unwrap();
+        assert_eq!(cfg.approval_timeout(), Duration::from_secs(3600));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn load_root_rejects_bad_approver_id() {
+        let dir = temp_dir("rootapprbad");
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "[approval]\napprovers = [\"nope\"]\n").unwrap();
+        assert!(super::load_root(&path).is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn load_root_rejects_u64_overflow_approver() {
+        // 20 digits passes the snowflake length/shape check but overflows u64,
+        // so it must fail config load rather than be silently dropped at runtime.
+        let dir = temp_dir("rootapproverflow");
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "[approval]\napprovers = [\"99999999999999999999\"]\n").unwrap();
+        assert!(super::load_root(&path).is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn load_root_rejects_zero_timeout() {
+        let dir = temp_dir("rootapprzero");
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "[approval]\napprovers = [\"123456789012345678\"]\ntimeout_secs = 0\n").unwrap();
         assert!(super::load_root(&path).is_err());
         std::fs::remove_dir_all(&dir).ok();
     }
