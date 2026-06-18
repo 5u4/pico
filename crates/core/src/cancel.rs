@@ -30,13 +30,12 @@ impl CancelRegistry {
     /// Cancel the turn on `channel` iff it is actively streaming; returns whether
     /// it was. False when nothing runs there or it is paused on a dialog.
     pub fn request(&self, channel: serenity::ChannelId) -> bool {
-        match self.inner.lock().get(&channel) {
-            Some(turn) if turn.streaming.load(Ordering::Acquire) => {
-                turn.token.cancel();
-                true
-            }
-            _ => false,
-        }
+        let token = match self.inner.lock().get(&channel) {
+            Some(turn) if turn.streaming.load(Ordering::Acquire) => turn.token.clone(),
+            _ => return false,
+        };
+        token.cancel();
+        true
     }
 
     /// Register the running turn with a fresh token; the guard unregisters on

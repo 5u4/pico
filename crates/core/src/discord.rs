@@ -960,6 +960,10 @@ async fn drive_turn(
                 _ => activity.end(&tool).await,
             },
             Some(OmpEvent::UiRequest(req)) => {
+                // Stale UiRequest from losing the abort race: don't render a zombie dialog.
+                if aborted {
+                    continue;
+                }
                 // Block the turn on the answer (the agent is paused awaiting it);
                 // `handle_request` races `cancel`, so a restart never strands the turn.
                 activity.flush().await;
