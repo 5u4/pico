@@ -21,6 +21,7 @@ pub struct ProfileConfig {
     pub model: Option<String>,
     pub surface_thinking: bool,
     pub streaming_behavior: StreamingBehavior,
+    pub browser_enabled: bool,
 }
 
 #[derive(Deserialize)]
@@ -29,6 +30,8 @@ struct RawConfig {
     llm: Option<RawLlm>,
     #[serde(default)]
     discord: Option<RawDiscord>,
+    #[serde(default)]
+    browser: Option<RawBrowser>,
 }
 
 #[derive(Deserialize)]
@@ -45,6 +48,12 @@ struct RawDiscord {
     streaming_behavior: StreamingBehavior,
 }
 
+#[derive(Deserialize, Default)]
+struct RawBrowser {
+    #[serde(default)]
+    enabled: bool,
+}
+
 pub fn load(config_path: &Path) -> color_eyre::Result<ProfileConfig> {
     let text = match std::fs::read_to_string(config_path) {
         Ok(text) => text,
@@ -53,6 +62,7 @@ pub fn load(config_path: &Path) -> color_eyre::Result<ProfileConfig> {
                 model: None,
                 surface_thinking: false,
                 streaming_behavior: StreamingBehavior::default(),
+                browser_enabled: false,
             });
         }
         Err(e) => {
@@ -66,6 +76,7 @@ pub fn load(config_path: &Path) -> color_eyre::Result<ProfileConfig> {
         model: raw.llm.and_then(|llm| llm.model),
         surface_thinking: discord.surface_thinking,
         streaming_behavior: discord.streaming_behavior,
+        browser_enabled: raw.browser.is_some_and(|b| b.enabled),
     })
 }
 
@@ -288,6 +299,23 @@ mod tests {
 
         let cfg = super::load(&path).unwrap();
         assert_eq!(cfg.model, None);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn browser_enabled_parses() {
+        let dir = temp_dir("browser");
+        let path = dir.join("config.toml");
+
+        std::fs::write(&path, "[browser]\nenabled = true\n").unwrap();
+        assert!(super::load(&path).unwrap().browser_enabled);
+
+        std::fs::write(&path, "[browser]\n").unwrap();
+        assert!(!super::load(&path).unwrap().browser_enabled);
+
+        std::fs::write(&path, "[llm]\nmodel = \"x\"\n").unwrap();
+        assert!(!super::load(&path).unwrap().browser_enabled);
 
         std::fs::remove_dir_all(&dir).ok();
     }

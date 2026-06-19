@@ -118,12 +118,25 @@ model = "provider/model"           # omp model for this profile
 [discord]
 surface_thinking = false           # stream the agent's reasoning as activity
 streaming_behavior = "follow_up"   # mid-turn message: follow_up | steer
+
+[browser]
+enabled = false                    # opt-in Camoufox anti-detection browser tools
 ```
 
 `streaming_behavior` controls what a message you send **while a turn is still
 running** does: `follow_up` (default) queues it behind the current turn; `steer`
 folds it into the running turn at the next step boundary. Either way the message
 is acked with a reaction (📥 queued, ↪️ steered).
+
+`[browser] enabled = true` gives the profile `camo_*` tools backed by a
+worker-owned Camoufox (anti-detection Firefox) daemon — stronger against
+Cloudflare / Google / login-walled sites than omp's native browser, which stays
+available alongside. The daemon starts lazily on the first turn of an enabled
+profile and shares one cookie jar per profile across its threads; if it can't
+start, the tools surface an error and the agent falls back to `read`/native browser.
+Toggling `enabled` takes effect on a thread's next fresh omp child — a new thread,
+or after the existing one is idle-evicted (~10 min) — since a live child keeps the
+tools it was spawned with.
 
 A turn that's still running can be cut short with `/cancel` in its thread: it
 aborts the in-flight turn (cancelling any running tool) and frees the thread for

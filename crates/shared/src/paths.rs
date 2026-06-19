@@ -80,3 +80,22 @@ pub fn thread_marker(root: &Path, thread_id: &str) -> PathBuf {
 pub fn worker_db(root: &Path) -> PathBuf {
     root.join("pico.db")
 }
+
+/// `<root>/camofox` — working dir for the worker-owned Camoufox daemon.
+pub fn camofox_dir(root: &Path) -> PathBuf {
+    root.join("camofox")
+}
+
+/// `<root>/camofox/extension.ts` — the omp extension the worker writes for
+/// browser-enabled profiles (embedded in the binary, rewritten at startup so
+/// it stays lockstep with the worker version).
+pub fn camofox_extension(root: &Path) -> PathBuf {
+    camofox_dir(root).join("extension.ts")
+}
+
+/// `<root>/camofox/profiles` — `CAMOFOX_PROFILE_DIR`: Camoufox's per-userId
+/// (= per-profile) cookie/storage jars. Under the worker root so a profile's
+/// logins persist on the state volume across restarts.
+pub fn camofox_profile_dir(root: &Path) -> PathBuf {
+    camofox_dir(root).join("profiles")
+}
