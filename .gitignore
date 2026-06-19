@@ -4,3 +4,4 @@ target/
 .env*
 !.env.e2e.example
 .omp
+tmp
