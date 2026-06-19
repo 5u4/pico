@@ -26,7 +26,8 @@ async fn http(base: &str, key: &str, method: &str, path: &str, body: Option<&str
     let addr = base.trim_start_matches("http://");
     let mut stream = TcpStream::connect(addr).await.expect("connect to camofox daemon");
     let body = body.unwrap_or("");
-    let mut req = format!("{method} {path} HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {key}\r\nConnection: close\r\n");
+    let mut req =
+        format!("{method} {path} HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {key}\r\nConnection: close\r\n");
     if !body.is_empty() {
         req.push_str(&format!("Content-Type: application/json\r\nContent-Length: {}\r\n", body.len()));
     } else if method != "GET" {
@@ -43,7 +44,10 @@ async fn http(base: &str, key: &str, method: &str, path: &str, body: Option<&str
         .nth(1)
         .and_then(|s| s.parse::<u16>().ok())
         .unwrap_or(0);
-    let body = text.split_once("\r\n\r\n").map(|(_, b)| b.to_owned()).unwrap_or_default();
+    let body = text
+        .split_once("\r\n\r\n")
+        .map(|(_, b)| b.to_owned())
+        .unwrap_or_default();
     (status, body)
 }
 

@@ -113,7 +113,11 @@ impl CamofoxDaemon {
             if st.health_failures < HEALTH_FAILS_BEFORE_RESPAWN {
                 return;
             }
-            tracing::warn!(port = self.port, fails = st.health_failures, "camofox daemon unhealthy; respawning");
+            tracing::warn!(
+                port = self.port,
+                fails = st.health_failures,
+                "camofox daemon unhealthy; respawning"
+            );
         }
         // Reap the dead/unhealthy child, then (re)spawn unless cancelled or backing off.
         if let Some(mut old) = st.child.take() {
@@ -236,7 +240,11 @@ async fn http_get_ok(port: u16, path: &str, bearer: &str) -> bool {
         }
         Some(head.starts_with(b"HTTP/1.1 200") || head.starts_with(b"HTTP/1.0 200"))
     };
-    tokio::time::timeout(Duration::from_secs(3), attempt).await.ok().flatten().unwrap_or(false)
+    tokio::time::timeout(Duration::from_secs(3), attempt)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(false)
 }
 
 /// Drain the daemon's stderr to the log so a full pipe can't block it.

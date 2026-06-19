@@ -403,7 +403,10 @@ mod tests {
         let cmd = build_command(&config);
         let std_cmd = cmd.as_std();
         let args: Vec<String> = std_cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
-        let i = args.iter().position(|a| a == "--extension").expect("--extension arg present");
+        let i = args
+            .iter()
+            .position(|a| a == "--extension")
+            .expect("--extension arg present");
         assert_eq!(args[i + 1], ext.to_string_lossy());
         let envs: std::collections::HashMap<String, String> = std_cmd
             .get_envs()
