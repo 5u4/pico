@@ -118,6 +118,9 @@ impl CamofoxDaemon {
         // Reap the dead/unhealthy child, then (re)spawn unless cancelled or backing off.
         if let Some(mut old) = st.child.take() {
             let _ = old.start_kill();
+            self.tracker.spawn(async move {
+                let _ = old.wait().await;
+            });
         }
         st.health_failures = 0;
         if self.cancel.is_cancelled() || st.retry_after.is_some_and(|t| Instant::now() < t) {

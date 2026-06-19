@@ -44,8 +44,12 @@ RUN apt-get update \
       libgtk-3-0 libdbus-glib-1-2 libxt6 libasound2 libx11-xcb1 libxcomposite1 \
       libxcursor1 libxdamage1 libxfixes3 libxi6 libxrandr2 libxrender1 libxss1 \
       libxtst6 libegl1-mesa libgl1-mesa-dri libgbm1 xvfb fonts-liberation \
-      fonts-noto-color-emoji fontconfig \
- && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+      fonts-noto-color-emoji fontconfig gnupg \
+ && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+      | gpg --dearmor -o /usr/share/keyrings/nodesource.gpg \
+ && echo "deb [signed-by=/usr/share/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" \
+      > /etc/apt/sources.list.d/nodesource.list \
+ && apt-get update \
  && apt-get install -y --no-install-recommends nodejs \
  && rm -rf /var/lib/apt/lists/*
 # Global-install the server, then pin the two drifting deps to the lockfile
