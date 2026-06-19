@@ -1,0 +1,121 @@
+//! Live camofox e2e (`#[ignore]`d like the others; run with `--include-ignored`
+//! on a host with node + `camofox-browser` + a Camoufox binary).
+
+use std::{collections::HashMap, path::PathBuf};
+
+use pico_core::omp::camofox::CamofoxDaemon;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
+};
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
+
+fn temp_root() -> PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("pico-camofox-e2e-{nanos}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// Minimal one-shot HTTP/1.1 request (Connection: close) against the loopback
+/// daemon. Returns `(status, body)`. Keeps the test dependency-free.
+async fn http(base: &str, key: &str, method: &str, path: &str, body: Option<&str>) -> (u16, String) {
+    let addr = base.trim_start_matches("http://");
+    let mut stream = TcpStream::connect(addr).await.expect("connect to camofox daemon");
+    let body = body.unwrap_or("");
+    let mut req = format!("{method} {path} HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {key}\r\nConnection: close\r\n");
+    if !body.is_empty() {
+        req.push_str(&format!("Content-Type: application/json\r\nContent-Length: {}\r\n", body.len()));
+    } else if method != "GET" {
+        req.push_str("Content-Length: 0\r\n");
+    }
+    req.push_str("\r\n");
+    req.push_str(body);
+    stream.write_all(req.as_bytes()).await.expect("write request");
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).await.expect("read response");
+    let text = String::from_utf8_lossy(&raw).into_owned();
+    let status = text
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse::<u16>().ok())
+        .unwrap_or(0);
+    let body = text.split_once("\r\n\r\n").map(|(_, b)| b.to_owned()).unwrap_or_default();
+    (status, body)
+}
+
+#[tokio::test]
+#[ignore = "live: needs node + camofox-browser + Camoufox (baked into the pico image)"]
+async fn camofox_opens_a_tab_and_snapshots() {
+    let root = temp_root();
+    let cancel = CancellationToken::new();
+    let tracker = TaskTracker::new();
+    let daemon = CamofoxDaemon::new(&root, cancel.clone(), &tracker);
+
+    daemon.ensure_started().await;
+
+    let env: HashMap<String, String> = daemon.injection("default", "e2e").1.into_iter().collect();
+    let base = env["CAMOFOX_BASE_URL"].clone();
+    let key = env["CAMOFOX_ACCESS_KEY"].clone();
+
+    let (health, _) = http(&base, &key, "GET", "/health", None).await;
+    assert_eq!(health, 200, "daemon /health should be 200 after ensure_started");
+
+    let (status, created) = http(
+        &base,
+        &key,
+        "POST",
+        "/tabs",
+        Some(r#"{"userId":"default","sessionKey":"e2e","url":"https://example.com"}"#),
+    )
+    .await;
+    assert_eq!(status, 200, "POST /tabs should be 200; body: {created}");
+    let tab_id = created
+        .split_once("\"tabId\":\"")
+        .and_then(|(_, rest)| rest.split_once('"'))
+        .map(|(id, _)| id.to_owned())
+        .unwrap_or_else(|| panic!("no tabId in create response: {created}"));
+
+    let (status, snapshot) = http(&base, &key, "GET", &format!("/tabs/{tab_id}/snapshot?userId=default"), None).await;
+    assert_eq!(status, 200, "snapshot should be 200; body: {snapshot}");
+    assert!(snapshot.contains("Example Domain"), "snapshot missing page content: {snapshot}");
+
+    cancel.cancel();
+    tracker.close();
+    tracker.wait().await;
+    std::fs::remove_dir_all(&root).ok();
+}
+
+/// Regression guard: the embedded extension must actually load under
+/// `omp --extension` and register every camo_* tool. A wrong `pi.zod` access
+/// (e.g. `const { z } = pi.zod`) makes omp silently drop the whole extension, so
+/// the daemon e2e above would still pass while the agent sees no tools. Spawns omp
+/// in print mode and asserts the model can see the tools.
+#[test]
+#[ignore = "live: needs omp on PATH + an authenticated model"]
+fn omp_loads_extension_and_registers_camo_tools() {
+    let ext = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/omp/camofox_extension.ts");
+    let cwd = temp_root();
+    let output = std::process::Command::new("omp")
+        .args(["-p", "--no-lsp", "--no-session", "--auto-approve", "-e"])
+        .arg(&ext)
+        .arg("Reply with ONLY a comma-separated list of the exact names of every tool you can call.")
+        .current_dir(&cwd)
+        .env("CAMOFOX_BASE_URL", "http://127.0.0.1:1")
+        .env("CAMOFOX_USER_ID", "t")
+        .env("CAMOFOX_SESSION_KEY", "t")
+        .env("CAMOFOX_ACCESS_KEY", "k")
+        .output()
+        .expect("run omp");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // Registration is all-or-nothing, so any one camo_* name proves it loaded.
+    assert!(
+        stdout.contains("camo_"),
+        "omp exposed no camo_* tools (extension failed to load?)\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    std::fs::remove_dir_all(&cwd).ok();
+}

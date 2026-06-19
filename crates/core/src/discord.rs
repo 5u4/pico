@@ -14,6 +14,7 @@ use crate::{
     config::StreamingBehavior,
     mid_turn::MidTurnQueue,
     omp::{
+        camofox::CamofoxDaemon,
         pool::{OmpPool, ThreadHandle, ThreadSession},
         protocol::{AssistantMessageEvent, OmpEvent, ToolCall, ToolCallEnd, ToolCallStart, ToolCallUpdate},
     },
@@ -23,6 +24,7 @@ pub(crate) struct Data {
     root: Arc<std::path::PathBuf>,
     bindings: Arc<parking_lot::Mutex<Bindings>>,
     pool: Arc<OmpPool>,
+    camofox: Arc<CamofoxDaemon>,
     cancel: CancellationToken,
     tracker: TaskTracker,
     supervisor_socket: Option<std::path::PathBuf>,
@@ -57,10 +59,12 @@ pub(crate) fn framework(
             Box::pin(async move {
                 poise::builtins::register_globally(ctx, &framework.options().commands).await?;
                 let _ = ready_tx.send(());
+                let camofox = CamofoxDaemon::new(&root, cancel.clone(), &tracker);
                 Ok(Data {
                     root: Arc::new(root),
                     bindings: Arc::new(parking_lot::Mutex::new(bindings)),
                     pool,
+                    camofox,
                     supervisor_socket,
                     cancel,
                     tracker,
@@ -499,6 +503,7 @@ async fn on_event(
         let root = Arc::clone(&data.root);
         let bindings = Arc::clone(&data.bindings);
         let pool = Arc::clone(&data.pool);
+        let camofox = Arc::clone(&data.camofox);
         let cancel = data.cancel.clone();
         let message = new_message.clone();
         let tracker = data.tracker.clone();
@@ -511,6 +516,7 @@ async fn on_event(
                 root,
                 bindings,
                 pool,
+                camofox,
                 cancel,
                 tracker,
                 pending_answers,
@@ -573,6 +579,7 @@ async fn route_message(
     root: Arc<std::path::PathBuf>,
     bindings: Arc<parking_lot::Mutex<Bindings>>,
     pool: Arc<OmpPool>,
+    camofox: Arc<CamofoxDaemon>,
     cancel: CancellationToken,
     tracker: TaskTracker,
     pending_answers: crate::ui::PendingAnswers,
@@ -781,12 +788,22 @@ async fn route_message(
     let identity = pico_shared::paths::profile_identity(&root, &profile);
     let profile_config = crate::config::load(&pico_shared::paths::profile_config(&root, &profile))?;
     let title_cwd = cwd.clone();
+    let (extensions, env) = if profile_config.browser_enabled {
+        // Best-effort: bring the daemon up (logs on failure). Tools are injected
+        // regardless — a down daemon surfaces as a tool error, not a failed turn.
+        camofox.ensure_started().await;
+        camofox.injection(&profile, &thread_id)
+    } else {
+        (Vec::new(), Vec::new())
+    };
     let config = crate::omp::client::SpawnConfig {
         model: profile_config.model,
         cwd: Some(cwd),
         session_dir: Some(session_dir),
         continue_session: true,
         append_system_prompt: identity.is_file().then_some(identity),
+        extensions,
+        env,
     };
 
     let handle = pool.get_or_spawn(&thread_id, &config).await?;

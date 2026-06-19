@@ -43,6 +43,12 @@ pub struct SpawnConfig {
     /// worker restart, since the session-dir is derived from the thread id.
     pub continue_session: bool,
     pub append_system_prompt: Option<PathBuf>,
+    /// omp `--extension <path>` modules to load (the camofox browser tools when a
+    /// profile enables the browser). Empty for a normal turn.
+    pub extensions: Vec<PathBuf>,
+    /// Extra environment for the child (the `CAMOFOX_*` wiring read by the
+    /// extension). Empty otherwise.
+    pub env: Vec<(String, String)>,
 }
 
 /// A live connection to one `omp --mode rpc` process.
@@ -75,6 +81,12 @@ fn build_command(config: &SpawnConfig) -> ProcCommand {
     }
     if let Some(prompt) = &config.append_system_prompt {
         cmd.arg("--append-system-prompt").arg(prompt);
+    }
+    for extension in &config.extensions {
+        cmd.arg("--extension").arg(extension);
+    }
+    for (key, value) in &config.env {
+        cmd.env(key, value);
     }
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -375,5 +387,37 @@ mod tests {
     fn build_command_without_cwd_inherits_worker_dir() {
         let cmd = build_command(&SpawnConfig::default());
         assert_eq!(cmd.as_std().get_current_dir(), None);
+    }
+
+    #[test]
+    fn build_command_injects_extensions_and_env() {
+        let ext = std::path::PathBuf::from("/x/extension.ts");
+        let config = SpawnConfig {
+            extensions: vec![ext.clone()],
+            env: vec![
+                ("CAMOFOX_BASE_URL".to_owned(), "http://127.0.0.1:9377".to_owned()),
+                ("CAMOFOX_USER_ID".to_owned(), "acme".to_owned()),
+            ],
+            ..SpawnConfig::default()
+        };
+        let cmd = build_command(&config);
+        let std_cmd = cmd.as_std();
+        let args: Vec<String> = std_cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        let i = args.iter().position(|a| a == "--extension").expect("--extension arg present");
+        assert_eq!(args[i + 1], ext.to_string_lossy());
+        let envs: std::collections::HashMap<String, String> = std_cmd
+            .get_envs()
+            .filter_map(|(k, v)| Some((k.to_string_lossy().into_owned(), v?.to_string_lossy().into_owned())))
+            .collect();
+        assert_eq!(envs.get("CAMOFOX_BASE_URL").map(String::as_str), Some("http://127.0.0.1:9377"));
+        assert_eq!(envs.get("CAMOFOX_USER_ID").map(String::as_str), Some("acme"));
+    }
+
+    #[test]
+    fn build_command_default_injects_no_extension_or_env() {
+        let cmd = build_command(&SpawnConfig::default());
+        let std_cmd = cmd.as_std();
+        assert!(std_cmd.get_args().all(|a| a != "--extension"));
+        assert_eq!(std_cmd.get_envs().count(), 0);
     }
 }
