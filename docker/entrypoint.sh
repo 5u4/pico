@@ -20,13 +20,15 @@ git config --global --get-all safe.directory 2>/dev/null | grep -qxF "$REPO" \
   || git config --global --add safe.directory "$REPO"
 
 # Point any cargo rooted in this repo (and the agent's worktrees of it) at the
-# shared pico target dir. Absolute + container-specific → generated here,
-# gitignored, never committed. New worktrees inherit it via the ambient-link hook.
-mkdir -p "$REPO/.cargo"
-cat > "$REPO/.cargo/config.toml" <<EOF
-[build]
-target-dir = "$PICO_TARGET"
-EOF
+# shared pico target dir. Best-effort: only the agent's own builds rely on it (the
+# startup build and /update, /dev-deploy pass --target-dir explicitly), so a
+# read-only repo mount just loses cache sharing rather than aborting startup with a
+# cryptic error ahead of the writability preflight below.
+{
+  mkdir -p "$REPO/.cargo" \
+    && printf '[build]\ntarget-dir = "%s"\n' "$PICO_TARGET" > "$REPO/.cargo/config.toml"
+} 2>/dev/null \
+  || echo "[entrypoint] WARN: could not write $REPO/.cargo/config.toml; agent worktree builds won't share the cargo cache" >&2
 
 if ! command -v omp >/dev/null 2>&1; then
   echo "[entrypoint] installing omp (latest)…"
