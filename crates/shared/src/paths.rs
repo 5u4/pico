@@ -11,6 +11,21 @@ pub fn pico_home() -> color_eyre::Result<PathBuf> {
     Ok(home.join(".pico"))
 }
 
+/// `~/.pico/agent` — the deployment checkout the container builds from. `/update`
+/// fast-forwards it to `origin/main` before rebuilding; the entrypoint builds the
+/// supervisor + worker from it on startup.
+pub fn agent_repo() -> color_eyre::Result<PathBuf> {
+    Ok(pico_home()?.join("agent"))
+}
+
+/// `~/.cache/build/pico-target` — cargo target dir shared by every pico build,
+/// kept off the global `CARGO_TARGET_DIR` env so unrelated projects the agent
+/// builds aren't forced in. Same path is in the entrypoint's `.cargo/config.toml`.
+pub fn pico_build_target_dir() -> color_eyre::Result<PathBuf> {
+    let home = std::env::home_dir().ok_or_else(|| color_eyre::eyre::eyre!("cannot determine home directory"))?;
+    Ok(home.join(".cache").join("build").join("pico-target"))
+}
+
 /// `~/.pico/supervisor` — the supervisor domain (one per host).
 pub fn supervisor_dir() -> color_eyre::Result<PathBuf> {
     Ok(pico_home()?.join("supervisor"))

@@ -14,7 +14,7 @@ set -uo pipefail
 
 # Local, gitignored paths mirrored from the main worktree into each new one,
 # relative to the repo root. Add more here if needed.
-LINK=(.omp .env.e2e)
+LINK=(.omp .env.e2e .cargo)
 
 # git runs post-checkout with cwd = the worktree being checked out.
 here="$(pwd)"

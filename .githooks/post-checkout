@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Mirror this repo's local gitignored ambient files (`.omp`, `.env.e2e`) into a
+# Mirror this repo's local gitignored ambient files (the script's `LINK` list) into a
 # newly created git worktree — see scripts/link-worktree-ambient.sh. cwd here is
 # the new worktree, whose checkout may predate the script (an old fork ref), so
 # resolve the script from the main worktree instead, and no-op when it's absent:

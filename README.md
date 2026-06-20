@@ -92,7 +92,9 @@ cargo install --path crates/worker
 pico-supervisor deploy "$(command -v pico-worker)"
 ```
 
-or `/deploy path:<abs-path>` from a configured Discord channel.
+or, from a configured Discord channel: `/update` (fast-forward `~/.pico/agent` to
+origin/main, rebuild, deploy) or `/dev-deploy` (build the current worktree thread
+and deploy).
 
 ## Layout & config
 
@@ -190,15 +192,18 @@ This repo ships a `post-checkout` hook (`.githooks/post-checkout` →
 checkout into each new worktree. Wire the repo's hooks once with `scripts/install-hooks.sh`
 (it points `core.hooksPath` at `.githooks`); your `.omp`/`.env.e2e` stay
 gitignored and uncommitted — only the hook and its script are tracked. Mirror more paths by editing the
-`LINK=(.omp .env.e2e)` list at the top of the script.
+`LINK=(.omp .env.e2e .cargo)` list at the top of the script.
 
-Build cache is already shared under Docker: the image sets
-`CARGO_TARGET_DIR=/build/target`, which the worker passes down to the `omp` child
-(and its `cargo`), so every worktree builds into one shared target dir instead of
-a cold multi-GB one each. (cargo still recompiles the workspace crates per
-worktree — their source path differs — but the dependency builds, the bulk, are
-shared.) On a systemd/host install, set the same on the unit:
-`Environment=CARGO_TARGET_DIR=/abs/shared/target`.
+Build cache is shared the same way: the container entrypoint writes a gitignored
+`.cargo/config.toml` into `~/.pico/agent` pointing cargo at one shared target dir
+(`~/.cache/build/pico-target`), and the hook links `.cargo` into each worktree —
+so every worktree builds into that dir instead of a cold multi-GB one each. (cargo
+still recompiles the workspace crates per worktree — their source path differs —
+but the dependency builds, the bulk, are shared.) It is deliberately not a global
+`CARGO_TARGET_DIR` env, which would force *every* cargo in the container —
+including unrelated projects the agent builds — into one dir. On a systemd/host
+install, set `build.target-dir` in a checkout-local `.cargo/config.toml` to share
+a dir the same way.
 
 ## Running as a system service
 
@@ -264,11 +269,12 @@ docker compose exec pico pico-supervisor status
 docker compose exec pico pico-supervisor rollback
 ```
 
-To roll a code change forward, edit it on the host (the repo is mounted) and
-deploy explicitly — a plain `docker compose restart pico` rebuilds but keeps
-running the current slot until you deploy:
+To roll a code change forward, send `/update` from a configured Discord channel
+(fast-forwards `~/.pico/agent` to origin/main, rebuilds, and deploys), or do it by
+hand in the container:
 
 ```sh
 docker compose exec pico sh -lc \
-  'cargo build --release -p pico-worker && pico-supervisor deploy "$(command -v pico-worker)"'
+  'cd ~/.pico/agent && git pull && cargo build --release -p pico-worker && \
+   pico-supervisor deploy "$(command -v pico-worker)"'
 ```
