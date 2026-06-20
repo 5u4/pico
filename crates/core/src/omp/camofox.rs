@@ -215,18 +215,17 @@ fn pick_free_port() -> Option<u16> {
         .map(|addr| addr.port())
 }
 
-/// Fetch the Camoufox engine (~650 MB, via the image's pinned `camoufox-js`) into
-/// the per-user cache when absent. Best-effort + cancellation-aware so a shutdown
-/// mid-download isn't blocked on `tracker.wait`.
+/// Fetch the Camoufox engine (~650 MB, via the image's pinned `camoufox-js`) into the
+/// per-user cache when absent. Best-effort + cancellation-aware so shutdown isn't blocked.
 pub async fn ensure_engine(cancel: CancellationToken) {
     if engine_present() {
         return;
     }
     tracing::info!("Camoufox engine missing; fetching (~650 MB, one-time)");
+    // stderr inherits (not piped): an undrained pipe would fill and deadlock the progress-streaming fetch.
     let child = ProcCommand::new(FETCH_CMD)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
         .kill_on_drop(true)
         .spawn();
     let mut child = match child {
@@ -241,23 +240,15 @@ pub async fn ensure_engine(cancel: CancellationToken) {
         status = child.wait() => Some(status),
     };
     match waited {
-        // Shutdown mid-fetch: kill then reap, so no orphan lingers and the SIGKILL'd wait returns at once.
         None => {
             let _ = child.start_kill();
             let _ = child.wait().await;
         }
         Some(Ok(status)) if status.success() => tracing::info!("Camoufox engine ready"),
-        Some(Ok(status)) => {
-            let mut stderr = String::new();
-            if let Some(mut pipe) = child.stderr.take() {
-                let _ = pipe.read_to_string(&mut stderr).await;
-            }
-            tracing::warn!(
-                code = ?status.code(),
-                stderr = %stderr.trim_end(),
-                "fetching Camoufox engine failed; browser tools stay unavailable until it succeeds",
-            );
-        }
+        Some(Ok(status)) => tracing::warn!(
+            code = ?status.code(),
+            "fetching Camoufox engine failed; browser tools stay unavailable until it succeeds",
+        ),
         Some(Err(e)) => tracing::warn!(error = %e, "waiting on Camoufox engine fetch failed"),
     }
 }
