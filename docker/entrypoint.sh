@@ -33,6 +33,23 @@ for d in "$CARGO_TARGET_DIR" "$PICO_HOME/.pico/supervisor"; do
   fi
 done
 
+# Preflight: if the docker socket is mounted, confirm this unprivileged user can
+# actually reach it. Access is granted statically by compose `group_add`
+# (DOCKER_GID, default 0 for OrbStack's root:root socket); a root:docker host has
+# a non-zero gid. Test the socket perms directly — not `docker version`, which
+# also fails when the daemon is merely down — so a group misconfig fails fast and
+# actionably instead of as opaque permission errors later during deploy.
+if [ -S /var/run/docker.sock ]; then
+  if ! { [ -r /var/run/docker.sock ] && [ -w /var/run/docker.sock ]; }; then
+    sock_gid="$(stat -c '%g' /var/run/docker.sock 2>/dev/null || echo '?')"
+    echo "[entrypoint] FATAL: /var/run/docker.sock not accessible to $(id -un) (groups: $(id -G))." >&2
+    echo "[entrypoint] Its owning group is gid $sock_gid, which is not in this container's groups." >&2
+    echo "[entrypoint] Set DOCKER_GID to that gid and recreate the service:" >&2
+    echo "[entrypoint]   DOCKER_GID=$sock_gid docker compose up -d --force-recreate" >&2
+    exit 1
+  fi
+fi
+
 echo "[entrypoint] building pico-supervisor + pico-worker (release; first run pulls deps)…"
 cargo build --release -p pico-supervisor -p pico-worker
 
