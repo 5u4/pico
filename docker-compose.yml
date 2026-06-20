@@ -3,34 +3,17 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile
-    # tini as PID 1 reaps the omp grandchildren the worker spawns.
     init: true
-    # Camoufox/Firefox (opt-in browser) can exhaust the default 64MB /dev/shm
-    # under load; give it room. Harmless when the browser is unused.
     shm_size: "1gb"
-    # If Camoufox fails to launch on a stricter host kernel — the
-    # "Sandbox: CanCreateUserNamespace() clone() failure: EPERM" warning turning
-    # fatal — relax the sandbox by uncommenting:
-    # security_opt:
-    #   - seccomp=unconfined
     restart: unless-stopped
-    working_dir: /workspace/pico
+    working_dir: /root/.pico/agent
     volumes:
-      # The repo: build source for the supervisor's deploys and the cwd the bot
-      # operates on for the bound channel. Read-write — omp edits/commits here.
-      - ./:/workspace/pico
-      # Worker state: bot token, config, bindings, profiles, migrated sessions.
-      - pico-state:/root/.pico
-      # omp's store: seeded with the Copilot auth + config.
-      - omp-state:/root/.omp
-      # Cargo registry + target, so restarts build incrementally.
+      - ${HOME}/.pico:/root/.pico
+      - ${HOME}/.omp:/root/.omp
+      - /var/run/docker.sock:/var/run/docker.sock
+      - pico-supervisor:/root/.pico/supervisor
       - pico-build:/build
 
 volumes:
-  # Seeded once from the host by docker/seed.sh; `external` keeps `compose down
-  # -v` from wiping the token and conversation history.
-  pico-state:
-    external: true
-  omp-state:
-    external: true
+  pico-supervisor:
   pico-build:
