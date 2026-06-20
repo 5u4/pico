@@ -1,5 +1,5 @@
-//! Live camofox e2e (`#[ignore]`d like the others; run with `--include-ignored`
-//! against the built pico image — camofox-browser is baked, the engine downloads on first use).
+//! Live camofox e2e — `#[ignore]`d like the others; run with `--include-ignored` against the
+//! built pico image, where camofox-browser is baked and the engine downloads on first use.
 
 use std::{collections::HashMap, path::PathBuf};
 
