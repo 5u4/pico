@@ -229,24 +229,36 @@ pub async fn ensure_engine(cancel: CancellationToken) {
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .spawn();
-    let child = match child {
+    let mut child = match child {
         Ok(child) => child,
         Err(e) => {
             tracing::warn!(error = %e, command = FETCH_CMD, "could not fetch Camoufox engine (image deps missing?)");
             return;
         }
     };
-    tokio::select! {
-        () = cancel.cancelled() => {}
-        out = child.wait_with_output() => match out {
-            Ok(out) if out.status.success() => tracing::info!("Camoufox engine ready"),
-            Ok(out) => tracing::warn!(
-                code = ?out.status.code(),
-                stderr = %String::from_utf8_lossy(&out.stderr).trim_end(),
+    let waited = tokio::select! {
+        () = cancel.cancelled() => None,
+        status = child.wait() => Some(status),
+    };
+    match waited {
+        // Shutdown mid-fetch: kill then reap, so no orphan lingers and the SIGKILL'd wait returns at once.
+        None => {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+        }
+        Some(Ok(status)) if status.success() => tracing::info!("Camoufox engine ready"),
+        Some(Ok(status)) => {
+            let mut stderr = String::new();
+            if let Some(mut pipe) = child.stderr.take() {
+                let _ = pipe.read_to_string(&mut stderr).await;
+            }
+            tracing::warn!(
+                code = ?status.code(),
+                stderr = %stderr.trim_end(),
                 "fetching Camoufox engine failed; browser tools stay unavailable until it succeeds",
-            ),
-            Err(e) => tracing::warn!(error = %e, "waiting on Camoufox engine fetch failed"),
-        },
+            );
+        }
+        Some(Err(e)) => tracing::warn!(error = %e, "waiting on Camoufox engine fetch failed"),
     }
 }
 
