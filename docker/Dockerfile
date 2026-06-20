@@ -77,7 +77,7 @@ ENV HOME=/home/pico \
      CARGO_HOME=/home/pico/.cache/build/cargo
 RUN curl -fsSL https://bun.sh/install | bash \
      && curl -LsSf https://astral.sh/uv/install.sh | sh \
-     && mkdir -p /home/pico/.cache/build /home/pico/.cache/camoufox /home/pico/.pico/supervisor /home/pico/.local/bin \
+     && mkdir -p /home/pico/.cache/build /home/pico/.pico/supervisor /home/pico/.local/bin \
      && chown -R pico:pico /home/pico
 
 ENV PATH=/home/pico/.bun/bin:/home/pico/.local/bin:$PATH

@@ -24,10 +24,13 @@ services:
       - ${HOME}/.omp:/home/pico/.omp
       - /var/run/docker.sock:/var/run/docker.sock
       - pico-supervisor:/home/pico/.pico/supervisor
+      # Mounted at .cache, not .cache/camoufox: camoufox-js rm -rf's its whole
+      # INSTALL_DIR (~/.cache/camoufox) before each engine fetch, which EBUSYs on a
+      # mount point. The cargo build cache nests inside on its own volume.
+      - pico-cache:/home/pico/.cache
       - pico-build:/home/pico/.cache/build
-      - pico-camofox:/home/pico/.cache/camoufox
 
 volumes:
   pico-supervisor:
   pico-build:
-  pico-camofox:
+  pico-cache:
