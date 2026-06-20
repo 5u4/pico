@@ -1,5 +1,5 @@
 //! Live camofox e2e (`#[ignore]`d like the others; run with `--include-ignored`
-//! on a host with node + `camofox-browser` + a Camoufox binary).
+//! against the built pico image — camofox-browser is baked, the engine downloads on first use).
 
 use std::{collections::HashMap, path::PathBuf};
 
@@ -52,13 +52,14 @@ async fn http(base: &str, key: &str, method: &str, path: &str, body: Option<&str
 }
 
 #[tokio::test]
-#[ignore = "live: needs node + camofox-browser + Camoufox (baked into the pico image)"]
+#[ignore = "live: needs the built pico image (pinned camofox-browser + camofox-fetch-engine + Xvfb + GTK/Firefox libs); fetches the engine if absent"]
 async fn camofox_opens_a_tab_and_snapshots() {
     let root = temp_root();
     let cancel = CancellationToken::new();
     let tracker = TaskTracker::new();
     let daemon = CamofoxDaemon::new(&root, cancel.clone(), &tracker);
 
+    pico_core::omp::camofox::ensure_engine(cancel.clone()).await;
     daemon.ensure_started().await;
 
     let env: HashMap<String, String> = daemon.injection("default", "e2e").1.into_iter().collect();

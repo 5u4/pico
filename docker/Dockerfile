@@ -16,6 +16,47 @@ RUN install -m 0755 -d /etc/apt/keyrings \
      && apt-get install -y --no-install-recommends docker-ce-cli docker-compose-plugin docker-buildx-plugin \
      && rm -rf /var/lib/apt/lists/*
 
+# Node.js LTS (system-wide) — runtime for the worker-spawned camofox-browser daemon
+# (its bin has a `#!/usr/bin/env node` shebang). NodeSource 22.x satisfies the
+# package's `engines: node >=22`.
+RUN curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key -o /etc/apt/keyrings/nodesource.asc \
+     && chmod a+r /etc/apt/keyrings/nodesource.asc \
+     && echo "deb [signed-by=/etc/apt/keyrings/nodesource.asc] https://deb.nodesource.com/node_22.x nodistro main" \
+     > /etc/apt/sources.list.d/nodesource.list \
+     && apt-get update \
+     && apt-get install -y --no-install-recommends nodejs \
+     && rm -rf /var/lib/apt/lists/*
+
+# Camoufox (anti-detection Firefox) runtime deps for the camofox-browser daemon:
+# the system libraries the engine binary dynamically links (incl. GL/EGL/GBM for
+# WebGL) plus the Xvfb virtual display it runs headful inside, and fonts. The
+# ~650 MB engine binary itself is NOT baked — the worker fetches it lazily into a
+# persistent cache on the first browser-enabled startup (see camofox-fetch-engine).
+RUN apt-get update \
+     && apt-get install -y --no-install-recommends \
+     xvfb fonts-liberation fonts-noto-color-emoji fontconfig \
+     libgtk-3-0 libdbus-glib-1-2 libxt6 libasound2 libxrender1 libxss1 \
+     libegl1-mesa libgl1-mesa-dri libgbm1 \
+     libx11-xcb1 libxcomposite1 libxcursor1 libxdamage1 libxfixes3 libxi6 libxrandr2 libxtst6 \
+     && rm -rf /var/lib/apt/lists/*
+
+# camofox-browser CLI, version-pinned. The bundled camoufox-js regressed (a broken
+# virtual-display path → `[object Promise]`); camoufox-js 0.10.2 + playwright-core
+# 1.59.1 is the known-good combo. `CAMOFOX_SKIP_DOWNLOAD=1` skips only the engine
+# download (native deps like better-sqlite3 still build); camofox-fetch-engine pulls
+# the engine via the pinned camoufox-js lazily at runtime instead.
+ARG CAMOFOX_BROWSER_VERSION=1.11.2
+ARG CAMOUFOX_JS_VERSION=0.10.2
+ARG PLAYWRIGHT_CORE_VERSION=1.59.1
+RUN CAMOFOX_SKIP_DOWNLOAD=1 npm install -g @askjo/camofox-browser@${CAMOFOX_BROWSER_VERSION} \
+     && CDIR="$(npm root -g)/@askjo/camofox-browser" \
+     && ( cd "$CDIR" && npm install --no-audit --no-fund --ignore-scripts \
+        camoufox-js@${CAMOUFOX_JS_VERSION} playwright-core@${PLAYWRIGHT_CORE_VERSION} ) \
+     && printf '#!/bin/sh\nexec node "%s/node_modules/camoufox-js/dist/__main__.js" fetch "$@"\n' "$CDIR" \
+        > /usr/local/bin/camofox-fetch-engine \
+     && chmod +x /usr/local/bin/camofox-fetch-engine \
+     && npm cache clean --force
+
 # Non-root user. UID/GID overridable to match a host user when bind mounts need it.
 ARG PICO_UID=1000
 ARG PICO_GID=1000
@@ -36,7 +77,7 @@ ENV HOME=/home/pico \
      CARGO_HOME=/home/pico/.cache/build/cargo
 RUN curl -fsSL https://bun.sh/install | bash \
      && curl -LsSf https://astral.sh/uv/install.sh | sh \
-     && mkdir -p /home/pico/.cache/build /home/pico/.pico/supervisor /home/pico/.local/bin \
+     && mkdir -p /home/pico/.cache/build /home/pico/.cache/camoufox /home/pico/.pico/supervisor /home/pico/.local/bin \
      && chown -R pico:pico /home/pico
 
 ENV PATH=/home/pico/.bun/bin:/home/pico/.local/bin:$PATH
