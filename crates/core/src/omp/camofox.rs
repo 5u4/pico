@@ -30,6 +30,9 @@ const RETRY_COOLDOWN: Duration = Duration::from_secs(30);
 const TERM_GRACE: Duration = Duration::from_secs(5);
 const HEALTH_FAILS_BEFORE_RESPAWN: u32 = 3;
 
+const BIN: &str = "camofox-browser";
+const FETCH_CMD: &str = "camofox-fetch-engine";
+
 struct State {
     child: Option<Child>,
     retry_after: Option<Instant>,
@@ -151,7 +154,7 @@ impl CamofoxDaemon {
     fn spawn(&self) -> color_eyre::Result<Child> {
         std::fs::create_dir_all(&self.profile_dir)
             .wrap_err_with(|| format!("create camofox profile dir {}", self.profile_dir.display()))?;
-        let mut cmd = ProcCommand::new("camofox-browser");
+        let mut cmd = ProcCommand::new(BIN);
         cmd.env("CAMOFOX_PORT", self.port.to_string())
             .env("CAMOFOX_ACCESS_KEY", &self.access_key)
             // Telemetry phones home by default — disable it.
@@ -210,6 +213,46 @@ fn pick_free_port() -> Option<u16> {
         .ok()
         .and_then(|l| l.local_addr().ok())
         .map(|addr| addr.port())
+}
+
+/// Fetch the Camoufox engine (~650 MB, via the image's pinned `camoufox-js`) into
+/// the per-user cache when absent. Best-effort + cancellation-aware so a shutdown
+/// mid-download isn't blocked on `tracker.wait`.
+pub async fn ensure_engine(cancel: CancellationToken) {
+    if engine_present() {
+        return;
+    }
+    tracing::info!("Camoufox engine missing; fetching (~650 MB, one-time)");
+    let child = ProcCommand::new(FETCH_CMD)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn();
+    let child = match child {
+        Ok(child) => child,
+        Err(e) => {
+            tracing::warn!(error = %e, command = FETCH_CMD, "could not fetch Camoufox engine (image deps missing?)");
+            return;
+        }
+    };
+    tokio::select! {
+        () = cancel.cancelled() => {}
+        out = child.wait_with_output() => match out {
+            Ok(out) if out.status.success() => tracing::info!("Camoufox engine ready"),
+            Ok(out) => tracing::warn!(
+                code = ?out.status.code(),
+                stderr = %String::from_utf8_lossy(&out.stderr).trim_end(),
+                "fetching Camoufox engine failed; browser tools stay unavailable until it succeeds",
+            ),
+            Err(e) => tracing::warn!(error = %e, "waiting on Camoufox engine fetch failed"),
+        },
+    }
+}
+
+/// Whether the engine is at `$HOME/.cache/camoufox` — `camoufox-js`'s hardcoded `INSTALL_DIR`.
+fn engine_present() -> bool {
+    std::env::var_os("HOME").is_some_and(|home| Path::new(&home).join(".cache/camoufox/version.json").is_file())
 }
 
 fn write_extension(path: &Path) -> color_eyre::Result<()> {

@@ -80,6 +80,16 @@ pub fn load(config_path: &Path) -> color_eyre::Result<ProfileConfig> {
     })
 }
 
+/// Whether any profile opts into the browser — gates the startup camofox engine fetch.
+pub fn any_browser_enabled(root: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(root.join("profiles")) else {
+        return false;
+    };
+    entries
+        .flatten()
+        .any(|entry| entry.path().is_dir() && load(&entry.path().join("config.toml")).is_ok_and(|c| c.browser_enabled))
+}
+
 pub struct GuildDefault {
     pub profile: String,
     pub cwd: PathBuf,
@@ -318,6 +328,27 @@ mod tests {
         assert!(!super::load(&path).unwrap().browser_enabled);
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn any_browser_enabled_scans_profiles() {
+        let root = temp_dir("anybrowser");
+        assert!(!super::any_browser_enabled(&root)); // no profiles dir yet
+
+        let write_profile = |name: &str, body: &str| {
+            let dir = root.join("profiles").join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("config.toml"), body).unwrap();
+        };
+
+        write_profile("a", "[llm]\nmodel = \"x\"\n");
+        write_profile("b", "[browser]\nenabled = false\n");
+        assert!(!super::any_browser_enabled(&root));
+
+        write_profile("c", "[browser]\nenabled = true\n");
+        assert!(super::any_browser_enabled(&root));
+
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]

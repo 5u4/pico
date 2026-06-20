@@ -25,7 +25,9 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - pico-supervisor:/home/pico/.pico/supervisor
       - pico-build:/home/pico/.cache/build
+      - pico-camofox:/home/pico/.cache/camoufox
 
 volumes:
   pico-supervisor:
   pico-build:
+  pico-camofox:

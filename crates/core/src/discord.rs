@@ -60,6 +60,10 @@ pub(crate) fn framework(
                 poise::builtins::register_globally(ctx, &framework.options().commands).await?;
                 let _ = ready_tx.send(());
                 let camofox = CamofoxDaemon::new(&root, cancel.clone(), &tracker);
+                // Backgrounded at startup (never delays readiness): pre-fetch the ~650 MB engine when a profile already enables the browser.
+                if crate::config::any_browser_enabled(&root) {
+                    tracker.spawn(crate::omp::camofox::ensure_engine(cancel.clone()));
+                }
                 Ok(Data {
                     root: Arc::new(root),
                     bindings: Arc::new(parking_lot::Mutex::new(bindings)),
