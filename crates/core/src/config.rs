@@ -7,13 +7,13 @@ use std::{
 use color_eyre::eyre::WrapErr;
 use serde::Deserialize;
 
-/// What a mid-turn message does (omp's per-prompt `streamingBehavior`): `follow_up`
-/// queues it behind the running turn, `steer` folds it in.
+/// What a mid-turn message does (omp's per-prompt `streamingBehavior`): `steer`
+/// folds it into the running turn, `follow_up` queues it behind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StreamingBehavior {
-    #[default]
     FollowUp,
+    #[default]
     Steer,
 }
 
@@ -335,13 +335,13 @@ mod tests {
     }
 
     #[test]
-    fn reads_streaming_behavior_and_defaults_follow_up() {
+    fn reads_streaming_behavior_and_defaults_steer() {
         use super::StreamingBehavior;
         let dir = temp_dir("streaming");
 
         let bare = dir.join("bare.toml");
         std::fs::write(&bare, "[llm]\nmodel = \"x\"\n").unwrap();
-        assert_eq!(super::load(&bare).unwrap().streaming_behavior, StreamingBehavior::FollowUp);
+        assert_eq!(super::load(&bare).unwrap().streaming_behavior, StreamingBehavior::Steer);
 
         let fu = dir.join("fu.toml");
         std::fs::write(&fu, "[discord]\nstreaming_behavior = \"follow_up\"\n").unwrap();

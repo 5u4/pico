@@ -82,7 +82,11 @@ impl TempRoot {
 
         let profile = path.join("profiles").join("default");
         std::fs::create_dir_all(&profile).unwrap();
-        std::fs::write(profile.join("config.toml"), "[llm]\nmodel = \"github-copilot/gpt-4o-mini\"\n").unwrap();
+        std::fs::write(
+            profile.join("config.toml"),
+            "[llm]\nmodel = \"github-copilot/gpt-4o-mini\"\n\n[discord]\nstreaming_behavior = \"follow_up\"\n",
+        )
+        .unwrap();
 
         let workdir = path.join("work");
         std::fs::create_dir_all(&workdir).unwrap();

@@ -117,16 +117,16 @@ model = "provider/model"           # omp model for this profile
 
 [discord]
 surface_thinking = false           # stream the agent's reasoning as activity
-streaming_behavior = "follow_up"   # mid-turn message: follow_up | steer
+streaming_behavior = "steer"       # mid-turn message: follow_up | steer
 
 [browser]
 enabled = false                    # opt-in Camoufox anti-detection browser tools
 ```
 
 `streaming_behavior` controls what a message you send **while a turn is still
-running** does: `follow_up` (default) queues it behind the current turn; `steer`
-folds it into the running turn at the next step boundary. Either way the message
-is acked with a reaction (📥 queued, ↪️ steered).
+running** does: `steer` (default) folds it into the running turn at the next
+step boundary; `follow_up` queues it behind the current turn. Either way the
+message is acked with a reaction (📥 queued, ↪️ steered).
 
 `[browser] enabled = true` gives the profile `camo_*` tools backed by a
 worker-owned Camoufox (anti-detection Firefox) daemon — stronger against
