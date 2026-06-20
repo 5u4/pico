@@ -1,7 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO=/root/.pico/agent
+PICO_HOME="${HOME:-/home/pico}"
+REPO="$PICO_HOME/.pico/agent"
+BIN="$PICO_HOME/.local/bin"
+: "${CARGO_TARGET_DIR:=$PICO_HOME/.cache/build/target}"
+
+# Runs entirely as the unprivileged pico user (USER pico in the Dockerfile) — there
+# is no root phase. Volume writability is guaranteed by the image (pico-owned dirs
+# that fresh named volumes inherit) and docker.sock access by compose `group_add`.
 cd "$REPO"
 
 git config --global --get-all safe.directory 2>/dev/null | grep -qxF "$REPO" \
@@ -12,15 +19,30 @@ if ! command -v omp >/dev/null 2>&1; then
   bun add -g @oh-my-pi/pi-coding-agent
 fi
 
+# Preflight: confirm we own our writable paths. The usual failure is a stale
+# root-owned named volume carried over from the old root-based image — surface it
+# with a fix instead of a cryptic EACCES deep inside cargo or the supervisor.
+for d in "$CARGO_TARGET_DIR" "$PICO_HOME/.pico/supervisor"; do
+  mkdir -p "$d" 2>/dev/null || true
+  if [ ! -w "$d" ]; then
+    echo "[entrypoint] FATAL: $d is not writable by $(id -un) (uid $(id -u))." >&2
+    echo "[entrypoint] Likely a stale root-owned volume from the old root-based image." >&2
+    echo "[entrypoint] Reset it once on the host, then bring the stack back up:" >&2
+    echo "[entrypoint]   docker compose down -v && docker compose up -d --build" >&2
+    exit 1
+  fi
+done
+
 echo "[entrypoint] building pico-supervisor + pico-worker (release; first run pulls deps)…"
 cargo build --release -p pico-supervisor -p pico-worker
 
-SUP=/build/target/release/pico-supervisor
-WORKER=/build/target/release/pico-worker
-CURRENT=/root/.pico/supervisor/slots/current
+SUP="$CARGO_TARGET_DIR/release/pico-supervisor"
+WORKER="$CARGO_TARGET_DIR/release/pico-worker"
+CURRENT="$PICO_HOME/.pico/supervisor/slots/current"
 
-ln -sf "$SUP" /usr/local/bin/pico-supervisor
-ln -sf "$WORKER" /usr/local/bin/pico-worker
+mkdir -p "$BIN"
+ln -sf "$SUP" "$BIN/pico-supervisor"
+ln -sf "$WORKER" "$BIN/pico-worker"
 
 echo "[entrypoint] starting supervisor daemon…"
 "$SUP" &

@@ -4,16 +4,27 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile
+      args:
+        PICO_UID: "${PICO_UID:-1000}"
+        PICO_GID: "${PICO_GID:-1000}"
     init: true
     shm_size: "1gb"
     restart: unless-stopped
-    working_dir: /root/.pico/agent
+    working_dir: /home/pico/.pico/agent
+    # Fully unprivileged: image runs as USER pico; the only thing pico needs that
+    # it does not own is the docker socket, granted here via its group.
+    group_add:
+      - "${DOCKER_GID:-0}"         # docker.sock group: 0 (root) on OrbStack; set DOCKER_GID for root:docker hosts
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     volumes:
-      - ${HOME}/.pico:/root/.pico
-      - ${HOME}/.omp:/root/.omp
+      - ${HOME}/.pico:/home/pico/.pico
+      - ${HOME}/.omp:/home/pico/.omp
       - /var/run/docker.sock:/var/run/docker.sock
-      - pico-supervisor:/root/.pico/supervisor
-      - pico-build:/build
+      - pico-supervisor:/home/pico/.pico/supervisor
+      - pico-build:/home/pico/.cache/build
 
 volumes:
   pico-supervisor:
