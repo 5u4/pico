@@ -4,7 +4,12 @@ set -euo pipefail
 PICO_HOME="${HOME:-/home/pico}"
 REPO="$PICO_HOME/.pico/agent"
 BIN="$PICO_HOME/.local/bin"
-: "${CARGO_TARGET_DIR:=$PICO_HOME/.cache/build/target}"
+# Shared cargo target for pico's OWN builds (this startup build + the worker's
+# /update and /dev-deploy). Scoped here and never exported into the supervisor
+# env, so unrelated projects the agent builds keep their own target dir. The
+# .cargo/config.toml written below gives the agent's cargo in a pico worktree the
+# same dir.
+PICO_TARGET="$PICO_HOME/.cache/build/pico-target"
 
 # Runs entirely as the unprivileged pico user (USER pico in the Dockerfile) — there
 # is no root phase. Volume writability is guaranteed by the image (pico-owned dirs
@@ -14,6 +19,17 @@ cd "$REPO"
 git config --global --get-all safe.directory 2>/dev/null | grep -qxF "$REPO" \
   || git config --global --add safe.directory "$REPO"
 
+# Point any cargo rooted in this repo (and the agent's worktrees of it) at the
+# shared pico target dir. Best-effort: only the agent's own builds rely on it (the
+# startup build and /update, /dev-deploy pass --target-dir explicitly), so a
+# read-only repo mount just loses cache sharing rather than aborting startup with a
+# cryptic error ahead of the writability preflight below.
+{
+  mkdir -p "$REPO/.cargo" \
+    && printf '[build]\ntarget-dir = "%s"\n' "$PICO_TARGET" > "$REPO/.cargo/config.toml"
+} 2>/dev/null \
+  || echo "[entrypoint] WARN: could not write $REPO/.cargo/config.toml; agent worktree builds won't share the cargo cache" >&2
+
 if ! command -v omp >/dev/null 2>&1; then
   echo "[entrypoint] installing omp (latest)…"
   bun add -g @oh-my-pi/pi-coding-agent
@@ -22,7 +38,7 @@ fi
 # Preflight: confirm we own our writable paths. The usual failure is a stale
 # root-owned named volume carried over from the old root-based image — surface it
 # with a fix instead of a cryptic EACCES deep inside cargo or the supervisor.
-for d in "$CARGO_TARGET_DIR" "$PICO_HOME/.pico/supervisor"; do
+for d in "$PICO_TARGET" "$PICO_HOME/.pico/supervisor"; do
   mkdir -p "$d" 2>/dev/null || true
   if [ ! -w "$d" ]; then
     echo "[entrypoint] FATAL: $d is not writable by $(id -un) (uid $(id -u))." >&2
@@ -51,10 +67,10 @@ if [ -S /var/run/docker.sock ]; then
 fi
 
 echo "[entrypoint] building pico-supervisor + pico-worker (release; first run pulls deps)…"
-cargo build --release -p pico-supervisor -p pico-worker
+CARGO_TARGET_DIR="$PICO_TARGET" cargo build --release -p pico-supervisor -p pico-worker
 
-SUP="$CARGO_TARGET_DIR/release/pico-supervisor"
-WORKER="$CARGO_TARGET_DIR/release/pico-worker"
+SUP="$PICO_TARGET/release/pico-supervisor"
+WORKER="$PICO_TARGET/release/pico-worker"
 CURRENT="$PICO_HOME/.pico/supervisor/slots/current"
 
 mkdir -p "$BIN"

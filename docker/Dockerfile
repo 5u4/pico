@@ -26,10 +26,14 @@ RUN groupadd -g "$PICO_GID" pico \
 # under pico's home and is pico-owned in the image. That is what lets the container
 # run fully unprivileged with no startup chown: a freshly-created named volume
 # mounted onto one of these dirs inherits the dir's pico:pico ownership.
+# No global CARGO_TARGET_DIR: it would force EVERY cargo in the container —
+# including unrelated projects the agent builds in a bound channel — into one
+# target dir (the env overrides a project's own .cargo/config.toml). pico builds
+# instead scope their target dir explicitly (entrypoint startup, /update,
+# /dev-deploy) or via the entrypoint-written ~/.pico/agent/.cargo/config.toml.
 ENV HOME=/home/pico \
      BUN_INSTALL=/home/pico/.bun \
-     CARGO_HOME=/home/pico/.cache/build/cargo \
-     CARGO_TARGET_DIR=/home/pico/.cache/build/target
+     CARGO_HOME=/home/pico/.cache/build/cargo
 RUN curl -fsSL https://bun.sh/install | bash \
      && curl -LsSf https://astral.sh/uv/install.sh | sh \
      && mkdir -p /home/pico/.cache/build /home/pico/.pico/supervisor /home/pico/.local/bin \

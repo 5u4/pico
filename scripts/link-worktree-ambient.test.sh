@@ -59,10 +59,12 @@ newbase() {
 base=$(newbase)
 mkdir -p "$base/.omp/rules"; echo rule > "$base/.omp/rules/x.md"
 printf 'E2E_X=1\n' > "$base/.env.e2e"
+mkdir -p "$base/.cargo"; printf '[build]\ntarget-dir = "/tmp/x"\n' > "$base/.cargo/config.toml"
 wt="$base.wt"
 git -C "$base" worktree add -q "$wt" HEAD 2>/dev/null
 expect_symlink "worktree add links .omp" "$wt/.omp" "$base/.omp"
 expect_symlink "worktree add links .env.e2e" "$wt/.env.e2e" "$base/.env.e2e"
+expect_symlink "worktree add links .cargo" "$wt/.cargo" "$base/.cargo"
 # The .omp / .env.e2e symlinks must be ignored, or an agent's `git add -A` on the
 # pico/<thread> branch would commit them — guards the `.omp` (not `.omp/`) pattern.
 expect_clean "worktree status clean (symlinks ignored)" "$wt"

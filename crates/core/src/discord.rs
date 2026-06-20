@@ -3,7 +3,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use color_eyre::eyre::{WrapErr, eyre};
+use color_eyre::eyre::{WrapErr, bail, eyre};
 use pico_shared::proto;
 use poise::serenity_prelude as serenity;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
@@ -50,7 +50,7 @@ pub(crate) fn framework(
 ) -> poise::Framework<Data, Error> {
     poise::Framework::builder()
         .options(poise::FrameworkOptions {
-            commands: vec![ping(), bind(), deploy(), worktree(), cancel_turn()],
+            commands: vec![ping(), bind(), dev_deploy(), update(), worktree(), cancel_turn()],
             event_handler: |ctx, event, framework, data| Box::pin(on_event(ctx, event, framework.bot_id, data)),
             command_check: Some(|ctx| Box::pin(command_in_registered_guild(ctx))),
             ..Default::default()
@@ -119,37 +119,46 @@ async fn cancel_turn(ctx: Context<'_>) -> Result<(), Error> {
     Ok(())
 }
 
-#[poise::command(slash_command)]
-async fn deploy(
-    ctx: Context<'_>,
-    #[description = "path to a prebuilt worker binary on the host"] path: String,
-) -> Result<(), Error> {
-    let Some(socket) = ctx.data().supervisor_socket.clone() else {
-        ctx.say("not running under a supervisor (standalone) — `/deploy` is unavailable")
+/// Build pico-worker from THIS thread's working dir and deploy it (no path arg).
+#[poise::command(slash_command, rename = "dev-deploy")]
+async fn dev_deploy(ctx: Context<'_>) -> Result<(), Error> {
+    let thread_id = ctx.channel_id().to_string();
+    let Some(marker) = crate::thread_marker::load(&ctx.data().root, &thread_id) else {
+        ctx.say("❌ this thread has no working dir yet — send it a message first, then retry.")
             .await?;
         return Ok(());
     };
-    ctx.say(format!("deploying `{path}` — I'll post the result here when it lands."))
-        .await?;
-    let report_to = ctx.channel_id().get().to_string();
-    match request_deploy(&socket, std::path::PathBuf::from(&path), Some(report_to)).await {
-        Ok(proto::Response::Ok { detail }) => {
-            // Unreachable on a self-deploy (it kills me first); if it lands, the
-            // new worker's relay already posted the outcome — don't double-post.
-            tracing::info!(%detail, "deploy ok; outcome relayed to channel");
-        }
-        Ok(proto::Response::Error { message }) => {
-            // Pre-kill failure (bad path / staging): no relay, so report it myself.
-            ctx.say(format!("deploy failed: {message}")).await?;
-        }
-        Ok(proto::Response::Status(_)) => {
-            ctx.say("deploy returned an unexpected status reply").await?;
-        }
-        Err(e) => {
-            ctx.say(format!("deploy outcome unknown: {e}")).await?;
-        }
+    if let Some(closed_at) = &marker.closed_at {
+        ctx.say(format!("❌ this worktree thread was closed at {closed_at}; open a new thread."))
+            .await?;
+        return Ok(());
     }
-    Ok(())
+    build_and_deploy(ctx, marker.cwd, "this thread's working dir").await
+}
+
+/// Fast-forward ~/.pico/agent to origin/main, build pico-worker, deploy (no path arg).
+#[poise::command(slash_command)]
+async fn update(ctx: Context<'_>) -> Result<(), Error> {
+    if ctx.data().supervisor_socket.is_none() {
+        ctx.say("not running under a supervisor (standalone) — deploy is unavailable")
+            .await?;
+        return Ok(());
+    }
+    let repo = match pico_shared::paths::agent_repo() {
+        Ok(repo) => repo,
+        Err(e) => {
+            ctx.say(format!("❌ can't locate the deployment checkout: {e:#}"))
+                .await?;
+            return Ok(());
+        }
+    };
+    ctx.say(format!("⬇️ updating `{}` to origin/main…", repo.display()))
+        .await?;
+    if let Err(e) = update_repo(&repo).await {
+        ctx.say(format!("❌ update failed: {e:#}")).await?;
+        return Ok(());
+    }
+    build_and_deploy(ctx, repo, "latest origin/main").await
 }
 
 async fn request_deploy(
@@ -185,6 +194,134 @@ pub(crate) async fn post_deploy_report(http: &Arc<serenity::Http>, report: proto
     if let Err(e) = serenity::ChannelId::new(id).say(http, &report.text).await {
         tracing::warn!(error = %format!("{e:#}"), channel = id, "failed to post deploy report to Discord");
     }
+}
+
+async fn build_and_deploy(ctx: Context<'_>, build_dir: std::path::PathBuf, what: &str) -> Result<(), Error> {
+    let Some(socket) = ctx.data().supervisor_socket.clone() else {
+        ctx.say("not running under a supervisor (standalone) — deploy is unavailable")
+            .await?;
+        return Ok(());
+    };
+    ctx.say(format!(
+        "🔨 building pico-worker from {what} — I'll post the result here when it lands."
+    ))
+    .await?;
+    let report_to = ctx.channel_id().get().to_string();
+    let bin = match build_worker(&build_dir).await {
+        Ok(bin) => bin,
+        Err(e) => {
+            ctx.channel_id()
+                .say(ctx.serenity_context(), format!("❌ build failed: {e:#}"))
+                .await?;
+            return Ok(());
+        }
+    };
+    match request_deploy(&socket, bin, Some(report_to)).await {
+        Ok(proto::Response::Ok { detail }) => {
+            tracing::info!(%detail, "deploy ok; outcome relayed to channel");
+        }
+        Ok(proto::Response::Error { message }) => {
+            ctx.channel_id()
+                .say(ctx.serenity_context(), format!("deploy failed: {message}"))
+                .await?;
+        }
+        Ok(proto::Response::Status(_)) => {
+            ctx.channel_id()
+                .say(ctx.serenity_context(), "deploy returned an unexpected status reply")
+                .await?;
+        }
+        Err(e) => {
+            ctx.channel_id()
+                .say(ctx.serenity_context(), format!("deploy outcome unknown: {e}"))
+                .await?;
+        }
+    }
+    Ok(())
+}
+
+static DEPLOY_BUILD_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+// Cap a wedged build so it can't hold DEPLOY_BUILD_LOCK indefinitely.
+const BUILD_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+
+async fn build_worker(build_dir: &std::path::Path) -> color_eyre::Result<std::path::PathBuf> {
+    let target_dir = pico_shared::paths::pico_build_target_dir()?;
+    // Serialize worker-initiated builds so the snapshot below copies THIS build's
+    // artifact, not one a concurrent /dev-deploy or /update raced into the shared dir.
+    let _build = DEPLOY_BUILD_LOCK.lock().await;
+    let child = tokio::process::Command::new("cargo")
+        .args(["build", "--release", "-p", "pico-worker", "--target-dir"])
+        .arg(&target_dir)
+        .current_dir(build_dir)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .wrap_err("spawn cargo build")?;
+    let out = match tokio::time::timeout(BUILD_TIMEOUT, child.wait_with_output()).await {
+        Ok(res) => res.wrap_err("wait for cargo build")?,
+        Err(_) => bail!("cargo build timed out after {}s", BUILD_TIMEOUT.as_secs()),
+    };
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let tail: String = stderr
+            .chars()
+            .rev()
+            .take(1500)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        bail!("cargo build failed ({}):\n{tail}", out.status);
+    }
+    snapshot(&target_dir).await
+}
+
+/// Copy the just-built worker to a unique private path: the shared target's
+/// `release/pico-worker` is last-writer-wins, so the supervisor must stage from a
+/// snapshot taken right after the build, not from the live shared path.
+async fn snapshot(target_dir: &std::path::Path) -> color_eyre::Result<std::path::PathBuf> {
+    let staging = target_dir.with_file_name("pico-deploy-staging");
+    prune_staging(&staging).await;
+    let id = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_nanos();
+    let dir = staging.join(id.to_string());
+    tokio::fs::create_dir_all(&dir).await?;
+    let dest = dir.join("pico-worker");
+    tokio::fs::copy(target_dir.join("release").join("pico-worker"), &dest)
+        .await
+        .wrap_err("snapshot built worker")?;
+    Ok(dest)
+}
+
+async fn prune_staging(staging: &std::path::Path) {
+    let Ok(mut entries) = tokio::fs::read_dir(staging).await else {
+        return;
+    };
+    let cutoff = std::time::SystemTime::now() - Duration::from_secs(3600);
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let stale = entry
+            .metadata()
+            .await
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .is_some_and(|m| m < cutoff);
+        if stale {
+            let _ = tokio::fs::remove_dir_all(entry.path()).await;
+        }
+    }
+}
+
+/// Fast-forward the deployment checkout to origin/main, discarding local edits.
+async fn update_repo(repo: &std::path::Path) -> color_eyre::Result<()> {
+    if !repo.join(".git").exists() {
+        bail!("{} is not a git checkout", repo.display());
+    }
+    crate::worktree::run_git(repo, ["fetch", "origin"], Duration::from_secs(120)).await?;
+    crate::worktree::run_git(repo, ["reset", "--hard", "origin/main"], Duration::from_secs(30)).await?;
+    Ok(())
 }
 
 #[poise::command(

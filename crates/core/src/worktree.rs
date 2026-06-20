@@ -245,7 +245,7 @@ async fn branch_exists(repo: &Path, branch: &str) -> color_eyre::Result<bool> {
     .await
 }
 
-async fn run_git<I, S>(repo: &Path, args: I, timeout: Duration) -> color_eyre::Result<()>
+pub(crate) async fn run_git<I, S>(repo: &Path, args: I, timeout: Duration) -> color_eyre::Result<()>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
