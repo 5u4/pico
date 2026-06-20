@@ -275,6 +275,7 @@ hand in the container:
 
 ```sh
 docker compose exec pico sh -lc \
-  'cd ~/.pico/agent && git pull && cargo build --release -p pico-worker && \
+  'cd ~/.pico/agent && git fetch origin && git reset --hard origin/main && \
+   cargo build --release -p pico-worker && \
    pico-supervisor deploy "$(command -v pico-worker)"'
 ```

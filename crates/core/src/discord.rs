@@ -241,21 +241,28 @@ async fn build_and_deploy(ctx: Context<'_>, build_dir: std::path::PathBuf, what:
 
 static DEPLOY_BUILD_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+// Cap a wedged build so it can't hold DEPLOY_BUILD_LOCK indefinitely.
+const BUILD_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+
 async fn build_worker(build_dir: &std::path::Path) -> color_eyre::Result<std::path::PathBuf> {
     let target_dir = pico_shared::paths::pico_build_target_dir()?;
     // Serialize worker-initiated builds so the snapshot below copies THIS build's
     // artifact, not one a concurrent /dev-deploy or /update raced into the shared dir.
     let _build = DEPLOY_BUILD_LOCK.lock().await;
-    let out = tokio::process::Command::new("cargo")
+    let child = tokio::process::Command::new("cargo")
         .args(["build", "--release", "-p", "pico-worker", "--target-dir"])
         .arg(&target_dir)
         .current_dir(build_dir)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
-        .output()
-        .await
+        .kill_on_drop(true)
+        .spawn()
         .wrap_err("spawn cargo build")?;
+    let out = match tokio::time::timeout(BUILD_TIMEOUT, child.wait_with_output()).await {
+        Ok(res) => res.wrap_err("wait for cargo build")?,
+        Err(_) => bail!("cargo build timed out after {}s", BUILD_TIMEOUT.as_secs()),
+    };
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
         let tail: String = stderr
