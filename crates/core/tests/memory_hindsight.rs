@@ -62,6 +62,11 @@ async fn hindsight_daemon_retain_recall_roundtrip() {
     let root = std::env::temp_dir().join(format!("pico-mem-e2e-{}", std::process::id()));
     std::fs::create_dir_all(root.join("secrets")).expect("mkdir secrets");
     std::fs::write(root.join("secrets/groq_api_key"), &groq_key).expect("write key");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(root.join("secrets/groq_api_key"), std::fs::Permissions::from_mode(0o600));
+    }
 
     let cancel = CancellationToken::new();
     let tracker = TaskTracker::new();

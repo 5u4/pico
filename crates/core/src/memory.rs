@@ -44,7 +44,8 @@ fn slugify(s: &str) -> String {
 }
 
 /// Per-(profile, user) bank (`pico-<profile>-<user>`), so a shared guild never
-/// recalls one member's memories into another's; an override pins one bank verbatim.
+/// recalls one member's memories into another's. A `[memory] bank` override
+/// replaces it with one shared (slugified) bank, dropping per-user isolation.
 pub fn bank_for(profile: &str, user: &str, override_name: Option<&str>) -> String {
     match override_name.map(str::trim).filter(|s| !s.is_empty()) {
         Some(name) => slugify(name),
@@ -181,6 +182,7 @@ const LLM_MODEL: &str = "openai/gpt-oss-20b";
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(240);
 const HEALTH_POLL: Duration = Duration::from_secs(2);
 const BRINGUP_COOLDOWN: Duration = Duration::from_secs(60);
+const RECHECK_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Worker-owned Hindsight container, brought up on demand over the host docker
 /// socket (DooD) when a profile enables memory and no external `[memory]
@@ -197,6 +199,7 @@ pub struct HindsightDaemon {
 #[derive(Default)]
 struct DaemonState {
     endpoint: Option<String>,
+    checked_at: Option<Instant>,
     bringing_up: bool,
     retry_after: Option<Instant>,
 }
@@ -222,9 +225,29 @@ impl HindsightDaemon {
     /// boot) runs in the background and the turn proceeds without memory until the
     /// container is ready.
     pub async fn ensure_endpoint(self: &Arc<Self>) -> Option<String> {
+        // Re-validate a stale cached endpoint so a removed container is re-brought-up, not cached forever.
+        let stale = {
+            let st = self.state.lock().await;
+            match (&st.endpoint, st.checked_at) {
+                (Some(ep), Some(at)) if at.elapsed() < RECHECK_INTERVAL => return Some(ep.clone()),
+                (Some(ep), _) => Some(ep.clone()),
+                (None, _) => None,
+            }
+        };
+        if let Some(ep) = stale {
+            if health(&ep).await {
+                self.state.lock().await.checked_at = Some(Instant::now());
+                return Some(ep);
+            }
+            let mut st = self.state.lock().await;
+            if st.endpoint.as_deref() == Some(ep.as_str()) {
+                st.endpoint = None;
+                st.checked_at = None;
+            }
+        }
         let mut st = self.state.lock().await;
-        if st.endpoint.is_some() {
-            return st.endpoint.clone();
+        if let Some(ep) = &st.endpoint {
+            return Some(ep.clone());
         }
         if st.bringing_up || st.retry_after.is_some_and(|t| Instant::now() < t) || self.groq_key.is_none() {
             return None;
@@ -252,6 +275,7 @@ impl HindsightDaemon {
             Some(ep) => {
                 tracing::info!(endpoint = %ep, "hindsight memory ready");
                 st.endpoint = Some(ep);
+                st.checked_at = Some(Instant::now());
                 st.retry_after = None;
             }
             None => st.retry_after = Some(Instant::now() + BRINGUP_COOLDOWN),

@@ -147,9 +147,11 @@ tools it was spawned with.
 by [Hindsight](https://hindsight.vectorize.io): before each turn pico recalls what
 it knows about you and prepends it to the message, and after each turn it stores
 the exchange (best-effort, off-thread). It is keyed per user per profile
-(`pico-<profile>-<user-id>`, override with `[memory] bank`), so one member's
-memories are never recalled into another member's prompt, while your own carry
-across every thread and channel on the profile. Memory is purely additive — if
+(`pico-<profile>-<user-id>`), so one member's memories are never recalled into
+another member's prompt, while your own carry across every thread and channel on
+the profile. (A `[memory] bank` override collapses the profile into one shared
+bank, dropping per-user isolation — use it only for single-user channels.)
+Memory is purely additive — if
 Hindsight is unavailable the turn just runs without it; worktree/coding channels
 are best left with memory off.
 
