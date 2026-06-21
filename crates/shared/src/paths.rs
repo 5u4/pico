@@ -56,11 +56,6 @@ pub fn worker_config(root: &Path) -> PathBuf {
     root.join("config.toml")
 }
 
-/// `<root>/system_prompt.md` — pico's base prompt, passed to `omp --system-prompt`.
-pub fn base_prompt(root: &Path) -> PathBuf {
-    root.join("system_prompt.md")
-}
-
 /// `<root>/profiles/<name>` — a profile's state directory.
 pub fn profile_dir(root: &Path, name: &str) -> PathBuf {
     root.join("profiles").join(name)
@@ -74,6 +69,11 @@ pub fn profile_config(root: &Path, name: &str) -> PathBuf {
 /// `<root>/profiles/<name>/identity.md` — a profile's appended system prompt.
 pub fn profile_identity(root: &Path, name: &str) -> PathBuf {
     profile_dir(root, name).join("identity.md")
+}
+
+/// `<root>/profiles/<name>/append.md` — pico's assembled `--append-system-prompt` file.
+pub fn profile_append(root: &Path, name: &str) -> PathBuf {
+    profile_dir(root, name).join("append.md")
 }
 
 /// `<root>/profiles/<name>/sessions/<thread_id>` — the OMP `--session-dir` for

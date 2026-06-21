@@ -927,7 +927,17 @@ async fn route_message(
     let session_dir = pico_shared::paths::profile_session_dir(&root, &profile, &thread_id);
     std::fs::create_dir_all(&session_dir).wrap_err_with(|| format!("create session dir {}", session_dir.display()))?;
     let identity = pico_shared::paths::profile_identity(&root, &profile);
-    let base_prompt = pico_shared::paths::base_prompt(&root);
+    let append_dest = pico_shared::paths::profile_append(&root, &profile);
+    let append_prompt = match crate::prompt::assemble_append(
+        &append_dest,
+        identity.is_file().then_some(identity.as_path()),
+    ) {
+        Ok(path) => Some(path),
+        Err(e) => {
+            tracing::warn!(error = %format!("{e:#}"), "assembling pico append prompt failed; spawning omp without it");
+            None
+        }
+    };
     let profile_config = crate::config::load(&pico_shared::paths::profile_config(&root, &profile))?;
     let title_cwd = cwd.clone();
     let (extensions, env) = if profile_config.browser_enabled {
@@ -943,8 +953,7 @@ async fn route_message(
         cwd: Some(cwd),
         session_dir: Some(session_dir),
         continue_session: true,
-        system_prompt: base_prompt.is_file().then_some(base_prompt),
-        append_system_prompt: identity.is_file().then_some(identity),
+        append_system_prompt: append_prompt,
         extensions,
         env,
     };
