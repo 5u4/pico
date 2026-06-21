@@ -961,7 +961,11 @@ async fn route_message(
         };
         endpoint.map(|endpoint| crate::memory::MemoryConfig {
             endpoint,
-            bank: crate::memory::bank_for(&profile, profile_config.memory_bank.as_deref()),
+            bank: crate::memory::bank_for(
+                &profile,
+                &message.author.id.to_string(),
+                profile_config.memory_bank.as_deref(),
+            ),
             recall_budget: profile_config.memory_recall_budget.clone(),
             recall_max_tokens: profile_config.memory_recall_max_tokens,
         })

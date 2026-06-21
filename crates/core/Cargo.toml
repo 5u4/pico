@@ -22,7 +22,6 @@ ulid.workspace = true
 
 [dev-dependencies]
 dotenvy.workspace = true
-reqwest.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tokio-util.workspace = true

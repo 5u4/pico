@@ -176,8 +176,8 @@ impl RootConfig {
         self.approval_timeout
     }
 
-    /// Worker-level Hindsight API base URL (`[memory] endpoint`). `None` ⇒ memory
-    /// is off worker-wide regardless of per-profile `[memory] enabled`.
+    /// Hindsight base URL override (`[memory] endpoint`). `None` ⇒ the worker
+    /// self-manages a container for enabled profiles instead.
     pub fn memory_endpoint(&self) -> Option<&str> {
         self.memory_endpoint.as_deref()
     }
@@ -324,7 +324,10 @@ pub fn load_root(config_path: &Path) -> color_eyre::Result<RootConfig> {
         worktrees_dir,
         approvers,
         approval_timeout,
-        memory_endpoint: raw.memory.map(|m| m.endpoint),
+        memory_endpoint: raw.memory.and_then(|m| {
+            let endpoint = m.endpoint.trim().to_owned();
+            (!endpoint.is_empty()).then_some(endpoint)
+        }),
     })
 }
 
@@ -390,6 +393,45 @@ mod tests {
         std::fs::write(&path, "[llm]\nmodel = \"x\"\n").unwrap();
         assert!(!super::load(&path).unwrap().browser_enabled);
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn memory_parses() {
+        let dir = temp_dir("memory");
+        let path = dir.join("config.toml");
+
+        std::fs::write(&path, "[memory]\nenabled = true\nbank = \"custom\"\n").unwrap();
+        let cfg = super::load(&path).unwrap();
+        assert!(cfg.memory_enabled);
+        assert_eq!(cfg.memory_bank.as_deref(), Some("custom"));
+        assert_eq!(cfg.memory_recall_budget, "mid");
+
+        std::fs::write(&path, "[memory]\n").unwrap();
+        assert!(!super::load(&path).unwrap().memory_enabled);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn any_memory_enabled_scans_profiles() {
+        let root = temp_dir("anymemory");
+        assert!(!super::any_memory_enabled(&root));
+        let dir = root.join("profiles").join("p");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("config.toml"), "[memory]\nenabled = true\n").unwrap();
+        assert!(super::any_memory_enabled(&root));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn blank_memory_endpoint_is_none() {
+        let dir = temp_dir("memendpoint");
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "[memory]\nendpoint = \"   \"\n").unwrap();
+        assert_eq!(super::load_root(&path).unwrap().memory_endpoint(), None);
+        std::fs::write(&path, "[memory]\nendpoint = \"http://x:8888\"\n").unwrap();
+        assert_eq!(super::load_root(&path).unwrap().memory_endpoint(), Some("http://x:8888"));
         std::fs::remove_dir_all(&dir).ok();
     }
 

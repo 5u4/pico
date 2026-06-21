@@ -146,15 +146,16 @@ tools it was spawned with.
 `[memory] enabled = true` gives the profile cross-thread long-term memory backed
 by [Hindsight](https://hindsight.vectorize.io): before each turn pico recalls what
 it knows about you and prepends it to the message, and after each turn it stores
-the exchange (best-effort, off-thread). It is keyed by a per-profile bank
-(`pico-<profile>`, override with `[memory] bank`), so every thread and channel on
-one profile shares one memory of you. Memory is purely additive — if Hindsight is
-unavailable the turn just runs without it; worktree/coding channels are best left
-with memory off.
+the exchange (best-effort, off-thread). It is keyed per user per profile
+(`pico-<profile>-<user-id>`, override with `[memory] bank`), so one member's
+memories are never recalled into another member's prompt, while your own carry
+across every thread and channel on the profile. Memory is purely additive — if
+Hindsight is unavailable the turn just runs without it; worktree/coding channels
+are best left with memory off.
 
-In the Docker deploy the worker runs Hindsight itself over the docker socket (see
-"Long-term memory" below). To point at an existing Hindsight instead — required on
-a systemd/host install — set `[memory] endpoint` in the worker `config.toml`:
+The worker runs Hindsight itself over the docker socket wherever one is available,
+pre-pulling the image at startup. To use an existing/remote Hindsight instead, set
+`[memory] endpoint` in the worker `config.toml`:
 
 ```toml
 # ~/.pico/workers/default/config.toml — use an external Hindsight, not a self-managed one
