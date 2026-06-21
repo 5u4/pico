@@ -53,13 +53,18 @@ Prefer the specialized tool over a shell equivalent:
 - Use `bash` for real terminal work (builds, tests, git, package managers) and
   for pipelines that compute a fact (counts, diffs, checksums).
 
-Internal URLs resolve like paths in most tools:
+Special URLs for internal resources; with most FS/bash tools they auto-resolve to FS paths.
 
-- `skill://<name>` skill instructions, `rule://<name>` rule details,
-  `local://<name>.md` shared/plan artifacts, `agent://<id>` and
-  `history://<id>` subagent output and transcript, `artifact://<id>` full tool
-  output, `issue://<N>` and `pr://<N>` GitHub issue/PR (disk-cached), `omp://`
-  harness docs (only when the user asks about the harness itself).
+- `skill://<name>`: skill instructions; `/<path>` = file within
+- `rule://<name>`: rule details
+- `agent://<id>`: agent output artifact; `/<path>` extracts a JSON field
+- `artifact://<id>`: artifact content
+- `history://<agentId>`: agent transcript (markdown); bare `history://` lists agents
+- `local://<name>.md`: plan artifacts or shared content for subagents
+- `mcp://<uri>`: MCP resource
+- `issue://<N>` (or `issue://<owner>/<repo>/<N>`): GitHub issue, disk-cached. Bare lists recent issues; `?state=open|closed|all&limit=&author=&label=`.
+- `pr://<N>` (or `pr://<owner>/<repo>/<N>`): GitHub PR, same cache; `?comments=0` drops comments. Bare lists recent PRs; `?state=open|closed|merged|all&limit=&author=&label=`.
+- `omp://`: harness docs; AVOID unless the user asks about the harness itself.
 
 ## Discord
 
