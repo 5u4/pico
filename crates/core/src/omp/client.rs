@@ -42,6 +42,7 @@ pub struct SpawnConfig {
     /// existing session — transparent thread resume across idle-eviction and
     /// worker restart, since the session-dir is derived from the thread id.
     pub continue_session: bool,
+    pub system_prompt: Option<PathBuf>,
     pub append_system_prompt: Option<PathBuf>,
     /// omp `--extension <path>` modules to load (the camofox browser tools when a
     /// profile enables the browser). Empty for a normal turn.
@@ -78,6 +79,9 @@ fn build_command(config: &SpawnConfig) -> ProcCommand {
     }
     if config.continue_session {
         cmd.arg("--continue");
+    }
+    if let Some(prompt) = &config.system_prompt {
+        cmd.arg("--system-prompt").arg(prompt);
     }
     if let Some(prompt) = &config.append_system_prompt {
         cmd.arg("--append-system-prompt").arg(prompt);
@@ -414,6 +418,39 @@ mod tests {
             .collect();
         assert_eq!(envs.get("CAMOFOX_BASE_URL").map(String::as_str), Some("http://127.0.0.1:9377"));
         assert_eq!(envs.get("CAMOFOX_USER_ID").map(String::as_str), Some("acme"));
+    }
+
+    #[test]
+    fn build_command_passes_system_and_append_prompts() {
+        let base = std::path::PathBuf::from("/x/system_prompt.md");
+        let identity = std::path::PathBuf::from("/x/identity.md");
+        let config = SpawnConfig {
+            system_prompt: Some(base.clone()),
+            append_system_prompt: Some(identity.clone()),
+            ..SpawnConfig::default()
+        };
+        let cmd = build_command(&config);
+        let args: Vec<String> = cmd
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let s = args
+            .iter()
+            .position(|a| a == "--system-prompt")
+            .expect("--system-prompt present");
+        assert_eq!(args[s + 1], base.to_string_lossy());
+        let a = args
+            .iter()
+            .position(|a| a == "--append-system-prompt")
+            .expect("--append-system-prompt present");
+        assert_eq!(args[a + 1], identity.to_string_lossy());
+    }
+
+    #[test]
+    fn build_command_default_passes_no_system_prompt() {
+        let cmd = build_command(&SpawnConfig::default());
+        assert!(cmd.as_std().get_args().all(|a| a != "--system-prompt"));
     }
 
     #[test]

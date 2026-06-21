@@ -56,6 +56,11 @@ pub fn worker_config(root: &Path) -> PathBuf {
     root.join("config.toml")
 }
 
+/// `<root>/system_prompt.md` — pico's base prompt, passed to `omp --system-prompt`.
+pub fn base_prompt(root: &Path) -> PathBuf {
+    root.join("system_prompt.md")
+}
+
 /// `<root>/profiles/<name>` — a profile's state directory.
 pub fn profile_dir(root: &Path, name: &str) -> PathBuf {
     root.join("profiles").join(name)

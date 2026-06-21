@@ -25,6 +25,9 @@ impl App {
     pub async fn build(root: &Path, supervisor_socket: Option<std::path::PathBuf>) -> color_eyre::Result<App> {
         let token = read_secret(root, "discord_bot_token")?;
         let bindings = crate::bindings::load(&pico_shared::paths::worker_bindings(root))?;
+        if let Err(e) = crate::prompt::write_base_prompt(root) {
+            tracing::warn!(error = %format!("{e:#}"), "writing pico base system prompt failed; falling back to omp's default prompt");
+        }
         let db = crate::db::open(root).await.wrap_err("opening worker database")?;
         match crate::approval::reconcile_pending_aborted(&db).await {
             Ok(0) => {}
