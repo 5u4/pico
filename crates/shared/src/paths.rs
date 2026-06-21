@@ -66,7 +66,7 @@ pub fn profile_config(root: &Path, name: &str) -> PathBuf {
     profile_dir(root, name).join("config.toml")
 }
 
-/// `<root>/profiles/<name>/identity.md` — a profile's appended system prompt.
+/// `<root>/profiles/<name>/identity.md` — a profile's persona overlay, concatenated into `append.md`.
 pub fn profile_identity(root: &Path, name: &str) -> PathBuf {
     profile_dir(root, name).join("identity.md")
 }

@@ -10,13 +10,22 @@ const APPEND_DELTA: &str = include_str!("append_prompt.md");
 /// Assemble the delta + the profile's `identity.md` (when present) into `dest`, returning it.
 pub fn assemble_append(dest: &Path, identity: Option<&Path>) -> color_eyre::Result<PathBuf> {
     let mut body = APPEND_DELTA.to_string();
-    if let Some(identity) = identity
-        && let Ok(soul) = std::fs::read_to_string(identity)
-    {
-        body.push_str("\n\n");
-        body.push_str(&soul);
+    if let Some(identity) = identity {
+        match std::fs::read_to_string(identity) {
+            Ok(soul) => {
+                body.push_str("\n\n");
+                body.push_str(&soul);
+            }
+            Err(e) => {
+                tracing::warn!(path = %identity.display(), error = %e, "reading identity.md failed; using delta only")
+            }
+        }
     }
-    std::fs::write(dest, &body).wrap_err_with(|| format!("write {}", dest.display()))?;
+    let dir = dest.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(dir).wrap_err_with(|| format!("create {}", dir.display()))?;
+    let tmp = dir.join(format!(".append.{}.tmp", ulid::Ulid::new()));
+    std::fs::write(&tmp, &body).wrap_err_with(|| format!("write {}", tmp.display()))?;
+    std::fs::rename(&tmp, dest).wrap_err_with(|| format!("rename {} -> {}", tmp.display(), dest.display()))?;
     Ok(dest.to_path_buf())
 }
 
