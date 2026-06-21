@@ -939,6 +939,15 @@ async fn route_message(
         }
     };
     let profile_config = crate::config::load(&pico_shared::paths::profile_config(&root, &profile))?;
+    let memory_cfg = root_config
+        .memory_endpoint()
+        .filter(|_| profile_config.memory_enabled)
+        .map(|endpoint| crate::memory::MemoryConfig {
+            endpoint: endpoint.to_owned(),
+            bank: crate::memory::bank_for(&profile, profile_config.memory_bank.as_deref()),
+            recall_budget: profile_config.memory_recall_budget.clone(),
+            recall_max_tokens: profile_config.memory_recall_max_tokens,
+        });
     let title_cwd = cwd.clone();
     let (extensions, env) = if profile_config.browser_enabled {
         // Best-effort: bring the daemon up (logs on failure). Tools are injected
@@ -960,13 +969,21 @@ async fn route_message(
 
     let handle = pool.get_or_spawn(&thread_id, &config).await?;
     let mut first_answer: Option<String> = None;
+    let recalled = match &memory_cfg {
+        Some(cfg) => crate::memory::recall(cfg, prompt).await,
+        None => None,
+    };
+    let turn_prompt = match &recalled {
+        Some(block) => std::borrow::Cow::Owned(format!("{block}{prompt}")),
+        None => std::borrow::Cow::Borrowed(prompt),
+    };
     let result = {
         let mut session = handle.lock().await;
         drive_turn(
             &ctx,
             target,
             &mut session,
-            prompt,
+            turn_prompt.as_ref(),
             &cancel,
             profile_config.surface_thinking,
             in_thread.then_some(message.id),
@@ -979,6 +996,20 @@ async fn route_message(
         )
         .await
     };
+    // Capture the turn into long-term memory (best-effort, off-thread). Uses the
+    // original prompt, never the memory-augmented one, so recalled context can't
+    // feed back into the bank.
+    if let Some(cfg) = &memory_cfg
+        && let Some(answer) = first_answer.clone().filter(|a| !a.trim().is_empty())
+    {
+        let cfg = cfg.clone();
+        let document_id = thread_id.clone();
+        let user = prompt.to_owned();
+        let tags = vec![format!("thread:{thread_id}"), format!("profile:{profile}")];
+        tracker.spawn(async move {
+            crate::memory::retain(&cfg, &document_id, &user, &answer, tags).await;
+        });
+    }
     // Title from the turn's first answer; spawned regardless of outcome so a hard error still yields a prompt-only title.
     if !in_thread {
         tracker.spawn(generate_and_apply_title(

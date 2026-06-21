@@ -22,6 +22,10 @@ pub struct ProfileConfig {
     pub surface_thinking: bool,
     pub streaming_behavior: StreamingBehavior,
     pub browser_enabled: bool,
+    pub memory_enabled: bool,
+    pub memory_bank: Option<String>,
+    pub memory_recall_budget: String,
+    pub memory_recall_max_tokens: u32,
 }
 
 #[derive(Deserialize)]
@@ -32,6 +36,8 @@ struct RawConfig {
     discord: Option<RawDiscord>,
     #[serde(default)]
     browser: Option<RawBrowser>,
+    #[serde(default)]
+    memory: Option<RawMemory>,
 }
 
 #[derive(Deserialize)]
@@ -54,6 +60,21 @@ struct RawBrowser {
     enabled: bool,
 }
 
+const DEFAULT_RECALL_BUDGET: &str = "mid";
+const DEFAULT_RECALL_MAX_TOKENS: u32 = 1536;
+
+#[derive(Deserialize, Default)]
+struct RawMemory {
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default)]
+    bank: Option<String>,
+    #[serde(default)]
+    recall_budget: Option<String>,
+    #[serde(default)]
+    recall_max_tokens: Option<u32>,
+}
+
 pub fn load(config_path: &Path) -> color_eyre::Result<ProfileConfig> {
     let text = match std::fs::read_to_string(config_path) {
         Ok(text) => text,
@@ -63,6 +84,10 @@ pub fn load(config_path: &Path) -> color_eyre::Result<ProfileConfig> {
                 surface_thinking: false,
                 streaming_behavior: StreamingBehavior::default(),
                 browser_enabled: false,
+                memory_enabled: false,
+                memory_bank: None,
+                memory_recall_budget: DEFAULT_RECALL_BUDGET.to_owned(),
+                memory_recall_max_tokens: DEFAULT_RECALL_MAX_TOKENS,
             });
         }
         Err(e) => {
@@ -77,6 +102,18 @@ pub fn load(config_path: &Path) -> color_eyre::Result<ProfileConfig> {
         surface_thinking: discord.surface_thinking,
         streaming_behavior: discord.streaming_behavior,
         browser_enabled: raw.browser.is_some_and(|b| b.enabled),
+        memory_enabled: raw.memory.as_ref().is_some_and(|m| m.enabled),
+        memory_bank: raw.memory.as_ref().and_then(|m| m.bank.clone()),
+        memory_recall_budget: raw
+            .memory
+            .as_ref()
+            .and_then(|m| m.recall_budget.clone())
+            .unwrap_or_else(|| DEFAULT_RECALL_BUDGET.to_owned()),
+        memory_recall_max_tokens: raw
+            .memory
+            .as_ref()
+            .and_then(|m| m.recall_max_tokens)
+            .unwrap_or(DEFAULT_RECALL_MAX_TOKENS),
     })
 }
 
@@ -103,6 +140,7 @@ pub struct RootConfig {
     worktrees_dir: Option<PathBuf>,
     approvers: Vec<String>,
     approval_timeout: Duration,
+    memory_endpoint: Option<String>,
 }
 
 impl RootConfig {
@@ -127,6 +165,12 @@ impl RootConfig {
     pub fn approval_timeout(&self) -> Duration {
         self.approval_timeout
     }
+
+    /// Worker-level Hindsight API base URL (`[memory] endpoint`). `None` ⇒ memory
+    /// is off worker-wide regardless of per-profile `[memory] enabled`.
+    pub fn memory_endpoint(&self) -> Option<&str> {
+        self.memory_endpoint.as_deref()
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -137,11 +181,18 @@ struct RawRootConfig {
     worktree: Option<RawWorktree>,
     #[serde(default)]
     approval: Option<RawApproval>,
+    #[serde(default)]
+    memory: Option<RawRootMemory>,
 }
 
 #[derive(serde::Deserialize)]
 struct RawWorktree {
     dir: String,
+}
+
+#[derive(serde::Deserialize)]
+struct RawRootMemory {
+    endpoint: String,
 }
 
 const DEFAULT_APPROVAL_TIMEOUT_SECS: u64 = 3600;
@@ -183,6 +234,7 @@ pub fn load_root(config_path: &Path) -> color_eyre::Result<RootConfig> {
                 worktrees_dir: None,
                 approvers: Vec::new(),
                 approval_timeout: Duration::from_secs(DEFAULT_APPROVAL_TIMEOUT_SECS),
+                memory_endpoint: None,
             });
         }
         Err(e) => {
@@ -262,6 +314,7 @@ pub fn load_root(config_path: &Path) -> color_eyre::Result<RootConfig> {
         worktrees_dir,
         approvers,
         approval_timeout,
+        memory_endpoint: raw.memory.map(|m| m.endpoint),
     })
 }
 

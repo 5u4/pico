@@ -123,6 +123,9 @@ streaming_behavior = "steer"       # mid-turn message: follow_up | steer
 
 [browser]
 enabled = false                    # opt-in Camoufox anti-detection browser tools
+
+[memory]
+enabled = false                    # opt-in cross-thread long-term memory (Hindsight)
 ```
 
 `streaming_behavior` controls what a message you send **while a turn is still
@@ -139,6 +142,23 @@ start, the tools surface an error and the agent falls back to `read`/native brow
 Toggling `enabled` takes effect on a thread's next fresh omp child — a new thread,
 or after the existing one is idle-evicted (~10 min) — since a live child keeps the
 tools it was spawned with.
+
+`[memory] enabled = true` gives the profile cross-thread long-term memory backed
+by a self-hosted [Hindsight](https://hindsight.vectorize.io) server: before each
+turn pico recalls what it knows about you and prepends it to the message, and
+after each turn it stores the exchange (best-effort, off-thread). It is keyed by a
+per-profile bank (`pico-<profile>`, override with `[memory] bank`), so every
+thread and channel on one profile shares one memory of you. Memory is purely
+additive — if Hindsight is unreachable the turn just runs without it. The worker
+must point at a Hindsight instance via `[memory] endpoint` in its `config.toml`;
+without it, `enabled` is a no-op. Worktree/coding channels are best left with
+memory off.
+
+```toml
+# ~/.pico/workers/default/config.toml — worker-level, names the shared server
+[memory]
+endpoint = "http://hindsight:8888"
+```
 
 A turn that's still running can be cut short with `/cancel` in its thread: it
 aborts the in-flight turn (cancelling any running tool) and frees the thread for
@@ -259,6 +279,24 @@ connects to Discord. A later restart just restores the current slot (the last
 deployed build) — roll new code forward with an explicit deploy (see Operating).
 Only one instance may hold the bot token at a time — stop the host/systemd
 supervisor before bringing the container up.
+
+### Long-term memory (optional)
+
+Memory is an opt-in compose profile. Put a Groq key (for Hindsight's fact
+extraction — local embeddings need no key) in a gitignored `.env` at the repo
+root and bring the stack up with the `memory` profile:
+
+```sh
+echo 'GROQ_API_KEY=gsk_…' >> .env
+docker compose --profile memory up -d --build
+```
+
+That starts a `hindsight` service (embedded PostgreSQL) reachable at
+`http://hindsight:8888`. Point the worker at it with `[memory] endpoint =
+"http://hindsight:8888"` in `~/.pico/workers/default/config.toml`, then enable it
+per profile with `[memory] enabled = true`. On a systemd/host install, run the
+same image standalone (`docker run … -p 8888:8888 ghcr.io/vectorize-io/hindsight:latest`)
+and set `endpoint` to wherever it listens.
 
 ### Operating
 
