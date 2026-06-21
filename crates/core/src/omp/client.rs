@@ -417,6 +417,32 @@ mod tests {
     }
 
     #[test]
+    fn build_command_passes_append_system_prompt() {
+        let append = std::path::PathBuf::from("/x/append.md");
+        let config = SpawnConfig {
+            append_system_prompt: Some(append.clone()),
+            ..SpawnConfig::default()
+        };
+        let cmd = build_command(&config);
+        let args: Vec<String> = cmd
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let a = args
+            .iter()
+            .position(|a| a == "--append-system-prompt")
+            .expect("--append-system-prompt present");
+        assert_eq!(args[a + 1], append.to_string_lossy());
+    }
+
+    #[test]
+    fn build_command_default_passes_no_append_prompt() {
+        let cmd = build_command(&SpawnConfig::default());
+        assert!(cmd.as_std().get_args().all(|a| a != "--append-system-prompt"));
+    }
+
+    #[test]
     fn build_command_default_injects_no_extension_or_env() {
         let cmd = build_command(&SpawnConfig::default());
         let std_cmd = cmd.as_std();

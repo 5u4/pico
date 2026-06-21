@@ -7,6 +7,7 @@ pub mod db;
 mod discord;
 mod mid_turn;
 pub mod omp;
+mod prompt;
 pub mod render;
 mod thread_marker;
 mod ui;
