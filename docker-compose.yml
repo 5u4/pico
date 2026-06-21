@@ -30,25 +30,7 @@ services:
       - pico-cache:/home/pico/.cache
       - pico-build:/home/pico/.cache/build
 
-  # Opt-in long-term memory. Start with `docker compose --profile memory up`;
-  # set GROQ_API_KEY in .env first. pico reaches it at http://hindsight:8888
-  # (set `[memory] endpoint` in the worker config.toml).
-  hindsight:
-    container_name: hindsight
-    image: ghcr.io/vectorize-io/hindsight:latest
-    profiles: ["memory"]
-    restart: unless-stopped
-    environment:
-      HINDSIGHT_API_LLM_PROVIDER: groq
-      HINDSIGHT_API_LLM_MODEL: openai/gpt-oss-20b
-      HINDSIGHT_API_LLM_API_KEY: ${GROQ_API_KEY:-}
-    volumes:
-      - hindsight-data:/home/hindsight/.pg0
-      - hindsight-cache:/home/hindsight/.cache
-
 volumes:
   pico-supervisor:
   pico-build:
   pico-cache:
-  hindsight-data:
-  hindsight-cache:

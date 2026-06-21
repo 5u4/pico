@@ -144,20 +144,22 @@ or after the existing one is idle-evicted (~10 min) — since a live child keeps
 tools it was spawned with.
 
 `[memory] enabled = true` gives the profile cross-thread long-term memory backed
-by a self-hosted [Hindsight](https://hindsight.vectorize.io) server: before each
-turn pico recalls what it knows about you and prepends it to the message, and
-after each turn it stores the exchange (best-effort, off-thread). It is keyed by a
-per-profile bank (`pico-<profile>`, override with `[memory] bank`), so every
-thread and channel on one profile shares one memory of you. Memory is purely
-additive — if Hindsight is unreachable the turn just runs without it. The worker
-must point at a Hindsight instance via `[memory] endpoint` in its `config.toml`;
-without it, `enabled` is a no-op. Worktree/coding channels are best left with
-memory off.
+by [Hindsight](https://hindsight.vectorize.io): before each turn pico recalls what
+it knows about you and prepends it to the message, and after each turn it stores
+the exchange (best-effort, off-thread). It is keyed by a per-profile bank
+(`pico-<profile>`, override with `[memory] bank`), so every thread and channel on
+one profile shares one memory of you. Memory is purely additive — if Hindsight is
+unavailable the turn just runs without it; worktree/coding channels are best left
+with memory off.
+
+In the Docker deploy the worker runs Hindsight itself over the docker socket (see
+"Long-term memory" below). To point at an existing Hindsight instead — required on
+a systemd/host install — set `[memory] endpoint` in the worker `config.toml`:
 
 ```toml
-# ~/.pico/workers/default/config.toml — worker-level, names the shared server
+# ~/.pico/workers/default/config.toml — use an external Hindsight, not a self-managed one
 [memory]
-endpoint = "http://hindsight:8888"
+endpoint = "http://host:8888"
 ```
 
 A turn that's still running can be cut short with `/cancel` in its thread: it
@@ -282,21 +284,23 @@ supervisor before bringing the container up.
 
 ### Long-term memory (optional)
 
-Memory is an opt-in compose profile. Put a Groq key (for Hindsight's fact
-extraction — local embeddings need no key) in a gitignored `.env` at the repo
-root and bring the stack up with the `memory` profile:
+Enable memory per profile with `[memory] enabled = true` (see Profiles), then give
+the worker a Groq key for Hindsight's fact extraction (local embeddings need none):
 
 ```sh
-echo 'GROQ_API_KEY=gsk_…' >> .env
-docker compose --profile memory up -d --build
+printf '%s' 'gsk_…' > ~/.pico/workers/default/secrets/groq_api_key
+chmod 600 ~/.pico/workers/default/secrets/groq_api_key
 ```
 
-That starts a `hindsight` service (embedded PostgreSQL) reachable at
-`http://hindsight:8888`. Point the worker at it with `[memory] endpoint =
-"http://hindsight:8888"` in `~/.pico/workers/default/config.toml`, then enable it
-per profile with `[memory] enabled = true`. On a systemd/host install, run the
-same image standalone (`docker run … -p 8888:8888 ghcr.io/vectorize-io/hindsight:latest`)
-and set `endpoint` to wherever it listens.
+On the first memory turn the worker brings up its own Hindsight container over the
+mounted docker socket (embedded PostgreSQL, persistent across restarts) and talks
+to it on the compose network — no compose changes, no ports to publish. The first
+turn or two have no memory while the ~4 GB image pulls and the server boots (pico
+pre-pulls at startup when a profile has memory on); a down or still-starting
+Hindsight never blocks a turn.
+
+To use an existing/remote Hindsight instead, set `[memory] endpoint` in the worker
+`config.toml` and the worker won't self-manage one.
 
 ### Operating
 

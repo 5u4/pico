@@ -1,18 +1,15 @@
-//! Live Hindsight round-trip: boots a throwaway hindsight container driven by
-//! Groq (`E2E_GROQ_KEY` from `.env.e2e`), then retains a fact and recalls it
-//! through `pico_core::memory`. `#[ignore]`d; skips cleanly when docker or the
-//! key is absent. Run with `cargo test -p pico-core --test memory_hindsight -- --ignored`.
+//! Live Hindsight round-trip through the worker-managed daemon: lets
+//! `HindsightDaemon` bring up its own container over the docker socket, then
+//! asserts a real retain -> recall round-trip. `#[ignore]`d; needs docker + `E2E_GROQ_KEY`.
 
 use std::{
-    path::Path,
+    path::{Path, PathBuf},
     process::Command,
     time::{Duration, Instant},
 };
 
-use pico_core::memory::{self, MemoryConfig};
-
-const PORT: u16 = 18888;
-const IMAGE: &str = "ghcr.io/vectorize-io/hindsight:latest";
+use pico_core::memory::{self, HindsightDaemon, MemoryConfig};
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 fn load_env() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.env.e2e");
@@ -27,54 +24,25 @@ fn docker_available() -> bool {
         .unwrap_or(false)
 }
 
-/// Removes the container on drop so a panicking assertion never leaks it.
-struct Container(String);
-impl Drop for Container {
+/// Force-remove the container, its data volume, and the temp root on drop so a
+/// panicking assertion never leaks them.
+struct Cleanup {
+    container: String,
+    root: PathBuf,
+}
+impl Drop for Cleanup {
     fn drop(&mut self) {
-        let _ = Command::new("docker").args(["rm", "-f", &self.0]).output();
+        let _ = Command::new("docker").args(["rm", "-f", &self.container]).output();
+        let _ = Command::new("docker")
+            .args(["volume", "rm", "-f", &format!("{}-data", self.container)])
+            .output();
+        let _ = std::fs::remove_dir_all(&self.root);
     }
-}
-
-/// Bridge IP of a running container. Lets a docker-in-docker test reach a
-/// sibling that published its port to the shared docker host, not to us.
-fn container_ip(name: &str) -> Option<String> {
-    let out = Command::new("docker")
-        .args([
-            "inspect",
-            "-f",
-            "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
-            name,
-        ])
-        .output()
-        .ok()?;
-    let ip = String::from_utf8_lossy(&out.stdout).trim().to_owned();
-    (out.status.success() && !ip.is_empty()).then_some(ip)
-}
-
-/// Poll candidate base URLs until one serves `/version`; returns the live one.
-async fn wait_healthy(bases: &[String], timeout: Duration) -> Option<String> {
-    let client = reqwest::Client::new();
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        for base in bases {
-            if let Ok(resp) = client
-                .get(format!("{base}/version"))
-                .timeout(Duration::from_secs(5))
-                .send()
-                .await
-                && resp.status().is_success()
-            {
-                return Some(base.clone());
-            }
-        }
-        tokio::time::sleep(Duration::from_secs(3)).await;
-    }
-    None
 }
 
 #[tokio::test]
 #[ignore]
-async fn hindsight_retain_recall_roundtrip() {
+async fn hindsight_daemon_retain_recall_roundtrip() {
     load_env();
     let Ok(groq_key) = std::env::var("E2E_GROQ_KEY") else {
         eprintln!("skip: E2E_GROQ_KEY not set in .env.e2e");
@@ -90,47 +58,34 @@ async fn hindsight_retain_recall_roundtrip() {
         return;
     }
 
-    let name = format!("pico-hindsight-e2e-{}", std::process::id());
-    let out = Command::new("docker")
-        .args([
-            "run",
-            "-d",
-            "--rm",
-            "--name",
-            &name,
-            "-p",
-            &format!("{PORT}:8888"),
-            "-e",
-            "HINDSIGHT_API_LLM_PROVIDER=groq",
-            "-e",
-            "HINDSIGHT_API_LLM_MODEL=openai/gpt-oss-20b",
-            "-e",
-            &format!("HINDSIGHT_API_LLM_API_KEY={groq_key}"),
-            IMAGE,
-        ])
-        .output()
-        .expect("docker run");
-    if !out.status.success() {
-        eprintln!(
-            "skip: docker run failed (image unavailable?): {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        return;
-    }
-    let _guard = Container(name.clone());
+    // Temp worker root carrying the Groq secret the daemon reads.
+    let root = std::env::temp_dir().join(format!("pico-mem-e2e-{}", std::process::id()));
+    std::fs::create_dir_all(root.join("secrets")).expect("mkdir secrets");
+    std::fs::write(root.join("secrets/groq_api_key"), &groq_key).expect("write key");
 
-    // Bare host reaches the published port on localhost; a docker-in-docker
-    // runner reaches the sibling by its bridge IP instead.
-    let mut bases = vec![format!("http://127.0.0.1:{PORT}")];
-    if let Some(ip) = container_ip(&name) {
-        bases.insert(0, format!("http://{ip}:8888"));
+    let cancel = CancellationToken::new();
+    let tracker = TaskTracker::new();
+    let daemon = HindsightDaemon::new(&root, cancel.clone(), &tracker);
+    let _cleanup = Cleanup {
+        container: daemon.container().to_owned(),
+        root: root.clone(),
+    };
+
+    // ensure_endpoint backgrounds the cold start (image pull + boot) and returns
+    // None until the container is healthy; poll until it produces an endpoint.
+    let deadline = Instant::now() + Duration::from_secs(300);
+    let mut endpoint = None;
+    while Instant::now() < deadline {
+        if let Some(ep) = daemon.ensure_endpoint().await {
+            endpoint = Some(ep);
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(3)).await;
     }
-    let base = wait_healthy(&bases, Duration::from_secs(300))
-        .await
-        .unwrap_or_else(|| panic!("hindsight never became healthy on any of {bases:?}"));
+    let endpoint = endpoint.expect("hindsight daemon never produced a healthy endpoint");
 
     let cfg = MemoryConfig {
-        endpoint: base,
+        endpoint,
         bank: format!("pico-e2e-{}", std::process::id()),
         recall_budget: "mid".to_owned(),
         recall_max_tokens: 1024,
@@ -146,8 +101,8 @@ async fn hindsight_retain_recall_roundtrip() {
     )
     .await;
 
-    // Retain processes asynchronously server-side (extract + consolidate), so
-    // poll recall until the fact surfaces or we time out.
+    // Retain processes asynchronously server-side (extract + consolidate), so poll
+    // recall until the fact surfaces or we time out.
     let deadline = Instant::now() + Duration::from_secs(180);
     let mut found = None;
     while Instant::now() < deadline {
@@ -159,5 +114,6 @@ async fn hindsight_retain_recall_roundtrip() {
         }
         tokio::time::sleep(Duration::from_secs(5)).await;
     }
+    cancel.cancel();
     assert!(found.is_some(), "recall never returned the retained fact within timeout");
 }

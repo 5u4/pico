@@ -2,7 +2,14 @@
 //! recall failure yields no injected context and a retain failure is dropped, so
 //! memory is purely additive and can never block or break a turn.
 
-use std::{sync::LazyLock, time::Duration};
+use std::{
+    path::Path,
+    sync::{Arc, LazyLock},
+    time::{Duration, Instant},
+};
+
+use tokio::{process::Command, sync::Mutex};
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 const RECALL_TIMEOUT: Duration = Duration::from_secs(4);
 const RETAIN_TIMEOUT: Duration = Duration::from_secs(30);
@@ -153,6 +160,248 @@ struct RecallResponse {
 struct RecallResult {
     #[serde(default)]
     text: String,
+}
+
+const IMAGE: &str = "ghcr.io/vectorize-io/hindsight:latest";
+const LLM_MODEL: &str = "openai/gpt-oss-20b";
+/// First boot loads the embedding model and inits PostgreSQL; allow generously.
+const HEALTH_TIMEOUT: Duration = Duration::from_secs(240);
+const HEALTH_POLL: Duration = Duration::from_secs(2);
+const BRINGUP_COOLDOWN: Duration = Duration::from_secs(60);
+
+/// Worker-owned Hindsight container, brought up on demand over the host docker
+/// socket (DooD) when a profile enables memory and no external `[memory]
+/// endpoint` override is set. Persistent (`--restart unless-stopped`), one per
+/// worker root, reused across worker restarts; never torn down by the worker.
+pub struct HindsightDaemon {
+    groq_key: Option<String>,
+    container: String,
+    state: Mutex<DaemonState>,
+    cancel: CancellationToken,
+    tracker: TaskTracker,
+}
+
+#[derive(Default)]
+struct DaemonState {
+    endpoint: Option<String>,
+    bringing_up: bool,
+    retry_after: Option<Instant>,
+}
+
+impl HindsightDaemon {
+    pub fn new(root: &Path, cancel: CancellationToken, tracker: &TaskTracker) -> Arc<Self> {
+        Arc::new(Self {
+            groq_key: read_optional_secret(root, "groq_api_key"),
+            container: container_name(root),
+            state: Mutex::new(DaemonState::default()),
+            cancel,
+            tracker: tracker.clone(),
+        })
+    }
+
+    /// This worker's Hindsight container name (`pico-hindsight-<root-hash>`).
+    pub fn container(&self) -> &str {
+        &self.container
+    }
+
+    /// Base URL of a healthy worker-managed Hindsight, or `None` while it is still
+    /// coming up or unavailable. Never blocks the turn: a cold start (image pull +
+    /// boot) runs in the background and the turn proceeds without memory until the
+    /// container is ready.
+    pub async fn ensure_endpoint(self: &Arc<Self>) -> Option<String> {
+        let mut st = self.state.lock().await;
+        if st.endpoint.is_some() {
+            return st.endpoint.clone();
+        }
+        if st.bringing_up || st.retry_after.is_some_and(|t| Instant::now() < t) || self.groq_key.is_none() {
+            return None;
+        }
+        st.bringing_up = true;
+        drop(st);
+        let daemon = Arc::clone(self);
+        self.tracker.spawn(async move { daemon.bring_up().await });
+        None
+    }
+
+    /// Pre-pull the image at startup so the first self-managed turn isn't blocked
+    /// on a multi-GB pull. Best-effort.
+    pub async fn ensure_image(self: Arc<Self>) {
+        if self.groq_key.is_some() {
+            docker_ok(&["pull", IMAGE]).await;
+        }
+    }
+
+    async fn bring_up(self: Arc<Self>) {
+        let endpoint = self.start_container().await;
+        let mut st = self.state.lock().await;
+        st.bringing_up = false;
+        match endpoint {
+            Some(ep) => {
+                tracing::info!(endpoint = %ep, "hindsight memory ready");
+                st.endpoint = Some(ep);
+                st.retry_after = None;
+            }
+            None => st.retry_after = Some(Instant::now() + BRINGUP_COOLDOWN),
+        }
+    }
+
+    async fn start_container(&self) -> Option<String> {
+        if self.cancel.is_cancelled() {
+            return None;
+        }
+        let network = self_network().await;
+        let endpoint = match &network {
+            Some(_) => format!("http://{}:8888", self.container),
+            None => "http://127.0.0.1:8888".to_owned(),
+        };
+        let ready = match container_state(&self.container).await {
+            ContainerState::Running => true,
+            ContainerState::Stopped => docker_ok(&["start", &self.container]).await,
+            ContainerState::Absent => match self.groq_key.as_deref() {
+                Some(key) => self.run_container(key, network.as_deref()).await,
+                None => false,
+            },
+            ContainerState::Unknown => false,
+        };
+        if ready && wait_healthy(&endpoint, &self.cancel).await {
+            Some(endpoint)
+        } else {
+            None
+        }
+    }
+
+    async fn run_container(&self, groq_key: &str, network: Option<&str>) -> bool {
+        let volume = format!("{}-data:/home/hindsight/.pg0", self.container);
+        let model_env = format!("HINDSIGHT_API_LLM_MODEL={LLM_MODEL}");
+        let key_env = format!("HINDSIGHT_API_LLM_API_KEY={groq_key}");
+        let mut args = vec![
+            "run",
+            "-d",
+            "--name",
+            self.container.as_str(),
+            "--restart",
+            "unless-stopped",
+        ];
+        match network {
+            Some(net) => args.extend(["--network", net]),
+            None => args.extend(["-p", "8888:8888"]),
+        }
+        args.extend([
+            "-v",
+            volume.as_str(),
+            "-e",
+            "HINDSIGHT_API_LLM_PROVIDER=groq",
+            "-e",
+            model_env.as_str(),
+            "-e",
+            key_env.as_str(),
+            IMAGE,
+        ]);
+        docker_ok(&args).await
+    }
+}
+
+enum ContainerState {
+    Running,
+    Stopped,
+    Absent,
+    Unknown,
+}
+
+/// Per-worker-root container name so distinct roots (including test temp dirs)
+/// never collide on one docker host.
+fn container_name(root: &Path) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    root.to_string_lossy().hash(&mut hasher);
+    format!("pico-hindsight-{:08x}", hasher.finish() as u32)
+}
+
+fn read_optional_secret(root: &Path, name: &str) -> Option<String> {
+    let raw = std::fs::read_to_string(pico_shared::paths::worker_secret(root, name)).ok()?;
+    let value = raw.trim();
+    (!value.is_empty()).then(|| value.to_owned())
+}
+
+async fn container_state(name: &str) -> ContainerState {
+    match Command::new("docker")
+        .args(["inspect", "-f", "{{.State.Running}}", name])
+        .output()
+        .await
+    {
+        Ok(out) if out.status.success() => {
+            if String::from_utf8_lossy(&out.stdout).trim() == "true" {
+                ContainerState::Running
+            } else {
+                ContainerState::Stopped
+            }
+        }
+        Ok(_) => ContainerState::Absent,
+        Err(_) => ContainerState::Unknown,
+    }
+}
+
+/// The worker's own first docker network, so a self-run sibling is reachable by
+/// container name. `None` outside a container (host/systemd) → published-port fallback.
+async fn self_network() -> Option<String> {
+    let host = std::fs::read_to_string("/etc/hostname").ok()?;
+    let host = host.trim();
+    if host.is_empty() {
+        return None;
+    }
+    let out = Command::new("docker")
+        .args([
+            "inspect",
+            "-f",
+            "{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}",
+            host,
+        ])
+        .output()
+        .await
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .next()
+        .map(str::to_owned)
+}
+
+async fn wait_healthy(endpoint: &str, cancel: &CancellationToken) -> bool {
+    let deadline = Instant::now() + HEALTH_TIMEOUT;
+    loop {
+        if health(endpoint).await {
+            return true;
+        }
+        if Instant::now() >= deadline || cancel.is_cancelled() {
+            return false;
+        }
+        tokio::time::sleep(HEALTH_POLL).await;
+    }
+}
+
+async fn health(endpoint: &str) -> bool {
+    HTTP.get(format!("{}/version", endpoint.trim_end_matches('/')))
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await
+        .map(|resp| resp.status().is_success())
+        .unwrap_or(false)
+}
+
+async fn docker_ok(args: &[&str]) -> bool {
+    match Command::new("docker").args(args).output().await {
+        Ok(out) if out.status.success() => true,
+        Ok(out) => {
+            tracing::warn!(op = args.first().copied().unwrap_or(""), stderr = %String::from_utf8_lossy(&out.stderr).trim(), "docker command failed");
+            false
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "docker not runnable for hindsight");
+            false
+        }
+    }
 }
 
 #[cfg(test)]

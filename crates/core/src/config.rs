@@ -127,6 +127,16 @@ pub fn any_browser_enabled(root: &Path) -> bool {
         .any(|entry| entry.path().is_dir() && load(&entry.path().join("config.toml")).is_ok_and(|c| c.browser_enabled))
 }
 
+/// Whether any profile opts into memory — gates the startup Hindsight image pull.
+pub fn any_memory_enabled(root: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(root.join("profiles")) else {
+        return false;
+    };
+    entries
+        .flatten()
+        .any(|entry| entry.path().is_dir() && load(&entry.path().join("config.toml")).is_ok_and(|c| c.memory_enabled))
+}
+
 pub struct GuildDefault {
     pub profile: String,
     pub cwd: PathBuf,
