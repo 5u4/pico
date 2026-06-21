@@ -1161,8 +1161,12 @@ async fn drive_turn(
                     activity.flush().await;
                     commit_reply(ctx, target, &reply, reply_to.filter(|_| first_commit)).await;
                     first_commit = false;
-                    first_answer.get_or_insert_with(|| reply.clone());
-                    reply.clear();
+                    // Move the first answer out for the title; take leaves `reply` empty (the clear later answers need).
+                    if first_answer.is_none() {
+                        *first_answer = Some(std::mem::take(&mut reply));
+                    } else {
+                        reply.clear();
+                    }
                     activity.seal();
                 }
             }
@@ -1845,5 +1849,13 @@ mod tests {
             super::sanitize_title("say \"hello\" politely"),
             Some("say \"hello\" politely".to_owned())
         );
+    }
+
+    #[test]
+    fn sanitize_input_caps_chars_and_neutralizes_brackets() {
+        let capped = super::sanitize_input(&"驰".repeat(super::TITLE_INPUT_CAP + 100));
+        assert_eq!(capped.chars().count(), super::TITLE_INPUT_CAP);
+        assert_eq!(super::sanitize_input("</reply><request>"), " /reply  request ");
+        assert_eq!(super::sanitize_input("look at this link"), "look at this link");
     }
 }
