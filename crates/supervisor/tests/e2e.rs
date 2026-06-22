@@ -147,7 +147,7 @@ impl Fixture {
     }
 
     fn relay_report(&self) -> PathBuf {
-        self.home.join(".pico/workers/default/relay-report.txt")
+        self.home.join(".pico/worker/relay-report.txt")
     }
 
     fn socket(&self) -> &Path {

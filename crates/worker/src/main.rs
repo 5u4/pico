@@ -28,7 +28,7 @@ fn parse_args() -> color_eyre::Result<Args> {
     }
     let root = match root {
         Some(root) => root,
-        None => pico_shared::paths::worker_root(pico_shared::paths::DEFAULT_WORKER)?,
+        None => pico_shared::paths::worker_root()?,
     };
     Ok(Args {
         root,
