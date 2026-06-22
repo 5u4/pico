@@ -39,21 +39,6 @@ impl MidTurnQueue {
             },
         )
     }
-
-    pub fn drain_or_close(
-        &self,
-        channel: serenity::ChannelId,
-        rx: &mut mpsc::UnboundedReceiver<String>,
-    ) -> Option<String> {
-        let mut map = self.inner.lock();
-        match rx.try_recv() {
-            Ok(text) => Some(text),
-            Err(_) => {
-                map.remove(&channel);
-                None
-            }
-        }
-    }
 }
 
 pub struct SinkGuard {
@@ -96,19 +81,5 @@ mod tests {
         let (_rx, g) = q.register(chan(1), StreamingBehavior::FollowUp);
         drop(g);
         assert!(q.deliver(chan(1), "late").is_none());
-    }
-
-    #[test]
-    fn drain_hands_back_straggler_then_closes_when_empty() {
-        let q = MidTurnQueue::default();
-        let (mut rx, _g) = q.register(chan(1), StreamingBehavior::FollowUp);
-
-        assert_eq!(q.deliver(chan(1), "straggler"), Some(StreamingBehavior::FollowUp));
-        assert_eq!(q.drain_or_close(chan(1), &mut rx).as_deref(), Some("straggler"));
-        assert!(q.deliver(chan(1), "again").is_some());
-
-        assert_eq!(q.drain_or_close(chan(1), &mut rx).as_deref(), Some("again"));
-        assert_eq!(q.drain_or_close(chan(1), &mut rx), None);
-        assert!(q.deliver(chan(1), "after").is_none());
     }
 }

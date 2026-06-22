@@ -37,6 +37,29 @@ fn emit_seq(out: &mut impl Write, marker: &str) {
     }
 }
 
+fn emit_bgtask(out: &mut impl Write, marker: &str) {
+    let run1 = [
+        json!({ "type": "tool_execution_start", "toolCallId": "bg-task", "toolName": "task", "args": { "agent": "task", "tasks": [{ "id": "bg-child", "description": format!("BGCHILD-{marker}") }] } }),
+        json!({ "type": "tool_execution_end", "toolCallId": "bg-task", "toolName": "task", "result": { "async": { "state": "running" } }, "isError": false }),
+        json!({ "type": "message_update", "assistantMessageEvent": { "type": "text_delta", "delta": format!("BGKICK-{marker}") } }),
+        json!({ "type": "turn_end" }),
+        json!({ "type": "agent_end" }),
+    ];
+    for frame in &run1 {
+        emit(out, frame);
+    }
+    std::thread::sleep(std::time::Duration::from_secs(4));
+    let run2 = [
+        json!({ "type": "agent_start" }),
+        json!({ "type": "message_update", "assistantMessageEvent": { "type": "text_delta", "delta": format!("BGDONE-{marker}") } }),
+        json!({ "type": "turn_end" }),
+        json!({ "type": "agent_end" }),
+    ];
+    for frame in &run2 {
+        emit(out, frame);
+    }
+}
+
 fn run_rpc() {
     let stdin = std::io::stdin();
     let mut out = std::io::stdout();
@@ -60,6 +83,10 @@ fn run_rpc() {
                 let message = frame.get("message").and_then(Value::as_str).unwrap_or_default();
                 match message.trim().split_once(' ') {
                     Some(("SEQ", marker)) => emit_seq(&mut out, marker),
+                    Some(("BGTASK", marker)) => {
+                        emit_bgtask(&mut out, marker);
+                        continue;
+                    }
                     Some(("QUEUE", marker)) => {
                         run_queue(&mut out, &mut lines, marker);
                         continue;
