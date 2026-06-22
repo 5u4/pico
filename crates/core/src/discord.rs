@@ -988,7 +988,7 @@ async fn drive_turn(
     let mut aborted = false;
     let mut first_commit = true;
     let mut settling = false;
-    let mut main_run_done = false;
+    let mut explicit_runs_pending: usize = 1;
     let mut awaiting_deferred = false;
 
     let mut reply = String::new();
@@ -1117,18 +1117,23 @@ async fn drive_turn(
                     activity.seal();
                 }
             }
-            Some(OmpEvent::AgentEnd) => match rx.try_recv() {
-                Ok(text) => session.client.prompt(&text).await?,
-                Err(_) => {
-                    if main_run_done {
-                        subagents.clear_one_backgrounded();
-                    } else {
-                        main_run_done = true;
-                    }
-                    awaiting_deferred = subagents.has_pending_background();
-                    settling = true;
+            Some(OmpEvent::AgentEnd) => {
+                if explicit_runs_pending > 0 {
+                    explicit_runs_pending -= 1;
+                } else {
+                    subagents.clear_one_backgrounded();
                 }
-            },
+                match rx.try_recv() {
+                    Ok(text) => {
+                        explicit_runs_pending += 1;
+                        session.client.prompt(&text).await?;
+                    }
+                    Err(_) => {
+                        awaiting_deferred = subagents.has_pending_background();
+                        settling = true;
+                    }
+                }
+            }
             Some(OmpEvent::Error(e)) => {
                 activity.flush().await;
                 subagents.flush_all(true).await;
