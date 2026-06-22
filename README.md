@@ -292,9 +292,9 @@ worker-managed container reuses omp's existing GitHub Copilot login for
 Hindsight's fact extraction: the worker reads omp's stored `github-copilot` token
 from its credential store (`~/.omp/agent/agent.db`) and points Hindsight's LLM at
 the Copilot API, so no separate key is needed as long as omp is logged into
-Copilot. Local embeddings need no key either. With an external `[memory]
-endpoint`, the worker self-manages nothing. If no Copilot token is found, memory
-simply stays off (best-effort — a turn never breaks).
+Copilot. Local embeddings need no key either. With an external
+`[memory] endpoint`, the worker self-manages nothing. If no Copilot token is
+found, memory simply stays off (best-effort — a turn never breaks).
 
 On the first memory turn the worker brings up its own Hindsight container over the
 mounted docker socket (embedded PostgreSQL, persistent across restarts) and talks
