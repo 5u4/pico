@@ -1,8 +1,3 @@
-//! Per-thread sink for a message that lands while a turn is already streaming:
-//! the router hands it to the running `drive_turn` (forwarded to omp as
-//! `steer`/`follow_up`) instead of serializing a fresh turn behind the lock. The
-//! deliver/close race is closed under the registry lock (see `drain_or_close`).
-
 use std::{collections::HashMap, sync::Arc};
 
 use parking_lot::Mutex;
@@ -11,7 +6,6 @@ use tokio::sync::mpsc;
 
 use crate::config::StreamingBehavior;
 
-/// `mode` lets the router pick the ack reaction without reloading config.
 struct Sink {
     tx: mpsc::UnboundedSender<String>,
     mode: StreamingBehavior,
@@ -23,9 +17,6 @@ pub struct MidTurnQueue {
 }
 
 impl MidTurnQueue {
-    /// Hand `text` to the turn on `channel`, returning its mode for the ack
-    /// reaction (or `None` if none runs). Locked across the send so it can't race
-    /// [`drain_or_close`](Self::drain_or_close) — a delivered message is never lost.
     pub fn deliver(&self, channel: serenity::ChannelId, text: &str) -> Option<StreamingBehavior> {
         let map = self.inner.lock();
         let sink = map.get(&channel)?;
@@ -33,7 +24,6 @@ impl MidTurnQueue {
         Some(sink.mode)
     }
 
-    /// Register the running turn; the guard unregisters on drop (abnormal exits).
     pub fn register(
         &self,
         channel: serenity::ChannelId,
@@ -50,9 +40,6 @@ impl MidTurnQueue {
         )
     }
 
-    /// At `agent_end`, under the registry lock: hand back a message that raced the
-    /// close (loop reruns it as a fresh prompt, sink kept) or remove the sink and
-    /// return `None`. The lock makes "empty" and "removed" atomic vs `deliver`.
     pub fn drain_or_close(
         &self,
         channel: serenity::ChannelId,
@@ -69,7 +56,6 @@ impl MidTurnQueue {
     }
 }
 
-/// Unregisters the sink on drop so an abnormal exit can't leak a dangling sink.
 pub struct SinkGuard {
     queue: MidTurnQueue,
     channel: serenity::ChannelId,

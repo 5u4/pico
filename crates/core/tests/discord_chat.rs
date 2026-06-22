@@ -1,9 +1,3 @@
-//! End-to-end chat-path test mostly driven by a deterministic scripted `omp`
-//! (PATH-shadowed; see crates/worker/src/scripted_omp.rs); a trailing phase
-//! swaps PATH back to the real omp for one Copilot smoke. `#[ignore]`d (two live
-//! bots, MESSAGE_CONTENT intent); run `--include-ignored` with `.env.e2e`. The
-//! pico bot connects once — a re-connect trips identify, so the smoke rides here.
-
 use std::{
     os::unix::fs::{PermissionsExt, symlink},
     path::{Path, PathBuf},
@@ -16,7 +10,6 @@ use pico_core::app::App;
 use poise::serenity_prelude as serenity;
 use tokio::sync::oneshot;
 
-/// The scripted `omp` stand-in, built once on demand beside this test binary.
 static SCRIPTED_OMP: LazyLock<PathBuf> = LazyLock::new(|| {
     let exe = std::env::current_exe().expect("current_exe");
     let profile_dir = exe
@@ -34,7 +27,6 @@ static SCRIPTED_OMP: LazyLock<PathBuf> = LazyLock::new(|| {
         "--features",
         "test-stub",
     ]);
-    // Match the test's own profile so the built bin lands in `profile_dir`.
     match profile_dir.file_name().and_then(|n| n.to_str()) {
         Some("debug") | None => {}
         Some("release") => {
@@ -58,10 +50,6 @@ fn var(key: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| panic!("set {key} in .env.e2e at the workspace root (see .env.e2e.example)"))
 }
 
-/// A throwaway worker root: bot token, a `default` profile, a binding that
-/// routes the e2e channel to it, and a config.toml registering the e2e guild so
-/// the guild gate serves it. Removed on drop so a panicking test leaves nothing
-/// behind.
 struct TempRoot {
     path: PathBuf,
 }
@@ -128,8 +116,6 @@ async fn wait_msg(
     false
 }
 
-/// Drive a held-open `QUEUE` turn, forward a mid-turn message, and report (acked
-/// with `emoji`, ALPHA posted, queued answer separate). `alpha` echoes the command kind.
 #[allow(clippy::too_many_arguments)]
 async fn queue_scenario(
     channel: serenity::ChannelId,
@@ -157,7 +143,6 @@ async fn queue_scenario(
     let Some(tid) = thread else {
         return (false, false, false);
     };
-    // Let the host register the mid-turn sink before forwarding into the held-open turn.
     tokio::time::sleep(Duration::from_secs(5)).await;
     let fu = tid
         .say(driver, followup)
@@ -174,7 +159,6 @@ async fn queue_scenario(
         }
         if let Ok(messages) = tid.messages(driver, serenity::GetMessages::new().limit(25)).await {
             let a = messages.iter().find(|m| m.content.contains(alpha));
-            // Exclude the driver's own echo (also contains `beta`) so `b` is pico's answer.
             let b = messages.iter().find(|m| m.id != fu.id && m.content.contains(beta));
             saw_alpha = a.is_some();
             separate = matches!((a, b), (Some(x), Some(y)) if x.id != y.id);
@@ -202,7 +186,6 @@ async fn scripted_omp_drives_thread_and_real_smoke() {
     let guild_id: u64 = var("E2E_GUILD_ID").parse().expect("E2E_GUILD_ID must be a snowflake");
     let root = TempRoot::new(&pico_token, channel_id, guild_id);
 
-    // Shadow `omp` with the scripted stand-in; set before the pool warms.
     let bindir = root.path.join("bin");
     std::fs::create_dir_all(&bindir).unwrap();
     symlink(&*SCRIPTED_OMP, bindir.join("omp")).unwrap();
@@ -283,8 +266,6 @@ async fn scripted_omp_drives_thread_and_real_smoke() {
         .await;
     }
 
-    // Timeline: activity tool → `task` → activity tool. With the seal, the post-task
-    // activity opens a new message below the task (its id above the task message's).
     let mut ordered = false;
     let mut seq_thread: Option<serenity::ChannelId> = None;
     let seq_msg = channel
@@ -316,7 +297,6 @@ async fn scripted_omp_drives_thread_and_real_smoke() {
         let _ = tid.delete(&driver).await;
     }
 
-    // Mid-turn delivery: forward a second message into the held-open QUEUE turn.
     let (fu_acked, fu_alpha, fu_separate) = queue_scenario(
         channel,
         &driver,
@@ -328,7 +308,6 @@ async fn scripted_omp_drives_thread_and_real_smoke() {
     )
     .await;
 
-    // steer: same path with the profile flipped (config is read per turn).
     std::fs::write(
         root.path.join("profiles").join("default").join("config.toml"),
         "[llm]\nmodel = \"github-copilot/gpt-4o-mini\"\n\n[discord]\nstreaming_behavior = \"steer\"\n",
@@ -345,8 +324,6 @@ async fn scripted_omp_drives_thread_and_real_smoke() {
     )
     .await;
 
-    // Real-LLM smoke on the same gateway: swap PATH back so a fresh thread spawns
-    // the real omp, and confirm one Copilot turn round-trips through Discord.
     unsafe { std::env::set_var("PATH", original_path) };
     let mut smoke_ok = false;
     if let Ok(smoke_msg) = channel
@@ -364,7 +341,6 @@ async fn scripted_omp_drives_thread_and_real_smoke() {
             }
             if let Some(tid) = smoke_thread
                 && wait_msg(tid, &driver, 1, |m| {
-                    // A real "pong" omits the marker; the stub's prompt-echo would carry it.
                     let c = m.content.to_lowercase();
                     c.contains("pong") && !c.contains(&marker.to_string())
                 })
@@ -379,7 +355,6 @@ async fn scripted_omp_drives_thread_and_real_smoke() {
         }
     }
 
-    // Tear down before asserting so a failure still cleans up the thread + bot.
     if let Some(tid) = thread {
         let _ = tid.delete(&driver).await;
     }

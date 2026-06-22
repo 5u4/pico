@@ -1,14 +1,6 @@
-//! Wire types for the `omp --mode rpc` newline-delimited JSON protocol.
-//!
-//! Only the frames Stage 1 drives are modeled; every other frame OMP emits
-//! decodes to [`Inbound::Unknown`] and is dropped by the reader rather than
-//! treated as an error.
-
 use serde::{Deserialize, Serialize};
 use ulid::Ulid;
 
-/// Correlation id for a command/response round-trip. Wraps a ULID so ids are
-/// globally unique and time-sortable — and greppable across pico and omp logs.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub(crate) struct RequestId(String);
 
@@ -24,9 +16,6 @@ impl std::fmt::Display for RequestId {
     }
 }
 
-/// A drive command pico writes to OMP's stdin. Each carries a host-generated
-/// [`RequestId`] so the matching [`RpcResponse`] correlates back to the
-/// awaiting caller.
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case", rename_all_fields = "camelCase")]
 pub(crate) enum Command<'a> {
@@ -60,7 +49,6 @@ pub(crate) enum Command<'a> {
 }
 
 impl Command<'_> {
-    /// The wire `type` tag, for logging the RPC conversation.
     pub(crate) fn kind(&self) -> &'static str {
         match self {
             Command::Prompt { .. } => "prompt",
@@ -74,9 +62,6 @@ impl Command<'_> {
     }
 }
 
-/// OMP's reply to a command (`{type:"response", command, success, error?}`).
-/// `prompt` is acked with `success:true` immediately; a later failure may arrive
-/// as a second response with the same `id` (see [`crate::omp::client`]).
 #[derive(Debug, Deserialize)]
 pub(crate) struct RpcResponse {
     pub id: Option<RequestId>,
@@ -86,9 +71,6 @@ pub(crate) struct RpcResponse {
     pub error: Option<String>,
 }
 
-/// A streaming event from an OMP session, delivered on the client's event
-/// channel. Control frames (`ready`, command responses) and unmodeled session
-/// frames never appear here — they are handled or discarded by the reader.
 #[derive(Debug, Clone)]
 pub enum OmpEvent {
     AgentStart,
@@ -96,23 +78,12 @@ pub enum OmpEvent {
     ToolStart(ToolCallStart),
     ToolUpdate(ToolCallUpdate),
     ToolEnd(ToolCallEnd),
-    /// An extension asked the user a question over the RPC UI sub-protocol (e.g. a tool-approval prompt); the host renders it and replies with a [`UiResponse`].
     UiRequest(UiRequest),
-    /// The agent run ended (all queued work drained). pico's drive loop exits here.
     AgentEnd,
-    /// One turn within the agent run ended. pico commits the buffered answer here so
-    /// each prompt's reply (incl. a dequeued follow_up's) posts as its own message.
     TurnEnd,
-    /// An asynchronous failure surfaced after the prompt was already acked
-    /// (e.g. the model rejected the request). Terminal for the current turn.
     Error(String),
 }
 
-/// The `assistantMessageEvent` payload of a `message_update` frame. pico
-/// streams the answer from `text_delta` and surfaces reasoning from the
-/// terminal `thinking_end` (which carries the whole thinking block); every
-/// other delta kind (`start`, `done`, tool-call + intermediate thinking
-/// deltas, …) collapses to [`AssistantMessageEvent::Other`].
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AssistantMessageEvent {
@@ -127,9 +98,6 @@ pub enum AssistantMessageEvent {
     Other,
 }
 
-/// Shared payload of a tool-call frame: the correlation id, the raw tool name
-/// (kept for the unknown-tool render and logging), the args, and the optional
-/// host-supplied intent.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolCall {
@@ -140,9 +108,6 @@ pub struct ToolCall {
     pub intent: Option<String>,
 }
 
-/// A `tool_execution_start` frame, classified by tool at decode so the renderer
-/// matches a typed variant. Open set: unknown tools fall to [`Self::Unknown`],
-/// keeping the raw name. A new variant makes the render match non-exhaustive.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(from = "ToolCall")]
 pub enum ToolCallStart {
@@ -182,7 +147,6 @@ impl From<ToolCall> for ToolCallStart {
 }
 
 impl ToolCallStart {
-    /// The shared payload, whichever tool this was classified as.
     pub fn call(&self) -> &ToolCall {
         match self {
             Self::Read(c)
@@ -202,7 +166,6 @@ impl ToolCallStart {
     }
 }
 
-/// Payload of a `tool_execution_end` frame.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolCallEnd {
@@ -213,10 +176,6 @@ pub struct ToolCallEnd {
     pub is_error: bool,
 }
 
-/// Payload of a `tool_execution_update` frame. `partial_result` is the tool's
-/// in-flight result; for the `task` tool it carries `details.progress` — one
-/// subagent snapshot per row. Kept raw because only the subagent renderer reads
-/// into it, and only for `task`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolCallUpdate {
@@ -225,12 +184,6 @@ pub struct ToolCallUpdate {
     pub partial_result: serde_json::Value,
 }
 
-/// An `extension_ui_request` frame (the RPC UI sub-protocol), classified by
-/// `method` like [`ToolCallStart`] classifies a
-/// [`ToolCall`]. A recognised method with no Discord surface becomes
-/// [`Self::Ignore`]; a method this build does not model becomes [`Self::Unknown`]
-/// and is auto-cancelled, so a future response-bearing dialog can never hang the
-/// turn waiting on a reply pico doesn't know to send.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(from = "RawUiRequest")]
 pub enum UiRequest {
@@ -261,22 +214,16 @@ pub enum UiRequest {
         message: String,
         notify_type: Option<String>,
     },
-    /// OMP withdrawing a still-pending request; no reply.
-    Cancel { target_id: String },
-    /// A recognised fire-and-forget method with no Discord analogue (the wire
-    /// names `setStatus`, `setWidget`, `setTitle`, `set_editor_text`, `open_url`);
-    /// skipped without a reply, exactly as OMP's own headless contexts treat it.
+    Cancel {
+        target_id: String,
+    },
     Ignore,
-    /// A method this build does not recognise. Replied with `cancelled` (keyed by
-    /// `id`) so a new response-bearing dialog resolves to its dismissed value
-    /// instead of hanging; `method` is retained only for the operator warning.
-    Unknown { id: Option<String>, method: String },
+    Unknown {
+        id: Option<String>,
+        method: String,
+    },
 }
 
-/// Raw wire shape of an `extension_ui_request`, classified into [`UiRequest`] by
-/// [`From`]. Every method's fields are optional here; the classifier supplies the
-/// per-variant requirements (e.g. a response-bearing method without an `id`
-/// falls through to [`UiRequest::Unknown`]).
 #[derive(Deserialize)]
 struct RawUiRequest {
     method: String,
@@ -344,8 +291,6 @@ impl From<RawUiRequest> for UiRequest {
     }
 }
 
-/// Reply to a [`UiRequest`], written to OMP's stdin and correlated by the
-/// request's `id`. Exactly one of `value` / `confirmed` / `cancelled` is set.
 #[derive(Debug, Serialize)]
 pub struct UiResponse<'a> {
     #[serde(rename = "type")]
@@ -386,7 +331,6 @@ impl<'a> UiResponse<'a> {
         }
     }
 
-    /// A dismissed dialog; `timed_out` marks a UI-enforced timeout (OMP fires `onTimeout`) versus a user cancel.
     pub fn cancelled(id: &'a str, timed_out: bool) -> Self {
         Self {
             kind: Self::KIND,
@@ -399,8 +343,6 @@ impl<'a> UiResponse<'a> {
     }
 }
 
-/// Every frame the client reads off OMP's stdout; unmodeled frames decode to
-/// [`Inbound::Unknown`].
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", rename_all_fields = "camelCase")]
 pub(crate) enum Inbound {
@@ -443,7 +385,6 @@ mod tests {
             .unwrap(),
             serde_json::json!({"type": "follow_up", "id": "req_0", "message": "more"}),
         );
-        // snake_case tag, camelCase modelId.
         assert_eq!(
             serde_json::to_value(Command::SetModel {
                 id: &id,
@@ -498,8 +439,6 @@ mod tests {
 
     #[test]
     fn decodes_text_delta_inside_message_update() {
-        // Captured from a live gpt-4o-mini turn; the real frame also carries a
-        // large `partial` object that must be ignored.
         let line = r#"{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"pong","partial":{"role":"assistant","content":[]}},"message":{"role":"assistant","content":[]}}"#;
         match parse(line) {
             Inbound::MessageUpdate {
@@ -560,7 +499,6 @@ mod tests {
             other => panic!("expected tool end, got {other:?}"),
         }
 
-        // An unclassified tool keeps its raw name in the Unknown payload.
         match parse(r#"{"type":"tool_execution_start","toolCallId":"c","toolName":"mcp__x","args":{}}"#) {
             Inbound::ToolExecutionStart(ToolCallStart::Unknown(c)) => assert_eq!(c.tool_name, "mcp__x"),
             other => panic!("expected unknown tool start, got {other:?}"),
@@ -569,9 +507,6 @@ mod tests {
 
     #[test]
     fn decodes_tool_execution_update_with_task_progress() {
-        // The `task` tool streams a partial result whose `details.progress`
-        // carries one snapshot per subagent; `args` is present on the wire and
-        // must be ignored.
         let line = r#"{"type":"tool_execution_update","toolCallId":"call_2","toolName":"task","args":{"agent":"explore"},"partialResult":{"content":[{"type":"text","text":"Running..."}],"details":{"progress":[{"index":0,"status":"running","currentTool":"read"}]}}}"#;
         match parse(line) {
             Inbound::ToolExecutionUpdate(t) => {
@@ -587,7 +522,6 @@ mod tests {
     fn agent_lifecycle_and_unknown_frames() {
         assert!(matches!(parse(r#"{"type":"agent_start"}"#), Inbound::AgentStart));
         assert!(matches!(parse(r#"{"type":"agent_end","messages":[]}"#), Inbound::AgentEnd));
-        // Frames Stage 1 does not consume must not error out the stream.
         assert!(matches!(parse(r#"{"type":"turn_start"}"#), Inbound::Unknown));
     }
 
@@ -646,15 +580,12 @@ mod tests {
             Inbound::ExtensionUiRequest(UiRequest::Cancel { target_id }) => assert_eq!(target_id, "u1"),
             other => panic!("expected cancel, got {other:?}"),
         }
-        // A recognised fire-and-forget chrome method → Ignore (no reply).
         assert!(matches!(
             parse(
                 r#"{"type":"extension_ui_request","id":"u7","method":"setWidget","widgetKey":"k","widgetLines":["x"]}"#
             ),
             Inbound::ExtensionUiRequest(UiRequest::Ignore),
         ));
-        // A method this build doesn't model → Unknown, keeping its id so the host
-        // can auto-cancel it instead of hanging.
         match parse(r#"{"type":"extension_ui_request","id":"u8","method":"multiselect","options":["a"]}"#) {
             Inbound::ExtensionUiRequest(UiRequest::Unknown { id, method }) => {
                 assert_eq!(id.as_deref(), Some("u8"));

@@ -102,8 +102,6 @@ async fn report_ready(socket: &Path, token: &str) -> color_eyre::Result<Option<p
         },
     )
     .await?;
-    // Best-effort: the ping above already validated readiness, so a missing or
-    // late reply (older supervisor, clean EOF) just means no report.
     let mut reader = tokio::io::BufReader::new(read_half);
     match tokio::time::timeout(
         std::time::Duration::from_secs(10),

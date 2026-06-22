@@ -1,9 +1,3 @@
-//! Per-thread registry of the in-flight turn's cancellation token: `drive_turn`
-//! registers one per turn (a drop-guard unregisters it) and `/cancel` fires it.
-//! Turns serialise behind the session mutex, so the keyed removal can't clobber a
-//! successor. `streaming`, cleared across a tool-approval dialog, keeps `/cancel`
-//! from latching a deferred abort on a non-streaming turn (the dialog self-cancels).
-
 use std::{
     collections::HashMap,
     sync::{
@@ -27,8 +21,6 @@ pub struct CancelRegistry {
 }
 
 impl CancelRegistry {
-    /// Cancel the turn on `channel` iff it is actively streaming; returns whether
-    /// it was. False when nothing runs there or it is paused on a dialog.
     pub fn request(&self, channel: serenity::ChannelId) -> bool {
         let token = match self.inner.lock().get(&channel) {
             Some(turn) if turn.streaming.load(Ordering::Acquire) => turn.token.clone(),
@@ -38,8 +30,6 @@ impl CancelRegistry {
         true
     }
 
-    /// Register the running turn with a fresh token; the guard unregisters on
-    /// drop. `drive_turn` clears the returned flag while it blocks on a dialog.
     pub fn register(&self, channel: serenity::ChannelId) -> (CancellationToken, Arc<AtomicBool>, CancelGuard) {
         let token = CancellationToken::new();
         let streaming = Arc::new(AtomicBool::new(true));
@@ -61,7 +51,6 @@ impl CancelRegistry {
     }
 }
 
-/// Unregisters the token on drop so a finished turn can't leak a dangling entry.
 pub struct CancelGuard {
     registry: CancelRegistry,
     channel: serenity::ChannelId,

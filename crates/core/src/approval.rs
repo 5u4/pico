@@ -1,11 +1,3 @@
-//! Reusable approval gate for pico-initiated high-privilege actions: [`request`]
-//! posts an Approve/Deny prompt, blocks until an allowlisted Discord user decides
-//! (or it times out / the worker stops), and persists each request as a row in
-//! the worker's SQLite store (`approvals` table) so pending requests and resolved
-//! history survive a restart. Approver authority is a worker-global allowlist
-//! decoupled from the trigger, so an agent-initiated request with no human
-//! invoker still gates.
-
 use std::time::Duration;
 
 use color_eyre::eyre::WrapErr;
@@ -13,48 +5,34 @@ use poise::serenity_prelude as serenity;
 use sqlx::SqlitePool;
 use tokio_util::sync::CancellationToken;
 
-/// Discord's per-message content cap leaves headroom below 2000.
 const MSG_CONTENT_CAP: usize = 1900;
 const APPROVE_ID: &str = "approval:approve";
 const DENY_ID: &str = "approval:deny";
 
-/// Terminal result handed back to the caller.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
     Approved,
     Denied,
     Expired,
-    /// The worker began shutting down first; the row stays `pending` and is
-    /// reconciled to `aborted` on the next start.
     Aborted,
-    /// No approvers configured — fail closed, nothing was posted.
     NoApprovers,
 }
 
 impl Outcome {
-    /// Whether the caller may proceed with the gated action.
     pub fn approved(self) -> bool {
         matches!(self, Outcome::Approved)
     }
 }
 
-/// What the caller wants approved.
 pub struct Subject<'a> {
-    /// Stable machine tag (e.g. `"skill_install"`); stored for history filtering
-    /// and future dispatch.
     pub kind: &'a str,
     pub title: &'a str,
     pub detail: &'a str,
-    /// Channel (or thread) the prompt is posted in; also the request's origin.
     pub channel: serenity::ChannelId,
     pub guild_id: Option<serenity::GuildId>,
-    /// The human who triggered it, when there is one; `None` for agent/system.
     pub requested_by: Option<serenity::UserId>,
 }
 
-/// Parse an allowlist of validated snowflake strings into ids for [`request`].
-/// Strings come pre-validated by `config::load_root`, so a parse miss is logged
-/// and skipped rather than failing the whole gate.
 pub fn parse_approvers(ids: &[String]) -> Vec<serenity::UserId> {
     ids.iter()
         .filter_map(|id| match id.parse::<u64>() {
@@ -67,12 +45,6 @@ pub fn parse_approvers(ids: &[String]) -> Vec<serenity::UserId> {
         .collect()
 }
 
-/// Request approval for `subject`: post an Approve/Deny prompt in
-/// `subject.channel`, persist a pending row, then block until an allowlisted user
-/// decides, the `timeout` elapses, or `cancel` fires.
-///
-/// Fails closed: an empty `approvers` returns [`Outcome::NoApprovers`] without
-/// posting; a disk-write or send error returns `Err`.
 pub async fn request(
     db: &SqlitePool,
     ctx: &serenity::Context,
@@ -97,7 +69,6 @@ pub async fn request(
     let msg = match subject.channel.send_message(ctx, prompt_message(&subject)).await {
         Ok(msg) => msg,
         Err(e) => {
-            // Posted nothing approvable — settle the row so it isn't left pending.
             let _ = resolve(db, &id, "aborted", None, &now()).await;
             return Err(e).wrap_err("posting approval prompt");
         }
@@ -148,9 +119,6 @@ pub async fn request(
     }
 }
 
-/// Startup reconcile: rows left `pending` lost their in-memory awaiter when the
-/// previous worker stopped, so settle them to `aborted` in one statement. Returns
-/// the count changed.
 pub(crate) async fn reconcile_pending_aborted(db: &SqlitePool) -> color_eyre::Result<u64> {
     let result = sqlx::query("UPDATE approvals SET status = 'aborted', resolved_at = ? WHERE status = 'pending'")
         .bind(now())
@@ -230,15 +198,10 @@ fn prompt_content(subject: &Subject<'_>) -> String {
 }
 
 fn resolved_line(subject: &Subject<'_>, outcome: &str) -> String {
-    // `title` is caller/model-controlled, so defang its mentions; `outcome` is
-    // bot-built (the resolver mention is safe) and must stay intact to render as
-    // a name rather than literal `<@id>`. Cap the combined string.
     let title = crate::render::defang_mentions(subject.title);
     crate::render::truncate(&format!("🔐 **{title}**\n{outcome}"), MSG_CONTENT_CAP)
 }
 
-/// Defang model-controlled mentions, THEN cap: defang inserts a zero-width space
-/// per mention, so capping first could leave the result back over the limit.
 fn clamp(text: &str) -> String {
     crate::render::truncate(&crate::render::defang_mentions(text), MSG_CONTENT_CAP)
 }

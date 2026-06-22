@@ -50,14 +50,12 @@ the checks to run before finishing, follow CONTRIBUTING.md.
   (mention it instead).
 - Every changed line should trace to the request.
 
-## 6. Comments — code is the source of truth
+## 6. No comments — code is the source of truth
 
-**Default to none. A comment must state something that can't become false.**
+**Write zero comments.** No `//`, no `///` / `//!` doc comments, no `/* */`.
+Names, types, and structure carry intent; comments drift, so they are banned.
 
-- Never restate code, narrate steps, or describe roadmap/status.
-- Never enumerate contents (module lists, feature lists) — that drifts the
-  moment code changes and no one prunes it.
-- `///` / `//!` API docs are fine, but write them about the contract (what a
-  caller must know), not the implementation.
-- The one clear keeper: the *why* behind a non-obvious decision or a deliberate
-  omission — facts the code can't show on its own.
+- The only exceptions: `// SAFETY:` above an `unsafe` block, and an
+  `SPDX-License-Identifier` header where one is required.
+- A pre-commit + CI gate (`scripts/lint-comments.sh`) fails any diff that adds a
+  non-exempt comment. Don't bypass it.

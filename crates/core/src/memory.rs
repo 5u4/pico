@@ -1,7 +1,3 @@
-//! Hindsight long-term-memory HTTP client. Every operation is best-effort: a
-//! recall failure yields no injected context and a retain failure is dropped, so
-//! memory is additive: it never breaks a turn, and blocks it only up to a short recall timeout.
-
 use std::{
     path::{Path, PathBuf},
     sync::{Arc, LazyLock},
@@ -17,11 +13,8 @@ const RETAIN_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_QUERY_CHARS: usize = 800;
 const RETAIN_CONTEXT: &str = "Discord conversation between the user and pico";
 
-/// One connection-pooling client for the whole worker; reused across turns.
 static HTTP: LazyLock<reqwest::Client> = LazyLock::new(reqwest::Client::new);
 
-/// Per-turn resolved memory settings: the worker's Hindsight endpoint plus the
-/// active profile's bank and recall tuning.
 #[derive(Clone)]
 pub struct MemoryConfig {
     pub endpoint: String,
@@ -30,8 +23,6 @@ pub struct MemoryConfig {
     pub recall_max_tokens: u32,
 }
 
-/// Fold an arbitrary string into Hindsight's bank-id charset (lowercase
-/// `alnum`/`-`/`_`); anything else becomes `-`.
 fn slugify(s: &str) -> String {
     s.chars()
         .map(|c| {
@@ -44,9 +35,6 @@ fn slugify(s: &str) -> String {
         .collect()
 }
 
-/// Per-(profile, user) bank (`pico-<profile>-<user>`), so a shared guild never
-/// recalls one member's memories into another's. A `[memory] bank` override
-/// replaces it with one shared (slugified) bank, dropping per-user isolation.
 pub fn bank_for(profile: &str, user: &str, override_name: Option<&str>) -> String {
     match override_name.map(str::trim).filter(|s| !s.is_empty()) {
         Some(name) => slugify(name),
@@ -54,9 +42,6 @@ pub fn bank_for(profile: &str, user: &str, override_name: Option<&str>) -> Strin
     }
 }
 
-/// Recall observations relevant to `query`, formatted as a `<memory-context>`
-/// block ready to prepend to the user's turn. `None` on no results, timeout, or
-/// any error — the turn then runs with no injected memory.
 pub async fn recall(cfg: &MemoryConfig, query: &str) -> Option<String> {
     let url = format!(
         "{}/v1/default/banks/{}/memories/recall",
@@ -91,8 +76,6 @@ pub async fn recall(cfg: &MemoryConfig, query: &str) -> Option<String> {
     format_recall(&texts)
 }
 
-/// Best-effort capture of one conversation turn into the thread's document
-/// (`document_id`, append mode). Logs and drops on any failure.
 pub async fn retain(cfg: &MemoryConfig, document_id: &str, user: &str, assistant: &str, tags: Vec<String>) {
     let url = format!("{}/v1/default/banks/{}/memories", cfg.endpoint.trim_end_matches('/'), cfg.bank);
     let body = retain_body(&format_turn(user, assistant), &tags, document_id);
@@ -136,7 +119,6 @@ fn format_turn(user: &str, assistant: &str) -> String {
     format!("User: {user}\nAssistant: {assistant}")
 }
 
-/// Collapse whitespace and drop angle brackets so a recalled fact can't inject a closing tag.
 fn sanitize(text: &str) -> String {
     let no_angles: String = text
         .chars()
@@ -175,22 +157,16 @@ struct RecallResult {
 
 const DEFAULT_IMAGE: &str = "ghcr.io/vectorize-io/hindsight:latest";
 
-/// Overridable via `PICO_HINDSIGHT_IMAGE` to pin a version/digest.
 fn image() -> String {
     std::env::var("PICO_HINDSIGHT_IMAGE").unwrap_or_else(|_| DEFAULT_IMAGE.to_owned())
 }
 const LLM_MODEL: &str = "gpt-4o-mini";
 const COPILOT_BASE_URL: &str = "https://api.enterprise.githubcopilot.com";
-/// First boot loads the embedding model and inits PostgreSQL; allow generously.
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(240);
 const HEALTH_POLL: Duration = Duration::from_secs(2);
 const BRINGUP_COOLDOWN: Duration = Duration::from_secs(60);
 const RECHECK_INTERVAL: Duration = Duration::from_secs(30);
 
-/// Worker-owned Hindsight container, brought up on demand over the host docker
-/// socket (DooD) when a profile enables memory and no external `[memory]
-/// endpoint` override is set. Persistent (`--restart unless-stopped`), one per
-/// worker root, reused across worker restarts; never torn down by the worker.
 pub struct HindsightDaemon {
     copilot_token: Option<String>,
     container: String,
@@ -220,18 +196,11 @@ impl HindsightDaemon {
         })
     }
 
-    /// This worker's Hindsight container name (`pico-hindsight-<root-hash>`).
     pub fn container(&self) -> &str {
         &self.container
     }
 
-    /// Base URL of a healthy worker-managed Hindsight, or `None` while it is still
-    /// coming up or unavailable. A cold start (image pull + boot) runs in the
-    /// background and the turn proceeds without memory until ready; re-validating a
-    /// cached endpoint does an inline health check bounded by `RECALL_TIMEOUT`, so a
-    /// stalled container delays a turn by at most that long.
     pub async fn ensure_endpoint(self: &Arc<Self>) -> Option<String> {
-        // Re-validate a stale cached endpoint so a removed container is re-brought-up, not cached forever.
         let stale = {
             let st = self.state.lock().await;
             match (&st.endpoint, st.checked_at) {
@@ -265,8 +234,6 @@ impl HindsightDaemon {
         None
     }
 
-    /// Pre-pull the image at startup so the first self-managed turn isn't blocked
-    /// on a multi-GB pull. Best-effort.
     pub async fn ensure_image(self: Arc<Self>) {
         if self.copilot_token.is_some() {
             docker_ok(&["pull", &image()]).await;
@@ -363,9 +330,6 @@ fn root_hash(root: &Path) -> u64 {
     hasher.finish()
 }
 
-/// Stable per-worker-root container name and host port (reused across restarts);
-/// distinct across roots in practice, though the 32-bit name and `% 4000` port
-/// hashes can collide.
 fn container_name(root: &Path) -> String {
     format!("pico-hindsight-{:08x}", root_hash(root) as u32)
 }
@@ -374,7 +338,6 @@ fn host_port(root: &Path) -> u16 {
     8888 + (root_hash(root) % 4000) as u16
 }
 
-/// Path to omp's `agent.db`, mirroring omp's `PI_CODING_AGENT_DIR`/`${PI_CONFIG_DIR:-~/.omp}/agent` resolution.
 fn omp_agent_db() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os("PI_CODING_AGENT_DIR") {
         return Some(PathBuf::from(dir).join("agent.db"));
@@ -385,8 +348,6 @@ fn omp_agent_db() -> Option<PathBuf> {
     Some(base.join("agent").join("agent.db"))
 }
 
-/// omp's stored GitHub Copilot OAuth token (`access` of the active
-/// `github-copilot` credential), reused as Hindsight's key. Best-effort: any failure yields `None`.
 pub async fn omp_copilot_token() -> Option<String> {
     let db = omp_agent_db()?;
     if !db.exists() {
@@ -435,8 +396,6 @@ async fn container_state(name: &str) -> ContainerState {
     }
 }
 
-/// The worker's own first docker network, so a self-run sibling is reachable by
-/// container name. `None` outside a container (host/systemd) → published-port fallback.
 async fn self_network() -> Option<String> {
     let host = std::fs::read_to_string("/etc/hostname").ok()?;
     let host = host.trim();

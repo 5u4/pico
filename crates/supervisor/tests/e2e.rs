@@ -1,14 +1,3 @@
-//! End-to-end tests for the supervisor's process orchestration: deploy,
-//! rollback, stop, and graceful shutdown. Every test drives a real supervisor
-//! (and the worker it spawns) over the control socket.
-//!
-//! Hermetic by construction: [`Fixture`] redirects `$HOME` to a fresh temp dir,
-//! so a supervisor under test resolves `~/.pico` *inside* that temp dir and
-//! never touches the developer's real `~/.pico`. The control socket lives under
-//! `/tmp` because macOS caps `sun_path` near 104 bytes — too short for the deep
-//! temp `$HOME`. Cleanup (stop the supervisor, remove the temp dir) runs on
-//! `Drop`, so it happens even when a test panics.
-
 use std::{
     io::{BufRead, BufReader, Write},
     os::unix::net::UnixStream,
@@ -20,22 +9,14 @@ use std::{
 
 use serde_json::Value;
 
-/// A sibling binary in the same target dir as this test's supervisor binary.
 fn bin(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_pico-supervisor")).with_file_name(name)
 }
 
-/// Path to the fake test-double worker (`crates/worker`'s `fake-worker` bin,
-/// behind the `test-stub` feature). The real worker only reaches "ready" by
-/// connecting to Discord, which a hermetic test can't do; the supervisor needs
-/// nothing but the ready ping, so these orchestration tests deploy the stub.
-/// Built on demand — `cargo test -p pico-supervisor` builds no worker bin — with a
-/// `OnceLock` so concurrent tests don't race the build.
 fn fake_worker_bin() -> PathBuf {
     static WORKER: OnceLock<PathBuf> = OnceLock::new();
     WORKER
         .get_or_init(|| {
-            // Always rebuild: the supervisor runs the stub as `--version`, so it must be current.
             let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
             let status = Command::new(cargo)
                 .args(["build", "-p", "pico-worker", "--features", "test-stub"])
@@ -47,7 +28,6 @@ fn fake_worker_bin() -> PathBuf {
         .clone()
 }
 
-/// `kill(pid, 0)` probes existence without delivering a signal.
 fn alive(pid: u32) -> bool {
     unsafe { libc::kill(pid as i32, 0) == 0 }
 }
@@ -79,16 +59,9 @@ fn message(v: &Value) -> &str {
     v["message"].as_str().unwrap_or("")
 }
 
-/// Serializes the suite: each test drives a full supervisor + worker process
-/// tree, and running nine of those in parallel oversubscribes the machine
-/// enough that worker startup can blow the readiness timeout. Held for the
-/// whole test via [`Fixture`].
 static SERIAL: Mutex<()> = Mutex::new(());
 
-/// A running supervisor with `$HOME` redirected to a private temp dir.
 struct Fixture {
-    // Released only after `Drop` finishes cleaning up, so the next test starts
-    // against a quiet machine. Declared first so it outlives the other fields.
     _serial: MutexGuard<'static, ()>,
     home: PathBuf,
     socket: PathBuf,
@@ -96,8 +69,6 @@ struct Fixture {
 }
 
 impl Fixture {
-    /// Start a supervisor. `slot`, if given, seeds the `current` slot symlink
-    /// before launch so the supervisor adopts it on boot.
     fn start(slot: Option<&Path>) -> Self {
         let serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
@@ -175,7 +146,6 @@ impl Fixture {
         self.request(&format!("{{\"cmd\":\"deploy\",\"path\":{path},\"report_to\":{report_to}}}"))
     }
 
-    /// Where the fake worker echoes a relayed deploy report.
     fn relay_report(&self) -> PathBuf {
         self.home.join(".pico/workers/default/relay-report.txt")
     }
@@ -195,8 +165,6 @@ impl Fixture {
 
 impl Drop for Fixture {
     fn drop(&mut self) {
-        // Graceful stop (so the worker is reaped, not orphaned), force-kill if
-        // it ignores us, then remove the temp $HOME — even on a panic.
         sigterm(self.sup.id());
         if poll(Duration::from_secs(10), || self.sup.try_wait().ok().flatten()).is_none() {
             let _ = self.sup.kill();
@@ -238,13 +206,10 @@ fn boot_adopts_current_slot() {
 #[test]
 fn shutdown_does_not_hang_on_idle_client() {
     let mut fx = Fixture::start(None);
-    // Connect but send nothing: the handler parks in read_frame. Give it a beat
-    // to reach that read so it is genuinely in-flight when the signal lands.
     let idle = UnixStream::connect(fx.socket()).expect("connect idle client");
     std::thread::sleep(Duration::from_millis(500));
 
     sigterm(fx.pid());
-    // Must finish well under REQUEST_READ_TIMEOUT (10s), not wait the read out.
     let exited = fx.wait_exit(Duration::from_secs(8));
     let clean = matches!(exited, Some(st) if st.success());
     drop(idle);
@@ -302,8 +267,6 @@ fn failed_deploy_rolls_back_to_previous() {
     assert!(status_is(&fx.deploy_path(&fake_worker_bin()), "ok"), "initial deploy failed");
     let good_slot = fx.current_slot().expect("current slot after deploy");
 
-    // A real file that is not executable: the copy succeeds but the spawn fails,
-    // exercising the kill-old -> spawn-new-fails -> roll-back path.
     let junk = fx.home.join("not-a-binary");
     std::fs::write(&junk, b"not a binary").unwrap();
     let resp = fx.deploy_path(&junk);
@@ -350,7 +313,6 @@ fn build_id_is_content_addressed() {
     let b = fx.status()["build"].as_str().map(str::to_owned);
 
     assert!(a.is_some(), "no build id reported");
-    // Same bytes at different slot dirs must hash equal: content-addressed, not path.
     assert_eq!(a, b, "build id changed for identical binary content (path-addressed?)");
 }
 
@@ -382,11 +344,9 @@ fn deploy_relays_report_to_live_worker() {
     let fx = Fixture::start(None);
     let worker = fake_worker_bin();
     assert!(status_is(&fx.deploy_path(&worker), "ok"), "initial deploy failed");
-    // The new worker should echo the relayed "deployed ..." report to its root.
     let resp = fx.deploy_path_report(&worker, "987654321");
     assert!(status_is(&resp, "ok"), "deploy with report failed: {resp}");
 
-    // Poll for the relayed content, not just the file: a bare read can race an empty write.
     let report = poll(Duration::from_secs(5), || {
         std::fs::read_to_string(fx.relay_report())
             .ok()
@@ -405,7 +365,6 @@ fn rollback_relays_failure_report() {
     let worker = fake_worker_bin();
     assert!(status_is(&fx.deploy_path(&worker), "ok"), "initial deploy failed");
 
-    // Real but non-executable: staging copies it, the spawn fails, then rollback.
     let junk = fx.home.join("not-a-binary");
     std::fs::write(&junk, b"not a binary").unwrap();
     let resp = fx.deploy_path_report(&junk, "987654321");

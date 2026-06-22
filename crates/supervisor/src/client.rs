@@ -1,7 +1,3 @@
-//! Control-socket client. `supervisor <deploy|status|stop|rollback>` connects to
-//! a running daemon's socket, sends one request, and prints the reply. The
-//! daemon itself takes no subcommand (`supervisor` with no arguments).
-
 use std::{path::PathBuf, time::Duration};
 
 use color_eyre::eyre::{WrapErr, eyre};
@@ -80,7 +76,6 @@ async fn send(request: Request) -> color_eyre::Result<Response> {
     let (read_half, mut write_half) = stream.into_split();
     proto::write_frame(&mut write_half, &request).await?;
     let mut reader = BufReader::new(read_half);
-    // Derived from health_timeout so a large one can't trip a spurious timeout.
     let budget = Duration::from_secs(config.health_timeout_secs.saturating_mul(4).saturating_add(10).max(180));
     tokio::time::timeout(budget, proto::read_frame::<Response, _>(&mut reader))
         .await

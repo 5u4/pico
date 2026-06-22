@@ -1,8 +1,3 @@
-//! Renders OMP's extension-UI requests (`select`/`confirm`/`input`/`editor`/
-//! `notify`) as Discord components and replies over RPC. A value-bearing request
-//! with no timeout blocks the turn until answered; turns serialise, so one is
-//! open at a time and the collector races `cancel`.
-
 use std::{fmt::Write as _, time::Duration};
 
 use poise::serenity_prelude as serenity;
@@ -23,7 +18,6 @@ const MODAL_LABEL_CAP: usize = 45;
 const MODAL_VALUE_CAP: usize = 4000;
 const ANSWER_PREVIEW_CAP: usize = 200;
 const SELECT_MAX_OPTIONS: usize = 25;
-/// Below Discord's ~15 min modal auto-close, so an abandoned modal can't pin a turn.
 const MODAL_SUBMIT_WINDOW: Duration = Duration::from_secs(14 * 60);
 
 const ID_SELECT: &str = "ui:select";
@@ -32,29 +26,19 @@ const ID_ANSWER: &str = "ui:answer";
 const ID_YES: &str = "ui:yes";
 const ID_NO: &str = "ui:no";
 
-/// Outcome of handling one UI request.
 pub enum Handled {
-    /// `posted`: handling left a fixed-position channel message (dialog/notify) → seal the feed.
     Continue { posted: bool },
-    /// The worker `cancel` token fired mid-prompt; the caller runs the restart cleanup.
     Cancelled,
 }
 
-/// One thread's open value-bearing dialog: the router hands the asker's
-/// next message to `tx` so it answers the dialog instead of starting a turn.
 pub struct PendingAnswer {
     author: serenity::UserId,
     tx: tokio::sync::mpsc::UnboundedSender<String>,
 }
 
-/// Per-thread registry of open `select`/`input`/`editor` dialogs, keyed by the
-/// Discord thread channel. see also: crate::discord (route_message delivers here).
 pub type PendingAnswers =
     std::sync::Arc<parking_lot::Mutex<std::collections::HashMap<serenity::ChannelId, PendingAnswer>>>;
 
-/// Deliver `text` as the answer to the dialog open on `channel`, if one waits on
-/// `author`. Returns whether consumed. Consuming *takes* the entry, so a same-author
-/// follow-up before the guard drops falls through to a new turn, not a dead buffer.
 pub fn deliver_pending_answer(
     pending: &PendingAnswers,
     channel: serenity::ChannelId,
@@ -71,7 +55,6 @@ pub fn deliver_pending_answer(
     entry.tx.send(text.to_owned()).is_ok()
 }
 
-/// Removes its `channel` entry on drop, so a post-dialog message starts a new turn.
 struct AnswerGuard<'a> {
     pending: &'a PendingAnswers,
     channel: serenity::ChannelId,
@@ -93,7 +76,6 @@ fn register_answer(
     (AnswerGuard { pending, channel }, rx)
 }
 
-/// Render `req` on Discord and reply over RPC. Only `author` (this turn's sender) can answer.
 pub async fn handle_request(
     ctx: &serenity::Context,
     channel: serenity::ChannelId,
@@ -145,13 +127,7 @@ pub async fn handle_request(
         UiRequest::Notify { message, notify_type } => Handled::Continue {
             posted: notify(ctx, channel, message, notify_type.as_deref()).await,
         },
-        // Recognised but with no Discord surface (`set_status`, …), or OMP
-        // withdrawing a pending request: nothing to reply.
         UiRequest::Cancel { .. } | UiRequest::Ignore => Handled::Continue { posted: false },
-        // A method this build doesn't recognise: reply `cancelled` so a new
-        // response-bearing dialog resolves to its dismissed value instead of
-        // hanging the turn. Harmless for a fire-and-forget method — OMP drops a
-        // reply whose id has no pending dialog.
         UiRequest::Unknown { id, method } => {
             tracing::warn!(%method, "unrecognised extension_ui_request; auto-cancelled");
             if let Some(id) = id {
@@ -175,7 +151,6 @@ async fn select(
     cancel: &CancellationToken,
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
 ) -> Handled {
-    // Empty list: OMP's `select` resolves to a cancel, so mirror it, not a dead menu.
     if options.is_empty() {
         let _ = client.ui_response(&UiResponse::cancelled(id, false)).await;
         return Handled::Continue { posted: false };
@@ -204,7 +179,6 @@ async fn select(
         Collected::Interaction(i) => *i,
     };
 
-    // Option values are select indices; map back to the verbatim label.
     let picked = if interaction.data.custom_id == ID_SELECT {
         match &interaction.data.kind {
             serenity::ComponentInteractionDataKind::StringSelect { values } => values
@@ -266,9 +240,6 @@ async fn confirm(
             return Handled::Cancelled;
         }
         Collected::Ended { timed_out } => {
-            // No interaction (a timeout, or shard drop): show it as cancelled, not a
-            // chosen "No". OMP still resolves confirm to `false`; flag the timeout
-            // so it can run `onTimeout`.
             finalize(ctx, channel, msg.id, &resolved_line(title, None)).await;
             let _ = if timed_out {
                 client.ui_response(&UiResponse::cancelled(id, true)).await
@@ -277,7 +248,6 @@ async fn confirm(
             };
             return Handled::Continue { posted: true };
         }
-        // `confirm` is button-only (yes/no), so it registers no answer channel.
         Collected::Text(_) => unreachable!("confirm registers no text answer channel"),
         Collected::Interaction(i) => *i,
     };
@@ -357,7 +327,6 @@ async fn text_prompt(
                 return Handled::Cancelled;
             }
             ModalStep::Reclick(next) => interaction = *next,
-            // Modal closed with no click: keep the prompt open for the next click.
             ModalStep::Closed => {
                 interaction = match collect(ctx, msg.id, author, None, cancel, Some(&mut *rx)).await {
                     Collected::Interaction(i) => *i,
@@ -381,20 +350,13 @@ async fn text_prompt(
     }
 }
 
-/// Outcome of opening one modal off a still-live carrier message.
 enum ModalStep {
     Answered(String),
     Reclick(Box<serenity::ComponentInteraction>),
-    /// Modal closed with no carrier click; the prompt stays open.
     Closed,
     Restart,
 }
 
-/// Open a modal off the Answer-click `interaction` and await its submit while a
-/// fresh carrier collector runs concurrently: Discord emits no event on modal
-/// dismiss, so the concurrent collector keeps Answer/cancel — and a typed answer
-/// in the channel — responsive instead of stranding the turn until the modal's
-/// 14-minute timeout.
 #[allow(clippy::too_many_arguments)]
 async fn run_modal(
     ctx: &serenity::Context,
@@ -414,7 +376,6 @@ async fn run_modal(
         r = interaction.quick_modal(ctx, modal) => match r {
             Ok(Some(response)) => {
                 let text = response.inputs.into_iter().next().unwrap_or_default();
-                // Ack the submit (else "interaction failed"); the carrier is edited separately.
                 let _ = response
                     .interaction
                     .create_response(ctx, serenity::CreateInteractionResponse::Acknowledge)
@@ -427,7 +388,6 @@ async fn run_modal(
             Collected::Interaction(i) => ModalStep::Reclick(i),
             Collected::Cancelled => ModalStep::Restart,
             Collected::Ended { .. } => ModalStep::Closed,
-            // A typed answer resolves the editor; a still-open modal becomes a stale submit.
             Collected::Text(text) => ModalStep::Answered(text),
         },
     }
@@ -460,10 +420,7 @@ async fn notify(
 enum Collected {
     Interaction(Box<serenity::ComponentInteraction>),
     Text(String),
-    /// Ended with no pick. `timed_out` only when a timeout was set and fired.
-    Ended {
-        timed_out: bool,
-    },
+    Ended { timed_out: bool },
     Cancelled,
 }
 
@@ -491,7 +448,6 @@ async fn collect(
         () = cancel.cancelled() => Collected::Cancelled,
         text = answered => match text {
             Some(t) => Collected::Text(t),
-            // Sender dropped (dialog ending): treat as a plain end, not a pick.
             None => Collected::Ended { timed_out: false },
         },
         result = collector.next() => match result {
@@ -519,7 +475,6 @@ async fn post(
     }
 }
 
-/// Ack a component interaction by collapsing its message to the resolved line.
 async fn ack_update(ctx: &serenity::Context, interaction: &serenity::ComponentInteraction, content: &str) {
     let response = serenity::CreateInteractionResponse::UpdateMessage(
         serenity::CreateInteractionResponseMessage::new()
@@ -531,7 +486,6 @@ async fn ack_update(ctx: &serenity::Context, interaction: &serenity::ComponentIn
     }
 }
 
-/// Collapse a carrier no interaction can update (a timeout, or a modal submit).
 async fn finalize(
     ctx: &serenity::Context,
     channel: serenity::ChannelId,
@@ -546,16 +500,12 @@ async fn finalize(
     }
 }
 
-/// Defang model-controlled mentions, THEN cap to Discord's message limit. Order
-/// matters: defang inserts a zero-width space per mention, so capping first could
-/// leave the result back over the limit.
 fn clamp_content(text: &str) -> String {
     render::truncate(&render::defang_mentions(text), MSG_CONTENT_CAP)
 }
 
 fn select_prompt_text(title: &str, options: &[String]) -> String {
     let mut out = format!("❓ {title}");
-    // Only the options the menu shows (capped at 25); numbering unpickable extras would mislead.
     for (i, opt) in options.iter().take(SELECT_MAX_OPTIONS).enumerate() {
         let _ = write!(out, "\n**{}.** {opt}", i + 1);
     }
@@ -587,7 +537,6 @@ fn select_components(options: &[String]) -> Vec<serenity::CreateActionRow> {
     ]
 }
 
-/// The settled-prompt line: the question plus the chosen answer or a cancel marker.
 fn resolved_line(title: &str, choice: Option<&str>) -> String {
     let title = render::truncate(title, MSG_CONTENT_CAP - 300);
     let body = match choice {
@@ -608,7 +557,6 @@ fn modal_field(title: &str, field: &TextField<'_>) -> serenity::CreateInputText 
     } else {
         serenity::InputTextStyle::Short
     };
-    // The custom id is overwritten by `CreateQuickModal`; an empty one is fine.
     let mut input = serenity::CreateInputText::new(style, modal_title(title), "").required(true);
     if let Some(value) = field.value {
         input = input.value(render::truncate(value, MODAL_VALUE_CAP));
@@ -635,8 +583,6 @@ mod tests {
 
     #[test]
     fn clamp_content_defangs_before_capping() {
-        // A near-cap string full of mentions must stay within the cap: defang
-        // inserts a zero-width space per mention, so defang must precede the cap.
         let raw = "@everyone ".repeat(MSG_CONTENT_CAP);
         let out = clamp_content(&raw);
         assert!(out.chars().count() <= MSG_CONTENT_CAP, "over cap: {}", out.chars().count());
@@ -645,7 +591,6 @@ mod tests {
 
     #[test]
     fn select_prompt_text_lists_only_shown_options() {
-        // The menu shows at most 25; the prompt text must not number unpickable extras.
         let options: Vec<String> = (0..30).map(|i| format!("opt{i}")).collect();
         let text = select_prompt_text("Pick", &options);
         assert!(text.contains("opt24"));

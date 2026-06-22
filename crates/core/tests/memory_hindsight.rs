@@ -1,7 +1,3 @@
-//! Live Hindsight round-trip through the worker-managed daemon: lets
-//! `HindsightDaemon` bring up its own container over the docker socket, then
-//! asserts a real retain -> recall round-trip. `#[ignore]`d; needs docker + an omp Copilot login.
-
 use std::{
     path::{Path, PathBuf},
     process::Command,
@@ -24,8 +20,6 @@ fn docker_available() -> bool {
         .unwrap_or(false)
 }
 
-/// Force-remove the container, its data volume, and the temp root on drop so a
-/// panicking assertion never leaks them.
 struct Cleanup {
     container: String,
     root: PathBuf,
@@ -53,7 +47,6 @@ async fn hindsight_daemon_retain_recall_roundtrip() {
         return;
     }
 
-    // Container name/port derive from this temp root; the LLM token comes from omp, not here.
     let root = std::env::temp_dir().join(format!("pico-mem-e2e-{}", std::process::id()));
     std::fs::create_dir_all(&root).expect("mkdir root");
 
@@ -65,8 +58,6 @@ async fn hindsight_daemon_retain_recall_roundtrip() {
         root: root.clone(),
     };
 
-    // ensure_endpoint backgrounds the cold start (image pull + boot) and returns
-    // None until the container is healthy; poll until it produces an endpoint.
     let deadline = Instant::now() + Duration::from_secs(300);
     let mut endpoint = None;
     while Instant::now() < deadline {
@@ -95,8 +86,6 @@ async fn hindsight_daemon_retain_recall_roundtrip() {
     )
     .await;
 
-    // Retain processes asynchronously server-side (extract + consolidate), so poll
-    // recall until the fact surfaces or we time out.
     let deadline = Instant::now() + Duration::from_secs(180);
     let mut found = None;
     while Instant::now() < deadline {

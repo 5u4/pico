@@ -1,3 +1,0 @@
-#!/usr/bin/env bash
-# Keep-reason gate for added comments. Bypass with `git commit --no-verify`.
-exec scripts/lint-comment-reasons.sh "$1"

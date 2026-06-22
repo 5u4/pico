@@ -7,8 +7,6 @@ use std::{
 use color_eyre::eyre::WrapErr;
 use serde::Deserialize;
 
-/// What a mid-turn message does (omp's per-prompt `streamingBehavior`): `steer`
-/// folds it into the running turn, `follow_up` queues it behind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StreamingBehavior {
@@ -119,7 +117,6 @@ pub fn load(config_path: &Path) -> color_eyre::Result<ProfileConfig> {
     })
 }
 
-/// Whether any profile opts into the browser — gates the startup camofox engine fetch.
 pub fn any_browser_enabled(root: &Path) -> bool {
     let Ok(entries) = std::fs::read_dir(root.join("profiles")) else {
         return false;
@@ -129,7 +126,6 @@ pub fn any_browser_enabled(root: &Path) -> bool {
         .any(|entry| entry.path().is_dir() && load(&entry.path().join("config.toml")).is_ok_and(|c| c.browser_enabled))
 }
 
-/// Whether any profile opts into memory — gates the startup Hindsight image pull.
 pub fn any_memory_enabled(root: &Path) -> bool {
     let Ok(entries) = std::fs::read_dir(root.join("profiles")) else {
         return false;
@@ -144,9 +140,6 @@ pub struct GuildDefault {
     pub cwd: PathBuf,
 }
 
-/// The worker root's served-guild registry. Only a guild with an entry here is
-/// served at all; an unbound channel in one routes its turns to that guild's
-/// default `(profile, cwd)`.
 pub struct RootConfig {
     guilds: HashMap<String, GuildDefault>,
     worktrees_dir: Option<PathBuf>,
@@ -160,26 +153,18 @@ impl RootConfig {
         self.guilds.get(guild_id)
     }
 
-    /// Parent dir for per-thread git worktrees (`[worktree] dir`). `None` means
-    /// unset — the worker then falls back to `<root>/worktrees`.
     pub fn worktrees_dir(&self) -> Option<&Path> {
         self.worktrees_dir.as_deref()
     }
 
-    /// Discord user ids allowed to resolve approval requests (`[approval] approvers`).
-    /// Empty ⇒ the approval gate fails closed (nothing can be approved).
     pub fn approvers(&self) -> &[String] {
         &self.approvers
     }
 
-    /// How long an approval prompt waits before expiring (`[approval] timeout_secs`,
-    /// default 1h).
     pub fn approval_timeout(&self) -> Duration {
         self.approval_timeout
     }
 
-    /// Hindsight base URL override (`[memory] endpoint`). `None` ⇒ the worker
-    /// self-manages a container for enabled profiles instead.
     pub fn memory_endpoint(&self) -> Option<&str> {
         self.memory_endpoint.as_deref()
     }
@@ -218,8 +203,6 @@ struct RawApproval {
     timeout_secs: Option<u64>,
 }
 
-/// One allowlisted approver id; accepts a quoted snowflake or a bare integer,
-/// exactly like a guild id.
 #[derive(serde::Deserialize)]
 #[serde(transparent)]
 struct Approver(#[serde(deserialize_with = "crate::bindings::de_snowflake")] String);
@@ -233,11 +216,6 @@ struct RawGuild {
     profile: Option<String>,
 }
 
-/// Load the served-guild registry from `<root>/config.toml`. A missing file is
-/// an empty registry. Validates id/profile shape and that each cwd is absolute,
-/// but deliberately NOT that the cwd exists: existence is re-checked per message
-/// so a directory torn down on the host surfaces as an in-channel error instead
-/// of a silent drop the user has to read logs to diagnose.
 pub fn load_root(config_path: &Path) -> color_eyre::Result<RootConfig> {
     let text = match std::fs::read_to_string(config_path) {
         Ok(text) => text,
@@ -445,7 +423,7 @@ mod tests {
     #[test]
     fn any_browser_enabled_scans_profiles() {
         let root = temp_dir("anybrowser");
-        assert!(!super::any_browser_enabled(&root)); // no profiles dir yet
+        assert!(!super::any_browser_enabled(&root));
 
         let write_profile = |name: &str, body: &str| {
             let dir = root.join("profiles").join(name);
@@ -660,8 +638,6 @@ mod tests {
 
     #[test]
     fn load_root_rejects_u64_overflow_approver() {
-        // 20 digits passes the snowflake length/shape check but overflows u64,
-        // so it must fail config load rather than be silently dropped at runtime.
         let dir = temp_dir("rootapproverflow");
         let path = dir.join("config.toml");
         std::fs::write(&path, "[approval]\napprovers = [\"99999999999999999999\"]\n").unwrap();
