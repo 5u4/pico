@@ -300,7 +300,7 @@ mounted docker socket (embedded PostgreSQL, persistent across restarts) and talk
 to it on the compose network — no compose changes, no ports to publish. The first
 turn or two have no memory while the ~4 GB image pulls and the server boots (pico
 pre-pulls at startup when a profile has memory on); a down or still-starting
-Hindsight never blocks a turn.
+Hindsight never breaks a turn — at worst it adds a short, bounded recall timeout.
 
 To use an existing/remote Hindsight instead, set `[memory] endpoint` in the worker
 `config.toml` and the worker won't self-manage one.

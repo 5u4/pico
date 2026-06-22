@@ -223,9 +223,10 @@ impl HindsightDaemon {
     }
 
     /// Base URL of a healthy worker-managed Hindsight, or `None` while it is still
-    /// coming up or unavailable. Never blocks the turn: a cold start (image pull +
-    /// boot) runs in the background and the turn proceeds without memory until the
-    /// container is ready.
+    /// coming up or unavailable. A cold start (image pull + boot) runs in the
+    /// background and the turn proceeds without memory until ready; re-validating a
+    /// cached endpoint does an inline health check bounded by `RECALL_TIMEOUT`, so a
+    /// stalled container delays a turn by at most that long.
     pub async fn ensure_endpoint(self: &Arc<Self>) -> Option<String> {
         // Re-validate a stale cached endpoint so a removed container is re-brought-up, not cached forever.
         let stale = {
@@ -432,7 +433,7 @@ async fn wait_healthy(endpoint: &str, cancel: &CancellationToken) -> bool {
 
 async fn health(endpoint: &str) -> bool {
     HTTP.get(format!("{}/version", endpoint.trim_end_matches('/')))
-        .timeout(Duration::from_secs(5))
+        .timeout(RECALL_TIMEOUT)
         .send()
         .await
         .map(|resp| resp.status().is_success())

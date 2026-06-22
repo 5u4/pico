@@ -108,6 +108,8 @@ pub fn load(config_path: &Path) -> color_eyre::Result<ProfileConfig> {
             .memory
             .as_ref()
             .and_then(|m| m.recall_budget.clone())
+            .map(|b| b.trim().to_owned())
+            .filter(|b| !b.is_empty())
             .unwrap_or_else(|| DEFAULT_RECALL_BUDGET.to_owned()),
         memory_recall_max_tokens: raw
             .memory
@@ -407,6 +409,8 @@ mod tests {
         assert!(cfg.memory_enabled);
         assert_eq!(cfg.memory_bank.as_deref(), Some("custom"));
         assert_eq!(cfg.memory_recall_budget, "mid");
+        std::fs::write(&path, "[memory]\nrecall_budget = \"  \"\n").unwrap();
+        assert_eq!(super::load(&path).unwrap().memory_recall_budget, "mid");
 
         std::fs::write(&path, "[memory]\n").unwrap();
         assert!(!super::load(&path).unwrap().memory_enabled);
