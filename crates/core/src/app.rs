@@ -23,7 +23,6 @@ impl App {
             Ok(n) => tracing::info!(count = n, "reconciled abandoned approval requests to aborted"),
             Err(e) => tracing::warn!(error = %format!("{e:#}"), "reconciling pending approvals failed"),
         }
-        db.close().await;
         let cancel = CancellationToken::new();
         let tracker = TaskTracker::new();
         let pool = OmpPool::new(cancel.clone(), &tracker);
@@ -36,6 +35,7 @@ impl App {
             .framework(crate::discord::framework(
                 root.to_path_buf(),
                 bindings,
+                db,
                 pool,
                 ready_tx,
                 supervisor_socket,
