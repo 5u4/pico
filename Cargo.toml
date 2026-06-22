@@ -16,7 +16,6 @@ pico-core = { path = "crates/core" }
 pico-shared = { path = "crates/shared" }
 poise = "0.6.2"
 rig-core = "0.38.2"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 serenity = "0.12.5"

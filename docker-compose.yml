@@ -30,7 +30,34 @@ services:
       - pico-cache:/home/pico/.cache
       - pico-build:/home/pico/.cache/build
 
+  # Long-running Hindsight memory server. Reached by omp inside the pico
+  # container at http://hindsight:8888 (shared compose network). pico's own code
+  # is memory-agnostic; enable memory in omp config (memory.backend: hindsight).
+  hindsight:
+    container_name: hindsight
+    image: ${PICO_HINDSIGHT_IMAGE:-ghcr.io/vectorize-io/hindsight:latest}
+    restart: unless-stopped
+    env_file:
+      - path: .env.hindsight
+        required: false
+    environment:
+      HINDSIGHT_API_LLM_PROVIDER: openai
+      HINDSIGHT_API_LLM_BASE_URL: https://api.enterprise.githubcopilot.com
+      HINDSIGHT_API_LLM_MODEL: gpt-4o-mini
+    ports:
+      - "127.0.0.1:8888:8888"
+      - "127.0.0.1:9999:9999"
+    volumes:
+      - hindsight-data:/home/hindsight/.pg0
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8888/version"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 900s
+
 volumes:
   pico-supervisor:
   pico-build:
   pico-cache:
+  hindsight-data:
