@@ -25,6 +25,7 @@ pub(crate) struct Data {
     bindings: Arc<parking_lot::Mutex<Bindings>>,
     pool: Arc<OmpPool>,
     camofox: Arc<CamofoxDaemon>,
+    hindsight: Arc<crate::memory::HindsightDaemon>,
     cancel: CancellationToken,
     tracker: TaskTracker,
     supervisor_socket: Option<std::path::PathBuf>,
@@ -60,15 +61,26 @@ pub(crate) fn framework(
                 poise::builtins::register_globally(ctx, &framework.options().commands).await?;
                 let _ = ready_tx.send(());
                 let camofox = CamofoxDaemon::new(&root, cancel.clone(), &tracker);
+                let hindsight = crate::memory::HindsightDaemon::new(&root, cancel.clone(), &tracker);
                 // Backgrounded at startup (never delays readiness): pre-fetch the ~650 MB engine when a profile already enables the browser.
                 if crate::config::any_browser_enabled(&root) {
                     tracker.spawn(crate::omp::camofox::ensure_engine(cancel.clone()));
+                }
+                // Backgrounded: pre-pull the Hindsight image when a profile enables
+                // self-managed memory (no external endpoint override), so the first
+                // memory turn isn't blocked on a multi-GB pull.
+                let memory_override = crate::config::load_root(&pico_shared::paths::worker_config(&root))
+                    .ok()
+                    .is_some_and(|c| c.memory_endpoint().is_some());
+                if crate::config::any_memory_enabled(&root) && !memory_override {
+                    tracker.spawn(Arc::clone(&hindsight).ensure_image());
                 }
                 Ok(Data {
                     root: Arc::new(root),
                     bindings: Arc::new(parking_lot::Mutex::new(bindings)),
                     pool,
                     camofox,
+                    hindsight,
                     supervisor_socket,
                     cancel,
                     tracker,
@@ -645,6 +657,7 @@ async fn on_event(
         let bindings = Arc::clone(&data.bindings);
         let pool = Arc::clone(&data.pool);
         let camofox = Arc::clone(&data.camofox);
+        let hindsight = Arc::clone(&data.hindsight);
         let cancel = data.cancel.clone();
         let message = new_message.clone();
         let tracker = data.tracker.clone();
@@ -658,6 +671,7 @@ async fn on_event(
                 bindings,
                 pool,
                 camofox,
+                hindsight,
                 cancel,
                 tracker,
                 pending_answers,
@@ -721,6 +735,7 @@ async fn route_message(
     bindings: Arc<parking_lot::Mutex<Bindings>>,
     pool: Arc<OmpPool>,
     camofox: Arc<CamofoxDaemon>,
+    hindsight: Arc<crate::memory::HindsightDaemon>,
     cancel: CancellationToken,
     tracker: TaskTracker,
     pending_answers: crate::ui::PendingAnswers,
@@ -939,6 +954,24 @@ async fn route_message(
         }
     };
     let profile_config = crate::config::load(&pico_shared::paths::profile_config(&root, &profile))?;
+    let memory_cfg = if profile_config.memory_enabled {
+        let endpoint = match root_config.memory_endpoint() {
+            Some(ep) => Some(ep.to_owned()),
+            None => hindsight.ensure_endpoint().await,
+        };
+        endpoint.map(|endpoint| crate::memory::MemoryConfig {
+            endpoint,
+            bank: crate::memory::bank_for(
+                &profile,
+                &message.author.id.to_string(),
+                profile_config.memory_bank.as_deref(),
+            ),
+            recall_budget: profile_config.memory_recall_budget.clone(),
+            recall_max_tokens: profile_config.memory_recall_max_tokens,
+        })
+    } else {
+        None
+    };
     let title_cwd = cwd.clone();
     let (extensions, env) = if profile_config.browser_enabled {
         // Best-effort: bring the daemon up (logs on failure). Tools are injected
@@ -960,13 +993,21 @@ async fn route_message(
 
     let handle = pool.get_or_spawn(&thread_id, &config).await?;
     let mut first_answer: Option<String> = None;
+    let recalled = match &memory_cfg {
+        Some(cfg) => crate::memory::recall(cfg, prompt).await,
+        None => None,
+    };
+    let turn_prompt = match &recalled {
+        Some(block) => std::borrow::Cow::Owned(format!("{block}{prompt}")),
+        None => std::borrow::Cow::Borrowed(prompt),
+    };
     let result = {
         let mut session = handle.lock().await;
         drive_turn(
             &ctx,
             target,
             &mut session,
-            prompt,
+            turn_prompt.as_ref(),
             &cancel,
             profile_config.surface_thinking,
             in_thread.then_some(message.id),
@@ -979,6 +1020,20 @@ async fn route_message(
         )
         .await
     };
+    // Capture the turn into long-term memory (best-effort, off-thread). Uses the
+    // original prompt, never the memory-augmented one, so recalled context can't
+    // feed back into the bank.
+    if let Some(cfg) = &memory_cfg
+        && let Some(answer) = first_answer.clone().filter(|a| !a.trim().is_empty())
+    {
+        let cfg = cfg.clone();
+        let document_id = thread_id.clone();
+        let user = prompt.to_owned();
+        let tags = vec![format!("thread:{thread_id}"), format!("profile:{profile}")];
+        tracker.spawn(async move {
+            crate::memory::retain(&cfg, &document_id, &user, &answer, tags).await;
+        });
+    }
     // Title from the turn's first answer; spawned regardless of outcome so a hard error still yields a prompt-only title.
     if !in_thread {
         tracker.spawn(generate_and_apply_title(

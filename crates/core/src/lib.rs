@@ -5,6 +5,7 @@ mod cancel;
 pub mod config;
 pub mod db;
 mod discord;
+pub mod memory;
 mod mid_turn;
 pub mod omp;
 mod prompt;

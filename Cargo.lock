@@ -1365,6 +1365,7 @@ dependencies = [
  "parking_lot",
  "pico-shared",
  "poise",
+ "reqwest",
  "serde",
  "serde_json",
  "sqlx",

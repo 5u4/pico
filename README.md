@@ -123,6 +123,9 @@ streaming_behavior = "steer"       # mid-turn message: follow_up | steer
 
 [browser]
 enabled = false                    # opt-in Camoufox anti-detection browser tools
+
+[memory]
+enabled = false                    # opt-in cross-thread long-term memory (Hindsight)
 ```
 
 `streaming_behavior` controls what a message you send **while a turn is still
@@ -139,6 +142,28 @@ start, the tools surface an error and the agent falls back to `read`/native brow
 Toggling `enabled` takes effect on a thread's next fresh omp child — a new thread,
 or after the existing one is idle-evicted (~10 min) — since a live child keeps the
 tools it was spawned with.
+
+`[memory] enabled = true` gives the profile cross-thread long-term memory backed
+by [Hindsight](https://hindsight.vectorize.io): before each turn pico recalls what
+it knows about you and prepends it to the message, and after each turn it stores
+the exchange (best-effort, off-thread). It is keyed per user per profile
+(`pico-<profile>-<user-id>`), so one member's memories are never recalled into
+another member's prompt, while your own carry across every thread and channel on
+the profile. (A `[memory] bank` override collapses the profile into one shared
+bank, dropping per-user isolation — use it only for single-user channels.)
+Memory is purely additive — if
+Hindsight is unavailable the turn just runs without it; worktree/coding channels
+are best left with memory off.
+
+The worker runs Hindsight itself over the docker socket wherever one is available,
+pre-pulling the image at startup. To use an existing/remote Hindsight instead, set
+`[memory] endpoint` in the worker `config.toml`:
+
+```toml
+# ~/.pico/workers/default/config.toml — use an external Hindsight, not a self-managed one
+[memory]
+endpoint = "http://host:8888"
+```
 
 A turn that's still running can be cut short with `/cancel` in its thread: it
 aborts the in-flight turn (cancelling any running tool) and frees the thread for
@@ -259,6 +284,28 @@ connects to Discord. A later restart just restores the current slot (the last
 deployed build) — roll new code forward with an explicit deploy (see Operating).
 Only one instance may hold the bot token at a time — stop the host/systemd
 supervisor before bringing the container up.
+
+### Long-term memory (optional)
+
+Enable memory per profile with `[memory] enabled = true` (see Profiles). For the
+worker-managed container, give the worker a Groq key for Hindsight's fact
+extraction (local embeddings need none) — with an external `[memory] endpoint`,
+no Groq key is needed locally:
+
+```sh
+printf '%s' 'gsk_…' > ~/.pico/workers/default/secrets/groq_api_key
+chmod 600 ~/.pico/workers/default/secrets/groq_api_key
+```
+
+On the first memory turn the worker brings up its own Hindsight container over the
+mounted docker socket (embedded PostgreSQL, persistent across restarts) and talks
+to it on the compose network — no compose changes, no ports to publish. The first
+turn or two have no memory while the ~4 GB image pulls and the server boots (pico
+pre-pulls at startup when a profile has memory on); a down or still-starting
+Hindsight never breaks a turn — at worst it adds a short, bounded recall timeout.
+
+To use an existing/remote Hindsight instead, set `[memory] endpoint` in the worker
+`config.toml` and the worker won't self-manage one.
 
 ### Operating
 

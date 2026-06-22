@@ -22,6 +22,10 @@ pub struct ProfileConfig {
     pub surface_thinking: bool,
     pub streaming_behavior: StreamingBehavior,
     pub browser_enabled: bool,
+    pub memory_enabled: bool,
+    pub memory_bank: Option<String>,
+    pub memory_recall_budget: String,
+    pub memory_recall_max_tokens: u32,
 }
 
 #[derive(Deserialize)]
@@ -32,6 +36,8 @@ struct RawConfig {
     discord: Option<RawDiscord>,
     #[serde(default)]
     browser: Option<RawBrowser>,
+    #[serde(default)]
+    memory: Option<RawMemory>,
 }
 
 #[derive(Deserialize)]
@@ -54,6 +60,21 @@ struct RawBrowser {
     enabled: bool,
 }
 
+const DEFAULT_RECALL_BUDGET: &str = "mid";
+const DEFAULT_RECALL_MAX_TOKENS: u32 = 1536;
+
+#[derive(Deserialize, Default)]
+struct RawMemory {
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default)]
+    bank: Option<String>,
+    #[serde(default)]
+    recall_budget: Option<String>,
+    #[serde(default)]
+    recall_max_tokens: Option<u32>,
+}
+
 pub fn load(config_path: &Path) -> color_eyre::Result<ProfileConfig> {
     let text = match std::fs::read_to_string(config_path) {
         Ok(text) => text,
@@ -63,6 +84,10 @@ pub fn load(config_path: &Path) -> color_eyre::Result<ProfileConfig> {
                 surface_thinking: false,
                 streaming_behavior: StreamingBehavior::default(),
                 browser_enabled: false,
+                memory_enabled: false,
+                memory_bank: None,
+                memory_recall_budget: DEFAULT_RECALL_BUDGET.to_owned(),
+                memory_recall_max_tokens: DEFAULT_RECALL_MAX_TOKENS,
             });
         }
         Err(e) => {
@@ -77,6 +102,20 @@ pub fn load(config_path: &Path) -> color_eyre::Result<ProfileConfig> {
         surface_thinking: discord.surface_thinking,
         streaming_behavior: discord.streaming_behavior,
         browser_enabled: raw.browser.is_some_and(|b| b.enabled),
+        memory_enabled: raw.memory.as_ref().is_some_and(|m| m.enabled),
+        memory_bank: raw.memory.as_ref().and_then(|m| m.bank.clone()),
+        memory_recall_budget: raw
+            .memory
+            .as_ref()
+            .and_then(|m| m.recall_budget.clone())
+            .map(|b| b.trim().to_owned())
+            .filter(|b| !b.is_empty())
+            .unwrap_or_else(|| DEFAULT_RECALL_BUDGET.to_owned()),
+        memory_recall_max_tokens: raw
+            .memory
+            .as_ref()
+            .and_then(|m| m.recall_max_tokens)
+            .unwrap_or(DEFAULT_RECALL_MAX_TOKENS),
     })
 }
 
@@ -88,6 +127,16 @@ pub fn any_browser_enabled(root: &Path) -> bool {
     entries
         .flatten()
         .any(|entry| entry.path().is_dir() && load(&entry.path().join("config.toml")).is_ok_and(|c| c.browser_enabled))
+}
+
+/// Whether any profile opts into memory — gates the startup Hindsight image pull.
+pub fn any_memory_enabled(root: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(root.join("profiles")) else {
+        return false;
+    };
+    entries
+        .flatten()
+        .any(|entry| entry.path().is_dir() && load(&entry.path().join("config.toml")).is_ok_and(|c| c.memory_enabled))
 }
 
 pub struct GuildDefault {
@@ -103,6 +152,7 @@ pub struct RootConfig {
     worktrees_dir: Option<PathBuf>,
     approvers: Vec<String>,
     approval_timeout: Duration,
+    memory_endpoint: Option<String>,
 }
 
 impl RootConfig {
@@ -127,6 +177,12 @@ impl RootConfig {
     pub fn approval_timeout(&self) -> Duration {
         self.approval_timeout
     }
+
+    /// Hindsight base URL override (`[memory] endpoint`). `None` ⇒ the worker
+    /// self-manages a container for enabled profiles instead.
+    pub fn memory_endpoint(&self) -> Option<&str> {
+        self.memory_endpoint.as_deref()
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -137,11 +193,19 @@ struct RawRootConfig {
     worktree: Option<RawWorktree>,
     #[serde(default)]
     approval: Option<RawApproval>,
+    #[serde(default)]
+    memory: Option<RawRootMemory>,
 }
 
 #[derive(serde::Deserialize)]
 struct RawWorktree {
     dir: String,
+}
+
+#[derive(serde::Deserialize)]
+struct RawRootMemory {
+    #[serde(default)]
+    endpoint: Option<String>,
 }
 
 const DEFAULT_APPROVAL_TIMEOUT_SECS: u64 = 3600;
@@ -183,6 +247,7 @@ pub fn load_root(config_path: &Path) -> color_eyre::Result<RootConfig> {
                 worktrees_dir: None,
                 approvers: Vec::new(),
                 approval_timeout: Duration::from_secs(DEFAULT_APPROVAL_TIMEOUT_SECS),
+                memory_endpoint: None,
             });
         }
         Err(e) => {
@@ -262,6 +327,10 @@ pub fn load_root(config_path: &Path) -> color_eyre::Result<RootConfig> {
         worktrees_dir,
         approvers,
         approval_timeout,
+        memory_endpoint: raw.memory.and_then(|m| m.endpoint).and_then(|endpoint| {
+            let endpoint = endpoint.trim().to_owned();
+            (!endpoint.is_empty()).then_some(endpoint)
+        }),
     })
 }
 
@@ -327,6 +396,49 @@ mod tests {
         std::fs::write(&path, "[llm]\nmodel = \"x\"\n").unwrap();
         assert!(!super::load(&path).unwrap().browser_enabled);
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn memory_parses() {
+        let dir = temp_dir("memory");
+        let path = dir.join("config.toml");
+
+        std::fs::write(&path, "[memory]\nenabled = true\nbank = \"custom\"\n").unwrap();
+        let cfg = super::load(&path).unwrap();
+        assert!(cfg.memory_enabled);
+        assert_eq!(cfg.memory_bank.as_deref(), Some("custom"));
+        assert_eq!(cfg.memory_recall_budget, "mid");
+        std::fs::write(&path, "[memory]\nrecall_budget = \"  \"\n").unwrap();
+        assert_eq!(super::load(&path).unwrap().memory_recall_budget, "mid");
+
+        std::fs::write(&path, "[memory]\n").unwrap();
+        assert!(!super::load(&path).unwrap().memory_enabled);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn any_memory_enabled_scans_profiles() {
+        let root = temp_dir("anymemory");
+        assert!(!super::any_memory_enabled(&root));
+        let dir = root.join("profiles").join("p");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("config.toml"), "[memory]\nenabled = true\n").unwrap();
+        assert!(super::any_memory_enabled(&root));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn blank_memory_endpoint_is_none() {
+        let dir = temp_dir("memendpoint");
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "[memory]\nendpoint = \"   \"\n").unwrap();
+        assert_eq!(super::load_root(&path).unwrap().memory_endpoint(), None);
+        std::fs::write(&path, "[memory]\nendpoint = \"http://x:8888\"\n").unwrap();
+        assert_eq!(super::load_root(&path).unwrap().memory_endpoint(), Some("http://x:8888"));
+        std::fs::write(&path, "[memory]\n").unwrap();
+        assert_eq!(super::load_root(&path).unwrap().memory_endpoint(), None);
         std::fs::remove_dir_all(&dir).ok();
     }
 
