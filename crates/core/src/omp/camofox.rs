@@ -1,8 +1,3 @@
-//! Worker-owned Camoufox daemon (`camofox-browser`): lazily spawned per
-//! browser-enabled profile, driven by an injected omp extension over REST. One
-//! per worker; the loopback port + access key are pinned so env baked into omp
-//! children survives daemon restarts. Isolation is by `userId` (= profile).
-
 use std::{
     net::TcpListener,
     path::{Path, PathBuf},
@@ -20,7 +15,6 @@ use tokio::{
 };
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
-/// Extension source, embedded so it ships in the binary; rewritten on startup.
 const EXTENSION_SOURCE: &str = include_str!("camofox_extension.ts");
 
 const DEFAULT_PORT: u16 = 9377;
@@ -51,8 +45,6 @@ pub struct CamofoxDaemon {
 }
 
 impl CamofoxDaemon {
-    /// Pins a free loopback port + access key, writes the extension, and arms a
-    /// cancel-driven shutdown. Infallible: soft failures log and self-heal.
     pub fn new(root: &Path, cancel: CancellationToken, tracker: &TaskTracker) -> Arc<CamofoxDaemon> {
         let port = pick_free_port().unwrap_or(DEFAULT_PORT);
         let access_key = format!("{}{}", ulid::Ulid::new(), ulid::Ulid::new()).to_lowercase();
@@ -74,7 +66,6 @@ impl CamofoxDaemon {
             cancel: cancel.clone(),
             tracker: tracker.clone(),
         });
-        // SIGTERM lets server.js tear down its Firefox/Xvfb tree; kill_on_drop backstops.
         let shutdown = Arc::clone(&daemon);
         tracker.spawn(async move {
             cancel.cancelled().await;
@@ -83,7 +74,6 @@ impl CamofoxDaemon {
         daemon
     }
 
-    /// Per-turn `--extension` path (omitted if the file is missing) + `CAMOFOX_*` env.
     pub fn injection(&self, profile: &str, thread_id: &str) -> (Vec<PathBuf>, Vec<(String, String)>) {
         let extensions = if self.extension_path.is_file() {
             vec![self.extension_path.clone()]
@@ -99,13 +89,9 @@ impl CamofoxDaemon {
         (extensions, env)
     }
 
-    /// Best-effort, single-flight: (re)spawn on the pinned port+key if the daemon
-    /// died or hung. Never fails the caller; backs off after a failed start.
     pub async fn ensure_started(&self) {
         let mut st = self.state.lock().await;
 
-        // A live child is trusted unless health fails repeatedly — the daemon is
-        // shared, so one transient blip must not kill it mid-browse for a sibling.
         let alive = matches!(st.child.as_mut().map(|c| c.try_wait()), Some(Ok(None)));
         if alive {
             if self.health_ok().await {
@@ -122,7 +108,6 @@ impl CamofoxDaemon {
                 "camofox daemon unhealthy; respawning"
             );
         }
-        // Reap the dead/unhealthy child, then (re)spawn unless cancelled or backing off.
         if let Some(mut old) = st.child.take() {
             let _ = old.start_kill();
             self.tracker.spawn(async move {
@@ -157,12 +142,7 @@ impl CamofoxDaemon {
         let mut cmd = ProcCommand::new(BIN);
         cmd.env("CAMOFOX_PORT", self.port.to_string())
             .env("CAMOFOX_ACCESS_KEY", &self.access_key)
-            // Telemetry phones home by default — disable it.
             .env("CAMOFOX_CRASH_REPORT_ENABLED", "false")
-            // The access key (above) is what gates every route except /health
-            // (camofox's accessKeyMiddleware); NODE_ENV=production is redundant
-            // defense-in-depth. The server binds 0.0.0.0, but docker-compose
-            // publishes no ports — reachable only inside the container's netns.
             .env("NODE_ENV", "production")
             .env("CAMOFOX_PROFILE_DIR", &self.profile_dir)
             .stdin(Stdio::null())
@@ -215,14 +195,11 @@ fn pick_free_port() -> Option<u16> {
         .map(|addr| addr.port())
 }
 
-/// Fetch the Camoufox engine (~650 MB, via the image's pinned `camoufox-js`) into the
-/// per-user cache when absent. Best-effort + cancellation-aware so shutdown isn't blocked.
 pub async fn ensure_engine(cancel: CancellationToken) {
     if engine_present() {
         return;
     }
     tracing::info!("Camoufox engine missing; fetching (~650 MB, one-time)");
-    // stderr inherits (not piped): an undrained pipe would fill and deadlock the progress-streaming fetch.
     let child = ProcCommand::new(FETCH_CMD)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -253,7 +230,6 @@ pub async fn ensure_engine(cancel: CancellationToken) {
     }
 }
 
-/// Whether the engine is at `$HOME/.cache/camoufox` — `camoufox-js`'s hardcoded `INSTALL_DIR`.
 fn engine_present() -> bool {
     std::env::var_os("HOME").is_some_and(|home| Path::new(&home).join(".cache/camoufox/version.json").is_file())
 }
@@ -266,7 +242,6 @@ fn write_extension(path: &Path) -> color_eyre::Result<()> {
     Ok(())
 }
 
-/// Loopback `GET` reporting whether the status is 200 (avoids an HTTP-client dep).
 async fn http_get_ok(port: u16, path: &str, bearer: &str) -> bool {
     let attempt = async {
         let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.ok()?;
@@ -274,7 +249,6 @@ async fn http_get_ok(port: u16, path: &str, bearer: &str) -> bool {
             "GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {bearer}\r\nConnection: close\r\n\r\n"
         );
         stream.write_all(req.as_bytes()).await.ok()?;
-        // Loop until the status line arrives: one short read could mis-report health.
         let mut head = Vec::with_capacity(32);
         let mut chunk = [0u8; 32];
         while head.len() < 12 {
@@ -293,7 +267,6 @@ async fn http_get_ok(port: u16, path: &str, bearer: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Drain the daemon's stderr to the log so a full pipe can't block it.
 async fn drain_stderr(stderr: ChildStderr, cancel: CancellationToken) {
     let mut lines = BufReader::new(stderr).lines();
     loop {

@@ -17,9 +17,6 @@ use crate::{config::Config, slots::Slots};
 
 const HISTORY_CAP: usize = 5;
 
-/// How long a control client has to deliver its request frame before the
-/// connection is dropped. Bounds a stalled or malicious client so it can't pin
-/// a handler task — and thus stall the shutdown drain — indefinitely.
 const REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 struct WorkerProc {
@@ -31,18 +28,14 @@ struct WorkerProc {
     started_at: Instant,
 }
 
-/// Best-effort provenance probed before spawn: embedded `--version` + content hash.
 #[derive(Default, Clone)]
 struct Meta {
     version: Option<String>,
     build: Option<String>,
 }
 
-/// In-flight spawn's readiness slot: its token, the ready signal, and an
-/// optional report to hand back on the ready ping.
 type PendingReady = (String, oneshot::Sender<()>, Option<DeployReport>);
 
-/// Owns the worker process, the deploy pipeline, and the control socket.
 pub struct Supervisor {
     config: Config,
     worker_root: PathBuf,
@@ -80,11 +73,6 @@ impl Supervisor {
         }
     }
 
-    /// Adopt the `current` slot binary if one exists. Must run only once the
-    /// accept loop is live: the spawned worker validates by sending a ready ping
-    /// back over the control socket, so booting before [`Self::serve`] is
-    /// accepting would deadlock on a ping nothing receives. Failure is
-    /// non-fatal — the socket stays up so a `deploy` can recover.
     async fn boot(&self) {
         let current = match self.slots.current_target() {
             Ok(Some(current)) => current,
@@ -141,8 +129,6 @@ impl Supervisor {
             tokio::spawn(async move { me.accept_loop(listener).await })
         };
 
-        // Socket is accepting now, so a worker adopted from the current slot can
-        // deliver its ready ping. Booting earlier would deadlock on it.
         self.boot().await;
 
         let result = match accept.await {
@@ -177,9 +163,6 @@ impl Supervisor {
         }
     }
 
-    /// Stop accepting, drain in-flight handlers so an in-flight deploy finishes
-    /// (rather than leaving the slots half-updated), then stop the worker and
-    /// remove the control socket. Runs on every exit from [`Self::serve`].
     async fn shutdown(&self) {
         self.cancel.cancel();
         self.tracker.close();
@@ -251,7 +234,6 @@ impl Supervisor {
             }
         };
 
-        // Probe before the kill, while the worker still serves.
         let meta = self.inspect(&bin).await;
         let desc = meta.version.clone().unwrap_or_else(|| path.display().to_string());
 
@@ -349,7 +331,6 @@ impl Supervisor {
             }
         };
 
-        // Probe before the kill so a slow `<prev> --version` adds no downtime.
         let meta = self.inspect(&prev).await;
         let desc = meta.version.clone().unwrap_or_else(|| prev.display().to_string());
 
@@ -432,9 +413,6 @@ impl Supervisor {
         }
     }
 
-    /// Spawn `worker --path <root> --socket <sock>` from `bin` and wait for its
-    /// `ready` ping within `health_timeout`. On any failure the child is killed
-    /// before the error returns, so no orphan survives.
     async fn spawn_and_validate(
         &self,
         bin: &Path,
@@ -543,8 +521,6 @@ fn ready_token() -> String {
     format!("{}-{nanos}-{seq}", std::process::id())
 }
 
-/// A peer hangup on the control socket (initiator closed before reading the
-/// reply). Expected for a worker self-deploy, so logged at debug, not warn.
 fn is_peer_disconnect(e: &color_eyre::Report) -> bool {
     e.chain().any(|cause| {
         cause

@@ -1,8 +1,3 @@
-//! Scripted `omp` stand-in for the Discord chat e2e: speaks enough of the
-//! `rpc` protocol to drive a deterministic thread reply without Copilot, plus
-//! the `config get`/`-p` title one-shots. The driver's `TELL <text>` message is
-//! echoed back as the assistant reply. see also: crates/core/tests/discord_chat.rs.
-
 use std::io::{BufRead, Write};
 
 use serde_json::{Value, json};
@@ -12,7 +7,6 @@ fn main() {
     if args.iter().any(|a| a == "--version" || a == "-V") {
         println!("scripted-omp 0.0.0");
     } else if args.first().map(String::as_str) == Some("config") {
-        // roles object so the title path resolves a smol model.
         println!(r#"{{"value":{{"smol":"scripted/smol","default":"scripted/default"}}}}"#);
     } else if args.iter().any(|a| a == "-p") {
         println!("Scripted thread title");
@@ -29,8 +23,6 @@ fn reply_for(message: &str) -> String {
     }
 }
 
-/// Emits `read → task → read` for the timeline e2e: the host must seal the activity
-/// feed after the `task` so the second `read` opens a new message below the task.
 fn emit_seq(out: &mut impl Write, marker: &str) {
     let frames = [
         json!({ "type": "tool_execution_start", "toolCallId": "seq-a", "toolName": "read", "args": { "path": format!("ACT-A-{marker}") } }),
@@ -82,15 +74,12 @@ fn run_rpc() {
                 }
                 emit(&mut out, &json!({ "type": "agent_end" }));
             }
-            // Any other drive command just needs an ack, or dispatch() would time out.
             _ if !id.is_empty() => ack(&mut out, kind, id),
             _ => {}
         }
     }
 }
 
-/// Holds a turn open until the host forwards a queued `follow_up`/`steer`, then emits
-/// the two answers as `turn_end`-delimited turns. An activity tool opens the window first.
 fn run_queue<R: std::io::BufRead>(out: &mut impl Write, lines: &mut std::io::Lines<R>, marker: &str) {
     emit(
         out,
@@ -123,7 +112,6 @@ fn run_queue<R: std::io::BufRead>(out: &mut impl Write, lines: &mut std::io::Lin
         }
     }
 
-    // Echo the command kind so the e2e can prove follow_up vs steer was forwarded.
     let cmd = queued.as_ref().map_or("none", |(kind, _)| kind.as_str());
     emit(
         out,
@@ -148,7 +136,6 @@ fn ack(out: &mut impl Write, command: &str, id: &str) {
 }
 
 fn emit(out: &mut impl Write, frame: &Value) {
-    // Newline-delimited JSON; flush so the host's blocked read wakes immediately.
     let _ = writeln!(out, "{frame}");
     let _ = out.flush();
 }

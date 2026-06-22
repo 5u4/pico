@@ -1,9 +1,3 @@
-//! Per-Discord-thread `omp --mode rpc` child registry. One child per thread,
-//! keyed by thread id; lazily spawned on first use and idle-evicted after
-//! [`IDLE_TIMEOUT`]. A respawn resumes the thread's session via the child's
-//! `--session-dir` + `--continue`, so eviction is transparent to the user —
-//! it only adds cold-start latency, never loses conversation history.
-
 use std::{
     collections::HashMap,
     sync::{
@@ -28,9 +22,6 @@ const SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 
 const SMOL_RESOLVE_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// One thread's live `omp` child and its event stream. Guarded by a per-thread
-/// async mutex so turns on the same thread serialise; different threads run on
-/// separate children and proceed concurrently.
 pub struct ThreadSession {
     pub client: OmpClient,
     pub events: mpsc::UnboundedReceiver<OmpEvent>,
@@ -42,8 +33,6 @@ pub struct ThreadHandle {
 }
 
 impl ThreadHandle {
-    /// Lock the session for a turn, stamping it active so the evictor leaves it
-    /// alone. The guard borrows the client + event stream for the whole turn.
     pub async fn lock(&self) -> tokio::sync::MutexGuard<'_, ThreadSession> {
         self.last_active.store(now_millis(), Ordering::Relaxed);
         self.inner.lock().await
@@ -59,18 +48,12 @@ pub struct OmpPool {
 
 #[derive(PartialEq, Eq, Debug)]
 pub(crate) enum CloseOutcome {
-    /// No child for this thread (never spawned or already evicted).
     Absent,
     Closed,
-    /// A turn is in flight (holds an extra `Arc`); the child was left running.
     Busy,
 }
 
 impl OmpPool {
-    /// Build the pool and spawn its idle-evictor on `tracker`. The sweep stops
-    /// at the next tick once `cancel` fires, so worker shutdown joins it via the
-    /// tracker rather than aborting mid-sweep. `cancel`/`tracker` are also handed
-    /// to each spawned `omp` child's stdio tasks.
     pub fn new(cancel: CancellationToken, tracker: &TaskTracker) -> Arc<OmpPool> {
         let pool = Arc::new(OmpPool {
             sessions: Mutex::new(HashMap::new()),
@@ -78,11 +61,8 @@ impl OmpPool {
             tracker: tracker.clone(),
             smol: tokio::sync::OnceCell::new(),
         });
-        // Warm the cache before any `omp` child exists, so the first thread's
-        // title task reads it instead of racing `omp config get` against spawns.
         let warm = Arc::clone(&pool);
         tracker.spawn(async move {
-            // Bail on shutdown rather than block the drain on an in-flight call.
             tokio::select! {
                 () = warm.cancel.cancelled() => {}
                 _ = warm.smol_model() => {}
@@ -102,15 +82,11 @@ impl OmpPool {
         pool
     }
 
-    /// Return the thread's handle, spawning the `omp` child if absent or
-    /// previously evicted. `config` is recomputed by the caller each turn (cwd,
-    /// model, `--session-dir`, `--continue`), so a respawn resumes the session.
     pub async fn get_or_spawn(&self, thread_id: &str, config: &SpawnConfig) -> color_eyre::Result<Arc<ThreadHandle>> {
         if let Some(handle) = self.sessions.lock().get(thread_id) {
             return Ok(Arc::clone(handle));
         }
 
-        // Spawn outside the map lock (spawn awaits the child's ready frame).
         let (client, events) = OmpClient::spawn(config, &self.cancel, &self.tracker).await?;
         let handle = Arc::new(ThreadHandle {
             inner: tokio::sync::Mutex::new(ThreadSession { client, events }),
@@ -118,8 +94,6 @@ impl OmpPool {
         });
 
         let mut map = self.sessions.lock();
-        // A concurrent caller may have spawned the same thread's child while we
-        // were awaiting ready; keep theirs and let ours drop (kill_on_drop).
         if let Some(existing) = map.get(thread_id) {
             return Ok(Arc::clone(existing));
         }
@@ -127,14 +101,10 @@ impl OmpPool {
         Ok(handle)
     }
 
-    /// Drop a dead thread's child so the next [`get_or_spawn`](Self::get_or_spawn)
-    /// respawns it (resuming via `--continue`); `kill_on_drop` fires once the turn releases its clone.
     pub(crate) fn forget(&self, thread_id: &str) {
         self.sessions.lock().remove(thread_id);
     }
 
-    /// Stop a thread's child for `/worktree close`, refusing while a turn is in
-    /// flight. The map lock makes the [`close_decision`] check + removal atomic.
     pub(crate) fn close(&self, thread_id: &str) -> CloseOutcome {
         let mut map = self.sessions.lock();
         let outcome = close_decision(map.get(thread_id).map(Arc::strong_count));
@@ -144,8 +114,6 @@ impl OmpPool {
         outcome
     }
 
-    /// The fire-and-forget thread-title model from omp's `modelRoles` (smol, else
-    /// default). Cached — including a stable "disabled" — but transient failures retry.
     pub async fn smol_model(&self) -> Option<String> {
         match self.smol.get_or_try_init(resolve_smol_model).await {
             Ok(model) => model.clone(),
@@ -153,11 +121,6 @@ impl OmpPool {
         }
     }
 
-    /// Drop children idle past [`IDLE_TIMEOUT`]. `strong_count == 1` means only
-    /// the map references the handle, i.e. no turn is in flight (a turn holds a
-    /// clone for its whole duration); checking it under the map lock — which
-    /// `get_or_spawn` also needs to hand out a clone — closes the race. Dropping
-    /// the handle kills the child via `kill_on_drop`.
     fn evict_idle(&self) {
         let now = now_millis();
         let cutoff = IDLE_TIMEOUT.as_millis() as u64;
@@ -174,9 +137,6 @@ fn now_millis() -> u64 {
         .unwrap_or(0)
 }
 
-/// Busy-guard decision from a thread's `Arc` strong count: `None` (no child) ⇒
-/// Absent; `> 1` (a live turn holds a clone) ⇒ Busy; `== 1` (only the pool map
-/// holds it) ⇒ Closed. Split out so the threshold is testable without a child.
 fn close_decision(strong_count: Option<usize>) -> CloseOutcome {
     match strong_count {
         None => CloseOutcome::Absent,
@@ -185,9 +145,6 @@ fn close_decision(strong_count: Option<usize>) -> CloseOutcome {
     }
 }
 
-/// Ask omp for its `smol`/`default` role model. omp owns the config, and `--model`
-/// needs a concrete `provider/modelId`, not the `pi/smol` role alias. `Err` is a
-/// transient failure (retry next thread); `Ok(None)` is a stable "no role" (cache).
 async fn resolve_smol_model() -> Result<Option<String>, ()> {
     let mut cmd = tokio::process::Command::new("omp");
     cmd.arg("config")
@@ -222,7 +179,6 @@ async fn resolve_smol_model() -> Result<Option<String>, ()> {
     }
 }
 
-/// `value.smol`, else `value.default`. Split out so the parse is unit-testable.
 fn smol_from_roles(roles: &serde_json::Value) -> Option<String> {
     let value = &roles["value"];
     ["smol", "default"]
@@ -250,7 +206,6 @@ mod tests {
 
     #[tokio::test]
     async fn close_absent_thread_reports_absent() {
-        // Common real path: the idle evictor has usually already dropped the child.
         let cancel = CancellationToken::new();
         let tracker = TaskTracker::new();
         let pool = OmpPool::new(cancel.clone(), &tracker);
@@ -263,7 +218,6 @@ mod tests {
     fn close_decision_busy_guard_thresholds() {
         assert_eq!(close_decision(None), CloseOutcome::Absent);
         assert_eq!(close_decision(Some(1)), CloseOutcome::Closed);
-        // A turn in flight holds a second clone; the threshold must refuse at > 1.
         assert_eq!(close_decision(Some(2)), CloseOutcome::Busy);
     }
 

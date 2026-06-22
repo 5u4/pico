@@ -23,8 +23,6 @@ pub fn split_to_budget(text: &str, budget: usize) -> Vec<String> {
             open_info.clone()
         };
 
-        // A line longer than the budget (minified JSON, a long URL) is hard-
-        // wrapped first, else it yields an oversized chunk Discord drops.
         if fence {
             emit_line(line, next_in_fence, in_fence, &open_info, budget, &mut content, &mut chunks);
         } else {
@@ -50,11 +48,6 @@ pub fn defang_mentions(text: &str) -> String {
         .replace("@here", "@\u{200b}here")
 }
 
-/// Rewrite GitHub-flavored markdown tables into nested bullet lists, since
-/// Discord renders neither the table syntax nor the pipes. Each data row becomes
-/// a block: the first column bolded as title, the rest as `header: value`
-/// sub-bullets. Conservative — text in ``` / ~~~ fences, and any header/delimiter
-/// pair that isn't an unambiguous table, passes through untouched.
 pub fn tables_to_lists(text: &str) -> String {
     let lines: Vec<&str> = text.lines().collect();
     let mut out: Vec<String> = Vec::with_capacity(lines.len());
@@ -63,7 +56,6 @@ pub fn tables_to_lists(text: &str) -> String {
     while i < lines.len() {
         let line = lines[i];
         if let Some(marker) = fence_marker(line) {
-            // A fence closes only on its own marker char: ``` can't end a ~~~ block.
             match fence {
                 Some(open) if open == marker => fence = None,
                 Some(_) => {}
@@ -94,8 +86,6 @@ pub fn tables_to_lists(text: &str) -> String {
     out.join("\n")
 }
 
-/// The fence marker char (`` ` `` or `~`) when `line` opens or closes a code
-/// fence (≤3 leading spaces, three+ of the marker), else `None`.
 fn fence_marker(line: &str) -> Option<char> {
     let indent = line.chars().take_while(|c| *c == ' ').count();
     if indent > 3 {
@@ -111,9 +101,6 @@ fn fence_marker(line: &str) -> Option<char> {
     }
 }
 
-/// The header cells when `header`/`delim` form a GFM table head: `header` holds a
-/// pipe, every `delim` cell is an alignment marker (`-`/`:-`/`-:`/`:-:`), and the
-/// two split to the same column count. `None` otherwise.
 fn table_header(header: &str, delim: &str) -> Option<Vec<String>> {
     if !is_table_row(header) {
         return None;
@@ -136,8 +123,6 @@ fn is_delimiter_cell(cell: &str) -> bool {
     !body.is_empty() && body.chars().all(|c| c == '-')
 }
 
-/// Split a table row into trimmed cells on unescaped `|`, unescaping `\|`/`\\`
-/// and dropping the empty cells the optional outer pipes produce.
 fn split_cells(line: &str) -> Vec<String> {
     let mut cells: Vec<String> = Vec::new();
     let mut cur = String::new();
@@ -166,8 +151,6 @@ fn split_cells(line: &str) -> Vec<String> {
 
 fn render_table_as_list(headers: &[String], rows: &[Vec<String>], out: &mut Vec<String>) {
     for row in rows {
-        // No title cell → flatten its fields to top-level bullets; a bare "-" is
-        // not a valid list marker.
         let (indent, start) = match row.first() {
             Some(title) if !title.is_empty() => {
                 out.push(format!("- **{title}**"));
@@ -187,19 +170,11 @@ fn render_table_as_list(headers: &[String], rows: &[Vec<String>], out: &mut Vec<
     }
 }
 
-/// Per-line detail budget for the tool/thinking activity feed; the leading
-/// emoji sits outside it. Matches the TS reference's `ACTIVITY_DETAIL`.
 const ACTIVITY_DETAIL: usize = 60;
 const ERROR_DETAIL: usize = 60;
-/// Activity message rollover caps; the char cap leaves headroom under
-/// Discord's 2000 limit for the rolling edits.
 pub const ACTIVITY_LINE_CAP: usize = 20;
 pub const ACTIVITY_CHAR_CAP: usize = 1800;
 
-/// One activity-feed line for a tool call: a per-tool emoji plus the primary arg
-/// trimmed to [`ACTIVITY_DETAIL`]. Matches the decode-time [`ToolCallStart`]
-/// classification and reads typed [`Args`] fields. `task` is routed away by the
-/// turn loop, so it shares the generic render.
 pub fn tool_activity_line(tool: &ToolCallStart) -> String {
     let raw = &tool.call().args;
     let a = Args::deserialize(raw).unwrap_or_default();
@@ -235,7 +210,6 @@ pub fn tool_activity_line(tool: &ToolCallStart) -> String {
     }
 }
 
-/// The `job` activity line: ⚙️ plus the action, so a poll never renders as a bare emoji.
 fn job_line(args: &serde_json::Value) -> String {
     let ids = |key: &str| {
         args.get(key)
@@ -260,9 +234,6 @@ fn job_line(args: &serde_json::Value) -> String {
     format!("⚙️ job {}", truncate(&detail, ACTIVITY_DETAIL))
 }
 
-/// Borrowed view over the `args` fields the activity line reads. serde fills
-/// only what's present (missing → `""`) and ignores unknown args; borrowing
-/// keeps a large `command`/`code` from being cloned just to take its first line.
 #[derive(serde::Deserialize, Default)]
 #[serde(default)]
 struct Args<'a> {
@@ -282,21 +253,14 @@ struct Args<'a> {
     paths: Vec<String>,
 }
 
-/// `emoji` + the detail trimmed to [`ACTIVITY_DETAIL`]. An empty detail renders
-/// as just the emoji and a trailing space, matching the per-field arms.
 fn locate(emoji: &str, detail: &str) -> String {
     format!("{emoji} {}", truncate(detail, ACTIVITY_DETAIL))
 }
 
-/// First non-empty candidate (typed field preference, replacing the per-tool
-/// key list), or `""` when all are empty.
 fn prefer<'a>(candidates: impl IntoIterator<Item = &'a str>) -> &'a str {
     candidates.into_iter().find(|s| !s.is_empty()).unwrap_or_default()
 }
 
-/// Deserialize `string | array-of-strings` (OMP's `search` `paths`) into a
-/// `Vec`. Without it a bare-string `paths` aborts the whole [`Args`] decode and
-/// blanks the line. Owned — entries are short and only the first is read.
 fn string_or_seq<'de, D>(de: D) -> Result<Vec<String>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -314,7 +278,6 @@ where
         where
             A: serde::de::SeqAccess<'de>,
         {
-            // Only the first path is rendered; clone it and drain the rest.
             let first = seq.next_element::<String>()?;
             while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {}
             Ok(first.into_iter().collect())
@@ -323,8 +286,6 @@ where
     de.deserialize_any(OneOrMany)
 }
 
-/// One activity-feed line for a reasoning block: the first line of the thinking
-/// text trimmed to [`ACTIVITY_DETAIL`]. Empty when the block has no text.
 pub fn thinking_line(content: &str) -> String {
     let detail = truncate(first_line(content.trim()), ACTIVITY_DETAIL);
     if detail.is_empty() {
@@ -334,10 +295,6 @@ pub fn thinking_line(content: &str) -> String {
     }
 }
 
-/// Rewrite an activity line into its failed form: swap the leading emoji for
-/// ❌, keep the original detail, and append the error. One physical line so a
-/// caller's line-index mapping stays 1:1. The caller applies it once per tool
-/// (it drops the line's placement first), so the error is never re-appended.
 pub fn with_failure_line(current: &str, error: Option<&str>) -> String {
     let body = current.find(' ').map_or("", |i| &current[i..]);
     let head = format!("❌{body}");
@@ -350,8 +307,6 @@ pub fn with_failure_line(current: &str, error: Option<&str>) -> String {
     }
 }
 
-/// Pull the human-readable message out of an OMP tool-failure result
-/// (`{ content: [{ type: "text", text }] }`, or a bare string).
 pub fn error_text(result: &serde_json::Value) -> Option<String> {
     if let Some(s) = result.as_str() {
         return Some(s.to_owned());
@@ -365,17 +320,11 @@ pub fn error_text(result: &serde_json::Value) -> Option<String> {
     })
 }
 
-/// Per-row detail caps for the subagent batch render; the leading marker/emoji
-/// sits outside each.
 const SUBAGENT_LABEL_MAX: usize = 28;
 const SUBAGENT_ARGS_MAX: usize = 40;
 const SUBAGENT_INTENT_MAX: usize = 40;
 const SUBAGENT_MODEL_MAX: usize = 30;
 
-/// Lifecycle of one subagent row, folded from `AgentProgress.status`:
-/// `completed` → [`SubagentStatus::Done`], `failed`/`aborted` →
-/// [`SubagentStatus::Failed`], `running`/`pending` →
-/// [`SubagentStatus::InProgress`]. `Detached` is assigned at turn end (see [`detach_rows`]).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum SubagentStatus {
     InProgress,
@@ -384,9 +333,6 @@ pub enum SubagentStatus {
     Detached,
 }
 
-/// One subagent's live render state in a `task` batch. Seeded from the tool args
-/// at start (`index`, `agent`, `description`), then folded forward from each
-/// `tool_execution_update` snapshot matched by `index`.
 pub struct SubagentRow {
     pub index: u64,
     pub agent: String,
@@ -399,9 +345,6 @@ pub struct SubagentRow {
     pub resolved_model: Option<String>,
 }
 
-/// One row per subagent from a `task` call's args (`{ agent, tasks: [...] }`, or
-/// a single `{ id, description }`). Array position becomes `index` — preserved
-/// across id-less skips — to match `AgentProgress.index`. Empty if not a batch.
 pub fn extract_subagent_rows(args: &serde_json::Value) -> Vec<SubagentRow> {
     let Some(obj) = args.as_object() else {
         return Vec::new();
@@ -446,9 +389,6 @@ fn seed_row(index: u64, agent: &str, entry: &serde_json::Value) -> SubagentRow {
     }
 }
 
-/// Fold an update's per-subagent snapshots onto rows by `index`. Tolerates
-/// `{ details: { progress } }` and bare `{ progress }`. The four live fields are
-/// overwritten every snapshot (omitted clears) so the row mirrors the latest.
 pub fn apply_progress(rows: &mut [SubagentRow], partial: &serde_json::Value) {
     let Some(progress) = read_progress(partial) else {
         return;
@@ -485,10 +425,6 @@ pub fn apply_progress(rows: &mut [SubagentRow], partial: &serde_json::Value) {
     }
 }
 
-/// At batch end settle any row still [`SubagentStatus::InProgress`] — to
-/// [`SubagentStatus::Failed`] when the whole `task` call errored, else
-/// [`SubagentStatus::Done`]. The update stream may not deliver a terminal
-/// snapshot for every row before the end frame lands.
 pub fn settle_rows(rows: &mut [SubagentRow], is_error: bool) {
     let fallback = if is_error {
         SubagentStatus::Failed
@@ -500,16 +436,12 @@ pub fn settle_rows(rows: &mut [SubagentRow], is_error: bool) {
     }
 }
 
-/// Settle still-running rows to [`SubagentStatus::Detached`] at a backgrounded turn end.
 pub fn detach_rows(rows: &mut [SubagentRow]) {
     for row in rows.iter_mut().filter(|r| r.status == SubagentStatus::InProgress) {
         row.status = SubagentStatus::Detached;
     }
 }
 
-/// The `task` batch message: a header (emoji + `Running`/`Spawned`/`Ran`; `👥` while
-/// any row is live, else `❌` if one failed / `🚀` if backgrounded — never `✅`) then
-/// one row per subagent.
 pub fn render_subagent_batch(rows: &[SubagentRow], elapsed_ms: u64) -> String {
     let elapsed = format_duration(elapsed_ms);
     let plural = if rows.len() == 1 { "" } else { "s" };
@@ -585,7 +517,6 @@ fn read_progress(partial: &serde_json::Value) -> Option<&Vec<serde_json::Value>>
     scope.get("progress").and_then(serde_json::Value::as_array)
 }
 
-/// `details.async.state` from a `task` frame, tolerating a bare or `details`-wrapped envelope.
 fn async_state(scope: &serde_json::Value) -> Option<&str> {
     let inner = match scope.get("details") {
         Some(details) if details.is_object() => details,
@@ -594,14 +525,10 @@ fn async_state(scope: &serde_json::Value) -> Option<&str> {
     inner.get("async")?.get("state")?.as_str()
 }
 
-/// Whether a `task` end is only the async spawn-ack (`async.state == "running"`):
-/// the batch must stay open for the terminal that lands later via `update`.
 pub fn is_spawn_ack(result: &serde_json::Value) -> bool {
     async_state(result) == Some("running")
 }
 
-/// Terminal outcome of an async `task` update: `Some(false)` completed, `Some(true)`
-/// failed (cancel/abort also fold to `failed`), `None` while running or non-async.
 pub fn async_terminal(partial: &serde_json::Value) -> Option<bool> {
     match async_state(partial)? {
         "completed" => Some(false),
@@ -627,8 +554,6 @@ fn normalize_status(value: &str) -> Option<SubagentStatus> {
     }
 }
 
-/// Compact human-facing duration: largest non-zero unit down to seconds,
-/// skipping zero components (`1m`, `1h5s`, `1d30m`). Sub-second renders `0s`.
 pub fn format_duration(ms: u64) -> String {
     if ms < 1_000 {
         return "0s".to_owned();
@@ -649,7 +574,6 @@ pub fn format_duration(ms: u64) -> String {
     if out.is_empty() { "0s".to_owned() } else { out }
 }
 
-/// Char-aware truncation with a trailing ellipsis; `max` counts the ellipsis.
 pub(crate) fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         return s.to_owned();
@@ -663,18 +587,11 @@ fn first_line(s: &str) -> &str {
     s.split('\n').next().unwrap_or(s)
 }
 
-/// The edit tool's target path: an explicit `path` arg, else the path parsed
-/// from the first hashline header (`[path#TAG]`) or apply-patch directive
-/// (`*** Update File: path`) in its `input`. Borrows from the inputs; `""` when
-/// nothing resolves.
 fn edit_path_arg<'a>(path: &'a str, input: &'a str) -> &'a str {
     if !path.is_empty() {
         return path;
     }
     for line in input.lines() {
-        // Anchored to the line start (like picomp's `^\s*\[`): a hashline header
-        // opens its line, so a mid-line bracket in an apply-patch diff body
-        // (`#[derive]`, `arr[0]`) can't be mistaken for one.
         if let Some(rest) = line.trim_start().strip_prefix('[')
             && let Some(close) = rest.find(']')
         {
@@ -695,8 +612,6 @@ fn edit_path_arg<'a>(path: &'a str, input: &'a str) -> &'a str {
     ""
 }
 
-/// Drop a trailing `#XXXX` snapshot tag (exactly four hex digits) from a
-/// hashline header's inner text, leaving the bare path.
 fn strip_hashline_tag(inner: &str) -> &str {
     if let Some((path, tag)) = inner.rsplit_once('#')
         && tag.len() == 4
@@ -756,11 +671,8 @@ fn emit_line(
     content.push(line.to_string());
 }
 
-/// Break an over-budget line into budget-sized char pieces; inside a fence the
-/// budget drops by the reopen/close marker length so each piece survives them.
 fn hard_wrap(line: &str, budget: usize, in_fence: bool, open_info: &str) -> Vec<String> {
     let max = if in_fence {
-        // reopen "```<info>" + the two join newlines + the closing "```".
         budget.saturating_sub(open_info.chars().count() + 8)
     } else {
         budget
@@ -885,7 +797,6 @@ mod tests {
     fn table_inside_fence_is_left_verbatim() {
         let backtick = "```\n| a | b |\n| - | - |\n| 1 | 2 |\n```";
         assert_eq!(tables_to_lists(backtick), backtick);
-        // A stray ``` inside the ~~~ block must not close the ~~~ fence early.
         let tilde = "~~~\n| a | b |\n| - | - |\n```\n| 1 | 2 |\n~~~";
         assert_eq!(tables_to_lists(tilde), tilde);
     }
@@ -940,18 +851,14 @@ mod tests {
         );
         assert_eq!(line("web_search", json!({ "query": "rust" })), "🔎 rust");
         assert_eq!(line("totally_unknown", json!({ "a": 1 })), "🛠️ totally_unknown");
-        // task is routed to the subagent renderer; reaching the activity feed it renders generically.
         assert_eq!(line("task", json!({ "agent": "explore" })), "🛠️ task");
     }
 
     #[test]
     fn search_tolerates_string_or_array_paths() {
         use serde_json::json;
-        // OMP's `search` schemas `paths` as string|array; a string form must not
-        // abort the whole args decode and blank the pattern.
         assert_eq!(line("search", json!({ "pattern": "TODO", "paths": "src" })), "🔍 TODO");
         assert_eq!(line("search", json!({ "pattern": "TODO", "paths": ["src", "lib"] })), "🔍 TODO");
-        // A bare-string `paths` still resolves as the primary when it's all there is.
         assert_eq!(line("find", json!({ "paths": "src/**/*.rs" })), "🔍 src/**/*.rs");
     }
 

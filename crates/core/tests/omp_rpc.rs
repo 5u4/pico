@@ -1,8 +1,3 @@
-//! End-to-end tests for the OMP RPC client. `#[ignore]`d by default: they spawn
-//! the real `omp --mode rpc` binary (Bun), and `streams_a_prompt_reply` /
-//! `classifies_a_real_tool_call` also hit GitHub Copilot over the network.
-//! Run with `--include-ignored`.
-
 use std::{
     path::PathBuf,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -14,8 +9,6 @@ use pico_core::omp::{
 };
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
-/// A throwaway directory removed on drop, so a panicking test leaves nothing
-/// behind under `$TMPDIR`.
 struct TempDir {
     path: PathBuf,
 }
@@ -35,10 +28,6 @@ impl Drop for TempDir {
     }
 }
 
-/// Drives the command/response plumbing against the real binary without an LLM
-/// call. Uses the developer's authenticated agent dir so the model catalog is
-/// populated; new_session/set_model/abort/follow_up resolve locally — no prompt,
-/// no network — and an unknown model exercises the failure path.
 #[tokio::test]
 #[ignore]
 async fn roundtrip_commands_without_model_calls() {
@@ -59,8 +48,6 @@ async fn roundtrip_commands_without_model_calls() {
         .set_model("github-copilot", "gpt-4o-mini")
         .await
         .expect("set_model to a known model");
-    // follow_up queues a message for after the (here absent) turn; it acks
-    // without starting a model call.
     client.follow_up("noop follow-up").await.expect("follow_up");
     client.abort().await.expect("abort");
 
@@ -73,8 +60,6 @@ async fn roundtrip_commands_without_model_calls() {
     client.shutdown().await.expect("shutdown");
 }
 
-/// Spawns OMP against the developer's authenticated agent dir and streams a real
-/// Copilot reply, asserting the AgentStart → text deltas → AgentEnd lifecycle.
 #[tokio::test]
 #[ignore]
 async fn streams_a_prompt_reply() {
@@ -116,8 +101,6 @@ async fn streams_a_prompt_reply() {
     client.shutdown().await.expect("shutdown");
 }
 
-/// A real `tool_execution_start` frame must classify through the
-/// `#[serde(from = "ToolCall")]` path; the text-only cases never decode a tool.
 #[tokio::test]
 #[ignore]
 async fn classifies_a_real_tool_call() {
@@ -161,8 +144,6 @@ async fn classifies_a_real_tool_call() {
     client.shutdown().await.expect("shutdown");
 }
 
-/// A real `task` call's `tool_execution_update` must carry the
-/// `details.progress[]` shape `apply_progress` reads. Slow: spawns a subagent.
 #[tokio::test]
 #[ignore]
 async fn task_update_carries_subagent_progress() {
@@ -211,11 +192,6 @@ async fn task_update_carries_subagent_progress() {
     client.shutdown().await.expect("shutdown");
 }
 
-/// The hardening for unrecognised UI methods replies `cancelled` keyed by the
-/// request's `id`. That is only safe if OMP ignores a response whose `id` has no
-/// pending dialog (a fire-and-forget method, or a method this build doesn't
-/// model). Send a bogus `extension_ui_response`, then a normal prompt, and assert
-/// the session still completes the turn — i.e. the stray reply didn't wedge it.
 #[tokio::test]
 #[ignore]
 async fn stale_ui_response_is_ignored() {
@@ -231,7 +207,6 @@ async fn stale_ui_response_is_ignored() {
         .await
         .expect("spawn omp --mode rpc");
 
-    // No dialog is pending, so this id matches nothing — OMP must drop it.
     client
         .ui_response(&UiResponse::cancelled("no-such-dialog", false))
         .await
@@ -264,10 +239,6 @@ async fn stale_ui_response_is_ignored() {
     client.shutdown().await.expect("shutdown");
 }
 
-/// Aborting an in-flight turn must end it promptly: `abort()` while a tool runs
-/// cancels the running command and the session emits `agent_end` instead of
-/// letting the tool run to completion. This is the omp behavior `/cancel` relies
-/// on (see `pico_core::cancel` + `drive_turn`'s interrupt arm).
 #[tokio::test]
 #[ignore]
 async fn abort_ends_an_in_flight_turn() {
@@ -287,8 +258,6 @@ async fn abort_ends_an_in_flight_turn() {
         .await
         .expect("prompt acked");
 
-    // Abort only once the bash tool is actually running — aborting before the
-    // tool starts would race ahead of the turn and prove nothing.
     loop {
         let event = tokio::time::timeout(Duration::from_secs(90), events.recv())
             .await
@@ -304,8 +273,6 @@ async fn abort_ends_an_in_flight_turn() {
 
     client.abort().await.expect("abort");
 
-    // The 60s sleep is cancelled, so agent_end must arrive far sooner than the
-    // sleep would allow; 25s is a generous ceiling that still proves the cut.
     let mut saw_end = false;
     while let Ok(recv) = tokio::time::timeout(Duration::from_secs(25), events.recv()).await {
         match recv.expect("event stream closed before agent_end") {

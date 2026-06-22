@@ -1,9 +1,3 @@
-//! Per-thread git worktrees for worktree-kind bindings. Each Discord thread in a
-//! worktree channel runs in `<worktrees_dir>/<channel_id>/<thread_id>`, forked
-//! off `base_repo`'s `origin/<default_branch>` onto branch `pico/<thread_id>`.
-//! The path is derived from ids (no DB): an existing worktree dir is reused, a
-//! missing one is created on demand.
-
 use std::{
     ffi::OsStr,
     path::{Path, PathBuf},
@@ -18,27 +12,16 @@ const FETCH_TIMEOUT: Duration = Duration::from_secs(120);
 
 const GIT_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Serialises worktree creation process-wide. It closes the dir-exists → `git
-/// worktree add` race (this runs before the pool's per-thread lock, so that can't
-/// cover it) and keeps concurrent `worktree add` off one repo's lock. One global
-/// mutex is coarser than per-repo: a slow `fetch` (bounded by FETCH_TIMEOUT)
-/// head-of-line-blocks new threads in other channels too — simple and correct
-/// for a single-bot process, revisit if many distinct base repos are served.
 static CREATE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// The branch a thread's worktree checks out. Snowflake-derived so a respawn
-/// resolves it with no stored mapping.
 fn branch_name(thread_id: &str) -> String {
     format!("pico/{thread_id}")
 }
 
-/// Where a thread's worktree lives. Pure id derivation, no IO.
 pub fn worktree_path(worktrees_dir: &Path, channel_id: &str, thread_id: &str) -> PathBuf {
     worktrees_dir.join(channel_id).join(thread_id)
 }
 
-/// Resolve the git worktree for a thread, creating it if absent, and return its
-/// derived path for use as the turn's cwd.
 pub async fn ensure(
     worktrees_dir: &Path,
     channel_id: &str,
@@ -51,10 +34,6 @@ pub async fn ensure(
     Ok(path)
 }
 
-/// Create the worktree at an explicit `path` (idempotent: an existing worktree is
-/// reused; a missing one is forked off `default_branch` after a best-effort `git
-/// fetch origin` for `origin/…` refs). Used to recreate a thread's frozen
-/// worktree path if it was torn down out from under the worker.
 pub async fn ensure_at(path: &Path, thread_id: &str, base_repo: &Path, default_branch: &str) -> color_eyre::Result<()> {
     let _guard = CREATE_LOCK.lock().await;
     if path.join(".git").exists() {
@@ -72,14 +51,9 @@ pub async fn ensure_at(path: &Path, thread_id: &str, base_repo: &Path, default_b
             .wrap_err_with(|| format!("create worktree parent {}", parent.display()))?;
     }
 
-    // Drop registrations for worktree dirs deleted out from under git, so a
-    // manual `rm -rf` of a prior worktree doesn't wedge `worktree add`.
     run_git(base_repo, ["worktree", "prune"], GIT_TIMEOUT)
         .await
         .wrap_err("git worktree prune")?;
-    // Refresh the remote-tracking ref before forking it — but best-effort: an
-    // offline/auth-failed fetch logs a warning and forks the possibly-stale ref
-    // rather than blocking the turn. A bare local `default_branch` skips it.
     if default_branch.starts_with("origin/")
         && let Err(e) = run_git(base_repo, ["fetch", "origin"], FETCH_TIMEOUT).await
     {
@@ -88,8 +62,6 @@ pub async fn ensure_at(path: &Path, thread_id: &str, base_repo: &Path, default_b
 
     let branch = branch_name(thread_id);
     if branch_exists(base_repo, &branch).await? {
-        // Reattach a branch left by a prior worktree — never `-B`, which resets
-        // it and loses commits.
         run_git(
             base_repo,
             [
@@ -121,10 +93,6 @@ pub async fn ensure_at(path: &Path, thread_id: &str, base_repo: &Path, default_b
     Ok(())
 }
 
-/// Validate a worktree base at bind time so `/bind worktree` rejects a bad setup
-/// up front instead of failing at the first message. `base_repo` must be a git
-/// repo; an `origin/…` `default_branch` additionally requires an `origin` remote
-/// (a bare local branch needs none).
 pub async fn validate_base_repo(base_repo: &Path, default_branch: &str) -> color_eyre::Result<()> {
     if !git_ok(base_repo, ["rev-parse", "--git-dir"], GIT_TIMEOUT).await? {
         bail!("{} is not a git repository", base_repo.display());
@@ -144,10 +112,8 @@ pub async fn validate_base_repo(base_repo: &Path, default_branch: &str) -> color
     Ok(())
 }
 
-/// What `/worktree close` would permanently destroy for a thread's worktree.
 pub struct LossSummary {
     pub dirty: bool,
-    /// Branch commits reachable from neither a remote-tracking ref (pushed) nor HEAD (in trunk) — the work this close would not preserve; `None` ⇒ unknown count, treated as loss.
     pub unmerged: Option<u32>,
 }
 
@@ -174,8 +140,6 @@ impl LossSummary {
     }
 }
 
-/// Inspect — read-only — what closing the thread's worktree would destroy. The
-/// unmerged probe uses `base_repo`'s branch ref, so it reports even if the dir is gone.
 pub async fn close_would_lose(base_repo: &Path, worktree: &Path, thread_id: &str) -> color_eyre::Result<LossSummary> {
     let dirty = if worktree.join(".git").exists() {
         let out = git_output(worktree, ["status", "--porcelain"], GIT_TIMEOUT).await?;
@@ -185,7 +149,6 @@ pub async fn close_would_lose(base_repo: &Path, worktree: &Path, thread_id: &str
     };
     let branch = branch_name(thread_id);
     let unmerged = if branch_exists(base_repo, &branch).await? {
-        // Pushed to any remote (recoverable even after a squash-merge) or reachable from HEAD (in trunk) ⇒ safe; the rest is work this close would not preserve.
         let out = git_output(
             base_repo,
             ["rev-list", "--count", &branch, "--not", "--remotes", "HEAD"],
@@ -203,9 +166,6 @@ pub async fn close_would_lose(base_repo: &Path, worktree: &Path, thread_id: &str
     Ok(LossSummary { dirty, unmerged })
 }
 
-/// Tear down a thread's worktree: force-remove the working tree, then delete its
-/// branch. Idempotent; `--force` so a dirty tree can't block the close. Serialised
-/// against [`ensure_at`] so a concurrent recreate can't race the removal.
 pub async fn remove(base_repo: &Path, worktree: &Path, thread_id: &str) -> color_eyre::Result<()> {
     let _guard = CREATE_LOCK.lock().await;
     if worktree.exists() {
@@ -222,7 +182,6 @@ pub async fn remove(base_repo: &Path, worktree: &Path, thread_id: &str) -> color
         .await
         .wrap_err("git worktree remove")?;
     } else {
-        // Dir deleted out from under git (host rebuild): drop the stale registration.
         run_git(base_repo, ["worktree", "prune"], GIT_TIMEOUT)
             .await
             .wrap_err("git worktree prune")?;
@@ -308,8 +267,6 @@ mod tests {
         assert!(status.success(), "git {args:?} failed");
     }
 
-    /// A base_repo with an `origin` remote and a seeded `main`, built by cloning a
-    /// throwaway upstream — mirrors a real clone a worktree channel forks from.
     fn base_repo_with_origin(root: &Path) -> PathBuf {
         let upstream = root.join("upstream");
         std::fs::create_dir_all(&upstream).unwrap();
@@ -325,8 +282,6 @@ mod tests {
         base
     }
 
-    /// A local repo with a seeded `main` and no remote — a worktree base for the
-    /// offline path (a bare-local `default_branch`).
     fn local_repo(root: &Path) -> PathBuf {
         let repo = root.join("local");
         std::fs::create_dir_all(&repo).unwrap();
@@ -353,7 +308,6 @@ mod tests {
         assert!(path.join(".git").exists(), "worktree .git missing");
         assert!(path.join("seed.txt").exists(), "fork did not check out main");
 
-        // Idempotent: a second call reuses the same worktree without erroring.
         let again = super::ensure(&wt_dir, "111111111111111111", "222222222222222222", &base, "origin/main")
             .await
             .unwrap();
@@ -384,17 +338,14 @@ mod tests {
     async fn validate_base_repo_checks_repo_and_conditional_origin() {
         let root = temp_dir("validate");
 
-        // Not a git repo: rejected regardless of ref.
         assert!(super::validate_base_repo(&root, "origin/main").await.is_err());
 
-        // No origin: rejected for an origin/ ref, accepted for a local branch.
         let no_origin = root.join("no-origin");
         std::fs::create_dir_all(&no_origin).unwrap();
         git(&no_origin, &["init", "-b", "main"]);
         assert!(super::validate_base_repo(&no_origin, "origin/main").await.is_err());
         assert!(super::validate_base_repo(&no_origin, "main").await.is_ok());
 
-        // A clone has an origin: origin/ ref accepted.
         let base = base_repo_with_origin(&root);
         assert!(super::validate_base_repo(&base, "origin/main").await.is_ok());
 
@@ -410,8 +361,6 @@ mod tests {
         let thread = "222222222222222222";
 
         let path = super::ensure(&wt_dir, channel, thread, &base, "main").await.unwrap();
-        // Commit on the thread's branch, then delete the worktree dir out from
-        // under git so the branch (pico/<thread>) survives but its checkout is gone.
         std::fs::write(path.join("work.txt"), "wip").unwrap();
         git(&path, &["config", "user.email", "test@pico"]);
         git(&path, &["config", "user.name", "pico test"]);
@@ -419,7 +368,6 @@ mod tests {
         git(&path, &["commit", "-m", "wip"]);
         std::fs::remove_dir_all(&path).unwrap();
 
-        // Re-ensure must reattach the branch at its tip, never reset it (`-B`).
         let again = super::ensure(&wt_dir, channel, thread, &base, "main").await.unwrap();
         assert_eq!(again, path);
         assert!(again.join("work.txt").exists(), "reattach lost the branch's commit");
@@ -432,7 +380,6 @@ mod tests {
         let root = temp_dir("offline");
         let base = local_repo(&root);
         let wt_dir = root.join("worktrees");
-        // A bare-local `default_branch` skips the fetch and needs no origin remote.
         let path = super::ensure(&wt_dir, "111111111111111111", "222222222222222222", &base, "main")
             .await
             .unwrap();
@@ -548,7 +495,6 @@ mod tests {
         let path = super::ensure(&wt_dir, channel, thread, &base, "origin/main")
             .await
             .unwrap();
-        // Push the branch (opening a PR): its commit never lands in trunk — the squash-merge case the old `trunk..branch` range falsely flagged.
         std::fs::write(path.join("work.txt"), "wip").unwrap();
         git(&path, &["config", "user.email", "test@pico"]);
         git(&path, &["config", "user.name", "pico test"]);
@@ -575,7 +521,6 @@ mod tests {
         git(&path, &["config", "user.name", "pico test"]);
         git(&path, &["add", "."]);
         git(&path, &["commit", "-m", "wip"]);
-        // Fast-forward base trunk (HEAD) onto the branch tip: now reachable from HEAD ⇒ safe.
         git(&base, &["merge", "--ff-only", &super::branch_name(thread)]);
 
         let loss = super::close_would_lose(&base, &path, thread).await.unwrap();
@@ -591,8 +536,6 @@ mod tests {
         let wt_dir = root.join("worktrees");
         let (channel, thread) = ("111111111111111111", "222222222222222222");
         let path = super::ensure(&wt_dir, channel, thread, &base, "main").await.unwrap();
-        // Point base HEAD at an unborn branch so `rev-list … HEAD` errors while
-        // pico/<thread> still resolves: an uncomputable count must fail closed (confirm).
         git(&base, &["symbolic-ref", "HEAD", "refs/heads/does-not-exist"]);
 
         let loss = super::close_would_lose(&base, &path, thread).await.unwrap();

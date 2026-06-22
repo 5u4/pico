@@ -6,9 +6,6 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::omp::pool::OmpPool;
 
-/// The worker's running application: owns the single Discord client (gateway +
-/// command framework), the channel→profile bindings, and the per-thread OMP
-/// child pool for this worker root.
 pub struct App {
     client: serenity::Client,
     ready_rx: tokio::sync::oneshot::Receiver<()>,
@@ -17,11 +14,6 @@ pub struct App {
 }
 
 impl App {
-    /// Load the bot token + channel bindings from `<root>` and construct the
-    /// Discord client without connecting ([`App::run`] connects). A missing or
-    /// empty token errors here — before the worker can report ready — so a
-    /// deploy lacking credentials fails the supervisor's health check and rolls
-    /// back instead of half-starting.
     pub async fn build(root: &Path, supervisor_socket: Option<std::path::PathBuf>) -> color_eyre::Result<App> {
         let token = read_secret(root, "discord_bot_token")?;
         let bindings = crate::bindings::load(&pico_shared::paths::worker_bindings(root))?;
@@ -60,10 +52,6 @@ impl App {
         })
     }
 
-    /// Connect to the gateway and serve until `shutdown` resolves, then stop the
-    /// shards cleanly. `on_connected` fires once the gateway is up — the worker
-    /// reports ready to the supervisor there — and never fires if the client
-    /// fails before connecting.
     pub async fn run<S, R, Rf>(self, shutdown: S, on_connected: R) -> color_eyre::Result<()>
     where
         S: Future<Output = ()> + Send + 'static,
@@ -105,8 +93,6 @@ impl App {
                 }
             });
         }
-        // Stop accepting new turns, then drain in-flight ones (each flushes its
-        // partial reply on `cancel`) plus the evictor and per-child stdio tasks.
         let result = client.start().await.wrap_err("discord client error");
         cancel.cancel();
         tracker.close();

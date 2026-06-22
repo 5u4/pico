@@ -1,8 +1,3 @@
-//! Test-double worker for the supervisor's e2e suite: it speaks the ready
-//! handshake and then waits for SIGTERM, with none of the real worker's Discord
-//! dependency, so the orchestration tests stay hermetic. Gated behind the
-//! `test-stub` feature so it never ships in a normal build.
-
 use std::path::PathBuf;
 
 use pico_shared::proto::{self, ReadyAck, Request};
@@ -31,7 +26,6 @@ async fn main() -> color_eyre::Result<()> {
         let stream = UnixStream::connect(&socket).await?;
         let (read_half, mut write_half) = stream.into_split();
         proto::write_frame(&mut write_half, &Request::Ready { token }).await?;
-        // Echo any relayed report so the e2e suite can assert delivery.
         let mut reader = BufReader::new(read_half);
         if let Ok(Some(ack)) = proto::read_frame::<ReadyAck, _>(&mut reader).await
             && let (Some(report), Some(root)) = (ack.report, root.as_ref())

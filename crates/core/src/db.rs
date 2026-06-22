@@ -1,17 +1,8 @@
-//! Per-worker SQLite store: one `<root>/pico.db` holds every subsystem's durable
-//! state (approvals now; scheduling / conversation to come) as separate tables —
-//! a single transactional persistence layer, not per-subsystem file juggling.
-//! Opened once at startup with WAL + embedded migrations.
-
 use std::{path::Path, time::Duration};
 
 use color_eyre::eyre::WrapErr;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 
-/// Open (creating if absent) the worker's SQLite pool and apply embedded
-/// migrations. This is the worker's single-writer store: under WAL readers never
-/// block the lone writer, and the busy timeout makes a contending writer wait
-/// rather than fail.
 pub async fn open(root: &Path) -> color_eyre::Result<sqlx::SqlitePool> {
     let options = SqliteConnectOptions::new()
         .filename(pico_shared::paths::worker_db(root))

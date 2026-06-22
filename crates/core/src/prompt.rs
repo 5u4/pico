@@ -1,13 +1,9 @@
-//! pico's small append delta (Discord override, persona framing, delegation) layered on
-//! omp's untouched default prompt via `--append-system-prompt`; `identity.md` appends after.
-
 use std::path::{Path, PathBuf};
 
 use color_eyre::eyre::WrapErr;
 
 const APPEND_DELTA: &str = include_str!("append_prompt.md");
 
-/// Assemble the delta + the profile's `identity.md` (when present) into `dest`, returning it.
 pub fn assemble_append(dest: &Path, identity: Option<&Path>) -> color_eyre::Result<PathBuf> {
     let mut body = APPEND_DELTA.to_string();
     if let Some(identity) = identity {

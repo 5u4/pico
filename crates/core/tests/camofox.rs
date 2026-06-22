@@ -1,6 +1,3 @@
-//! Live camofox e2e — `#[ignore]`d like the others; run with `--include-ignored` against the
-//! built pico image, where camofox-browser is baked and the engine downloads on first use.
-
 use std::{collections::HashMap, path::PathBuf};
 
 use pico_core::omp::camofox::CamofoxDaemon;
@@ -20,8 +17,6 @@ fn temp_root() -> PathBuf {
     dir
 }
 
-/// Minimal one-shot HTTP/1.1 request (Connection: close) against the loopback
-/// daemon. Returns `(status, body)`. Keeps the test dependency-free.
 async fn http(base: &str, key: &str, method: &str, path: &str, body: Option<&str>) -> (u16, String) {
     let addr = base.trim_start_matches("http://");
     let mut stream = TcpStream::connect(addr).await.expect("connect to camofox daemon");
@@ -94,11 +89,6 @@ async fn camofox_opens_a_tab_and_snapshots() {
     std::fs::remove_dir_all(&root).ok();
 }
 
-/// Regression guard: the embedded extension must actually load under
-/// `omp --extension` and register every camo_* tool. A wrong `pi.zod` access
-/// (e.g. `const { z } = pi.zod`) makes omp silently drop the whole extension, so
-/// the daemon e2e above would still pass while the agent sees no tools. Spawns omp
-/// in print mode and asserts the model can see the tools.
 #[test]
 #[ignore = "live: needs omp on PATH + an authenticated model"]
 fn omp_loads_extension_and_registers_camo_tools() {
@@ -117,7 +107,6 @@ fn omp_loads_extension_and_registers_camo_tools() {
         .expect("run omp");
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    // Registration is all-or-nothing, so any one camo_* name proves it loaded.
     assert!(
         stdout.contains("camo_"),
         "omp exposed no camo_* tools (extension failed to load?)\nstdout: {stdout}\nstderr: {stderr}"

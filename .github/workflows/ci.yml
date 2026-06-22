@@ -32,8 +32,6 @@ jobs:
       - name: worktree-ambient-link tests
         run: bash scripts/link-worktree-ambient.test.sh
       - name: lint-comments
-        # TEMP: report comment density but don't block merge — pending a comments-lint rework (PR #28).
-        continue-on-error: true
         env:
           BASE_REF: ${{ github.base_ref }}
           BEFORE_SHA: ${{ github.event.before }}

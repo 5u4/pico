@@ -1,9 +1,3 @@
-//! Per-thread frozen route. A thread's profile + cwd (and, for a worktree, its
-//! base repo + start ref) are recorded on its first turn under
-//! `<root>/threads/<thread_id>.toml`, so a later channel rebind never migrates an
-//! existing thread to a new cwd/worktree. Keyed by thread id, independent of
-//! profile.
-
 use std::{
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
@@ -15,11 +9,7 @@ use serde::{Deserialize, Serialize};
 pub struct ThreadMarker {
     pub profile: String,
     pub cwd: PathBuf,
-    /// Present iff the thread is a worktree thread — lets `cwd` be recreated if
-    /// the worktree was torn down out from under the worker.
     pub worktree: Option<WorktreeOrigin>,
-    /// Set (ISO8601) when the worktree thread was closed via `/worktree close`;
-    /// its presence tombstones the thread so `route_message` refuses further turns.
     pub closed_at: Option<String>,
 }
 
@@ -40,11 +30,6 @@ struct RawMarker {
     closed_at: Option<String>,
 }
 
-/// Read a thread's marker. `None` means "resolve from the channel binding": the
-/// marker is absent (first turn) or present-but-unreadable/invalid (self-heal —
-/// the caller re-resolves and overwrites). The profile is re-validated because it
-/// becomes a path component under `<root>/profiles/`, so a tampered marker can't
-/// escape.
 pub fn load(root: &Path, thread_id: &str) -> Option<ThreadMarker> {
     let path = pico_shared::paths::thread_marker(root, thread_id);
     let text = match std::fs::read_to_string(&path) {
@@ -75,9 +60,6 @@ fn parse(text: &str) -> Option<ThreadMarker> {
     }
     let worktree = match (raw.base_repo, raw.default_branch) {
         (Some(base_repo), Some(default_branch)) => {
-            // Re-validate the worktree origin like the binding does: the ref
-            // reaches `git worktree add` and base_repo is a `git -C` target, so a
-            // tampered marker must self-heal, never inject an option-like ref/path.
             if !crate::bindings::is_valid_branch(&default_branch) {
                 return None;
             }
@@ -91,7 +73,6 @@ fn parse(text: &str) -> Option<ThreadMarker> {
             })
         }
         (None, None) => None,
-        // A half-written worktree origin can't recreate the cwd: self-heal.
         _ => return None,
     };
     Some(ThreadMarker {
@@ -102,8 +83,6 @@ fn parse(text: &str) -> Option<ThreadMarker> {
     })
 }
 
-/// Persist a thread's marker. Best-effort: a write failure logs and is retried on
-/// the next turn rather than blocking it.
 pub fn save(root: &Path, thread_id: &str, marker: &ThreadMarker) {
     if let Err(e) = write(root, thread_id, marker) {
         tracing::warn!(%thread_id, error = %format!("{e:#}"), "persisting thread marker failed");
@@ -126,8 +105,6 @@ fn write(root: &Path, thread_id: &str, marker: &ThreadMarker) -> color_eyre::Res
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(dir).wrap_err_with(|| format!("creating {}", dir.display()))?;
 
-    // Atomic temp+rename so a concurrent reader never sees a torn file; the
-    // per-write sequence keeps tmp names unique within the process.
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
     let tmp = dir.join(format!(".{thread_id}.tmp.{}.{}", std::process::id(), seq));
@@ -136,8 +113,6 @@ fn write(root: &Path, thread_id: &str, marker: &ThreadMarker) -> color_eyre::Res
     Ok(())
 }
 
-/// Tombstone a worktree thread: stamp `closed_at` on its marker and persist it.
-/// Surfaces write failures (unlike best-effort [`save`]) so a failed close aborts.
 pub fn tombstone(root: &Path, thread_id: &str, marker: ThreadMarker, closed_at: String) -> color_eyre::Result<()> {
     let marker = ThreadMarker {
         closed_at: Some(closed_at),

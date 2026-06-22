@@ -13,16 +13,11 @@ pub struct Binding {
     pub kind: BindingKind,
 }
 
-/// What a bound channel's threads run against. `Regular` pins one cwd for every
-/// thread; `Worktree` forks a fresh git worktree per thread off `base_repo`.
 pub enum BindingKind {
     Regular { cwd: PathBuf },
     Worktree { base_repo: PathBuf, default_branch: String },
 }
 
-/// Start ref a worktree binding forks from when the entry names none. The
-/// `origin/` prefix forks freshly-fetched remote main; a bare local branch
-/// (e.g. `main`) opts out of the fetch and forks offline.
 pub const DEFAULT_BRANCH: &str = "origin/main";
 
 pub struct Bindings {
@@ -83,11 +78,6 @@ pub fn load(path: &Path) -> color_eyre::Result<Bindings> {
     Ok(Bindings { inner })
 }
 
-/// Parse + validate one raw entry. Cheap, sync invariants run here (ids, profile,
-/// absolute existing paths, branch syntax) so a hand-edited file fails at load,
-/// not at spawn. A worktree `base_repo`'s git-repo-ness is *not* checked here
-/// (that's an async check in `/bind worktree`; otherwise it surfaces as a runtime
-/// `git worktree` error).
 fn binding_from_raw(raw: RawBinding) -> color_eyre::Result<Binding> {
     let RawBinding {
         channel_id,
@@ -154,10 +144,6 @@ pub fn set(path: &Path, channel_id: &str, profile: &str, cwd: &Path) -> color_ey
     )
 }
 
-/// Write a worktree binding: every thread in `channel_id` forks a fresh git
-/// worktree off `base_repo` at `default_branch`. The caller verifies `base_repo`
-/// is a git repo (async `git`) first; this re-checks only the cheap filesystem
-/// invariants `load` also enforces.
 pub fn set_worktree(
     path: &Path,
     channel_id: &str,
@@ -186,8 +172,6 @@ pub fn set_worktree(
     )
 }
 
-/// Upsert one entry by channel id under the write lock — so two concurrent
-/// `/bind`s can't lose each other's update — then atomically rewrite the file.
 fn upsert(path: &Path, entry: RawBinding) -> color_eyre::Result<()> {
     let _guard = write_lock();
     let mut file = read_raw(path)?.unwrap_or(RawFile { binding: Vec::new() });
@@ -231,8 +215,6 @@ fn write_atomic(path: &Path, file: &RawFile) -> color_eyre::Result<()> {
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(dir).wrap_err_with(|| format!("creating {}", dir.display()))?;
 
-    // PID alone collides between concurrent writers in one process; the
-    // per-write sequence makes each tmp name unique.
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
     let mut tmp_name = std::ffi::OsString::from(".");
@@ -259,10 +241,6 @@ pub(crate) fn is_valid_profile(name: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
-/// A worktree start ref reaches `git worktree add … <ref>` (and a thread marker
-/// reaches it from disk) as an option-parseable positional, so reject anything
-/// option-like (leading `-`) or outside git-ref-safe chars — blocks
-/// `--upload-pack=…`-style arg injection.
 pub(crate) fn is_valid_branch(branch: &str) -> bool {
     !branch.is_empty()
         && !branch.starts_with('-')
@@ -281,9 +259,6 @@ fn validate_branch(branch: &str) -> color_eyre::Result<()> {
     Ok(())
 }
 
-/// Identity invariants shared by every binding kind. The profile check is a
-/// security boundary: it becomes a path component under `<root>/profiles/`, so
-/// `..` or an absolute path would escape.
 fn validate_identity(channel_id: &str, profile: &str) -> color_eyre::Result<()> {
     if !is_valid_snowflake(channel_id) {
         return Err(color_eyre::eyre::eyre!(
@@ -298,8 +273,6 @@ fn validate_identity(channel_id: &str, profile: &str) -> color_eyre::Result<()> 
     Ok(())
 }
 
-/// A binding path (`cwd` for regular, `base_repo` for worktree) must be an
-/// absolute, existing directory; `label` names it in the error.
 fn validate_existing_dir(label: &str, path: &Path) -> color_eyre::Result<()> {
     if !path.is_absolute() {
         return Err(color_eyre::eyre::eyre!("{label} {} must be an absolute path", path.display()));
@@ -316,9 +289,6 @@ fn write_lock() -> std::sync::MutexGuard<'static, ()> {
     LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// Accept a snowflake (channel or guild id) as a quoted string or bare integer, per the
-/// documented `bindings.toml` contract. Bare integers above `i64::MAX` (20-digit
-/// snowflakes, not reachable until ~2084) still require quoting.
 pub(crate) fn de_snowflake<'de, D>(de: D) -> Result<String, D::Error>
 where
     D: serde::Deserializer<'de>,

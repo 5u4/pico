@@ -9,6 +9,6 @@ if [ -z "$current" ] || [ "$current" = ".githooks" ]; then
   git config core.hooksPath .githooks
 else
   echo "core.hooksPath is already set to '$current'; leaving it alone." >&2
-  echo "To enable the comment gates, run:" >&2
+  echo "To enable the comment gate, run:" >&2
   echo "  git config core.hooksPath .githooks" >&2
 fi
