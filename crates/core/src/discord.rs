@@ -1456,6 +1456,7 @@ impl<'a> SubagentFeed<'a> {
     fn clear_one_backgrounded(&mut self) {
         if let Some(batch) = self.batches.values_mut().find(|batch| batch.backgrounded) {
             batch.backgrounded = false;
+            crate::render::detach_rows(&mut batch.rows);
         }
     }
 
