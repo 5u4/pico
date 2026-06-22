@@ -23,6 +23,7 @@ use crate::{
 pub(crate) struct Data {
     root: Arc<std::path::PathBuf>,
     bindings: Arc<parking_lot::Mutex<Bindings>>,
+    db: sqlx::SqlitePool,
     pool: Arc<OmpPool>,
     camofox: Arc<CamofoxDaemon>,
     hindsight: Arc<crate::memory::HindsightDaemon>,
@@ -37,9 +38,11 @@ pub(crate) struct Data {
 pub(crate) type Error = Box<dyn std::error::Error + Send + Sync>;
 type Context<'a> = poise::Context<'a, Data, Error>;
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn framework(
     root: std::path::PathBuf,
     bindings: Bindings,
+    db: sqlx::SqlitePool,
     pool: Arc<OmpPool>,
     ready_tx: tokio::sync::oneshot::Sender<()>,
     supervisor_socket: Option<std::path::PathBuf>,
@@ -71,6 +74,7 @@ pub(crate) fn framework(
                 Ok(Data {
                     root: Arc::new(root),
                     bindings: Arc::new(parking_lot::Mutex::new(bindings)),
+                    db,
                     pool,
                     camofox,
                     hindsight,
@@ -126,7 +130,7 @@ async fn cancel_turn(ctx: Context<'_>) -> Result<(), Error> {
 #[poise::command(slash_command, rename = "dev-deploy")]
 async fn dev_deploy(ctx: Context<'_>) -> Result<(), Error> {
     let thread_id = ctx.channel_id().to_string();
-    let Some(marker) = crate::thread_marker::load(&ctx.data().root, &thread_id) else {
+    let Some(marker) = crate::thread_marker::load(&ctx.data().db, &thread_id).await else {
         ctx.say("❌ this thread has no working dir yet — send it a message first, then retry.")
             .await?;
         return Ok(());
@@ -480,7 +484,7 @@ async fn worktree_close(ctx: Context<'_>) -> Result<(), Error> {
     let thread_id = ctx.channel_id().to_string();
     ctx.defer_ephemeral().await?;
 
-    let marker = match crate::thread_marker::load(&data.root, &thread_id) {
+    let marker = match crate::thread_marker::load(&data.db, &thread_id).await {
         Some(marker) if marker.worktree.is_some() => marker,
         _ => {
             ctx.say("❌ not a worktree thread; nothing to close.").await?;
@@ -519,7 +523,7 @@ async fn worktree_close(ctx: Context<'_>) -> Result<(), Error> {
     }
 
     let closed_at = serenity::Timestamp::now().to_string();
-    if let Err(e) = crate::thread_marker::tombstone(&data.root, &thread_id, marker, closed_at) {
+    if let Err(e) = crate::thread_marker::tombstone(&data.db, &thread_id, marker, closed_at).await {
         ctx.say(format!(
             "❌ worktree removed, but writing the closed marker failed: {e} — retry to finish."
         ))
@@ -613,6 +617,7 @@ async fn on_event(
         let ctx = ctx.clone();
         let root = Arc::clone(&data.root);
         let bindings = Arc::clone(&data.bindings);
+        let db = data.db.clone();
         let pool = Arc::clone(&data.pool);
         let camofox = Arc::clone(&data.camofox);
         let hindsight = Arc::clone(&data.hindsight);
@@ -627,6 +632,7 @@ async fn on_event(
                 ctx,
                 root,
                 bindings,
+                db,
                 pool,
                 camofox,
                 hindsight,
@@ -686,6 +692,7 @@ async fn route_message(
     ctx: serenity::Context,
     root: Arc<std::path::PathBuf>,
     bindings: Arc<parking_lot::Mutex<Bindings>>,
+    db: sqlx::SqlitePool,
     pool: Arc<OmpPool>,
     camofox: Arc<CamofoxDaemon>,
     hindsight: Arc<crate::memory::HindsightDaemon>,
@@ -775,7 +782,7 @@ async fn route_message(
     };
     let thread_id = target.to_string();
 
-    let (profile, cwd) = match crate::thread_marker::load(root.as_path(), &thread_id) {
+    let (profile, cwd) = match crate::thread_marker::load(&db, &thread_id).await {
         Some(marker) => {
             if let Some(closed_at) = &marker.closed_at {
                 target
@@ -858,7 +865,7 @@ async fn route_message(
                 }
             };
             crate::thread_marker::save(
-                root.as_path(),
+                &db,
                 &thread_id,
                 &crate::thread_marker::ThreadMarker {
                     profile: profile.clone(),
@@ -866,7 +873,8 @@ async fn route_message(
                     worktree,
                     closed_at: None,
                 },
-            );
+            )
+            .await;
             (profile, cwd)
         }
     };

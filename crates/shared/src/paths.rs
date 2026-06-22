@@ -62,10 +62,6 @@ pub fn default_worktrees_dir(root: &Path) -> PathBuf {
     root.join("worktrees")
 }
 
-pub fn thread_marker(root: &Path, thread_id: &str) -> PathBuf {
-    root.join("threads").join(format!("{thread_id}.toml"))
-}
-
 pub fn worker_db(root: &Path) -> PathBuf {
     root.join("pico.db")
 }
