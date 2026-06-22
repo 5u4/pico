@@ -202,7 +202,8 @@ struct RawWorktree {
 
 #[derive(serde::Deserialize)]
 struct RawRootMemory {
-    endpoint: String,
+    #[serde(default)]
+    endpoint: Option<String>,
 }
 
 const DEFAULT_APPROVAL_TIMEOUT_SECS: u64 = 3600;
@@ -324,8 +325,8 @@ pub fn load_root(config_path: &Path) -> color_eyre::Result<RootConfig> {
         worktrees_dir,
         approvers,
         approval_timeout,
-        memory_endpoint: raw.memory.and_then(|m| {
-            let endpoint = m.endpoint.trim().to_owned();
+        memory_endpoint: raw.memory.and_then(|m| m.endpoint).and_then(|endpoint| {
+            let endpoint = endpoint.trim().to_owned();
             (!endpoint.is_empty()).then_some(endpoint)
         }),
     })
@@ -432,6 +433,8 @@ mod tests {
         assert_eq!(super::load_root(&path).unwrap().memory_endpoint(), None);
         std::fs::write(&path, "[memory]\nendpoint = \"http://x:8888\"\n").unwrap();
         assert_eq!(super::load_root(&path).unwrap().memory_endpoint(), Some("http://x:8888"));
+        std::fs::write(&path, "[memory]\n").unwrap();
+        assert_eq!(super::load_root(&path).unwrap().memory_endpoint(), None);
         std::fs::remove_dir_all(&dir).ok();
     }
 
