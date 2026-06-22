@@ -3,11 +3,12 @@
 //! memory is additive: it never breaks a turn, and blocks it only up to a short recall timeout.
 
 use std::{
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, LazyLock},
     time::{Duration, Instant},
 };
 
+use sqlx::{ConnectOptions, sqlite::SqliteConnectOptions};
 use tokio::{process::Command, sync::Mutex};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
@@ -178,7 +179,8 @@ const DEFAULT_IMAGE: &str = "ghcr.io/vectorize-io/hindsight:latest";
 fn image() -> String {
     std::env::var("PICO_HINDSIGHT_IMAGE").unwrap_or_else(|_| DEFAULT_IMAGE.to_owned())
 }
-const LLM_MODEL: &str = "openai/gpt-oss-20b";
+const LLM_MODEL: &str = "gpt-4o-mini";
+const COPILOT_BASE_URL: &str = "https://api.enterprise.githubcopilot.com";
 /// First boot loads the embedding model and inits PostgreSQL; allow generously.
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(240);
 const HEALTH_POLL: Duration = Duration::from_secs(2);
@@ -190,7 +192,7 @@ const RECHECK_INTERVAL: Duration = Duration::from_secs(30);
 /// endpoint` override is set. Persistent (`--restart unless-stopped`), one per
 /// worker root, reused across worker restarts; never torn down by the worker.
 pub struct HindsightDaemon {
-    groq_key: Option<String>,
+    copilot_token: Option<String>,
     container: String,
     host_port: u16,
     state: Mutex<DaemonState>,
@@ -207,9 +209,9 @@ struct DaemonState {
 }
 
 impl HindsightDaemon {
-    pub fn new(root: &Path, cancel: CancellationToken, tracker: &TaskTracker) -> Arc<Self> {
+    pub async fn new(root: &Path, cancel: CancellationToken, tracker: &TaskTracker) -> Arc<Self> {
         Arc::new(Self {
-            groq_key: read_optional_secret(root, "groq_api_key"),
+            copilot_token: omp_copilot_token().await,
             container: container_name(root),
             host_port: host_port(root),
             state: Mutex::new(DaemonState::default()),
@@ -253,7 +255,7 @@ impl HindsightDaemon {
         if let Some(ep) = &st.endpoint {
             return Some(ep.clone());
         }
-        if st.bringing_up || st.retry_after.is_some_and(|t| Instant::now() < t) || self.groq_key.is_none() {
+        if st.bringing_up || st.retry_after.is_some_and(|t| Instant::now() < t) || self.copilot_token.is_none() {
             return None;
         }
         st.bringing_up = true;
@@ -266,7 +268,7 @@ impl HindsightDaemon {
     /// Pre-pull the image at startup so the first self-managed turn isn't blocked
     /// on a multi-GB pull. Best-effort.
     pub async fn ensure_image(self: Arc<Self>) {
-        if self.groq_key.is_some() {
+        if self.copilot_token.is_some() {
             docker_ok(&["pull", &image()]).await;
         }
     }
@@ -298,8 +300,8 @@ impl HindsightDaemon {
         let ready = match container_state(&self.container).await {
             ContainerState::Running => true,
             ContainerState::Stopped => docker_ok(&["start", &self.container]).await,
-            ContainerState::Absent => match self.groq_key.as_deref() {
-                Some(key) => self.run_container(key, network.as_deref()).await,
+            ContainerState::Absent => match self.copilot_token.as_deref() {
+                Some(token) => self.run_container(token, network.as_deref()).await,
                 None => false,
             },
             ContainerState::Unknown => false,
@@ -311,10 +313,11 @@ impl HindsightDaemon {
         }
     }
 
-    async fn run_container(&self, groq_key: &str, network: Option<&str>) -> bool {
+    async fn run_container(&self, token: &str, network: Option<&str>) -> bool {
         let volume = format!("{}-data:/home/hindsight/.pg0", self.container);
         let model_env = format!("HINDSIGHT_API_LLM_MODEL={LLM_MODEL}");
-        let key_env = format!("HINDSIGHT_API_LLM_API_KEY={groq_key}");
+        let base_url_env = format!("HINDSIGHT_API_LLM_BASE_URL={COPILOT_BASE_URL}");
+        let key_env = format!("HINDSIGHT_API_LLM_API_KEY={token}");
         let image = image();
         let mut args = vec![
             "run",
@@ -333,7 +336,9 @@ impl HindsightDaemon {
             "-v",
             volume.as_str(),
             "-e",
-            "HINDSIGHT_API_LLM_PROVIDER=groq",
+            "HINDSIGHT_API_LLM_PROVIDER=openai",
+            "-e",
+            base_url_env.as_str(),
             "-e",
             model_env.as_str(),
             "-e",
@@ -369,10 +374,47 @@ fn host_port(root: &Path) -> u16 {
     8888 + (root_hash(root) % 4000) as u16
 }
 
-fn read_optional_secret(root: &Path, name: &str) -> Option<String> {
-    let raw = std::fs::read_to_string(pico_shared::paths::worker_secret(root, name)).ok()?;
-    let value = raw.trim();
-    (!value.is_empty()).then(|| value.to_owned())
+/// Path to omp's `agent.db`, mirroring omp's `PI_CODING_AGENT_DIR`/`${PI_CONFIG_DIR:-~/.omp}/agent` resolution.
+fn omp_agent_db() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os("PI_CODING_AGENT_DIR") {
+        return Some(PathBuf::from(dir).join("agent.db"));
+    }
+    let base = std::env::var_os("PI_CONFIG_DIR")
+        .map(PathBuf::from)
+        .or_else(|| std::env::home_dir().map(|home| home.join(".omp")))?;
+    Some(base.join("agent").join("agent.db"))
+}
+
+/// omp's stored GitHub Copilot OAuth token (`access` of the active
+/// `github-copilot` credential), reused as Hindsight's key. Best-effort: any failure yields `None`.
+pub async fn omp_copilot_token() -> Option<String> {
+    let db = omp_agent_db()?;
+    if !db.exists() {
+        return None;
+    }
+    let mut conn = SqliteConnectOptions::new()
+        .filename(&db)
+        .read_only(true)
+        .connect()
+        .await
+        .ok()?;
+    let data: Option<String> = sqlx::query_scalar(
+        "SELECT data FROM auth_credentials \
+         WHERE provider = 'github-copilot' AND credential_type = 'oauth' AND disabled_cause IS NULL \
+         ORDER BY updated_at DESC LIMIT 1",
+    )
+    .fetch_optional(&mut conn)
+    .await
+    .ok()?;
+    let data = data?;
+    let token = serde_json::from_str::<serde_json::Value>(&data)
+        .ok()
+        .and_then(|v| v.get("access").and_then(|a| a.as_str()).map(|s| s.trim().to_owned()))
+        .filter(|t| !t.is_empty());
+    if token.is_none() {
+        tracing::debug!("omp github-copilot credential present but its token is unparseable");
+    }
+    token
 }
 
 async fn container_state(name: &str) -> ContainerState {

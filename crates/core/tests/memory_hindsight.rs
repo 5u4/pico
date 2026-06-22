@@ -1,6 +1,6 @@
 //! Live Hindsight round-trip through the worker-managed daemon: lets
 //! `HindsightDaemon` bring up its own container over the docker socket, then
-//! asserts a real retain -> recall round-trip. `#[ignore]`d; needs docker + `E2E_GROQ_KEY`.
+//! asserts a real retain -> recall round-trip. `#[ignore]`d; needs docker + an omp Copilot login.
 
 use std::{
     path::{Path, PathBuf},
@@ -44,33 +44,22 @@ impl Drop for Cleanup {
 #[ignore]
 async fn hindsight_daemon_retain_recall_roundtrip() {
     load_env();
-    let Ok(groq_key) = std::env::var("E2E_GROQ_KEY") else {
-        eprintln!("skip: E2E_GROQ_KEY not set in .env.e2e");
-        return;
-    };
-    let groq_key = groq_key.trim().to_owned();
-    if groq_key.is_empty() {
-        eprintln!("skip: E2E_GROQ_KEY empty");
-        return;
-    }
     if !docker_available() {
         eprintln!("skip: docker not available");
         return;
     }
-
-    // Temp worker root carrying the Groq secret the daemon reads.
-    let root = std::env::temp_dir().join(format!("pico-mem-e2e-{}", std::process::id()));
-    std::fs::create_dir_all(root.join("secrets")).expect("mkdir secrets");
-    std::fs::write(root.join("secrets/groq_api_key"), &groq_key).expect("write key");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(root.join("secrets/groq_api_key"), std::fs::Permissions::from_mode(0o600));
+    if memory::omp_copilot_token().await.is_none() {
+        eprintln!("skip: no omp github-copilot token (log omp into Copilot first)");
+        return;
     }
+
+    // Container name/port derive from this temp root; the LLM token comes from omp, not here.
+    let root = std::env::temp_dir().join(format!("pico-mem-e2e-{}", std::process::id()));
+    std::fs::create_dir_all(&root).expect("mkdir root");
 
     let cancel = CancellationToken::new();
     let tracker = TaskTracker::new();
-    let daemon = HindsightDaemon::new(&root, cancel.clone(), &tracker);
+    let daemon = HindsightDaemon::new(&root, cancel.clone(), &tracker).await;
     let _cleanup = Cleanup {
         container: daemon.container().to_owned(),
         root: root.clone(),
