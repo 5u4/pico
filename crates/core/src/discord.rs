@@ -947,6 +947,8 @@ enum TurnOutcome {
 
 const STALL_TIMEOUT: Duration = Duration::from_secs(3900);
 
+const SETTLE_GRACE: Duration = Duration::from_secs(1);
+
 const REACT_FOLLOW_UP: &str = "📥";
 const REACT_STEER: &str = "↪️";
 
@@ -985,12 +987,20 @@ async fn drive_turn(
     let (interrupt, streaming, _cancel_guard) = cancels.register(target);
     let mut aborted = false;
     let mut first_commit = true;
+    let mut settling = false;
+    let mut main_run_done = false;
+    let mut awaiting_deferred = false;
 
     let mut reply = String::new();
     let mut activity = Activity::new(ctx, target);
     let mut subagents = SubagentFeed::new(ctx, target);
 
     loop {
+        let idle_wait = if settling && !awaiting_deferred {
+            SETTLE_GRACE
+        } else {
+            STALL_TIMEOUT
+        };
         let event = tokio::select! {
             () = cancel.cancelled() => {
                 activity.flush().await;
@@ -1018,8 +1028,9 @@ async fn drive_turn(
                 }
                 continue;
             }
-            recv = tokio::time::timeout(STALL_TIMEOUT, session.events.recv()) => match recv {
+            recv = tokio::time::timeout(idle_wait, session.events.recv()) => match recv {
                 Ok(event) => event,
+                Err(_) if settling => break,
                 Err(_) => {
                     tracing::warn!(timeout = ?STALL_TIMEOUT, "turn made no progress; resetting wedged OMP session");
                     activity.flush().await;
@@ -1032,6 +1043,9 @@ async fn drive_turn(
                 }
             },
         };
+        if event.is_some() {
+            settling = false;
+        }
         match event {
             Some(OmpEvent::Message(AssistantMessageEvent::TextDelta { delta })) => {
                 reply.push_str(&delta);
@@ -1103,9 +1117,17 @@ async fn drive_turn(
                     activity.seal();
                 }
             }
-            Some(OmpEvent::AgentEnd) => match mid_turn.drain_or_close(target, &mut rx) {
-                Some(text) => session.client.prompt(&text).await?,
-                None => break,
+            Some(OmpEvent::AgentEnd) => match rx.try_recv() {
+                Ok(text) => session.client.prompt(&text).await?,
+                Err(_) => {
+                    if main_run_done {
+                        subagents.clear_one_backgrounded();
+                    } else {
+                        main_run_done = true;
+                    }
+                    awaiting_deferred = subagents.has_pending_background();
+                    settling = true;
+                }
             },
             Some(OmpEvent::Error(e)) => {
                 activity.flush().await;
@@ -1419,6 +1441,16 @@ impl<'a> SubagentFeed<'a> {
             if batch.backgrounded {
                 crate::render::detach_rows(&mut batch.rows);
             }
+        }
+    }
+
+    fn has_pending_background(&self) -> bool {
+        self.batches.values().any(|batch| batch.backgrounded)
+    }
+
+    fn clear_one_backgrounded(&mut self) {
+        if let Some(batch) = self.batches.values_mut().find(|batch| batch.backgrounded) {
+            batch.backgrounded = false;
         }
     }
 

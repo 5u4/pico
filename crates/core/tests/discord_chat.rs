@@ -297,6 +297,35 @@ async fn scripted_omp_drives_thread_and_real_smoke() {
         let _ = tid.delete(&driver).await;
     }
 
+    let mut bg_deferred = false;
+    let mut bg_thread: Option<serenity::ChannelId> = None;
+    let bg_msg = channel
+        .say(&driver, format!("BGTASK {marker}"))
+        .await
+        .expect("driver failed to post BGTASK message");
+    for _ in 0..30 {
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        if bg_thread.is_none()
+            && let Ok(m) = channel.message(&driver, bg_msg.id).await
+            && let Some(started) = m.thread
+        {
+            bg_thread = Some(started.id);
+        }
+        if let Some(tid) = bg_thread
+            && let Ok(messages) = tid.messages(&driver, serenity::GetMessages::new().limit(25)).await
+        {
+            let kick = messages.iter().any(|m| m.content.contains(&format!("BGKICK-{marker}")));
+            let done = messages.iter().any(|m| m.content.contains(&format!("BGDONE-{marker}")));
+            if kick && done {
+                bg_deferred = true;
+                break;
+            }
+        }
+    }
+    if let Some(tid) = bg_thread {
+        let _ = tid.delete(&driver).await;
+    }
+
     let (fu_acked, fu_alpha, fu_separate) = queue_scenario(
         channel,
         &driver,
@@ -370,6 +399,10 @@ async fn scripted_omp_drives_thread_and_real_smoke() {
     assert!(
         ordered,
         "post-task activity did not open a new message below the task message (timeline seal)"
+    );
+    assert!(
+        bg_deferred,
+        "pico did not push the deferred second agent-run message (BGDONE) to Discord"
     );
     assert!(fu_acked, "follow_up mid-turn message was not acked with the 📥 reaction");
     assert!(
