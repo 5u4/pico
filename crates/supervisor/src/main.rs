@@ -29,7 +29,7 @@ async fn run_daemon() -> color_eyre::Result<()> {
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "pico supervisor starting");
 
     let config = config::Config::load(&dir)?;
-    let worker_root = config.worker_root()?;
+    let worker_root = pico_shared::paths::worker_root()?;
     let socket_path = config.socket_path.clone().unwrap_or_else(|| dir.join("pico.sock"));
     let slots = slots::Slots::new(&dir)?;
     let sup = Arc::new(supervisor::Supervisor::new(config, worker_root, socket_path, slots));

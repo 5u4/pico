@@ -333,7 +333,7 @@ async fn bind_set(
 ) -> Result<(), Error> {
     let data = ctx.data();
     let channel = bindable_channel(ctx).await?;
-    let profile = profile.unwrap_or_else(|| pico_shared::paths::DEFAULT_WORKER.to_owned());
+    let profile = profile.unwrap_or_else(|| pico_shared::paths::DEFAULT_PROFILE.to_owned());
     if !pico_shared::paths::profile_dir(&data.root, &profile).is_dir() {
         ctx.say(format!("profile `{profile}` does not exist under this root"))
             .await?;
@@ -368,7 +368,7 @@ async fn bind_worktree(
 ) -> Result<(), Error> {
     let data = ctx.data();
     let channel = bindable_channel(ctx).await?;
-    let profile = profile.unwrap_or_else(|| pico_shared::paths::DEFAULT_WORKER.to_owned());
+    let profile = profile.unwrap_or_else(|| pico_shared::paths::DEFAULT_PROFILE.to_owned());
     if !pico_shared::paths::profile_dir(&data.root, &profile).is_dir() {
         ctx.say(format!("profile `{profile}` does not exist under this root"))
             .await?;

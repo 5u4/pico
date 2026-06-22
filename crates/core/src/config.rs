@@ -244,7 +244,7 @@ pub fn load_root(config_path: &Path) -> color_eyre::Result<RootConfig> {
         }
         let profile = g
             .profile
-            .unwrap_or_else(|| pico_shared::paths::DEFAULT_WORKER.to_owned());
+            .unwrap_or_else(|| pico_shared::paths::DEFAULT_PROFILE.to_owned());
         if !crate::bindings::is_valid_profile(&profile) {
             return Err(color_eyre::eyre::eyre!(
                 "guild {}: invalid profile {profile:?} (must match ^[A-Za-z0-9_-]+$)",

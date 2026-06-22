@@ -15,13 +15,6 @@ pub struct Config {
     pub socket_path: Option<PathBuf>,
     #[serde(default = "default_health_timeout_secs")]
     pub health_timeout_secs: u64,
-    #[serde(default)]
-    pub workers: Vec<WorkerEntry>,
-}
-
-#[derive(Deserialize)]
-pub struct WorkerEntry {
-    pub root: PathBuf,
 }
 
 impl Config {
@@ -36,12 +29,5 @@ impl Config {
 
     pub fn health_timeout(&self) -> Duration {
         Duration::from_secs(self.health_timeout_secs)
-    }
-
-    pub fn worker_root(&self) -> color_eyre::Result<PathBuf> {
-        match self.workers.first() {
-            Some(w) => Ok(w.root.clone()),
-            None => pico_shared::paths::worker_root(pico_shared::paths::DEFAULT_WORKER),
-        }
     }
 }

@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-pub const DEFAULT_WORKER: &str = "default";
+pub const DEFAULT_PROFILE: &str = "default";
 
 fn home() -> color_eyre::Result<PathBuf> {
     std::env::home_dir().ok_or_else(|| color_eyre::eyre::eyre!("cannot determine home directory"))
@@ -22,8 +22,8 @@ pub fn supervisor_dir() -> color_eyre::Result<PathBuf> {
     Ok(pico_home()?.join("supervisor"))
 }
 
-pub fn worker_root(name: &str) -> color_eyre::Result<PathBuf> {
-    Ok(pico_home()?.join("workers").join(name))
+pub fn worker_root() -> color_eyre::Result<PathBuf> {
+    Ok(pico_home()?.join("worker"))
 }
 
 pub fn worker_secret(root: &Path, name: &str) -> PathBuf {
