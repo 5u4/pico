@@ -358,8 +358,9 @@ fn root_hash(root: &Path) -> u64 {
     hasher.finish()
 }
 
-/// Per-worker-root container name and host port, so distinct roots (test temp
-/// dirs, or multiple self-managed workers on one host) never collide.
+/// Stable per-worker-root container name and host port (reused across restarts);
+/// distinct across roots in practice, though the 32-bit name and `% 4000` port
+/// hashes can collide.
 fn container_name(root: &Path) -> String {
     format!("pico-hindsight-{:08x}", root_hash(root) as u32)
 }

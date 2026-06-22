@@ -287,8 +287,10 @@ supervisor before bringing the container up.
 
 ### Long-term memory (optional)
 
-Enable memory per profile with `[memory] enabled = true` (see Profiles), then give
-the worker a Groq key for Hindsight's fact extraction (local embeddings need none):
+Enable memory per profile with `[memory] enabled = true` (see Profiles). For the
+worker-managed container, give the worker a Groq key for Hindsight's fact
+extraction (local embeddings need none) — with an external `[memory] endpoint`,
+no Groq key is needed locally:
 
 ```sh
 printf '%s' 'gsk_…' > ~/.pico/workers/default/secrets/groq_api_key
