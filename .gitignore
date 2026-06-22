@@ -4,5 +4,6 @@ target/
 .cargo
 .env*
 !.env.e2e.example
+!.env.hindsight.example
 .omp
 tmp
