@@ -20,14 +20,14 @@ PATHS=(
 # a string needs a real lexer; the prose policy covers that case instead.
 discretionary_comments() {
   awk '
-    function classify(c,   rest) {
+    function classify(c) {
       if (in_block) {
         if (c ~ /\*\//) in_block = 0
         return 1
       }
       if (c ~ /^\/\//) {
-        rest = c; sub(/^\/\/[\/!]?[[:space:]]?/, "", rest)
-        if (rest ~ /^SAFETY:/) return 0
+        if (c ~ /^\/\/[[:space:]]*SAFETY:/) return 0
+        if (c ~ /^\/\/[[:space:]]*SPDX-License-Identifier/) return 0
         return 1
       }
       if (c ~ /^\/\*/) {
@@ -42,7 +42,7 @@ discretionary_comments() {
     /^\+/ {
       line = substr($0, 2)
       c = line; sub(/^[[:space:]]+/, "", c)
-      if (line !~ /SPDX-License-Identifier/ && classify(c))
+      if (classify(c))
         printf "%s:%d:%s\n", f, n, line
       n++
       next

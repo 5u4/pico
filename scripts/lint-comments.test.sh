@@ -102,6 +102,35 @@ git -C "$repo" add f.rs
 run "$GATE" "$repo"
 expect_rc "SPDX exempt passes" 0
 
+# A doc-comment SAFETY (/// or //!) is not the `// SAFETY:` exception and fails.
+repo=$(newrepo)
+cat > "$repo/sd.rs" <<'RS'
+/// SAFETY: doc prose, not an unsafe-block justification
+pub fn s() {}
+RS
+git -C "$repo" add sd.rs
+run "$GATE" "$repo"
+expect_rc "/// SAFETY doc form fails" 1
+
+repo=$(newrepo)
+cat > "$repo/si.rs" <<'RS'
+//! SAFETY: module prose, still banned
+pub const X: u32 = 1;
+RS
+git -C "$repo" add si.rs
+run "$GATE" "$repo"
+expect_rc "//! SAFETY inner-doc fails" 1
+
+# SPDX exemption is for a leading header only, not any line mentioning it.
+repo=$(newrepo)
+cat > "$repo/sp.rs" <<'RS'
+// see the SPDX-License-Identifier note for licensing
+pub const X: u32 = 1;
+RS
+git -C "$repo" add sp.rs
+run "$GATE" "$repo"
+expect_rc "mid-text SPDX mention is not exempt" 1
+
 # No comments at all passes.
 repo=$(newrepo)
 cat > "$repo/g.rs" <<'RS'
