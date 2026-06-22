@@ -191,6 +191,7 @@ const RECHECK_INTERVAL: Duration = Duration::from_secs(30);
 pub struct HindsightDaemon {
     groq_key: Option<String>,
     container: String,
+    host_port: u16,
     state: Mutex<DaemonState>,
     cancel: CancellationToken,
     tracker: TaskTracker,
@@ -209,6 +210,7 @@ impl HindsightDaemon {
         Arc::new(Self {
             groq_key: read_optional_secret(root, "groq_api_key"),
             container: container_name(root),
+            host_port: host_port(root),
             state: Mutex::new(DaemonState::default()),
             cancel,
             tracker: tracker.clone(),
@@ -289,7 +291,7 @@ impl HindsightDaemon {
         let network = self_network().await;
         let endpoint = match &network {
             Some(_) => format!("http://{}:8888", self.container),
-            None => "http://127.0.0.1:8888".to_owned(),
+            None => format!("http://127.0.0.1:{}", self.host_port),
         };
         let ready = match container_state(&self.container).await {
             ContainerState::Running => true,
@@ -320,9 +322,10 @@ impl HindsightDaemon {
             "--restart",
             "unless-stopped",
         ];
+        let port_map = format!("127.0.0.1:{}:8888", self.host_port);
         match network {
             Some(net) => args.extend(["--network", net]),
-            None => args.extend(["-p", "127.0.0.1:8888:8888"]),
+            None => args.extend(["-p", port_map.as_str()]),
         }
         args.extend([
             "-v",
@@ -346,13 +349,21 @@ enum ContainerState {
     Unknown,
 }
 
-/// Per-worker-root container name so distinct roots (including test temp dirs)
-/// never collide on one docker host.
-fn container_name(root: &Path) -> String {
+fn root_hash(root: &Path) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     root.to_string_lossy().hash(&mut hasher);
-    format!("pico-hindsight-{:08x}", hasher.finish() as u32)
+    hasher.finish()
+}
+
+/// Per-worker-root container name and host port, so distinct roots (test temp
+/// dirs, or multiple self-managed workers on one host) never collide.
+fn container_name(root: &Path) -> String {
+    format!("pico-hindsight-{:08x}", root_hash(root) as u32)
+}
+
+fn host_port(root: &Path) -> u16 {
+    8888 + (root_hash(root) % 4000) as u16
 }
 
 fn read_optional_secret(root: &Path, name: &str) -> Option<String> {
@@ -453,6 +464,15 @@ mod tests {
         assert_ne!(bank_for("default", "1", None), bank_for("default", "2", None));
         assert_eq!(bank_for("default", "42", Some("Shared/1")), "shared-1");
         assert_eq!(bank_for("default", "42", Some("  ")), "pico-default-42");
+    }
+
+    #[test]
+    fn host_port_is_deterministic_and_root_scoped() {
+        let a = std::path::Path::new("/root/a");
+        let b = std::path::Path::new("/root/b");
+        assert_eq!(host_port(a), host_port(a));
+        assert!((8888..12888).contains(&host_port(a)));
+        assert_ne!(container_name(a), container_name(b));
     }
 
     #[test]
