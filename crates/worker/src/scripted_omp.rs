@@ -25,8 +25,9 @@ fn reply_for(message: &str) -> String {
 
 fn unwrap_message(message: &str) -> &str {
     let trimmed = message.trim_start();
-    if trimmed.starts_with("<discord-message")
-        && let Some((_, rest)) = trimmed.split_once('\n')
+    if let Some((first_line, rest)) = trimmed.split_once('\n')
+        && first_line.starts_with("<discord-message")
+        && first_line.trim_end().ends_with("/>")
     {
         return rest;
     }

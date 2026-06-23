@@ -877,7 +877,7 @@ async fn route_message(
     let append_dest = session_dir.join("append.md");
     let guild_name = guild_id.name(&ctx.cache);
     let (channel_name, thread_label) = if in_thread {
-        (channel_display_name(&ctx, bound_channel).await, channel.name.clone())
+        (channel_display_name(&ctx, guild_id, bound_channel), channel.name.clone())
     } else {
         (Some(channel.name.clone()), thread_name(prompt))
     };
@@ -968,11 +968,13 @@ fn sender_display_name(message: &serenity::Message) -> String {
         .unwrap_or_else(|| message.author.name.clone())
 }
 
-async fn channel_display_name(ctx: &serenity::Context, id: serenity::ChannelId) -> Option<String> {
-    match id.to_channel(ctx).await.ok()? {
-        serenity::Channel::Guild(channel) => Some(channel.name),
-        _ => None,
-    }
+fn channel_display_name(
+    ctx: &serenity::Context,
+    guild_id: serenity::GuildId,
+    id: serenity::ChannelId,
+) -> Option<String> {
+    let guild = ctx.cache.guild(guild_id)?;
+    guild.channels.get(&id).map(|channel| channel.name.clone())
 }
 
 #[derive(PartialEq, Eq)]
