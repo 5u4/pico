@@ -1,7 +1,4 @@
 #!/usr/bin/env bash
-# Pre-commit gate: rustfmt (nightly), clippy, and the comment-density guard.
-# rustfmt.toml uses nightly-only options, so fmt must run on nightly or it
-# reports misleading diffs. Bypass the whole gate with `git commit --no-verify`.
 set -eu
 
 cargo +nightly fmt --all --check
