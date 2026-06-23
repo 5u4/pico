@@ -327,6 +327,8 @@ async fn scripted_omp_drives_thread_and_real_smoke() {
     }
 
     let mut white_captured = false;
+    let mut white_pre_silent = false;
+    let mut white_post_loud = false;
     let mut white_thread: Option<serenity::ChannelId> = None;
     let white_msg = channel
         .say(&driver, format!("WHITE {marker}"))
@@ -343,10 +345,16 @@ async fn scripted_omp_drives_thread_and_real_smoke() {
         if let Some(tid) = white_thread
             && let Ok(messages) = tid.messages(&driver, serenity::GetMessages::new().limit(25)).await
         {
-            let pre = messages.iter().any(|m| m.content.contains(&format!("PRE-{marker}")));
-            let post = messages.iter().any(|m| m.content.contains(&format!("POST-{marker}")));
-            if pre && post {
+            let pre = messages.iter().find(|m| m.content.contains(&format!("PRE-{marker}")));
+            let post = messages.iter().find(|m| m.content.contains(&format!("POST-{marker}")));
+            if let (Some(pre), Some(post)) = (pre, post) {
                 white_captured = true;
+                white_pre_silent = pre
+                    .flags
+                    .is_some_and(|f| f.contains(serenity::MessageFlags::SUPPRESS_NOTIFICATIONS));
+                white_post_loud = !post
+                    .flags
+                    .is_some_and(|f| f.contains(serenity::MessageFlags::SUPPRESS_NOTIFICATIONS));
                 break;
             }
         }
@@ -433,6 +441,14 @@ async fn scripted_omp_drives_thread_and_real_smoke() {
     assert!(
         white_captured,
         "pico dropped the intermediate white-text segment before the tool (PRE) or the final segment (POST)"
+    );
+    assert!(
+        white_pre_silent,
+        "the intermediate (PRE) white-text segment was not sent as a silent (muted) message"
+    );
+    assert!(
+        white_post_loud,
+        "the final (POST) answer was incorrectly sent as a silent message"
     );
     assert!(
         bg_deferred,

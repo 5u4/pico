@@ -1024,7 +1024,7 @@ async fn drive_turn(
     let (mut rx, _sink_guard) = mid_turn.register(target, mode);
     let (interrupt, streaming, _cancel_guard) = cancels.register(target);
     let mut aborted = false;
-    let mut first_commit = true;
+    let mut held: Option<String> = None;
     let mut settling = false;
     let mut explicit_runs_pending: usize = 1;
     let mut awaiting_deferred = false;
@@ -1043,7 +1043,7 @@ async fn drive_turn(
             () = cancel.cancelled() => {
                 activity.flush().await;
                 subagents.flush_all(false).await;
-                commit_reply(ctx, target, &reply, reply_to.filter(|_| first_commit)).await;
+                flush_final(ctx, target, &mut activity, &mut reply, &mut held, reply_to, title_seed).await;
                 let _ = target
                     .say(ctx, "worker is restarting; resend your message to continue")
                     .await;
@@ -1073,7 +1073,7 @@ async fn drive_turn(
                     tracing::warn!(timeout = ?STALL_TIMEOUT, "turn made no progress; resetting wedged OMP session");
                     activity.flush().await;
                     subagents.flush_all(true).await;
-                    commit_reply(ctx, target, &reply, reply_to.filter(|_| first_commit)).await;
+                    flush_final(ctx, target, &mut activity, &mut reply, &mut held, reply_to, title_seed).await;
                     let _ = target
                         .say(ctx, "the turn stalled with no progress and was reset; resend your message to continue")
                         .await;
@@ -1089,25 +1089,37 @@ async fn drive_turn(
                 reply.push_str(&delta);
             }
             Some(OmpEvent::Message(AssistantMessageEvent::TextEnd { content })) => {
-                if !content.is_empty() {
-                    reply = content;
-                }
-                commit_segment(ctx, target, &mut reply, reply_to, &mut first_commit, title_seed, &mut activity).await;
+                let seg = if content.is_empty() {
+                    std::mem::take(&mut reply)
+                } else {
+                    content
+                };
+                reply.clear();
+                hold_segment(ctx, target, &mut activity, &mut held, seg).await;
             }
             Some(OmpEvent::Message(AssistantMessageEvent::ThinkingEnd { content })) => {
                 if surface_thinking {
                     activity.thinking(&content).await;
                 }
             }
-            Some(OmpEvent::ToolStart(tool)) => match &tool {
-                ToolCallStart::Task(call) => {
-                    activity.flush().await;
-                    if subagents.start(call).await {
-                        activity.seal();
-                    }
+            Some(OmpEvent::ToolStart(tool)) => {
+                if !reply.trim().is_empty() {
+                    let seg = std::mem::take(&mut reply);
+                    hold_segment(ctx, target, &mut activity, &mut held, seg).await;
                 }
-                _ => activity.start(&tool).await,
-            },
+                if let Some(prev) = held.take() {
+                    commit_text(ctx, target, &mut activity, &prev, None, true).await;
+                }
+                match &tool {
+                    ToolCallStart::Task(call) => {
+                        activity.flush().await;
+                        if subagents.start(call).await {
+                            activity.seal();
+                        }
+                    }
+                    _ => activity.start(&tool).await,
+                }
+            }
             Some(OmpEvent::ToolUpdate(tool)) => {
                 if tool.tool_name == "task" {
                     subagents.update(&tool).await;
@@ -1129,7 +1141,7 @@ async fn drive_turn(
                 match handled {
                     crate::ui::Handled::Cancelled => {
                         subagents.flush_all(false).await;
-                        commit_reply(ctx, target, &reply, reply_to.filter(|_| first_commit)).await;
+                        flush_final(ctx, target, &mut activity, &mut reply, &mut held, reply_to, title_seed).await;
                         let _ = target
                             .say(
                                 ctx,
@@ -1146,9 +1158,13 @@ async fn drive_turn(
                 }
             }
             Some(OmpEvent::TurnEnd) => {
-                commit_segment(ctx, target, &mut reply, reply_to, &mut first_commit, title_seed, &mut activity).await;
+                if !reply.trim().is_empty() {
+                    let seg = std::mem::take(&mut reply);
+                    hold_segment(ctx, target, &mut activity, &mut held, seg).await;
+                }
             }
             Some(OmpEvent::AgentEnd) => {
+                flush_final(ctx, target, &mut activity, &mut reply, &mut held, reply_to, title_seed).await;
                 if explicit_runs_pending > 0 {
                     explicit_runs_pending -= 1;
                 } else {
@@ -1168,6 +1184,7 @@ async fn drive_turn(
             Some(OmpEvent::Error(e)) => {
                 activity.flush().await;
                 subagents.flush_all(true).await;
+                flush_final(ctx, target, &mut activity, &mut reply, &mut held, reply_to, title_seed).await;
                 let _ = target.say(ctx, format!("OMP error: {e}")).await;
                 return Ok(TurnOutcome::Live);
             }
@@ -1175,7 +1192,7 @@ async fn drive_turn(
             None => {
                 activity.flush().await;
                 subagents.flush_all(true).await;
-                commit_reply(ctx, target, &reply, reply_to.filter(|_| first_commit)).await;
+                flush_final(ctx, target, &mut activity, &mut reply, &mut held, reply_to, title_seed).await;
                 let _ = target
                     .say(ctx, "the OMP session ended unexpectedly; send another message to restart it")
                     .await;
@@ -1186,7 +1203,7 @@ async fn drive_turn(
     activity.flush().await;
     subagents.settle_backgrounded();
     subagents.flush_all(false).await;
-    commit_reply(ctx, target, &reply, reply_to.filter(|_| first_commit)).await;
+    flush_final(ctx, target, &mut activity, &mut reply, &mut held, reply_to, title_seed).await;
     Ok(TurnOutcome::Live)
 }
 
@@ -1195,6 +1212,7 @@ async fn commit_reply(
     target: serenity::ChannelId,
     reply: &str,
     reply_to: Option<serenity::MessageId>,
+    silent: bool,
 ) {
     let listed = crate::render::tables_to_lists(reply);
     let chunks =
@@ -1206,6 +1224,9 @@ async fn commit_reply(
                 let reference = serenity::MessageReference::from((target, msg_id)).fail_if_not_exists(false);
                 message = message.reference_message(reference);
             }
+            if silent {
+                message = message.flags(serenity::MessageFlags::SUPPRESS_NOTIFICATIONS);
+            }
         } else {
             message = message.flags(serenity::MessageFlags::SUPPRESS_NOTIFICATIONS);
         }
@@ -1215,23 +1236,55 @@ async fn commit_reply(
     }
 }
 
-async fn commit_segment(
+async fn commit_text(
     ctx: &serenity::Context,
     target: serenity::ChannelId,
-    reply: &mut String,
-    reply_to: Option<serenity::MessageId>,
-    first_commit: &mut bool,
-    title_seed: &mut Option<String>,
     activity: &mut Activity<'_>,
+    text: &str,
+    reply_to: Option<serenity::MessageId>,
+    silent: bool,
 ) {
-    if reply.trim().is_empty() {
+    if text.trim().is_empty() {
         return;
     }
     activity.flush().await;
-    commit_reply(ctx, target, reply.as_str(), reply_to.filter(|_| *first_commit)).await;
-    *first_commit = false;
-    *title_seed = Some(std::mem::take(reply));
+    commit_reply(ctx, target, text, reply_to, silent).await;
     activity.seal();
+}
+
+async fn hold_segment(
+    ctx: &serenity::Context,
+    target: serenity::ChannelId,
+    activity: &mut Activity<'_>,
+    held: &mut Option<String>,
+    seg: String,
+) {
+    if seg.trim().is_empty() {
+        return;
+    }
+    if let Some(prev) = held.take() {
+        commit_text(ctx, target, activity, &prev, None, true).await;
+    }
+    *held = Some(seg);
+}
+
+async fn flush_final(
+    ctx: &serenity::Context,
+    target: serenity::ChannelId,
+    activity: &mut Activity<'_>,
+    reply: &mut String,
+    held: &mut Option<String>,
+    reply_to: Option<serenity::MessageId>,
+    title_seed: &mut Option<String>,
+) {
+    if !reply.trim().is_empty() {
+        let seg = std::mem::take(reply);
+        hold_segment(ctx, target, activity, held, seg).await;
+    }
+    if let Some(text) = held.take() {
+        commit_text(ctx, target, activity, &text, reply_to, false).await;
+        *title_seed = Some(text);
+    }
 }
 
 const ACTIVITY_THROTTLE: Duration = Duration::from_secs(1);
