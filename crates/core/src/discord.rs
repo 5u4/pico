@@ -729,8 +729,11 @@ async fn route_message(
     {
         return Ok(());
     }
+    let sent_at = crate::prompt::format_sent_at(message.timestamp.unix_timestamp(), root_config.timezone());
+    let display_name = sender_display_name(&message);
+    let wrapped = crate::prompt::wrap_discord_message(message.author.id.get(), &display_name, &sent_at, prompt);
 
-    if in_thread && let Some(mode) = mid_turn.deliver(channel.id, prompt) {
+    if in_thread && let Some(mode) = mid_turn.deliver(channel.id, &wrapped) {
         react_queued(&ctx, &message, mode).await;
         return Ok(());
     }
@@ -770,7 +773,7 @@ async fn route_message(
     };
     let thread_id = target.to_string();
 
-    let (profile, cwd) = match crate::thread_marker::load(&db, &thread_id).await {
+    let (profile, cwd, worktree_origin) = match crate::thread_marker::load(&db, &thread_id).await {
         Some(marker) => {
             if let Some(closed_at) = &marker.closed_at {
                 target
@@ -800,7 +803,7 @@ async fn route_message(
                     .await?;
                 return Ok(());
             }
-            (marker.profile, marker.cwd)
+            (marker.profile, marker.cwd, marker.worktree)
         }
         None => {
             let (profile, cwd, worktree) = match route {
@@ -858,12 +861,12 @@ async fn route_message(
                 &crate::thread_marker::ThreadMarker {
                     profile: profile.clone(),
                     cwd: cwd.clone(),
-                    worktree,
+                    worktree: worktree.clone(),
                     closed_at: None,
                 },
             )
             .await;
-            (profile, cwd)
+            (profile, cwd, worktree)
         }
     };
     tracing::info!(%thread_id, %profile, in_thread, "driving omp turn");
@@ -871,10 +874,27 @@ async fn route_message(
     let session_dir = pico_shared::paths::profile_session_dir(&root, &profile, &thread_id);
     std::fs::create_dir_all(&session_dir).wrap_err_with(|| format!("create session dir {}", session_dir.display()))?;
     let identity = pico_shared::paths::profile_identity(&root, &profile);
-    let append_dest = pico_shared::paths::profile_append(&root, &profile);
+    let append_dest = session_dir.join("append.md");
+    let guild_name = guild_id.name(&ctx.cache);
+    let (channel_name, thread_label) = if in_thread {
+        (channel_display_name(&ctx, bound_channel).await, channel.name.clone())
+    } else {
+        (Some(channel.name.clone()), thread_name(prompt))
+    };
+    let context_block = crate::prompt::runtime_context_block(&crate::prompt::RuntimeContext {
+        guild: (guild_id.get(), guild_name.as_deref()),
+        channel: (bound_channel.get(), channel_name.as_deref()),
+        thread: (target.get(), &thread_label),
+        profile: &profile,
+        cwd: &cwd,
+        worktree: worktree_origin
+            .as_ref()
+            .map(|w| (w.base_repo.as_path(), w.default_branch.as_str())),
+    });
     let append_prompt = match crate::prompt::assemble_append(
         &append_dest,
         identity.is_file().then_some(identity.as_path()),
+        &context_block,
     ) {
         Ok(path) => Some(path),
         Err(e) => {
@@ -908,7 +928,7 @@ async fn route_message(
             &ctx,
             target,
             &mut session,
-            prompt,
+            &wrapped,
             &cancel,
             profile_config.surface_thinking,
             in_thread.then_some(message.id),
@@ -937,6 +957,22 @@ async fn route_message(
         pool.forget(&thread_id);
     }
     Ok(())
+}
+
+fn sender_display_name(message: &serenity::Message) -> String {
+    message
+        .member
+        .as_ref()
+        .and_then(|m| m.nick.clone())
+        .or_else(|| message.author.global_name.clone())
+        .unwrap_or_else(|| message.author.name.clone())
+}
+
+async fn channel_display_name(ctx: &serenity::Context, id: serenity::ChannelId) -> Option<String> {
+    match id.to_channel(ctx).await.ok()? {
+        serenity::Channel::Guild(channel) => Some(channel.name),
+        _ => None,
+    }
 }
 
 #[derive(PartialEq, Eq)]

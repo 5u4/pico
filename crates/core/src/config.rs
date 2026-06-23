@@ -97,6 +97,7 @@ pub struct RootConfig {
     worktrees_dir: Option<PathBuf>,
     approvers: Vec<String>,
     approval_timeout: Duration,
+    timezone: chrono_tz::Tz,
 }
 
 impl RootConfig {
@@ -115,6 +116,10 @@ impl RootConfig {
     pub fn approval_timeout(&self) -> Duration {
         self.approval_timeout
     }
+
+    pub fn timezone(&self) -> chrono_tz::Tz {
+        self.timezone
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -125,6 +130,8 @@ struct RawRootConfig {
     worktree: Option<RawWorktree>,
     #[serde(default)]
     approval: Option<RawApproval>,
+    #[serde(default)]
+    timezone: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -164,6 +171,7 @@ pub fn load_root(config_path: &Path) -> color_eyre::Result<RootConfig> {
                 worktrees_dir: None,
                 approvers: Vec::new(),
                 approval_timeout: Duration::from_secs(DEFAULT_APPROVAL_TIMEOUT_SECS),
+                timezone: chrono_tz::UTC,
             });
         }
         Err(e) => {
@@ -238,11 +246,18 @@ pub fn load_root(config_path: &Path) -> color_eyre::Result<RootConfig> {
             approval_timeout = Duration::from_secs(secs);
         }
     }
+    let timezone = match raw.timezone {
+        Some(name) => name.parse::<chrono_tz::Tz>().map_err(|_| {
+            color_eyre::eyre::eyre!("invalid timezone {name:?} (expected an IANA name like \"America/Vancouver\")")
+        })?,
+        None => chrono_tz::UTC,
+    };
     Ok(RootConfig {
         guilds,
         worktrees_dir,
         approvers,
         approval_timeout,
+        timezone,
     })
 }
 
@@ -541,6 +556,35 @@ mod tests {
         let dir = temp_dir("rootapprzero");
         let path = dir.join("config.toml");
         std::fs::write(&path, "[approval]\napprovers = [\"123456789012345678\"]\ntimeout_secs = 0\n").unwrap();
+        assert!(super::load_root(&path).is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn load_root_reads_iana_timezone() {
+        let dir = temp_dir("roottz");
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "timezone = \"America/Vancouver\"\n").unwrap();
+        let cfg = super::load_root(&path).unwrap();
+        assert_eq!(cfg.timezone(), chrono_tz::America::Vancouver);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn load_root_defaults_timezone_to_utc() {
+        let dir = temp_dir("roottzdefault");
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "[[guild]]\nid = \"123456789012345678\"\ncwd = \"/tmp\"\n").unwrap();
+        let cfg = super::load_root(&path).unwrap();
+        assert_eq!(cfg.timezone(), chrono_tz::UTC);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn load_root_rejects_invalid_timezone() {
+        let dir = temp_dir("roottzbad");
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "timezone = \"Mars/Olympus\"\n").unwrap();
         assert!(super::load_root(&path).is_err());
         std::fs::remove_dir_all(&dir).ok();
     }

@@ -50,10 +50,6 @@ pub fn profile_identity(root: &Path, name: &str) -> PathBuf {
     profile_dir(root, name).join("identity.md")
 }
 
-pub fn profile_append(root: &Path, name: &str) -> PathBuf {
-    profile_dir(root, name).join("append.md")
-}
-
 pub fn profile_session_dir(root: &Path, name: &str, thread_id: &str) -> PathBuf {
     profile_dir(root, name).join("sessions").join(thread_id)
 }
