@@ -204,6 +204,17 @@ pub fn tool_activity_line(tool: &ToolCallStart) -> String {
         }
         ToolCallStart::WebSearch(_) => locate("🔎", a.query),
         ToolCallStart::Job(call) => job_line(&call.args),
+        ToolCallStart::Todo(call) => todo_line(&call.args),
+        ToolCallStart::Github(call) => github_line(&call.args),
+        ToolCallStart::Irc(call) => irc_line(&call.args),
+        ToolCallStart::AstGrep(call) => locate("🌳", prefer([str_arg(&call.args, "pat"), "ast_grep"])),
+        ToolCallStart::AstEdit(call) => locate("🌳", prefer([ops_pat(&call.args), "ast_edit"])),
+        ToolCallStart::Debug(call) => debug_line(&call.args),
+        ToolCallStart::InspectImage(call) => locate("🖼️", prefer([str_arg(&call.args, "path"), "inspect_image"])),
+        ToolCallStart::ManageSkill(call) => manage_skill_line(&call.args),
+        ToolCallStart::Resolve(call) => resolve_line(&call.args),
+        ToolCallStart::GenerateImage(call) => locate("🎨", prefer([str_arg(&call.args, "subject"), "generate_image"])),
+        ToolCallStart::Camo(call) => camo_line(&call.tool_name, &call.args),
         ToolCallStart::Task(call) | ToolCallStart::Unknown(call) => {
             format!("🛠️ {}", truncate(&call.tool_name, ACTIVITY_DETAIL))
         }
@@ -232,6 +243,139 @@ fn job_line(args: &serde_json::Value) -> String {
         return "⚙️ job".to_owned();
     };
     format!("⚙️ job {}", truncate(&detail, ACTIVITY_DETAIL))
+}
+
+fn github_line(args: &serde_json::Value) -> String {
+    verb_line(
+        "🐙",
+        "github",
+        str_arg(args, "op"),
+        prefer([
+            str_arg(args, "query"),
+            str_arg(args, "pr"),
+            str_arg(args, "repo"),
+            str_arg(args, "branch"),
+        ]),
+    )
+}
+
+fn irc_line(args: &serde_json::Value) -> String {
+    verb_line(
+        "💬",
+        "irc",
+        str_arg(args, "op"),
+        prefer([str_arg(args, "to"), str_arg(args, "from")]),
+    )
+}
+
+fn debug_line(args: &serde_json::Value) -> String {
+    verb_line(
+        "🐞",
+        "debug",
+        str_arg(args, "action"),
+        prefer([
+            str_arg(args, "program"),
+            str_arg(args, "expression"),
+            str_arg(args, "file"),
+        ]),
+    )
+}
+
+fn manage_skill_line(args: &serde_json::Value) -> String {
+    verb_line("📘", "manage_skill", str_arg(args, "action"), str_arg(args, "name"))
+}
+
+fn resolve_line(args: &serde_json::Value) -> String {
+    verb_line("☑️", "resolve", str_arg(args, "action"), "")
+}
+
+fn verb_line(emoji: &str, fallback: &str, verb: &str, target: &str) -> String {
+    let detail = match (verb.is_empty(), target.is_empty()) {
+        (false, false) => format!("{verb} {target}"),
+        (false, true) => verb.to_owned(),
+        (true, _) => fallback.to_owned(),
+    };
+    format!("{emoji} {}", truncate(&detail, ACTIVITY_DETAIL))
+}
+
+fn camo_line(name: &str, args: &serde_json::Value) -> String {
+    let action = name.strip_prefix("camo_").unwrap_or(name).replace('_', " ");
+    let detail = match name {
+        "camo_open" | "camo_navigate" => prefer([str_arg(args, "url"), str_arg(args, "query"), str_arg(args, "macro")]),
+        "camo_click" => prefer([str_arg(args, "ref"), str_arg(args, "selector")]),
+        "camo_type" => str_arg(args, "text"),
+        "camo_scroll" => str_arg(args, "direction"),
+        _ => "",
+    };
+    if detail.is_empty() {
+        format!("🌐 {action}")
+    } else {
+        format!("🌐 {action} {}", truncate(detail, ACTIVITY_DETAIL))
+    }
+}
+
+fn todo_line(args: &serde_json::Value) -> String {
+    let Some(first) = args
+        .get("ops")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|o| o.first())
+    else {
+        return "📋 todo".to_owned();
+    };
+    let op = str_arg(first, "op");
+    let detail = match op {
+        "init" => format!("init {} tasks", todo_init_count(first)),
+        "append" => {
+            let phase = str_arg(first, "phase");
+            let n = first
+                .get("items")
+                .and_then(serde_json::Value::as_array)
+                .map_or(0, Vec::len);
+            if phase.is_empty() {
+                format!("append {n}")
+            } else {
+                format!("append {phase} ({n})")
+            }
+        }
+        "done" | "start" | "drop" => {
+            let what = prefer([str_arg(first, "task"), str_arg(first, "phase")]);
+            if what.is_empty() {
+                op.to_owned()
+            } else {
+                format!("{op}: {what}")
+            }
+        }
+        "" => "todo".to_owned(),
+        other => other.to_owned(),
+    };
+    format!("📋 {}", truncate(&detail, ACTIVITY_DETAIL))
+}
+
+fn todo_init_count(op: &serde_json::Value) -> usize {
+    if let Some(items) = op.get("items").and_then(serde_json::Value::as_array) {
+        return items.len();
+    }
+    let Some(phases) = op.get("list").and_then(serde_json::Value::as_array) else {
+        return 0;
+    };
+    phases
+        .iter()
+        .filter_map(|p| p.get("items").and_then(serde_json::Value::as_array))
+        .map(Vec::len)
+        .sum()
+}
+
+fn ops_pat(args: &serde_json::Value) -> &str {
+    args.get("ops")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|o| o.first())
+        .and_then(|first| first.get("pat"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+}
+
+fn str_arg<'a>(args: &'a serde_json::Value, key: &str) -> &'a str {
+    args.get(key).and_then(serde_json::Value::as_str).unwrap_or_default()
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -852,6 +996,83 @@ mod tests {
         assert_eq!(line("web_search", json!({ "query": "rust" })), "🔎 rust");
         assert_eq!(line("totally_unknown", json!({ "a": 1 })), "🛠️ totally_unknown");
         assert_eq!(line("task", json!({ "agent": "explore" })), "🛠️ task");
+    }
+
+    #[test]
+    fn previously_unknown_tools_get_dedicated_lines() {
+        use serde_json::json;
+        assert_eq!(
+            line(
+                "todo",
+                json!({ "ops": [{ "op": "init", "list": [{ "phase": "A", "items": ["x", "y"] }, { "phase": "B", "items": ["z"] }] }] })
+            ),
+            "📋 init 3 tasks"
+        );
+        assert_eq!(
+            line("todo", json!({ "ops": [{ "op": "init", "items": ["a", "b"] }] })),
+            "📋 init 2 tasks"
+        );
+        assert_eq!(
+            line("todo", json!({ "ops": [{ "op": "done", "task": "Wire workspace" }] })),
+            "📋 done: Wire workspace"
+        );
+        assert_eq!(
+            line(
+                "todo",
+                json!({ "ops": [{ "op": "append", "phase": "Auth", "items": ["a", "b"] }] })
+            ),
+            "📋 append Auth (2)"
+        );
+        assert_eq!(line("todo", json!({ "ops": [{ "op": "view" }] })), "📋 view");
+        assert_eq!(
+            line("github", json!({ "op": "search_issues", "query": "rust async" })),
+            "🐙 search_issues rust async"
+        );
+        assert_eq!(line("github", json!({ "op": "pr_create" })), "🐙 pr_create");
+        assert_eq!(line("irc", json!({ "op": "send", "to": "AuthLoader" })), "💬 send AuthLoader");
+        assert_eq!(line("ast_grep", json!({ "pat": "foo($$$)", "paths": ["src"] })), "🌳 foo($$$)");
+        assert_eq!(
+            line("ast_edit", json!({ "ops": [{ "pat": "a", "out": "b" }], "paths": ["src"] })),
+            "🌳 a"
+        );
+        assert_eq!(
+            line("debug", json!({ "action": "launch", "program": "./app" })),
+            "🐞 launch ./app"
+        );
+        assert_eq!(line("inspect_image", json!({ "path": "a.png" })), "🖼️ a.png");
+        assert_eq!(
+            line("manage_skill", json!({ "action": "create", "name": "foo" })),
+            "📘 create foo"
+        );
+        assert_eq!(line("resolve", json!({ "action": "apply", "reason": "ok" })), "☑️ apply");
+        assert_eq!(line("generate_image", json!({ "subject": "a calico cat" })), "🎨 a calico cat");
+        assert_eq!(line("camo_open", json!({ "url": "https://x" })), "🌐 open https://x");
+        assert_eq!(line("camo_scroll", json!({ "direction": "down" })), "🌐 scroll down");
+        assert_eq!(line("camo_type", json!({ "text": "hi" })), "🌐 type hi");
+        assert_eq!(line("camo_list_tabs", json!({})), "🌐 list tabs");
+        assert_eq!(line("todo", json!({})), "📋 todo");
+        assert_eq!(
+            line("todo", json!({ "ops": [{ "op": "append", "items": ["a"] }] })),
+            "📋 append 1"
+        );
+        assert_eq!(line("todo", json!({ "ops": [{ "op": "done" }] })), "📋 done");
+        assert_eq!(line("todo", json!({ "ops": [{ "op": "" }] })), "📋 todo");
+        assert_eq!(
+            line("github", json!({ "op": "pr_view", "pr": 42, "repo": "o/r" })),
+            "🐙 pr_view o/r"
+        );
+        assert_eq!(line("irc", json!({ "op": "wait", "from": "AuthLoader" })), "💬 wait AuthLoader");
+        assert_eq!(line("ast_grep", json!({ "paths": ["src"] })), "🌳 ast_grep");
+        assert_eq!(line("ast_edit", json!({ "paths": ["src"] })), "🌳 ast_edit");
+        assert_eq!(
+            line("debug", json!({ "action": "evaluate", "expression": "x+1" })),
+            "🐞 evaluate x+1"
+        );
+        assert_eq!(line("camo_click", json!({ "ref": "e1" })), "🌐 click e1");
+        assert_eq!(
+            line("camo_navigate", json!({ "macro": "@google_search", "query": "rust" })),
+            "🌐 navigate rust"
+        );
     }
 
     #[test]
