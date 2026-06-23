@@ -901,7 +901,7 @@ async fn route_message(
     };
 
     let handle = pool.get_or_spawn(&thread_id, &config).await?;
-    let mut first_answer: Option<String> = None;
+    let mut title_seed: Option<String> = None;
     let result = {
         let mut session = handle.lock().await;
         drive_turn(
@@ -917,7 +917,7 @@ async fn route_message(
             &mid_turn,
             &cancels,
             profile_config.streaming_behavior,
-            &mut first_answer,
+            &mut title_seed,
         )
         .await
     };
@@ -928,7 +928,7 @@ async fn route_message(
             Arc::clone(&handle),
             Arc::clone(&pool),
             prompt.to_owned(),
-            first_answer,
+            title_seed,
             title_cwd,
             cancel.clone(),
         ));
@@ -979,7 +979,7 @@ async fn drive_turn(
     mid_turn: &MidTurnQueue,
     cancels: &CancelRegistry,
     mode: StreamingBehavior,
-    first_answer: &mut Option<String>,
+    title_seed: &mut Option<String>,
 ) -> color_eyre::Result<TurnOutcome> {
     let _typing = target.start_typing(&ctx.http);
     session.client.prompt(prompt).await?;
@@ -1050,23 +1050,26 @@ async fn drive_turn(
             Some(OmpEvent::Message(AssistantMessageEvent::TextDelta { delta })) => {
                 reply.push_str(&delta);
             }
+            Some(OmpEvent::Message(AssistantMessageEvent::TextEnd { content })) => {
+                if !content.is_empty() {
+                    reply = content;
+                }
+                commit_segment(ctx, target, &mut reply, reply_to, &mut first_commit, title_seed, &mut activity).await;
+            }
             Some(OmpEvent::Message(AssistantMessageEvent::ThinkingEnd { content })) => {
                 if surface_thinking {
                     activity.thinking(&content).await;
                 }
             }
-            Some(OmpEvent::ToolStart(tool)) => {
-                reply.clear();
-                match &tool {
-                    ToolCallStart::Task(call) => {
-                        activity.flush().await;
-                        if subagents.start(call).await {
-                            activity.seal();
-                        }
+            Some(OmpEvent::ToolStart(tool)) => match &tool {
+                ToolCallStart::Task(call) => {
+                    activity.flush().await;
+                    if subagents.start(call).await {
+                        activity.seal();
                     }
-                    _ => activity.start(&tool).await,
                 }
-            }
+                _ => activity.start(&tool).await,
+            },
             Some(OmpEvent::ToolUpdate(tool)) => {
                 if tool.tool_name == "task" {
                     subagents.update(&tool).await;
@@ -1105,17 +1108,7 @@ async fn drive_turn(
                 }
             }
             Some(OmpEvent::TurnEnd) => {
-                if !reply.trim().is_empty() {
-                    activity.flush().await;
-                    commit_reply(ctx, target, &reply, reply_to.filter(|_| first_commit)).await;
-                    first_commit = false;
-                    if first_answer.is_none() {
-                        *first_answer = Some(std::mem::take(&mut reply));
-                    } else {
-                        reply.clear();
-                    }
-                    activity.seal();
-                }
+                commit_segment(ctx, target, &mut reply, reply_to, &mut first_commit, title_seed, &mut activity).await;
             }
             Some(OmpEvent::AgentEnd) => {
                 if explicit_runs_pending > 0 {
@@ -1182,6 +1175,25 @@ async fn commit_reply(
             tracing::warn!(error = %e, "reply send failed");
         }
     }
+}
+
+async fn commit_segment(
+    ctx: &serenity::Context,
+    target: serenity::ChannelId,
+    reply: &mut String,
+    reply_to: Option<serenity::MessageId>,
+    first_commit: &mut bool,
+    title_seed: &mut Option<String>,
+    activity: &mut Activity<'_>,
+) {
+    if reply.trim().is_empty() {
+        return;
+    }
+    activity.flush().await;
+    commit_reply(ctx, target, reply.as_str(), reply_to.filter(|_| *first_commit)).await;
+    *first_commit = false;
+    *title_seed = Some(std::mem::take(reply));
+    activity.seal();
 }
 
 const ACTIVITY_THROTTLE: Duration = Duration::from_secs(1);

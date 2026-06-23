@@ -60,6 +60,23 @@ fn emit_bgtask(out: &mut impl Write, marker: &str) {
     }
 }
 
+fn emit_white(out: &mut impl Write, marker: &str) {
+    let frames = [
+        json!({ "type": "message_update", "assistantMessageEvent": { "type": "text_start", "contentIndex": 0 } }),
+        json!({ "type": "message_update", "assistantMessageEvent": { "type": "text_delta", "contentIndex": 0, "delta": format!("PRE-{marker}") } }),
+        json!({ "type": "message_update", "assistantMessageEvent": { "type": "text_end", "contentIndex": 0, "content": format!("PRE-{marker}") } }),
+        json!({ "type": "tool_execution_start", "toolCallId": "white-a", "toolName": "read", "args": { "path": format!("WACT-{marker}") } }),
+        json!({ "type": "tool_execution_end", "toolCallId": "white-a", "toolName": "read", "result": {}, "isError": false }),
+        json!({ "type": "message_update", "assistantMessageEvent": { "type": "text_start", "contentIndex": 0 } }),
+        json!({ "type": "message_update", "assistantMessageEvent": { "type": "text_delta", "contentIndex": 0, "delta": format!("POST-{marker}") } }),
+        json!({ "type": "message_update", "assistantMessageEvent": { "type": "text_end", "contentIndex": 0, "content": format!("POST-{marker}") } }),
+        json!({ "type": "turn_end" }),
+    ];
+    for frame in &frames {
+        emit(out, frame);
+    }
+}
+
 fn run_rpc() {
     let stdin = std::io::stdin();
     let mut out = std::io::stdout();
@@ -83,6 +100,7 @@ fn run_rpc() {
                 let message = frame.get("message").and_then(Value::as_str).unwrap_or_default();
                 match message.trim().split_once(' ') {
                     Some(("SEQ", marker)) => emit_seq(&mut out, marker),
+                    Some(("WHITE", marker)) => emit_white(&mut out, marker),
                     Some(("BGTASK", marker)) => {
                         emit_bgtask(&mut out, marker);
                         continue;
