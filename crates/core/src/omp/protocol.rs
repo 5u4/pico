@@ -123,6 +123,17 @@ pub enum ToolCallStart {
     WebSearch(ToolCall),
     Task(ToolCall),
     Job(ToolCall),
+    Todo(ToolCall),
+    Github(ToolCall),
+    Irc(ToolCall),
+    AstGrep(ToolCall),
+    AstEdit(ToolCall),
+    Debug(ToolCall),
+    InspectImage(ToolCall),
+    ManageSkill(ToolCall),
+    Resolve(ToolCall),
+    GenerateImage(ToolCall),
+    Camo(ToolCall),
     Unknown(ToolCall),
 }
 
@@ -141,6 +152,17 @@ impl From<ToolCall> for ToolCallStart {
             "web_search" => Self::WebSearch(call),
             "task" => Self::Task(call),
             "job" => Self::Job(call),
+            "todo" => Self::Todo(call),
+            "github" => Self::Github(call),
+            "irc" => Self::Irc(call),
+            "ast_grep" => Self::AstGrep(call),
+            "ast_edit" => Self::AstEdit(call),
+            "debug" => Self::Debug(call),
+            "inspect_image" => Self::InspectImage(call),
+            "manage_skill" => Self::ManageSkill(call),
+            "resolve" => Self::Resolve(call),
+            "generate_image" => Self::GenerateImage(call),
+            name if name.starts_with("camo_") => Self::Camo(call),
             _ => Self::Unknown(call),
         }
     }
@@ -161,6 +183,17 @@ impl ToolCallStart {
             | Self::WebSearch(c)
             | Self::Task(c)
             | Self::Job(c)
+            | Self::Todo(c)
+            | Self::Github(c)
+            | Self::Irc(c)
+            | Self::AstGrep(c)
+            | Self::AstEdit(c)
+            | Self::Debug(c)
+            | Self::InspectImage(c)
+            | Self::ManageSkill(c)
+            | Self::Resolve(c)
+            | Self::GenerateImage(c)
+            | Self::Camo(c)
             | Self::Unknown(c) => c,
         }
     }
