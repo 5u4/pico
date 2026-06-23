@@ -25,9 +25,7 @@ fn rerun_paths() -> Vec<String> {
 }
 
 fn git_path(target: &str) -> Option<String> {
-    if let Some(path) =
-        git(&["rev-parse", "--path-format=absolute", "--git-path", target]).filter(|s| !s.is_empty())
-    {
+    if let Some(path) = git(&["rev-parse", "--path-format=absolute", "--git-path", target]).filter(|s| !s.is_empty()) {
         return Some(path);
     }
     let relative = git(&["rev-parse", "--git-path", target]).filter(|s| !s.is_empty())?;
