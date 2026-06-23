@@ -1,15 +1,8 @@
 use std::{fmt::Write as _, time::Duration};
 
+use pico_core::{omp::protocol::UiRequest, render};
 use poise::serenity_prelude as serenity;
 use tokio_util::sync::CancellationToken;
-
-use crate::{
-    omp::{
-        client::OmpClient,
-        protocol::{UiRequest, UiResponse},
-    },
-    render,
-};
 
 const MSG_CONTENT_CAP: usize = 1900;
 const OPTION_LABEL_CAP: usize = 100;
@@ -25,11 +18,6 @@ const ID_CANCEL: &str = "ui:cancel";
 const ID_ANSWER: &str = "ui:answer";
 const ID_YES: &str = "ui:yes";
 const ID_NO: &str = "ui:no";
-
-pub enum Handled {
-    Continue { posted: bool },
-    Cancelled,
-}
 
 pub struct PendingAnswer {
     author: serenity::UserId,
@@ -76,36 +64,35 @@ fn register_answer(
     (AnswerGuard { pending, channel }, rx)
 }
 
-pub async fn handle_request(
+pub(crate) async fn run(
     ctx: &serenity::Context,
     channel: serenity::ChannelId,
-    client: &OmpClient,
     author: serenity::UserId,
-    req: &UiRequest,
-    cancel: &CancellationToken,
     pending: &PendingAnswers,
-) -> Handled {
+    cancel: &CancellationToken,
+    req: &UiRequest,
+) -> pico_core::surface::UiOutcome {
     match req {
         UiRequest::Select {
-            id,
             title,
             options,
             timeout,
+            ..
         } => {
             let (_guard, mut rx) = register_answer(pending, channel, author);
-            select(ctx, channel, client, author, id, title, options, *timeout, cancel, &mut rx).await
+            select(ctx, channel, author, title, options, *timeout, cancel, &mut rx).await
         }
         UiRequest::Confirm {
-            id,
             title,
             message,
             timeout,
-        } => confirm(ctx, channel, client, author, id, title, message, *timeout, cancel).await,
+            ..
+        } => confirm(ctx, channel, author, title, message, *timeout, cancel).await,
         UiRequest::Input {
-            id,
             title,
             placeholder,
             timeout,
+            ..
         } => {
             let (_guard, mut rx) = register_answer(pending, channel, author);
             let field = TextField {
@@ -113,27 +100,22 @@ pub async fn handle_request(
                 value: None,
                 placeholder: placeholder.as_deref(),
             };
-            text_prompt(ctx, channel, client, author, id, title, field, *timeout, cancel, &mut rx).await
+            text_prompt(ctx, channel, author, title, field, *timeout, cancel, &mut rx).await
         }
-        UiRequest::Editor { id, title, prefill } => {
+        UiRequest::Editor { title, prefill, .. } => {
             let (_guard, mut rx) = register_answer(pending, channel, author);
             let field = TextField {
                 multiline: true,
                 value: prefill.as_deref(),
                 placeholder: None,
             };
-            text_prompt(ctx, channel, client, author, id, title, field, None, cancel, &mut rx).await
+            text_prompt(ctx, channel, author, title, field, None, cancel, &mut rx).await
         }
-        UiRequest::Notify { message, notify_type } => Handled::Continue {
+        UiRequest::Notify { message, notify_type } => pico_core::surface::UiOutcome::Notified {
             posted: notify(ctx, channel, message, notify_type.as_deref()).await,
         },
-        UiRequest::Cancel { .. } | UiRequest::Ignore => Handled::Continue { posted: false },
-        UiRequest::Unknown { id, method } => {
-            tracing::warn!(%method, "unrecognised extension_ui_request; auto-cancelled");
-            if let Some(id) = id {
-                let _ = client.ui_response(&UiResponse::cancelled(id, false)).await;
-            }
-            Handled::Continue { posted: false }
+        UiRequest::Cancel { .. } | UiRequest::Ignore | UiRequest::Unknown { .. } => {
+            pico_core::surface::UiOutcome::Notified { posted: false }
         }
     }
 }
@@ -142,39 +124,44 @@ pub async fn handle_request(
 async fn select(
     ctx: &serenity::Context,
     channel: serenity::ChannelId,
-    client: &OmpClient,
     author: serenity::UserId,
-    id: &str,
     title: &str,
     options: &[String],
     timeout: Option<u64>,
     cancel: &CancellationToken,
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
-) -> Handled {
+) -> pico_core::surface::UiOutcome {
     if options.is_empty() {
-        let _ = client.ui_response(&UiResponse::cancelled(id, false)).await;
-        return Handled::Continue { posted: false };
+        return pico_core::surface::UiOutcome::Respond {
+            reply: pico_core::surface::UiReply::Dismissed { timed_out: false },
+            posted: false,
+        };
     }
 
     let Some(msg) = post(ctx, channel, &select_prompt_text(title, options), select_components(options)).await else {
-        let _ = client.ui_response(&UiResponse::cancelled(id, false)).await;
-        return Handled::Continue { posted: false };
+        return pico_core::surface::UiOutcome::Respond {
+            reply: pico_core::surface::UiReply::Dismissed { timed_out: false },
+            posted: false,
+        };
     };
 
     let interaction = match collect(ctx, msg.id, author, timeout, cancel, Some(rx)).await {
         Collected::Cancelled => {
-            let _ = client.ui_response(&UiResponse::cancelled(id, false)).await;
-            return Handled::Cancelled;
+            return pico_core::surface::UiOutcome::Cancelled;
         }
         Collected::Ended { timed_out } => {
             finalize(ctx, channel, msg.id, &resolved_line(title, None)).await;
-            let _ = client.ui_response(&UiResponse::cancelled(id, timed_out)).await;
-            return Handled::Continue { posted: true };
+            return pico_core::surface::UiOutcome::Respond {
+                reply: pico_core::surface::UiReply::Dismissed { timed_out },
+                posted: true,
+            };
         }
         Collected::Text(text) => {
             finalize(ctx, channel, msg.id, &resolved_line(title, Some(&text))).await;
-            let _ = client.ui_response(&UiResponse::value(id, &text)).await;
-            return Handled::Continue { posted: true };
+            return pico_core::surface::UiOutcome::Respond {
+                reply: pico_core::surface::UiReply::Value(text),
+                posted: true,
+            };
         }
         Collected::Interaction(i) => *i,
     };
@@ -194,28 +181,27 @@ async fn select(
 
     ack_update(ctx, &interaction, &resolved_line(title, picked)).await;
     match picked {
-        Some(value) => {
-            let _ = client.ui_response(&UiResponse::value(id, value)).await;
-        }
-        None => {
-            let _ = client.ui_response(&UiResponse::cancelled(id, false)).await;
-        }
+        Some(value) => pico_core::surface::UiOutcome::Respond {
+            reply: pico_core::surface::UiReply::Value(value.to_owned()),
+            posted: true,
+        },
+        None => pico_core::surface::UiOutcome::Respond {
+            reply: pico_core::surface::UiReply::Dismissed { timed_out: false },
+            posted: true,
+        },
     }
-    Handled::Continue { posted: true }
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn confirm(
     ctx: &serenity::Context,
     channel: serenity::ChannelId,
-    client: &OmpClient,
     author: serenity::UserId,
-    id: &str,
     title: &str,
     message: &str,
     timeout: Option<u64>,
     cancel: &CancellationToken,
-) -> Handled {
+) -> pico_core::surface::UiOutcome {
     let content = clamp_content(&if message.is_empty() {
         format!("❓ {title}")
     } else {
@@ -230,23 +216,29 @@ async fn confirm(
             .style(serenity::ButtonStyle::Danger),
     ])];
     let Some(msg) = post(ctx, channel, &content, components).await else {
-        let _ = client.ui_response(&UiResponse::cancelled(id, false)).await;
-        return Handled::Continue { posted: false };
+        return pico_core::surface::UiOutcome::Respond {
+            reply: pico_core::surface::UiReply::Dismissed { timed_out: false },
+            posted: false,
+        };
     };
 
     let interaction = match collect(ctx, msg.id, author, timeout, cancel, None).await {
         Collected::Cancelled => {
-            let _ = client.ui_response(&UiResponse::cancelled(id, false)).await;
-            return Handled::Cancelled;
+            return pico_core::surface::UiOutcome::Cancelled;
         }
         Collected::Ended { timed_out } => {
             finalize(ctx, channel, msg.id, &resolved_line(title, None)).await;
-            let _ = if timed_out {
-                client.ui_response(&UiResponse::cancelled(id, true)).await
+            return if timed_out {
+                pico_core::surface::UiOutcome::Respond {
+                    reply: pico_core::surface::UiReply::Dismissed { timed_out: true },
+                    posted: true,
+                }
             } else {
-                client.ui_response(&UiResponse::confirmed(id, false)).await
+                pico_core::surface::UiOutcome::Respond {
+                    reply: pico_core::surface::UiReply::Confirmed(false),
+                    posted: true,
+                }
             };
-            return Handled::Continue { posted: true };
         }
         Collected::Text(_) => unreachable!("confirm registers no text answer channel"),
         Collected::Interaction(i) => *i,
@@ -254,8 +246,10 @@ async fn confirm(
 
     let yes = interaction.data.custom_id == ID_YES;
     ack_update(ctx, &interaction, &resolved_line(title, Some(if yes { "Yes" } else { "No" }))).await;
-    let _ = client.ui_response(&UiResponse::confirmed(id, yes)).await;
-    Handled::Continue { posted: true }
+    pico_core::surface::UiOutcome::Respond {
+        reply: pico_core::surface::UiReply::Confirmed(yes),
+        posted: true,
+    }
 }
 
 struct TextField<'a> {
@@ -268,15 +262,13 @@ struct TextField<'a> {
 async fn text_prompt(
     ctx: &serenity::Context,
     channel: serenity::ChannelId,
-    client: &OmpClient,
     author: serenity::UserId,
-    id: &str,
     title: &str,
     field: TextField<'_>,
     timeout: Option<u64>,
     cancel: &CancellationToken,
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
-) -> Handled {
+) -> pico_core::surface::UiOutcome {
     let hint = field.placeholder.map(|p| format!(" ({p})")).unwrap_or_default();
     let content = clamp_content(&format!("❓ {title}{hint}\n_Reply here, or click **Answer** for a form._"));
     let components = vec![serenity::CreateActionRow::Buttons(vec![
@@ -288,24 +280,29 @@ async fn text_prompt(
             .style(serenity::ButtonStyle::Secondary),
     ])];
     let Some(msg) = post(ctx, channel, &content, components).await else {
-        let _ = client.ui_response(&UiResponse::cancelled(id, false)).await;
-        return Handled::Continue { posted: false };
+        return pico_core::surface::UiOutcome::Respond {
+            reply: pico_core::surface::UiReply::Dismissed { timed_out: false },
+            posted: false,
+        };
     };
 
     let mut interaction = match collect(ctx, msg.id, author, timeout, cancel, Some(&mut *rx)).await {
         Collected::Cancelled => {
-            let _ = client.ui_response(&UiResponse::cancelled(id, false)).await;
-            return Handled::Cancelled;
+            return pico_core::surface::UiOutcome::Cancelled;
         }
         Collected::Ended { timed_out } => {
             finalize(ctx, channel, msg.id, &resolved_line(title, None)).await;
-            let _ = client.ui_response(&UiResponse::cancelled(id, timed_out)).await;
-            return Handled::Continue { posted: true };
+            return pico_core::surface::UiOutcome::Respond {
+                reply: pico_core::surface::UiReply::Dismissed { timed_out },
+                posted: true,
+            };
         }
         Collected::Text(text) => {
             finalize(ctx, channel, msg.id, &resolved_line(title, Some(&text))).await;
-            let _ = client.ui_response(&UiResponse::value(id, &text)).await;
-            return Handled::Continue { posted: true };
+            return pico_core::surface::UiOutcome::Respond {
+                reply: pico_core::surface::UiReply::Value(text),
+                posted: true,
+            };
         }
         Collected::Interaction(i) => *i,
     };
@@ -313,36 +310,42 @@ async fn text_prompt(
     loop {
         if interaction.data.custom_id != ID_ANSWER {
             ack_update(ctx, &interaction, &resolved_line(title, None)).await;
-            let _ = client.ui_response(&UiResponse::cancelled(id, false)).await;
-            return Handled::Continue { posted: true };
+            return pico_core::surface::UiOutcome::Respond {
+                reply: pico_core::surface::UiReply::Dismissed { timed_out: false },
+                posted: true,
+            };
         }
         match run_modal(ctx, msg.id, author, title, &field, interaction, cancel, &mut *rx).await {
             ModalStep::Answered(text) => {
                 finalize(ctx, channel, msg.id, &resolved_line(title, Some(&text))).await;
-                let _ = client.ui_response(&UiResponse::value(id, &text)).await;
-                return Handled::Continue { posted: true };
+                return pico_core::surface::UiOutcome::Respond {
+                    reply: pico_core::surface::UiReply::Value(text),
+                    posted: true,
+                };
             }
             ModalStep::Restart => {
-                let _ = client.ui_response(&UiResponse::cancelled(id, false)).await;
-                return Handled::Cancelled;
+                return pico_core::surface::UiOutcome::Cancelled;
             }
             ModalStep::Reclick(next) => interaction = *next,
             ModalStep::Closed => {
                 interaction = match collect(ctx, msg.id, author, None, cancel, Some(&mut *rx)).await {
                     Collected::Interaction(i) => *i,
                     Collected::Cancelled => {
-                        let _ = client.ui_response(&UiResponse::cancelled(id, false)).await;
-                        return Handled::Cancelled;
+                        return pico_core::surface::UiOutcome::Cancelled;
                     }
                     Collected::Ended { .. } => {
                         finalize(ctx, channel, msg.id, &resolved_line(title, None)).await;
-                        let _ = client.ui_response(&UiResponse::cancelled(id, false)).await;
-                        return Handled::Continue { posted: true };
+                        return pico_core::surface::UiOutcome::Respond {
+                            reply: pico_core::surface::UiReply::Dismissed { timed_out: false },
+                            posted: true,
+                        };
                     }
                     Collected::Text(text) => {
                         finalize(ctx, channel, msg.id, &resolved_line(title, Some(&text))).await;
-                        let _ = client.ui_response(&UiResponse::value(id, &text)).await;
-                        return Handled::Continue { posted: true };
+                        return pico_core::surface::UiOutcome::Respond {
+                            reply: pico_core::surface::UiReply::Value(text),
+                            posted: true,
+                        };
                     }
                 };
             }

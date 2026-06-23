@@ -53,7 +53,7 @@ async fn main() -> color_eyre::Result<()> {
         "pico worker starting"
     );
 
-    let app = pico_core::app::App::build(&args.root, args.socket.clone()).await?;
+    let app = pico_discord::app::App::build(&args.root, args.socket.clone()).await?;
 
     let on_connected = {
         let socket = args.socket.clone();

@@ -47,7 +47,7 @@ pub struct OmpPool {
 }
 
 #[derive(PartialEq, Eq, Debug)]
-pub(crate) enum CloseOutcome {
+pub enum CloseOutcome {
     Absent,
     Closed,
     Busy,
@@ -101,11 +101,11 @@ impl OmpPool {
         Ok(handle)
     }
 
-    pub(crate) fn forget(&self, thread_id: &str) {
+    pub fn forget(&self, thread_id: &str) {
         self.sessions.lock().remove(thread_id);
     }
 
-    pub(crate) fn close(&self, thread_id: &str) -> CloseOutcome {
+    pub fn close(&self, thread_id: &str) -> CloseOutcome {
         let mut map = self.sessions.lock();
         let outcome = close_decision(map.get(thread_id).map(Arc::strong_count));
         if outcome == CloseOutcome::Closed {

@@ -718,7 +718,7 @@ pub fn format_duration(ms: u64) -> String {
     if out.is_empty() { "0s".to_owned() } else { out }
 }
 
-pub(crate) fn truncate(s: &str, max: usize) -> String {
+pub fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         return s.to_owned();
     }
