@@ -7,6 +7,8 @@ pub trait Surface: Send + Sync {
 
     fn typing(&self) -> Self::Typing;
 
+    fn limits(&self) -> SizeLimits;
+
     async fn post(&self, text: &str, opts: PostOpts) -> Option<Self::Msg>;
 
     async fn edit(&self, msg: &Self::Msg, text: &str) -> bool;
@@ -37,6 +39,14 @@ impl PostOpts {
         as_reply: true,
         silent: false,
     };
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SizeLimits {
+    pub reply_budget: usize,
+    pub activity_line_cap: usize,
+    pub activity_char_cap: usize,
+    pub activity_send_max: usize,
 }
 
 #[derive(Debug, PartialEq, Eq)]

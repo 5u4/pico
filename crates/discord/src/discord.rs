@@ -1017,6 +1017,15 @@ impl pico_core::surface::Surface for DiscordSurface {
         self.channel.start_typing(&self.ctx.http)
     }
 
+    fn limits(&self) -> pico_core::surface::SizeLimits {
+        pico_core::surface::SizeLimits {
+            reply_budget: 1800,
+            activity_line_cap: 20,
+            activity_char_cap: 1800,
+            activity_send_max: 1990,
+        }
+    }
+
     async fn post(&self, text: &str, opts: pico_core::surface::PostOpts) -> Option<serenity::MessageId> {
         let mut message = serenity::CreateMessage::new().content(text.to_owned());
         if opts.as_reply

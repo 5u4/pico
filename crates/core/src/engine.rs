@@ -25,7 +25,6 @@ use crate::{
 const STALL_TIMEOUT: Duration = Duration::from_secs(3900);
 const SETTLE_GRACE: Duration = Duration::from_secs(1);
 const ACTIVITY_THROTTLE: Duration = Duration::from_secs(1);
-const ACTIVITY_SEND_MAX: usize = 1990;
 const SUBAGENT_THROTTLE: Duration = Duration::from_secs(2);
 
 #[derive(PartialEq, Eq)]
@@ -286,7 +285,7 @@ async fn handle_ui<S: Surface>(surface: &S, client: &OmpClient, req: &UiRequest)
 
 async fn commit_reply<S: Surface>(surface: &S, reply: &str, as_reply: bool, silent: bool) {
     let listed = render::tables_to_lists(reply);
-    let chunks = render::split_to_budget(&render::defang_mentions(&listed), render::DISCORD_BUDGET);
+    let chunks = render::split_to_budget(&render::defang_mentions(&listed), surface.limits().reply_budget);
     for (i, chunk) in chunks.iter().enumerate() {
         let opts = if i == 0 {
             PostOpts { as_reply, silent }
@@ -355,12 +354,12 @@ struct ActivityHost<M> {
 }
 
 impl<M> ActivityHost<M> {
-    fn text(&self) -> String {
+    fn text(&self, send_max: usize) -> String {
         let body = render::defang_mentions(&self.lines.join("\n"));
-        if body.chars().count() <= ACTIVITY_SEND_MAX {
+        if body.chars().count() <= send_max {
             return body;
         }
-        body.chars().take(ACTIVITY_SEND_MAX).collect()
+        body.chars().take(send_max).collect()
     }
 
     fn char_count(&self) -> usize {
@@ -422,13 +421,14 @@ impl<'a, S: Surface> Activity<'a, S> {
     }
 
     async fn append(&mut self, line: String) -> Option<(usize, usize)> {
+        let limits = self.surface.limits();
         let rollover = self.sealed
             || match self.hosts.last() {
                 None => true,
                 Some(host) => {
                     let count = host.lines.len();
                     let projected = host.char_count() + line.chars().count() + usize::from(count > 0);
-                    count + 1 > render::ACTIVITY_LINE_CAP || projected > render::ACTIVITY_CHAR_CAP
+                    count + 1 > limits.activity_line_cap || projected > limits.activity_char_cap
                 }
             };
         if rollover {
@@ -464,11 +464,12 @@ impl<'a, S: Surface> Activity<'a, S> {
 
     async fn flush(&mut self) {
         let surface = self.surface;
+        let send_max = surface.limits().activity_send_max;
         for host in &mut self.hosts {
             if !host.dirty {
                 continue;
             }
-            let text = host.text();
+            let text = host.text(send_max);
             if text == host.rendered {
                 host.dirty = false;
                 continue;
@@ -509,7 +510,10 @@ impl<'a, S: Surface> SubagentFeed<'a, S> {
         if rows.is_empty() {
             return false;
         }
-        let content = subagent_send_text(&render::render_subagent_batch(&rows, 0));
+        let content = subagent_send_text(
+            &render::render_subagent_batch(&rows, 0),
+            self.surface.limits().activity_send_max,
+        );
         let Some(message) = self.surface.post(&content, PostOpts::SILENT).await else {
             return false;
         };
@@ -592,7 +596,10 @@ impl<'a, S: Surface> SubagentFeed<'a, S> {
             return;
         };
         let elapsed = batch.started_at.elapsed().as_millis() as u64;
-        let content = subagent_send_text(&render::render_subagent_batch(&batch.rows, elapsed));
+        let content = subagent_send_text(
+            &render::render_subagent_batch(&batch.rows, elapsed),
+            surface.limits().activity_send_max,
+        );
         if content == batch.rendered {
             batch.last_edit = Instant::now();
             return;
@@ -604,12 +611,12 @@ impl<'a, S: Surface> SubagentFeed<'a, S> {
     }
 }
 
-fn subagent_send_text(raw: &str) -> String {
+fn subagent_send_text(raw: &str, send_max: usize) -> String {
     let defanged = render::defang_mentions(raw);
-    if defanged.chars().count() <= ACTIVITY_SEND_MAX {
+    if defanged.chars().count() <= send_max {
         defanged
     } else {
-        defanged.chars().take(ACTIVITY_SEND_MAX).collect()
+        defanged.chars().take(send_max).collect()
     }
 }
 
@@ -618,6 +625,7 @@ mod tests {
     use std::sync::{Mutex, atomic::AtomicU64};
 
     use super::*;
+    use crate::surface::SizeLimits;
 
     #[derive(Default)]
     struct FakeSurface {
@@ -634,6 +642,15 @@ mod tests {
 
         fn typing(&self) -> FakeTyping {
             FakeTyping
+        }
+
+        fn limits(&self) -> SizeLimits {
+            SizeLimits {
+                reply_budget: 1800,
+                activity_line_cap: 20,
+                activity_char_cap: 1800,
+                activity_send_max: 1990,
+            }
         }
 
         async fn post(&self, text: &str, opts: PostOpts) -> Option<u64> {
