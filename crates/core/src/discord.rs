@@ -1050,7 +1050,10 @@ async fn drive_turn(
             Some(OmpEvent::Message(AssistantMessageEvent::TextDelta { delta })) => {
                 reply.push_str(&delta);
             }
-            Some(OmpEvent::Message(AssistantMessageEvent::TextEnd)) => {
+            Some(OmpEvent::Message(AssistantMessageEvent::TextEnd { content })) => {
+                if !content.is_empty() {
+                    reply = content;
+                }
                 commit_segment(ctx, target, &mut reply, reply_to, &mut first_commit, title_seed, &mut activity).await;
             }
             Some(OmpEvent::Message(AssistantMessageEvent::ThinkingEnd { content })) => {
