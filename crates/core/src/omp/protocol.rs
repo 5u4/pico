@@ -90,6 +90,7 @@ pub enum AssistantMessageEvent {
     TextDelta {
         delta: String,
     },
+    TextEnd,
     ThinkingEnd {
         #[serde(default)]
         content: String,

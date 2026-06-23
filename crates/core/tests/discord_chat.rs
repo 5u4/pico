@@ -326,6 +326,35 @@ async fn scripted_omp_drives_thread_and_real_smoke() {
         let _ = tid.delete(&driver).await;
     }
 
+    let mut white_captured = false;
+    let mut white_thread: Option<serenity::ChannelId> = None;
+    let white_msg = channel
+        .say(&driver, format!("WHITE {marker}"))
+        .await
+        .expect("driver failed to post WHITE message");
+    for _ in 0..30 {
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        if white_thread.is_none()
+            && let Ok(m) = channel.message(&driver, white_msg.id).await
+            && let Some(started) = m.thread
+        {
+            white_thread = Some(started.id);
+        }
+        if let Some(tid) = white_thread
+            && let Ok(messages) = tid.messages(&driver, serenity::GetMessages::new().limit(25)).await
+        {
+            let pre = messages.iter().any(|m| m.content.contains(&format!("PRE-{marker}")));
+            let post = messages.iter().any(|m| m.content.contains(&format!("POST-{marker}")));
+            if pre && post {
+                white_captured = true;
+                break;
+            }
+        }
+    }
+    if let Some(tid) = white_thread {
+        let _ = tid.delete(&driver).await;
+    }
+
     let (fu_acked, fu_alpha, fu_separate) = queue_scenario(
         channel,
         &driver,
@@ -399,6 +428,11 @@ async fn scripted_omp_drives_thread_and_real_smoke() {
     assert!(
         ordered,
         "post-task activity did not open a new message below the task message (timeline seal)"
+    );
+    assert!(white_thread.is_some(), "pico never opened a thread for the WHITE message");
+    assert!(
+        white_captured,
+        "pico dropped the intermediate white-text segment before the tool (PRE) or the final segment (POST)"
     );
     assert!(
         bg_deferred,
