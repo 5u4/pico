@@ -2,7 +2,7 @@ use crate::omp::protocol::UiRequest;
 
 #[allow(async_fn_in_trait)]
 pub trait Surface: Send + Sync {
-    type Msg: Send;
+    type Msg: Send + Sync;
     type Typing: Send;
 
     fn typing(&self) -> Self::Typing;
