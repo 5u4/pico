@@ -6,7 +6,7 @@ use std::{
     time::Duration,
 };
 
-use pico_core::app::App;
+use pico_discord::app::App;
 use poise::serenity_prelude as serenity;
 use tokio::sync::oneshot;
 
@@ -175,7 +175,7 @@ async fn queue_scenario(
 #[ignore]
 async fn scripted_omp_drives_thread_and_real_smoke() {
     let _ = tracing_subscriber::fmt()
-        .with_env_filter("pico_core=debug,info")
+        .with_env_filter("pico_core=debug,pico_discord=debug,info")
         .try_init();
     load_env();
     let pico_token = var("E2E_PICO_BOT_TOKEN");

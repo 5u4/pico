@@ -198,12 +198,12 @@ fn prompt_content(subject: &Subject<'_>) -> String {
 }
 
 fn resolved_line(subject: &Subject<'_>, outcome: &str) -> String {
-    let title = crate::render::defang_mentions(subject.title);
-    crate::render::truncate(&format!("🔐 **{title}**\n{outcome}"), MSG_CONTENT_CAP)
+    let title = pico_core::render::defang_mentions(subject.title);
+    pico_core::render::truncate(&format!("🔐 **{title}**\n{outcome}"), MSG_CONTENT_CAP)
 }
 
 fn clamp(text: &str) -> String {
-    crate::render::truncate(&crate::render::defang_mentions(text), MSG_CONTENT_CAP)
+    pico_core::render::truncate(&pico_core::render::defang_mentions(text), MSG_CONTENT_CAP)
 }
 
 async fn ack_update(ctx: &serenity::Context, interaction: &serenity::ComponentInteraction, content: &str) {
@@ -250,7 +250,7 @@ mod tests {
 
     async fn test_pool(tag: &str) -> (SqlitePool, PathBuf) {
         let dir = temp_dir(tag);
-        let pool = crate::db::open(&dir).await.unwrap();
+        let pool = pico_core::db::open(&dir).await.unwrap();
         (pool, dir)
     }
 

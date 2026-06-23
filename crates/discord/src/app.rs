@@ -1,10 +1,9 @@
 use std::path::Path;
 
 use color_eyre::eyre::WrapErr;
+use pico_core::omp::pool::OmpPool;
 use poise::serenity_prelude as serenity;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
-
-use crate::omp::pool::OmpPool;
 
 pub struct App {
     client: serenity::Client,
@@ -16,8 +15,8 @@ pub struct App {
 impl App {
     pub async fn build(root: &Path, supervisor_socket: Option<std::path::PathBuf>) -> color_eyre::Result<App> {
         let token = read_secret(root, "discord_bot_token")?;
-        let bindings = crate::bindings::load(&pico_shared::paths::worker_bindings(root))?;
-        let db = crate::db::open(root).await.wrap_err("opening worker database")?;
+        let bindings = pico_core::bindings::load(&pico_shared::paths::worker_bindings(root))?;
+        let db = pico_core::db::open(root).await.wrap_err("opening worker database")?;
         match crate::approval::reconcile_pending_aborted(&db).await {
             Ok(0) => {}
             Ok(n) => tracing::info!(count = n, "reconciled abandoned approval requests to aborted"),

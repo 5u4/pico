@@ -2,8 +2,6 @@ use serde::Deserialize;
 
 use crate::omp::protocol::ToolCallStart;
 
-pub const DISCORD_BUDGET: usize = 1800;
-
 pub fn split_to_budget(text: &str, budget: usize) -> Vec<String> {
     if text.trim().is_empty() {
         return Vec::new();
@@ -172,8 +170,6 @@ fn render_table_as_list(headers: &[String], rows: &[Vec<String>], out: &mut Vec<
 
 const ACTIVITY_DETAIL: usize = 60;
 const ERROR_DETAIL: usize = 60;
-pub const ACTIVITY_LINE_CAP: usize = 20;
-pub const ACTIVITY_CHAR_CAP: usize = 1800;
 
 pub fn tool_activity_line(tool: &ToolCallStart) -> String {
     let raw = &tool.call().args;
@@ -718,7 +714,7 @@ pub fn format_duration(ms: u64) -> String {
     if out.is_empty() { "0s".to_owned() } else { out }
 }
 
-pub(crate) fn truncate(s: &str, max: usize) -> String {
+pub fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         return s.to_owned();
     }
@@ -850,8 +846,8 @@ mod tests {
 
     #[test]
     fn empty_text_returns_empty_vec() {
-        assert!(split_to_budget("", DISCORD_BUDGET).is_empty());
-        assert!(split_to_budget("   \n  \t ", DISCORD_BUDGET).is_empty());
+        assert!(split_to_budget("", 1800).is_empty());
+        assert!(split_to_budget("   \n  \t ", 1800).is_empty());
     }
 
     #[test]

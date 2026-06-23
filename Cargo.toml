@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/core", "crates/shared", "crates/worker", "crates/supervisor"]
+members = ["crates/core", "crates/discord", "crates/shared", "crates/worker", "crates/supervisor"]
 
 [workspace.package]
 version = "0.1.0"
@@ -15,6 +15,7 @@ dotenvy = "0.15"
 libc = "0.2.186"
 parking_lot = "0.12.5"
 pico-core = { path = "crates/core" }
+pico-discord = { path = "crates/discord" }
 pico-shared = { path = "crates/shared" }
 poise = "0.6.2"
 rig-core = "0.38.2"

@@ -1,0 +1,749 @@
+use std::{
+    collections::HashMap,
+    sync::atomic::Ordering,
+    time::{Duration, Instant},
+};
+
+use tokio_util::sync::CancellationToken;
+
+use crate::{
+    cancel::CancelRegistry,
+    config::StreamingBehavior,
+    mid_turn::MidTurnQueue,
+    omp::{
+        client::OmpClient,
+        pool::ThreadSession,
+        protocol::{
+            AssistantMessageEvent, OmpEvent, ToolCall, ToolCallEnd, ToolCallStart, ToolCallUpdate, UiRequest,
+            UiResponse,
+        },
+    },
+    render,
+    surface::{ConversationId, PostOpts, Surface, UiOutcome, UiReply},
+};
+
+const STALL_TIMEOUT: Duration = Duration::from_secs(3900);
+const SETTLE_GRACE: Duration = Duration::from_secs(1);
+const ACTIVITY_THROTTLE: Duration = Duration::from_secs(1);
+const SUBAGENT_THROTTLE: Duration = Duration::from_secs(2);
+
+#[derive(PartialEq, Eq)]
+pub enum TurnOutcome {
+    Live,
+    Dead,
+}
+
+pub struct TurnRequest<'a> {
+    pub conversation: &'a ConversationId,
+    pub prompt: &'a str,
+    pub surface_thinking: bool,
+    pub mode: StreamingBehavior,
+    pub cancel: &'a CancellationToken,
+}
+
+pub struct TurnRuntime<'a> {
+    pub mid_turn: &'a MidTurnQueue,
+    pub cancels: &'a CancelRegistry,
+}
+
+pub async fn drive_turn<S: Surface>(
+    surface: &S,
+    session: &mut ThreadSession,
+    req: TurnRequest<'_>,
+    rt: TurnRuntime<'_>,
+    title_seed: &mut Option<String>,
+) -> color_eyre::Result<TurnOutcome> {
+    let _typing = surface.typing();
+    session.client.prompt(req.prompt).await?;
+    let (mut rx, _sink_guard) = rt.mid_turn.register(req.conversation, req.mode);
+    let (interrupt, streaming, _cancel_guard) = rt.cancels.register(req.conversation);
+    let mut aborted = false;
+    let mut held: Option<String> = None;
+    let mut settling = false;
+    let mut explicit_runs_pending: usize = 1;
+    let mut awaiting_deferred = false;
+
+    let mut reply = String::new();
+    let mut activity = Activity::new(surface);
+    let mut subagents = SubagentFeed::new(surface);
+
+    loop {
+        let idle_wait = if settling && !awaiting_deferred {
+            SETTLE_GRACE
+        } else {
+            STALL_TIMEOUT
+        };
+        let event = tokio::select! {
+            () = req.cancel.cancelled() => {
+                activity.flush().await;
+                subagents.flush_all(false).await;
+                flush_final(surface, &mut activity, &mut reply, &mut held, title_seed).await;
+                surface.say("worker is restarting; resend your message to continue").await;
+                return Ok(TurnOutcome::Live);
+            }
+            () = interrupt.cancelled(), if !aborted => {
+                aborted = true;
+                if let Err(e) = session.client.abort().await {
+                    tracing::warn!(error = %format!("{e:#}"), "abort on /cancel failed");
+                }
+                continue;
+            }
+            Some(text) = rx.recv() => {
+                let forwarded = match req.mode {
+                    StreamingBehavior::FollowUp => session.client.follow_up(&text).await,
+                    StreamingBehavior::Steer => session.client.steer(&text).await,
+                };
+                if let Err(e) = forwarded {
+                    tracing::warn!(error = %format!("{e:#}"), mode = ?req.mode, "forwarding mid-turn message to omp failed");
+                }
+                continue;
+            }
+            recv = tokio::time::timeout(idle_wait, session.events.recv()) => match recv {
+                Ok(event) => event,
+                Err(_) if settling => break,
+                Err(_) => {
+                    tracing::warn!(timeout = ?STALL_TIMEOUT, "turn made no progress; resetting wedged OMP session");
+                    activity.flush().await;
+                    subagents.flush_all(true).await;
+                    flush_final(surface, &mut activity, &mut reply, &mut held, title_seed).await;
+                    surface
+                        .say("the turn stalled with no progress and was reset; resend your message to continue")
+                        .await;
+                    return Ok(TurnOutcome::Dead);
+                }
+            },
+        };
+        if event.is_some() {
+            settling = false;
+        }
+        match event {
+            Some(OmpEvent::Message(AssistantMessageEvent::TextDelta { delta })) => {
+                reply.push_str(&delta);
+            }
+            Some(OmpEvent::Message(AssistantMessageEvent::TextEnd { content })) => {
+                let seg = if content.is_empty() {
+                    std::mem::take(&mut reply)
+                } else {
+                    content
+                };
+                reply.clear();
+                hold_segment(surface, &mut activity, &mut held, seg).await;
+            }
+            Some(OmpEvent::Message(AssistantMessageEvent::ThinkingEnd { content })) => {
+                if req.surface_thinking {
+                    activity.thinking(&content).await;
+                }
+            }
+            Some(OmpEvent::ToolStart(tool)) => {
+                if !reply.trim().is_empty() {
+                    let seg = std::mem::take(&mut reply);
+                    hold_segment(surface, &mut activity, &mut held, seg).await;
+                }
+                if let Some(prev) = held.take() {
+                    commit_text(surface, &mut activity, &prev, false, true).await;
+                }
+                match &tool {
+                    ToolCallStart::Task(call) => {
+                        activity.flush().await;
+                        if subagents.start(call).await {
+                            activity.seal();
+                        }
+                    }
+                    _ => activity.start(&tool).await,
+                }
+            }
+            Some(OmpEvent::ToolUpdate(tool)) => {
+                if tool.tool_name == "task" {
+                    subagents.update(&tool).await;
+                }
+            }
+            Some(OmpEvent::ToolEnd(tool)) => match tool.tool_name.as_str() {
+                "task" => subagents.end(&tool).await,
+                _ => activity.end(&tool).await,
+            },
+            Some(OmpEvent::UiRequest(ui_req)) => {
+                if aborted {
+                    continue;
+                }
+                activity.flush().await;
+                streaming.store(false, Ordering::Release);
+                let disposition = handle_ui(surface, &session.client, &ui_req).await;
+                streaming.store(true, Ordering::Release);
+                match disposition {
+                    UiDisposition::Cancelled => {
+                        subagents.flush_all(false).await;
+                        flush_final(surface, &mut activity, &mut reply, &mut held, title_seed).await;
+                        surface
+                            .say("worker restarted, so the pending question was discarded; resend your message to continue")
+                            .await;
+                        return Ok(TurnOutcome::Live);
+                    }
+                    UiDisposition::Continue { posted } => {
+                        if posted {
+                            activity.seal();
+                        }
+                    }
+                }
+            }
+            Some(OmpEvent::TurnEnd) => {
+                if !reply.trim().is_empty() {
+                    let seg = std::mem::take(&mut reply);
+                    hold_segment(surface, &mut activity, &mut held, seg).await;
+                }
+            }
+            Some(OmpEvent::AgentEnd) => {
+                flush_final(surface, &mut activity, &mut reply, &mut held, title_seed).await;
+                if explicit_runs_pending > 0 {
+                    explicit_runs_pending -= 1;
+                } else {
+                    subagents.clear_one_backgrounded();
+                }
+                match rx.try_recv() {
+                    Ok(text) => {
+                        explicit_runs_pending += 1;
+                        session.client.prompt(&text).await?;
+                    }
+                    Err(_) => {
+                        awaiting_deferred = subagents.has_pending_background();
+                        settling = true;
+                    }
+                }
+            }
+            Some(OmpEvent::Error(e)) => {
+                activity.flush().await;
+                subagents.flush_all(true).await;
+                flush_final(surface, &mut activity, &mut reply, &mut held, title_seed).await;
+                surface.say(&format!("OMP error: {e}")).await;
+                return Ok(TurnOutcome::Live);
+            }
+            Some(OmpEvent::AgentStart | OmpEvent::Message(AssistantMessageEvent::Other)) => {}
+            None => {
+                activity.flush().await;
+                subagents.flush_all(true).await;
+                flush_final(surface, &mut activity, &mut reply, &mut held, title_seed).await;
+                surface
+                    .say("the OMP session ended unexpectedly; send another message to restart it")
+                    .await;
+                return Ok(TurnOutcome::Dead);
+            }
+        }
+    }
+    activity.flush().await;
+    subagents.settle_backgrounded();
+    subagents.flush_all(false).await;
+    flush_final(surface, &mut activity, &mut reply, &mut held, title_seed).await;
+    Ok(TurnOutcome::Live)
+}
+
+enum UiDisposition {
+    Continue { posted: bool },
+    Cancelled,
+}
+
+fn ui_request_id(req: &UiRequest) -> Option<&str> {
+    match req {
+        UiRequest::Select { id, .. }
+        | UiRequest::Confirm { id, .. }
+        | UiRequest::Input { id, .. }
+        | UiRequest::Editor { id, .. } => Some(id),
+        _ => None,
+    }
+}
+
+async fn handle_ui<S: Surface>(surface: &S, client: &OmpClient, req: &UiRequest) -> UiDisposition {
+    match req {
+        UiRequest::Cancel { .. } | UiRequest::Ignore => UiDisposition::Continue { posted: false },
+        UiRequest::Unknown { id, method } => {
+            tracing::warn!(%method, "unrecognised extension_ui_request; auto-cancelled");
+            if let Some(id) = id {
+                let _ = client.ui_response(&UiResponse::cancelled(id, false)).await;
+            }
+            UiDisposition::Continue { posted: false }
+        }
+        _ => match surface.ui(req).await {
+            UiOutcome::Cancelled => {
+                if let Some(id) = ui_request_id(req) {
+                    let _ = client.ui_response(&UiResponse::cancelled(id, false)).await;
+                }
+                UiDisposition::Cancelled
+            }
+            UiOutcome::Notified { posted } => UiDisposition::Continue { posted },
+            UiOutcome::Respond { reply, posted } => {
+                if let Some(id) = ui_request_id(req) {
+                    let resp = match &reply {
+                        UiReply::Value(v) => UiResponse::value(id, v),
+                        UiReply::Confirmed(b) => UiResponse::confirmed(id, *b),
+                        UiReply::Dismissed { timed_out } => UiResponse::cancelled(id, *timed_out),
+                    };
+                    let _ = client.ui_response(&resp).await;
+                }
+                UiDisposition::Continue { posted }
+            }
+        },
+    }
+}
+
+async fn commit_reply<S: Surface>(surface: &S, reply: &str, as_reply: bool, silent: bool) {
+    let listed = render::tables_to_lists(reply);
+    let chunks = render::split_to_budget(&render::defang_mentions(&listed), surface.limits().reply_budget);
+    for (i, chunk) in chunks.iter().enumerate() {
+        let opts = if i == 0 {
+            PostOpts { as_reply, silent }
+        } else {
+            PostOpts::SILENT
+        };
+        surface.post(chunk, opts).await;
+    }
+}
+
+async fn commit_text<S: Surface>(
+    surface: &S,
+    activity: &mut Activity<'_, S>,
+    text: &str,
+    as_reply: bool,
+    silent: bool,
+) {
+    if text.trim().is_empty() {
+        return;
+    }
+    activity.flush().await;
+    commit_reply(surface, text, as_reply, silent).await;
+    activity.seal();
+}
+
+async fn hold_segment<S: Surface>(surface: &S, activity: &mut Activity<'_, S>, held: &mut Option<String>, seg: String) {
+    if seg.trim().is_empty() {
+        return;
+    }
+    if let Some(prev) = held.take() {
+        commit_text(surface, activity, &prev, false, true).await;
+    }
+    *held = Some(seg);
+}
+
+async fn flush_final<S: Surface>(
+    surface: &S,
+    activity: &mut Activity<'_, S>,
+    reply: &mut String,
+    held: &mut Option<String>,
+    title_seed: &mut Option<String>,
+) {
+    if !reply.trim().is_empty() {
+        let seg = std::mem::take(reply);
+        hold_segment(surface, activity, held, seg).await;
+    }
+    if let Some(text) = held.take() {
+        commit_text(surface, activity, &text, true, false).await;
+        *title_seed = Some(text);
+    }
+}
+
+struct Activity<'a, S: Surface> {
+    surface: &'a S,
+    hosts: Vec<ActivityHost<S::Msg>>,
+    placements: HashMap<String, (usize, usize)>,
+    last_edit: Instant,
+    sealed: bool,
+}
+
+struct ActivityHost<M> {
+    message: M,
+    lines: Vec<String>,
+    rendered: String,
+    dirty: bool,
+}
+
+impl<M> ActivityHost<M> {
+    fn text(&self, send_max: usize) -> String {
+        let body = render::defang_mentions(&self.lines.join("\n"));
+        if body.chars().count() <= send_max {
+            return body;
+        }
+        body.chars().take(send_max).collect()
+    }
+
+    fn char_count(&self) -> usize {
+        let body: usize = self.lines.iter().map(|l| l.chars().count()).sum();
+        body + self.lines.len().saturating_sub(1)
+    }
+}
+
+impl<'a, S: Surface> Activity<'a, S> {
+    fn new(surface: &'a S) -> Self {
+        Activity {
+            surface,
+            hosts: Vec::new(),
+            placements: HashMap::new(),
+            last_edit: Instant::now(),
+            sealed: false,
+        }
+    }
+
+    fn seal(&mut self) {
+        self.sealed = true;
+    }
+
+    async fn start(&mut self, tool: &ToolCallStart) {
+        let line = render::tool_activity_line(tool);
+        if let Some(placement) = self.append(line).await {
+            self.placements.insert(tool.call().tool_call_id.clone(), placement);
+        }
+    }
+
+    async fn thinking(&mut self, content: &str) {
+        let line = render::thinking_line(content);
+        if !line.is_empty() {
+            self.append(line).await;
+        }
+    }
+
+    async fn end(&mut self, tool: &ToolCallEnd) {
+        let Some((host_idx, line_idx)) = self.placements.remove(&tool.tool_call_id) else {
+            return;
+        };
+        if !tool.is_error {
+            return;
+        }
+        let error = render::error_text(&tool.result);
+        let Some(host) = self.hosts.get_mut(host_idx) else {
+            return;
+        };
+        let Some(current) = host.lines.get(line_idx) else {
+            return;
+        };
+        let next = render::with_failure_line(current, error.as_deref());
+        if next == *current {
+            return;
+        }
+        host.lines[line_idx] = next;
+        host.dirty = true;
+        self.maybe_flush().await;
+    }
+
+    async fn append(&mut self, line: String) -> Option<(usize, usize)> {
+        let limits = self.surface.limits();
+        let rollover = self.sealed
+            || match self.hosts.last() {
+                None => true,
+                Some(host) => {
+                    let count = host.lines.len();
+                    let projected = host.char_count() + line.chars().count() + usize::from(count > 0);
+                    count + 1 > limits.activity_line_cap || projected > limits.activity_char_cap
+                }
+            };
+        if rollover {
+            let sent = render::defang_mentions(&line);
+            let message = self.surface.post(&sent, PostOpts::SILENT).await?;
+            self.hosts.push(ActivityHost {
+                message,
+                lines: vec![line],
+                rendered: sent,
+                dirty: false,
+            });
+            self.sealed = false;
+            self.last_edit = Instant::now();
+            return Some((self.hosts.len() - 1, 0));
+        }
+        let host_idx = self.hosts.len() - 1;
+        let line_idx = {
+            let host = self.hosts.last_mut().expect("host present when not rolling over");
+            let idx = host.lines.len();
+            host.lines.push(line);
+            host.dirty = true;
+            idx
+        };
+        self.maybe_flush().await;
+        Some((host_idx, line_idx))
+    }
+
+    async fn maybe_flush(&mut self) {
+        if self.last_edit.elapsed() >= ACTIVITY_THROTTLE {
+            self.flush().await;
+        }
+    }
+
+    async fn flush(&mut self) {
+        let surface = self.surface;
+        let send_max = surface.limits().activity_send_max;
+        for host in &mut self.hosts {
+            if !host.dirty {
+                continue;
+            }
+            let text = host.text(send_max);
+            if text == host.rendered {
+                host.dirty = false;
+                continue;
+            }
+            if surface.edit(&host.message, &text).await {
+                host.rendered = text;
+                host.dirty = false;
+            }
+        }
+        self.last_edit = Instant::now();
+    }
+}
+
+struct SubagentFeed<'a, S: Surface> {
+    surface: &'a S,
+    batches: HashMap<String, SubagentBatch<S::Msg>>,
+}
+
+struct SubagentBatch<M> {
+    message: M,
+    rows: Vec<render::SubagentRow>,
+    started_at: Instant,
+    last_edit: Instant,
+    rendered: String,
+    backgrounded: bool,
+}
+
+impl<'a, S: Surface> SubagentFeed<'a, S> {
+    fn new(surface: &'a S) -> Self {
+        SubagentFeed {
+            surface,
+            batches: HashMap::new(),
+        }
+    }
+
+    async fn start(&mut self, call: &ToolCall) -> bool {
+        let rows = render::extract_subagent_rows(&call.args);
+        if rows.is_empty() {
+            return false;
+        }
+        let content = subagent_send_text(
+            &render::render_subagent_batch(&rows, 0),
+            self.surface.limits().activity_send_max,
+        );
+        let Some(message) = self.surface.post(&content, PostOpts::SILENT).await else {
+            return false;
+        };
+        let now = Instant::now();
+        self.batches.insert(
+            call.tool_call_id.clone(),
+            SubagentBatch {
+                message,
+                rows,
+                started_at: now,
+                last_edit: now,
+                rendered: content,
+                backgrounded: false,
+            },
+        );
+        true
+    }
+
+    async fn update(&mut self, tool: &ToolCallUpdate) {
+        let Some(batch) = self.batches.get_mut(&tool.tool_call_id) else {
+            return;
+        };
+        render::apply_progress(&mut batch.rows, &tool.partial_result);
+        if let Some(is_error) = render::async_terminal(&tool.partial_result) {
+            render::settle_rows(&mut batch.rows, is_error);
+            self.edit(&tool.tool_call_id).await;
+            self.batches.remove(&tool.tool_call_id);
+        } else if batch.last_edit.elapsed() >= SUBAGENT_THROTTLE {
+            self.edit(&tool.tool_call_id).await;
+        }
+    }
+
+    async fn end(&mut self, tool: &ToolCallEnd) {
+        if render::is_spawn_ack(&tool.result) {
+            if let Some(batch) = self.batches.get_mut(&tool.tool_call_id) {
+                batch.backgrounded = true;
+            }
+            return;
+        }
+        let Some(batch) = self.batches.get_mut(&tool.tool_call_id) else {
+            return;
+        };
+        render::settle_rows(&mut batch.rows, tool.is_error);
+        self.edit(&tool.tool_call_id).await;
+        self.batches.remove(&tool.tool_call_id);
+    }
+
+    async fn flush_all(&mut self, settle_failed: bool) {
+        let keys: Vec<String> = self.batches.keys().cloned().collect();
+        for key in keys {
+            if settle_failed && let Some(batch) = self.batches.get_mut(&key) {
+                render::settle_rows(&mut batch.rows, true);
+            }
+            self.edit(&key).await;
+        }
+    }
+
+    fn settle_backgrounded(&mut self) {
+        for batch in self.batches.values_mut() {
+            if batch.backgrounded {
+                render::detach_rows(&mut batch.rows);
+            }
+        }
+    }
+
+    fn has_pending_background(&self) -> bool {
+        self.batches.values().any(|batch| batch.backgrounded)
+    }
+
+    fn clear_one_backgrounded(&mut self) {
+        if let Some(batch) = self.batches.values_mut().find(|batch| batch.backgrounded) {
+            batch.backgrounded = false;
+            render::detach_rows(&mut batch.rows);
+        }
+    }
+
+    async fn edit(&mut self, key: &str) {
+        let surface = self.surface;
+        let Some(batch) = self.batches.get_mut(key) else {
+            return;
+        };
+        let elapsed = batch.started_at.elapsed().as_millis() as u64;
+        let content = subagent_send_text(
+            &render::render_subagent_batch(&batch.rows, elapsed),
+            surface.limits().activity_send_max,
+        );
+        if content == batch.rendered {
+            batch.last_edit = Instant::now();
+            return;
+        }
+        if surface.edit(&batch.message, &content).await {
+            batch.rendered = content;
+            batch.last_edit = Instant::now();
+        }
+    }
+}
+
+fn subagent_send_text(raw: &str, send_max: usize) -> String {
+    let defanged = render::defang_mentions(raw);
+    if defanged.chars().count() <= send_max {
+        defanged
+    } else {
+        defanged.chars().take(send_max).collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Mutex, atomic::AtomicU64};
+
+    use super::*;
+    use crate::surface::SizeLimits;
+
+    #[derive(Default)]
+    struct FakeSurface {
+        posts: Mutex<Vec<(String, PostOpts)>>,
+        edits: Mutex<Vec<(u64, String)>>,
+        next_id: AtomicU64,
+    }
+
+    struct FakeTyping;
+
+    impl Surface for FakeSurface {
+        type Msg = u64;
+        type Typing = FakeTyping;
+
+        fn typing(&self) -> FakeTyping {
+            FakeTyping
+        }
+
+        fn limits(&self) -> SizeLimits {
+            SizeLimits {
+                reply_budget: 1800,
+                activity_line_cap: 20,
+                activity_char_cap: 1800,
+                activity_send_max: 1990,
+            }
+        }
+
+        async fn post(&self, text: &str, opts: PostOpts) -> Option<u64> {
+            self.posts.lock().unwrap().push((text.to_owned(), opts));
+            Some(self.next_id.fetch_add(1, Ordering::Relaxed))
+        }
+
+        async fn edit(&self, msg: &u64, text: &str) -> bool {
+            self.edits.lock().unwrap().push((*msg, text.to_owned()));
+            true
+        }
+
+        async fn ui(&self, _req: &UiRequest) -> UiOutcome {
+            UiOutcome::Notified { posted: false }
+        }
+    }
+
+    #[tokio::test]
+    async fn intermediate_segments_are_silent_and_only_final_pings() {
+        let surface = FakeSurface::default();
+        let mut activity = Activity::new(&surface);
+        let mut held = None;
+        let mut reply = String::new();
+        let mut title_seed = None;
+        hold_segment(&surface, &mut activity, &mut held, "first".to_owned()).await;
+        hold_segment(&surface, &mut activity, &mut held, "second".to_owned()).await;
+        flush_final(&surface, &mut activity, &mut reply, &mut held, &mut title_seed).await;
+        let posts = surface.posts.lock().unwrap();
+        assert_eq!(posts.len(), 2);
+        assert_eq!(posts[0].0, "first");
+        assert!(posts[0].1.silent && !posts[0].1.as_reply);
+        assert_eq!(posts[1].0, "second");
+        assert!(posts[1].1.as_reply && !posts[1].1.silent);
+        assert_eq!(title_seed.as_deref(), Some("second"));
+    }
+
+    #[tokio::test]
+    async fn long_final_reply_splits_with_first_chunk_pinging_rest_silent() {
+        let surface = FakeSurface::default();
+        let mut activity = Activity::new(&surface);
+        let mut held = Some("x".repeat(4000));
+        let mut reply = String::new();
+        let mut title_seed = None;
+        flush_final(&surface, &mut activity, &mut reply, &mut held, &mut title_seed).await;
+        let posts = surface.posts.lock().unwrap();
+        assert!(posts.len() >= 2);
+        assert!(posts[0].1.as_reply && !posts[0].1.silent);
+        for chunk in &posts[1..] {
+            assert!(chunk.1.silent && !chunk.1.as_reply);
+        }
+    }
+
+    #[tokio::test]
+    async fn whitespace_only_segment_posts_nothing() {
+        let surface = FakeSurface::default();
+        let mut activity = Activity::new(&surface);
+        let mut held = Some("   ".to_owned());
+        let mut reply = String::new();
+        let mut title_seed = None;
+        flush_final(&surface, &mut activity, &mut reply, &mut held, &mut title_seed).await;
+        assert!(surface.posts.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn sealing_activity_starts_a_fresh_host() {
+        let surface = FakeSurface::default();
+        let mut activity = Activity::new(&surface);
+        activity.thinking("alpha").await;
+        let after_alpha = surface.posts.lock().unwrap().len();
+        activity.thinking("beta").await;
+        let after_beta = surface.posts.lock().unwrap().len();
+        activity.seal();
+        activity.thinking("gamma").await;
+        let after_gamma = surface.posts.lock().unwrap().len();
+        assert_eq!(after_alpha, 1);
+        assert_eq!(after_beta, 1);
+        assert_eq!(after_gamma, 2);
+    }
+
+    #[test]
+    fn ui_request_id_is_present_only_for_prompting_variants() {
+        let select = UiRequest::Select {
+            id: "abc".to_owned(),
+            title: String::new(),
+            options: Vec::new(),
+            timeout: None,
+        };
+        assert_eq!(ui_request_id(&select), Some("abc"));
+        let notify = UiRequest::Notify {
+            message: String::new(),
+            notify_type: None,
+        };
+        assert_eq!(ui_request_id(&notify), None);
+        assert_eq!(ui_request_id(&UiRequest::Ignore), None);
+    }
+}

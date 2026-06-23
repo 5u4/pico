@@ -1,24 +1,20 @@
-use std::{
-    sync::{Arc, atomic::Ordering},
-    time::{Duration, Instant},
-};
+use std::{sync::Arc, time::Duration};
 
 use color_eyre::eyre::{WrapErr, bail, eyre};
-use pico_shared::proto;
-use poise::serenity_prelude as serenity;
-use tokio_util::{sync::CancellationToken, task::TaskTracker};
-
-use crate::{
+use pico_core::{
     bindings::{Binding, BindingKind, Bindings},
     cancel::CancelRegistry,
     config::StreamingBehavior,
     mid_turn::MidTurnQueue,
     omp::{
         camofox::CamofoxDaemon,
-        pool::{OmpPool, ThreadHandle, ThreadSession},
-        protocol::{AssistantMessageEvent, OmpEvent, ToolCall, ToolCallEnd, ToolCallStart, ToolCallUpdate},
+        pool::{OmpPool, ThreadHandle},
     },
+    surface::ConversationId,
 };
+use pico_shared::proto;
+use poise::serenity_prelude as serenity;
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 pub(crate) struct Data {
     root: Arc<std::path::PathBuf>,
@@ -60,8 +56,8 @@ pub(crate) fn framework(
                 poise::builtins::register_globally(ctx, &framework.options().commands).await?;
                 let _ = ready_tx.send(());
                 let camofox = CamofoxDaemon::new(&root, cancel.clone(), &tracker);
-                if crate::config::any_browser_enabled(&root) {
-                    tracker.spawn(crate::omp::camofox::ensure_engine(cancel.clone()));
+                if pico_core::config::any_browser_enabled(&root) {
+                    tracker.spawn(pico_core::omp::camofox::ensure_engine(cancel.clone()));
                 }
                 Ok(Data {
                     root: Arc::new(root),
@@ -86,7 +82,7 @@ async fn command_in_registered_guild(ctx: Context<'_>) -> Result<bool, Error> {
         ctx.say("Commands only work inside a configured server.").await?;
         return Ok(false);
     };
-    let root_config = match crate::config::load_root(&pico_shared::paths::worker_config(&ctx.data().root)) {
+    let root_config = match pico_core::config::load_root(&pico_shared::paths::worker_config(&ctx.data().root)) {
         Ok(config) => config,
         Err(e) => {
             ctx.say(format!("config error: {e}")).await?;
@@ -110,7 +106,11 @@ async fn ping(ctx: Context<'_>) -> Result<(), Error> {
 
 #[poise::command(slash_command, rename = "cancel")]
 async fn cancel_turn(ctx: Context<'_>) -> Result<(), Error> {
-    if ctx.data().cancels.request(ctx.channel_id()) {
+    if ctx
+        .data()
+        .cancels
+        .request(&ConversationId::new("discord", &ctx.channel_id().to_string()))
+    {
         ctx.say("🛑 Turn cancelled.").await?;
     } else {
         ctx.say("Nothing to cancel.").await?;
@@ -121,7 +121,7 @@ async fn cancel_turn(ctx: Context<'_>) -> Result<(), Error> {
 #[poise::command(slash_command, rename = "dev-deploy")]
 async fn dev_deploy(ctx: Context<'_>) -> Result<(), Error> {
     let thread_id = ctx.channel_id().to_string();
-    let Some(marker) = crate::thread_marker::load(&ctx.data().db, &thread_id).await else {
+    let Some(marker) = pico_core::thread_marker::load(&ctx.data().db, &thread_id).await else {
         ctx.say("❌ this thread has no working dir yet — send it a message first, then retry.")
             .await?;
         return Ok(());
@@ -306,8 +306,8 @@ async fn update_repo(repo: &std::path::Path) -> color_eyre::Result<()> {
     if !repo.join(".git").exists() {
         bail!("{} is not a git checkout", repo.display());
     }
-    crate::worktree::run_git(repo, ["fetch", "origin"], Duration::from_secs(120)).await?;
-    crate::worktree::run_git(repo, ["reset", "--hard", "origin/main"], Duration::from_secs(30)).await?;
+    pico_core::worktree::run_git(repo, ["fetch", "origin"], Duration::from_secs(120)).await?;
+    pico_core::worktree::run_git(repo, ["reset", "--hard", "origin/main"], Duration::from_secs(30)).await?;
     Ok(())
 }
 
@@ -335,8 +335,8 @@ async fn bind_set(
         return Ok(());
     }
     let path = pico_shared::paths::worker_bindings(&data.root);
-    match crate::bindings::set(&path, &channel.to_string(), &profile, std::path::Path::new(&cwd)) {
-        Ok(()) => match crate::bindings::load(&path) {
+    match pico_core::bindings::set(&path, &channel.to_string(), &profile, std::path::Path::new(&cwd)) {
+        Ok(()) => match pico_core::bindings::load(&path) {
             Ok(reloaded) => {
                 *data.bindings.lock() = reloaded;
                 ctx.say(format!("bound <#{channel}> → profile `{profile}`, cwd `{cwd}`"))
@@ -369,15 +369,15 @@ async fn bind_worktree(
             .await?;
         return Ok(());
     }
-    let branch = branch.unwrap_or_else(|| crate::bindings::DEFAULT_BRANCH.to_owned());
-    let base_path = crate::bindings::expand_home(&base_repo);
-    if let Err(e) = crate::worktree::validate_base_repo(&base_path, &branch).await {
+    let branch = branch.unwrap_or_else(|| pico_core::bindings::DEFAULT_BRANCH.to_owned());
+    let base_path = pico_core::bindings::expand_home(&base_repo);
+    if let Err(e) = pico_core::worktree::validate_base_repo(&base_path, &branch).await {
         ctx.say(format!("not a usable worktree base: {e}")).await?;
         return Ok(());
     }
     let path = pico_shared::paths::worker_bindings(&data.root);
-    match crate::bindings::set_worktree(&path, &channel.to_string(), &profile, &base_path, &branch) {
-        Ok(()) => match crate::bindings::load(&path) {
+    match pico_core::bindings::set_worktree(&path, &channel.to_string(), &profile, &base_path, &branch) {
+        Ok(()) => match pico_core::bindings::load(&path) {
             Ok(reloaded) => {
                 *data.bindings.lock() = reloaded;
                 ctx.say(format!(
@@ -401,8 +401,8 @@ async fn bind_unset(ctx: Context<'_>) -> Result<(), Error> {
     let data = ctx.data();
     let channel = bindable_channel(ctx).await?;
     let path = pico_shared::paths::worker_bindings(&data.root);
-    match crate::bindings::unset(&path, &channel.to_string()) {
-        Ok(true) => match crate::bindings::load(&path) {
+    match pico_core::bindings::unset(&path, &channel.to_string()) {
+        Ok(true) => match pico_core::bindings::load(&path) {
             Ok(reloaded) => {
                 *data.bindings.lock() = reloaded;
                 ctx.say(format!("unbound <#{channel}>")).await?;
@@ -475,7 +475,7 @@ async fn worktree_close(ctx: Context<'_>) -> Result<(), Error> {
     let thread_id = ctx.channel_id().to_string();
     ctx.defer_ephemeral().await?;
 
-    let marker = match crate::thread_marker::load(&data.db, &thread_id).await {
+    let marker = match pico_core::thread_marker::load(&data.db, &thread_id).await {
         Some(marker) if marker.worktree.is_some() => marker,
         _ => {
             ctx.say("❌ not a worktree thread; nothing to close.").await?;
@@ -491,7 +491,7 @@ async fn worktree_close(ctx: Context<'_>) -> Result<(), Error> {
     let base_repo = origin.base_repo.clone();
     let worktree_path = marker.cwd.clone();
 
-    let loss = match crate::worktree::close_would_lose(&base_repo, &worktree_path, &thread_id).await {
+    let loss = match pico_core::worktree::close_would_lose(&base_repo, &worktree_path, &thread_id).await {
         Ok(loss) => loss,
         Err(e) => {
             ctx.say(format!("❌ worktree inspection failed: {e}")).await?;
@@ -502,19 +502,19 @@ async fn worktree_close(ctx: Context<'_>) -> Result<(), Error> {
         return Ok(());
     }
 
-    if data.pool.close(&thread_id) == crate::omp::pool::CloseOutcome::Busy {
+    if data.pool.close(&thread_id) == pico_core::omp::pool::CloseOutcome::Busy {
         ctx.say("⏳ a turn is running on this thread; wait for it to finish and retry.")
             .await?;
         return Ok(());
     }
 
-    if let Err(e) = crate::worktree::remove(&base_repo, &worktree_path, &thread_id).await {
+    if let Err(e) = pico_core::worktree::remove(&base_repo, &worktree_path, &thread_id).await {
         ctx.say(format!("❌ teardown failed: {e}")).await?;
         return Ok(());
     }
 
     let closed_at = serenity::Timestamp::now().to_string();
-    if let Err(e) = crate::thread_marker::tombstone(&data.db, &thread_id, marker, closed_at).await {
+    if let Err(e) = pico_core::thread_marker::tombstone(&data.db, &thread_id, marker, closed_at).await {
         ctx.say(format!(
             "❌ worktree removed, but writing the closed marker failed: {e} — retry to finish."
         ))
@@ -539,7 +539,7 @@ async fn worktree_close(ctx: Context<'_>) -> Result<(), Error> {
     Ok(())
 }
 
-async fn confirm_close(ctx: Context<'_>, loss: &crate::worktree::LossSummary) -> Result<bool, Error> {
+async fn confirm_close(ctx: Context<'_>, loss: &pico_core::worktree::LossSummary) -> Result<bool, Error> {
     let handle = ctx
         .send(
             poise::CreateReply::default()
@@ -653,7 +653,7 @@ enum Route {
     },
 }
 
-fn resolve_route(guild_default: &crate::config::GuildDefault, binding: Option<&Binding>) -> Route {
+fn resolve_route(guild_default: &pico_core::config::GuildDefault, binding: Option<&Binding>) -> Route {
     match binding {
         Some(b) => match &b.kind {
             BindingKind::Regular { cwd } => Route::Regular {
@@ -699,7 +699,7 @@ async fn route_message(
     let Some(guild_id) = message.guild_id else {
         return Ok(());
     };
-    let root_config = match crate::config::load_root(&pico_shared::paths::worker_config(&root)) {
+    let root_config = match pico_core::config::load_root(&pico_shared::paths::worker_config(&root)) {
         Ok(config) => config,
         Err(e) => {
             message.reply(&ctx, format!("❌ worker config error: {e}")).await?;
@@ -729,11 +729,13 @@ async fn route_message(
     {
         return Ok(());
     }
-    let sent_at = crate::prompt::format_sent_at(message.timestamp.unix_timestamp(), root_config.timezone());
+    let sent_at = pico_core::prompt::format_sent_at(message.timestamp.unix_timestamp(), root_config.timezone());
     let display_name = sender_display_name(&message);
-    let wrapped = crate::prompt::wrap_discord_message(message.author.id.get(), &display_name, &sent_at, prompt);
+    let wrapped = pico_core::prompt::wrap_discord_message(message.author.id.get(), &display_name, &sent_at, prompt);
 
-    if in_thread && let Some(mode) = mid_turn.deliver(channel.id, &wrapped) {
+    if in_thread
+        && let Some(mode) = mid_turn.deliver(&ConversationId::new("discord", &channel.id.to_string()), &wrapped)
+    {
         react_queued(&ctx, &message, mode).await;
         return Ok(());
     }
@@ -773,7 +775,7 @@ async fn route_message(
     };
     let thread_id = target.to_string();
 
-    let (profile, cwd, worktree_origin) = match crate::thread_marker::load(&db, &thread_id).await {
+    let (profile, cwd, worktree_origin) = match pico_core::thread_marker::load(&db, &thread_id).await {
         Some(marker) => {
             if let Some(closed_at) = &marker.closed_at {
                 target
@@ -786,7 +788,7 @@ async fn route_message(
             }
             if let Some(wt) = &marker.worktree {
                 if let Err(e) =
-                    crate::worktree::ensure_at(&marker.cwd, &thread_id, &wt.base_repo, &wt.default_branch).await
+                    pico_core::worktree::ensure_at(&marker.cwd, &thread_id, &wt.base_repo, &wt.default_branch).await
                 {
                     target.say(&ctx, format!("❌ worktree setup failed: {e}")).await?;
                     return Ok(());
@@ -831,7 +833,7 @@ async fn route_message(
                         .worktrees_dir()
                         .map(std::path::Path::to_path_buf)
                         .unwrap_or_else(|| pico_shared::paths::default_worktrees_dir(root.as_path()));
-                    match crate::worktree::ensure(
+                    match pico_core::worktree::ensure(
                         &worktrees_dir,
                         &bound_channel.to_string(),
                         &thread_id,
@@ -843,7 +845,7 @@ async fn route_message(
                         Ok(path) => (
                             profile,
                             path,
-                            Some(crate::thread_marker::WorktreeOrigin {
+                            Some(pico_core::thread_marker::WorktreeOrigin {
                                 base_repo,
                                 default_branch,
                             }),
@@ -855,10 +857,10 @@ async fn route_message(
                     }
                 }
             };
-            crate::thread_marker::save(
+            pico_core::thread_marker::save(
                 &db,
                 &thread_id,
-                &crate::thread_marker::ThreadMarker {
+                &pico_core::thread_marker::ThreadMarker {
                     profile: profile.clone(),
                     cwd: cwd.clone(),
                     worktree: worktree.clone(),
@@ -881,7 +883,7 @@ async fn route_message(
     } else {
         (Some(channel.name.clone()), thread_name(prompt))
     };
-    let context_block = crate::prompt::runtime_context_block(&crate::prompt::RuntimeContext {
+    let context_block = pico_core::prompt::runtime_context_block(&pico_core::prompt::RuntimeContext {
         guild: (guild_id.get(), guild_name.as_deref()),
         channel: (bound_channel.get(), channel_name.as_deref()),
         thread: (target.get(), &thread_label),
@@ -891,7 +893,7 @@ async fn route_message(
             .as_ref()
             .map(|w| (w.base_repo.as_path(), w.default_branch.as_str())),
     });
-    let append_prompt = match crate::prompt::assemble_append(
+    let append_prompt = match pico_core::prompt::assemble_append(
         &append_dest,
         identity.is_file().then_some(identity.as_path()),
         &context_block,
@@ -902,7 +904,7 @@ async fn route_message(
             None
         }
     };
-    let profile_config = crate::config::load(&pico_shared::paths::profile_config(&root, &profile))?;
+    let profile_config = pico_core::config::load(&pico_shared::paths::profile_config(&root, &profile))?;
     let title_cwd = cwd.clone();
     let (extensions, env) = if profile_config.browser_enabled {
         camofox.ensure_started().await;
@@ -910,7 +912,7 @@ async fn route_message(
     } else {
         (Vec::new(), Vec::new())
     };
-    let config = crate::omp::client::SpawnConfig {
+    let config = pico_core::omp::client::SpawnConfig {
         model: profile_config.model,
         cwd: Some(cwd),
         session_dir: Some(session_dir),
@@ -922,24 +924,29 @@ async fn route_message(
 
     let handle = pool.get_or_spawn(&thread_id, &config).await?;
     let mut title_seed: Option<String> = None;
+    let conversation = ConversationId::new("discord", &thread_id);
     let result = {
         let mut session = handle.lock().await;
-        drive_turn(
-            &ctx,
-            target,
-            &mut session,
-            &wrapped,
-            &cancel,
-            profile_config.surface_thinking,
-            in_thread.then_some(message.id),
-            message.author.id,
-            &pending_answers,
-            &mid_turn,
-            &cancels,
-            profile_config.streaming_behavior,
-            &mut title_seed,
-        )
-        .await
+        let surface = DiscordSurface {
+            ctx: ctx.clone(),
+            channel: target,
+            trigger: in_thread.then_some(message.id),
+            author: message.author.id,
+            pending: pending_answers.clone(),
+            cancel: cancel.clone(),
+        };
+        let req = pico_core::engine::TurnRequest {
+            conversation: &conversation,
+            prompt: &wrapped,
+            surface_thinking: profile_config.surface_thinking,
+            mode: profile_config.streaming_behavior,
+            cancel: &cancel,
+        };
+        let rt = pico_core::engine::TurnRuntime {
+            mid_turn: &mid_turn,
+            cancels: &cancels,
+        };
+        pico_core::engine::drive_turn(&surface, &mut session, req, rt, &mut title_seed).await
     };
     if !in_thread {
         tracker.spawn(generate_and_apply_title(
@@ -953,7 +960,7 @@ async fn route_message(
             cancel.clone(),
         ));
     }
-    if result? == TurnOutcome::Dead {
+    if result? == pico_core::engine::TurnOutcome::Dead {
         pool.forget(&thread_id);
     }
     Ok(())
@@ -977,16 +984,6 @@ fn channel_display_name(
     guild.channels.get(&id).map(|channel| channel.name.clone())
 }
 
-#[derive(PartialEq, Eq)]
-enum TurnOutcome {
-    Live,
-    Dead,
-}
-
-const STALL_TIMEOUT: Duration = Duration::from_secs(3900);
-
-const SETTLE_GRACE: Duration = Duration::from_secs(1);
-
 const REACT_FOLLOW_UP: &str = "📥";
 const REACT_STEER: &str = "↪️";
 
@@ -1003,609 +1000,68 @@ async fn react_queued(ctx: &serenity::Context, message: &serenity::Message, mode
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn drive_turn(
-    ctx: &serenity::Context,
-    target: serenity::ChannelId,
-    session: &mut ThreadSession,
-    prompt: &str,
-    cancel: &CancellationToken,
-    surface_thinking: bool,
-    reply_to: Option<serenity::MessageId>,
+struct DiscordSurface {
+    ctx: serenity::Context,
+    channel: serenity::ChannelId,
+    trigger: Option<serenity::MessageId>,
     author: serenity::UserId,
-    pending: &crate::ui::PendingAnswers,
-    mid_turn: &MidTurnQueue,
-    cancels: &CancelRegistry,
-    mode: StreamingBehavior,
-    title_seed: &mut Option<String>,
-) -> color_eyre::Result<TurnOutcome> {
-    let _typing = target.start_typing(&ctx.http);
-    session.client.prompt(prompt).await?;
-    let (mut rx, _sink_guard) = mid_turn.register(target, mode);
-    let (interrupt, streaming, _cancel_guard) = cancels.register(target);
-    let mut aborted = false;
-    let mut held: Option<String> = None;
-    let mut settling = false;
-    let mut explicit_runs_pending: usize = 1;
-    let mut awaiting_deferred = false;
-
-    let mut reply = String::new();
-    let mut activity = Activity::new(ctx, target);
-    let mut subagents = SubagentFeed::new(ctx, target);
-
-    loop {
-        let idle_wait = if settling && !awaiting_deferred {
-            SETTLE_GRACE
-        } else {
-            STALL_TIMEOUT
-        };
-        let event = tokio::select! {
-            () = cancel.cancelled() => {
-                activity.flush().await;
-                subagents.flush_all(false).await;
-                flush_final(ctx, target, &mut activity, &mut reply, &mut held, reply_to, title_seed).await;
-                let _ = target
-                    .say(ctx, "worker is restarting; resend your message to continue")
-                    .await;
-                return Ok(TurnOutcome::Live);
-            }
-            () = interrupt.cancelled(), if !aborted => {
-                aborted = true;
-                if let Err(e) = session.client.abort().await {
-                    tracing::warn!(error = %format!("{e:#}"), "abort on /cancel failed");
-                }
-                continue;
-            }
-            Some(text) = rx.recv() => {
-                let forwarded = match mode {
-                    StreamingBehavior::FollowUp => session.client.follow_up(&text).await,
-                    StreamingBehavior::Steer => session.client.steer(&text).await,
-                };
-                if let Err(e) = forwarded {
-                    tracing::warn!(error = %format!("{e:#}"), ?mode, "forwarding mid-turn message to omp failed");
-                }
-                continue;
-            }
-            recv = tokio::time::timeout(idle_wait, session.events.recv()) => match recv {
-                Ok(event) => event,
-                Err(_) if settling => break,
-                Err(_) => {
-                    tracing::warn!(timeout = ?STALL_TIMEOUT, "turn made no progress; resetting wedged OMP session");
-                    activity.flush().await;
-                    subagents.flush_all(true).await;
-                    flush_final(ctx, target, &mut activity, &mut reply, &mut held, reply_to, title_seed).await;
-                    let _ = target
-                        .say(ctx, "the turn stalled with no progress and was reset; resend your message to continue")
-                        .await;
-                    return Ok(TurnOutcome::Dead);
-                }
-            },
-        };
-        if event.is_some() {
-            settling = false;
-        }
-        match event {
-            Some(OmpEvent::Message(AssistantMessageEvent::TextDelta { delta })) => {
-                reply.push_str(&delta);
-            }
-            Some(OmpEvent::Message(AssistantMessageEvent::TextEnd { content })) => {
-                let seg = if content.is_empty() {
-                    std::mem::take(&mut reply)
-                } else {
-                    content
-                };
-                reply.clear();
-                hold_segment(ctx, target, &mut activity, &mut held, seg).await;
-            }
-            Some(OmpEvent::Message(AssistantMessageEvent::ThinkingEnd { content })) => {
-                if surface_thinking {
-                    activity.thinking(&content).await;
-                }
-            }
-            Some(OmpEvent::ToolStart(tool)) => {
-                if !reply.trim().is_empty() {
-                    let seg = std::mem::take(&mut reply);
-                    hold_segment(ctx, target, &mut activity, &mut held, seg).await;
-                }
-                if let Some(prev) = held.take() {
-                    commit_text(ctx, target, &mut activity, &prev, None, true).await;
-                }
-                match &tool {
-                    ToolCallStart::Task(call) => {
-                        activity.flush().await;
-                        if subagents.start(call).await {
-                            activity.seal();
-                        }
-                    }
-                    _ => activity.start(&tool).await,
-                }
-            }
-            Some(OmpEvent::ToolUpdate(tool)) => {
-                if tool.tool_name == "task" {
-                    subagents.update(&tool).await;
-                }
-            }
-            Some(OmpEvent::ToolEnd(tool)) => match tool.tool_name.as_str() {
-                "task" => subagents.end(&tool).await,
-                _ => activity.end(&tool).await,
-            },
-            Some(OmpEvent::UiRequest(req)) => {
-                if aborted {
-                    continue;
-                }
-                activity.flush().await;
-                streaming.store(false, Ordering::Release);
-                let handled =
-                    crate::ui::handle_request(ctx, target, &session.client, author, &req, cancel, pending).await;
-                streaming.store(true, Ordering::Release);
-                match handled {
-                    crate::ui::Handled::Cancelled => {
-                        subagents.flush_all(false).await;
-                        flush_final(ctx, target, &mut activity, &mut reply, &mut held, reply_to, title_seed).await;
-                        let _ = target
-                            .say(
-                                ctx,
-                                "worker restarted, so the pending question was discarded; resend your message to continue",
-                            )
-                            .await;
-                        return Ok(TurnOutcome::Live);
-                    }
-                    crate::ui::Handled::Continue { posted } => {
-                        if posted {
-                            activity.seal();
-                        }
-                    }
-                }
-            }
-            Some(OmpEvent::TurnEnd) => {
-                if !reply.trim().is_empty() {
-                    let seg = std::mem::take(&mut reply);
-                    hold_segment(ctx, target, &mut activity, &mut held, seg).await;
-                }
-            }
-            Some(OmpEvent::AgentEnd) => {
-                flush_final(ctx, target, &mut activity, &mut reply, &mut held, reply_to, title_seed).await;
-                if explicit_runs_pending > 0 {
-                    explicit_runs_pending -= 1;
-                } else {
-                    subagents.clear_one_backgrounded();
-                }
-                match rx.try_recv() {
-                    Ok(text) => {
-                        explicit_runs_pending += 1;
-                        session.client.prompt(&text).await?;
-                    }
-                    Err(_) => {
-                        awaiting_deferred = subagents.has_pending_background();
-                        settling = true;
-                    }
-                }
-            }
-            Some(OmpEvent::Error(e)) => {
-                activity.flush().await;
-                subagents.flush_all(true).await;
-                flush_final(ctx, target, &mut activity, &mut reply, &mut held, reply_to, title_seed).await;
-                let _ = target.say(ctx, format!("OMP error: {e}")).await;
-                return Ok(TurnOutcome::Live);
-            }
-            Some(OmpEvent::AgentStart | OmpEvent::Message(AssistantMessageEvent::Other)) => {}
-            None => {
-                activity.flush().await;
-                subagents.flush_all(true).await;
-                flush_final(ctx, target, &mut activity, &mut reply, &mut held, reply_to, title_seed).await;
-                let _ = target
-                    .say(ctx, "the OMP session ended unexpectedly; send another message to restart it")
-                    .await;
-                return Ok(TurnOutcome::Dead);
-            }
-        }
-    }
-    activity.flush().await;
-    subagents.settle_backgrounded();
-    subagents.flush_all(false).await;
-    flush_final(ctx, target, &mut activity, &mut reply, &mut held, reply_to, title_seed).await;
-    Ok(TurnOutcome::Live)
+    pending: crate::ui::PendingAnswers,
+    cancel: CancellationToken,
 }
 
-async fn commit_reply(
-    ctx: &serenity::Context,
-    target: serenity::ChannelId,
-    reply: &str,
-    reply_to: Option<serenity::MessageId>,
-    silent: bool,
-) {
-    let listed = crate::render::tables_to_lists(reply);
-    let chunks =
-        crate::render::split_to_budget(&crate::render::defang_mentions(&listed), crate::render::DISCORD_BUDGET);
-    for (i, chunk) in chunks.iter().enumerate() {
-        let mut message = serenity::CreateMessage::new().content(chunk.clone());
-        if i == 0 {
-            if let Some(msg_id) = reply_to {
-                let reference = serenity::MessageReference::from((target, msg_id)).fail_if_not_exists(false);
-                message = message.reference_message(reference);
-            }
-            if silent {
-                message = message.flags(serenity::MessageFlags::SUPPRESS_NOTIFICATIONS);
-            }
-        } else {
+impl pico_core::surface::Surface for DiscordSurface {
+    type Msg = serenity::MessageId;
+    type Typing = serenity::Typing;
+
+    fn typing(&self) -> serenity::Typing {
+        self.channel.start_typing(&self.ctx.http)
+    }
+
+    fn limits(&self) -> pico_core::surface::SizeLimits {
+        pico_core::surface::SizeLimits {
+            reply_budget: 1800,
+            activity_line_cap: 20,
+            activity_char_cap: 1800,
+            activity_send_max: 1990,
+        }
+    }
+
+    async fn post(&self, text: &str, opts: pico_core::surface::PostOpts) -> Option<serenity::MessageId> {
+        let mut message = serenity::CreateMessage::new().content(text.to_owned());
+        if opts.as_reply
+            && let Some(msg_id) = self.trigger
+        {
+            let reference = serenity::MessageReference::from((self.channel, msg_id)).fail_if_not_exists(false);
+            message = message.reference_message(reference);
+        }
+        if opts.silent {
             message = message.flags(serenity::MessageFlags::SUPPRESS_NOTIFICATIONS);
         }
-        if let Err(e) = target.send_message(ctx, message).await {
-            tracing::warn!(error = %e, "reply send failed");
-        }
-    }
-}
-
-async fn commit_text(
-    ctx: &serenity::Context,
-    target: serenity::ChannelId,
-    activity: &mut Activity<'_>,
-    text: &str,
-    reply_to: Option<serenity::MessageId>,
-    silent: bool,
-) {
-    if text.trim().is_empty() {
-        return;
-    }
-    activity.flush().await;
-    commit_reply(ctx, target, text, reply_to, silent).await;
-    activity.seal();
-}
-
-async fn hold_segment(
-    ctx: &serenity::Context,
-    target: serenity::ChannelId,
-    activity: &mut Activity<'_>,
-    held: &mut Option<String>,
-    seg: String,
-) {
-    if seg.trim().is_empty() {
-        return;
-    }
-    if let Some(prev) = held.take() {
-        commit_text(ctx, target, activity, &prev, None, true).await;
-    }
-    *held = Some(seg);
-}
-
-async fn flush_final(
-    ctx: &serenity::Context,
-    target: serenity::ChannelId,
-    activity: &mut Activity<'_>,
-    reply: &mut String,
-    held: &mut Option<String>,
-    reply_to: Option<serenity::MessageId>,
-    title_seed: &mut Option<String>,
-) {
-    if !reply.trim().is_empty() {
-        let seg = std::mem::take(reply);
-        hold_segment(ctx, target, activity, held, seg).await;
-    }
-    if let Some(text) = held.take() {
-        commit_text(ctx, target, activity, &text, reply_to, false).await;
-        *title_seed = Some(text);
-    }
-}
-
-const ACTIVITY_THROTTLE: Duration = Duration::from_secs(1);
-const ACTIVITY_SEND_MAX: usize = 1990;
-
-struct Activity<'a> {
-    ctx: &'a serenity::Context,
-    channel: serenity::ChannelId,
-    hosts: Vec<ActivityHost>,
-    placements: std::collections::HashMap<String, (usize, usize)>,
-    last_edit: Instant,
-    sealed: bool,
-}
-
-struct ActivityHost {
-    message: serenity::Message,
-    lines: Vec<String>,
-    rendered: String,
-    dirty: bool,
-}
-
-impl ActivityHost {
-    fn text(&self) -> String {
-        let body = crate::render::defang_mentions(&self.lines.join("\n"));
-        if body.chars().count() <= ACTIVITY_SEND_MAX {
-            return body;
-        }
-        body.chars().take(ACTIVITY_SEND_MAX).collect()
-    }
-
-    fn char_count(&self) -> usize {
-        let body: usize = self.lines.iter().map(|l| l.chars().count()).sum();
-        body + self.lines.len().saturating_sub(1)
-    }
-}
-
-impl<'a> Activity<'a> {
-    fn new(ctx: &'a serenity::Context, channel: serenity::ChannelId) -> Self {
-        Activity {
-            ctx,
-            channel,
-            hosts: Vec::new(),
-            placements: std::collections::HashMap::new(),
-            last_edit: Instant::now(),
-            sealed: false,
-        }
-    }
-
-    fn seal(&mut self) {
-        self.sealed = true;
-    }
-
-    async fn start(&mut self, tool: &ToolCallStart) {
-        let line = crate::render::tool_activity_line(tool);
-        if let Some(placement) = self.append(line).await {
-            self.placements.insert(tool.call().tool_call_id.clone(), placement);
-        }
-    }
-
-    async fn thinking(&mut self, content: &str) {
-        let line = crate::render::thinking_line(content);
-        if !line.is_empty() {
-            self.append(line).await;
-        }
-    }
-
-    async fn end(&mut self, tool: &ToolCallEnd) {
-        let Some((host_idx, line_idx)) = self.placements.remove(&tool.tool_call_id) else {
-            return;
-        };
-        if !tool.is_error {
-            return;
-        }
-        let error = crate::render::error_text(&tool.result);
-        let Some(host) = self.hosts.get_mut(host_idx) else {
-            return;
-        };
-        let Some(current) = host.lines.get(line_idx) else {
-            return;
-        };
-        let next = crate::render::with_failure_line(current, error.as_deref());
-        if next == *current {
-            return;
-        }
-        host.lines[line_idx] = next;
-        host.dirty = true;
-        self.maybe_flush().await;
-    }
-
-    async fn append(&mut self, line: String) -> Option<(usize, usize)> {
-        let rollover = self.sealed
-            || match self.hosts.last() {
-                None => true,
-                Some(host) => {
-                    let count = host.lines.len();
-                    let projected = host.char_count() + line.chars().count() + usize::from(count > 0);
-                    count + 1 > crate::render::ACTIVITY_LINE_CAP || projected > crate::render::ACTIVITY_CHAR_CAP
-                }
-            };
-        if rollover {
-            let sent = crate::render::defang_mentions(&line);
-            let message = self.post(&sent).await?;
-            self.hosts.push(ActivityHost {
-                message,
-                lines: vec![line],
-                rendered: sent,
-                dirty: false,
-            });
-            self.sealed = false;
-            self.last_edit = Instant::now();
-            return Some((self.hosts.len() - 1, 0));
-        }
-        let host_idx = self.hosts.len() - 1;
-        let line_idx = {
-            let host = self.hosts.last_mut().expect("host present when not rolling over");
-            let idx = host.lines.len();
-            host.lines.push(line);
-            host.dirty = true;
-            idx
-        };
-        self.maybe_flush().await;
-        Some((host_idx, line_idx))
-    }
-
-    async fn post(&self, content: &str) -> Option<serenity::Message> {
-        let message = serenity::CreateMessage::new()
-            .content(content.to_string())
-            .flags(serenity::MessageFlags::SUPPRESS_NOTIFICATIONS);
-        match self.channel.send_message(self.ctx, message).await {
-            Ok(message) => Some(message),
+        match self.channel.send_message(&self.ctx, message).await {
+            Ok(msg) => Some(msg.id),
             Err(e) => {
-                tracing::warn!(error = %e, "activity send failed");
+                tracing::warn!(error = %e, "surface post failed");
                 None
             }
         }
     }
 
-    async fn maybe_flush(&mut self) {
-        if self.last_edit.elapsed() >= ACTIVITY_THROTTLE {
-            self.flush().await;
-        }
-    }
-
-    async fn flush(&mut self) {
-        let ctx = self.ctx;
-        for host in &mut self.hosts {
-            if !host.dirty {
-                continue;
-            }
-            let text = host.text();
-            if text == host.rendered {
-                host.dirty = false;
-                continue;
-            }
-            match host
-                .message
-                .edit(ctx, serenity::EditMessage::new().content(text.clone()))
-                .await
-            {
-                Ok(()) => {
-                    host.rendered = text;
-                    host.dirty = false;
-                }
-                Err(e) => tracing::warn!(error = %e, "activity edit failed"),
-            }
-        }
-        self.last_edit = Instant::now();
-    }
-}
-
-const SUBAGENT_THROTTLE: Duration = Duration::from_secs(2);
-
-struct SubagentFeed<'a> {
-    ctx: &'a serenity::Context,
-    channel: serenity::ChannelId,
-    batches: std::collections::HashMap<String, SubagentBatch>,
-}
-
-struct SubagentBatch {
-    message: serenity::Message,
-    rows: Vec<crate::render::SubagentRow>,
-    started_at: Instant,
-    last_edit: Instant,
-    rendered: String,
-    backgrounded: bool,
-}
-
-impl<'a> SubagentFeed<'a> {
-    fn new(ctx: &'a serenity::Context, channel: serenity::ChannelId) -> Self {
-        SubagentFeed {
-            ctx,
-            channel,
-            batches: std::collections::HashMap::new(),
-        }
-    }
-
-    async fn start(&mut self, call: &ToolCall) -> bool {
-        let rows = crate::render::extract_subagent_rows(&call.args);
-        if rows.is_empty() {
-            return false;
-        }
-        let content = subagent_send_text(&crate::render::render_subagent_batch(&rows, 0));
-        let Some(message) = self.post(&content).await else {
-            return false;
-        };
-        let now = Instant::now();
-        self.batches.insert(
-            call.tool_call_id.clone(),
-            SubagentBatch {
-                message,
-                rows,
-                started_at: now,
-                last_edit: now,
-                rendered: content,
-                backgrounded: false,
-            },
-        );
-        true
-    }
-
-    async fn update(&mut self, tool: &ToolCallUpdate) {
-        let Some(batch) = self.batches.get_mut(&tool.tool_call_id) else {
-            return;
-        };
-        crate::render::apply_progress(&mut batch.rows, &tool.partial_result);
-        if let Some(is_error) = crate::render::async_terminal(&tool.partial_result) {
-            crate::render::settle_rows(&mut batch.rows, is_error);
-            self.edit(&tool.tool_call_id).await;
-            self.batches.remove(&tool.tool_call_id);
-        } else if batch.last_edit.elapsed() >= SUBAGENT_THROTTLE {
-            self.edit(&tool.tool_call_id).await;
-        }
-    }
-
-    async fn end(&mut self, tool: &ToolCallEnd) {
-        if crate::render::is_spawn_ack(&tool.result) {
-            if let Some(batch) = self.batches.get_mut(&tool.tool_call_id) {
-                batch.backgrounded = true;
-            }
-            return;
-        }
-        let Some(batch) = self.batches.get_mut(&tool.tool_call_id) else {
-            return;
-        };
-        crate::render::settle_rows(&mut batch.rows, tool.is_error);
-        self.edit(&tool.tool_call_id).await;
-        self.batches.remove(&tool.tool_call_id);
-    }
-
-    async fn flush_all(&mut self, settle_failed: bool) {
-        let keys: Vec<String> = self.batches.keys().cloned().collect();
-        for key in keys {
-            if settle_failed && let Some(batch) = self.batches.get_mut(&key) {
-                crate::render::settle_rows(&mut batch.rows, true);
-            }
-            self.edit(&key).await;
-        }
-    }
-
-    fn settle_backgrounded(&mut self) {
-        for batch in self.batches.values_mut() {
-            if batch.backgrounded {
-                crate::render::detach_rows(&mut batch.rows);
-            }
-        }
-    }
-
-    fn has_pending_background(&self) -> bool {
-        self.batches.values().any(|batch| batch.backgrounded)
-    }
-
-    fn clear_one_backgrounded(&mut self) {
-        if let Some(batch) = self.batches.values_mut().find(|batch| batch.backgrounded) {
-            batch.backgrounded = false;
-            crate::render::detach_rows(&mut batch.rows);
-        }
-    }
-
-    async fn edit(&mut self, key: &str) {
-        let Some(batch) = self.batches.get_mut(key) else {
-            return;
-        };
-        let elapsed = batch.started_at.elapsed().as_millis() as u64;
-        let content = subagent_send_text(&crate::render::render_subagent_batch(&batch.rows, elapsed));
-        if content == batch.rendered {
-            batch.last_edit = Instant::now();
-            return;
-        }
-        match batch
-            .message
-            .edit(self.ctx, serenity::EditMessage::new().content(content.clone()))
+    async fn edit(&self, msg: &serenity::MessageId, text: &str) -> bool {
+        match self
+            .channel
+            .edit_message(&self.ctx, *msg, serenity::EditMessage::new().content(text.to_owned()))
             .await
         {
-            Ok(()) => {
-                batch.rendered = content;
-                batch.last_edit = Instant::now();
-            }
-            Err(e) => tracing::warn!(error = %e, "subagent edit failed"),
-        }
-    }
-
-    async fn post(&self, content: &str) -> Option<serenity::Message> {
-        let message = serenity::CreateMessage::new()
-            .content(content.to_string())
-            .flags(serenity::MessageFlags::SUPPRESS_NOTIFICATIONS);
-        match self.channel.send_message(self.ctx, message).await {
-            Ok(message) => Some(message),
+            Ok(_) => true,
             Err(e) => {
-                tracing::warn!(error = %e, "subagent send failed");
-                None
+                tracing::warn!(error = %e, "surface edit failed");
+                false
             }
         }
     }
-}
 
-fn subagent_send_text(raw: &str) -> String {
-    let defanged = crate::render::defang_mentions(raw);
-    if defanged.chars().count() <= ACTIVITY_SEND_MAX {
-        defanged
-    } else {
-        defanged.chars().take(ACTIVITY_SEND_MAX).collect()
+    async fn ui(&self, req: &pico_core::omp::protocol::UiRequest) -> pico_core::surface::UiOutcome {
+        crate::ui::run(&self.ctx, self.channel, self.author, &self.pending, &self.cancel, req).await
     }
 }
 
@@ -1756,7 +1212,7 @@ fn strip_wrapping_quotes(s: &str) -> &str {
 mod tests {
     use std::path::PathBuf;
 
-    use crate::{
+    use pico_core::{
         bindings::{Binding, BindingKind},
         config::GuildDefault,
     };

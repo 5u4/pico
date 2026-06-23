@@ -312,7 +312,7 @@ where
     de.deserialize_any(Snowflake)
 }
 
-pub(crate) fn expand_home(raw: &str) -> PathBuf {
+pub fn expand_home(raw: &str) -> PathBuf {
     if raw == "~"
         && let Some(home) = std::env::home_dir()
     {
