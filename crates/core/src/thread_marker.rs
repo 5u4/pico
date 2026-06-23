@@ -10,6 +10,7 @@ pub struct ThreadMarker {
     pub closed_at: Option<String>,
 }
 
+#[derive(Clone)]
 pub struct WorktreeOrigin {
     pub base_repo: PathBuf,
     pub default_branch: String,

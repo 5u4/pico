@@ -23,6 +23,17 @@ fn reply_for(message: &str) -> String {
     }
 }
 
+fn unwrap_message(message: &str) -> &str {
+    let trimmed = message.trim_start();
+    if let Some((first_line, rest)) = trimmed.split_once('\n')
+        && first_line.starts_with("<discord-message")
+        && first_line.trim_end().ends_with("/>")
+    {
+        return rest;
+    }
+    message
+}
+
 fn emit_seq(out: &mut impl Write, marker: &str) {
     let frames = [
         json!({ "type": "tool_execution_start", "toolCallId": "seq-a", "toolName": "read", "args": { "path": format!("ACT-A-{marker}") } }),
@@ -98,6 +109,7 @@ fn run_rpc() {
                 ack(&mut out, "prompt", id);
                 emit(&mut out, &json!({ "type": "agent_start" }));
                 let message = frame.get("message").and_then(Value::as_str).unwrap_or_default();
+                let message = unwrap_message(message);
                 match message.trim().split_once(' ') {
                     Some(("SEQ", marker)) => emit_seq(&mut out, marker),
                     Some(("WHITE", marker)) => emit_white(&mut out, marker),
@@ -152,7 +164,7 @@ fn run_queue<R: std::io::BufRead>(out: &mut impl Write, lines: &mut std::io::Lin
         }
         if kind == "follow_up" || kind == "steer" {
             let message = frame.get("message").and_then(Value::as_str).unwrap_or_default();
-            queued = Some((kind.to_owned(), message.to_owned()));
+            queued = Some((kind.to_owned(), unwrap_message(message).to_owned()));
             break;
         }
     }
