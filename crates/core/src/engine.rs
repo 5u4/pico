@@ -307,19 +307,6 @@ async fn handle_ui<S: Surface>(surface: &S, client: &OmpClient, req: &UiRequest)
     }
 }
 
-async fn commit_reply<S: Surface>(surface: &S, reply: &str, as_reply: bool, silent: bool) {
-    let listed = render::tables_to_lists(reply);
-    let chunks = render::split_to_budget(&render::defang_mentions(&listed), surface.limits().reply_budget);
-    for (i, chunk) in chunks.iter().enumerate() {
-        let opts = if i == 0 {
-            PostOpts { as_reply, silent }
-        } else {
-            PostOpts::SILENT
-        };
-        surface.post(chunk, opts).await;
-    }
-}
-
 async fn commit_text<S: Surface>(
     surface: &S,
     activity: &mut Activity<'_, S>,
@@ -331,7 +318,7 @@ async fn commit_text<S: Surface>(
         return;
     }
     activity.flush().await;
-    commit_reply(surface, text, as_reply, silent).await;
+    surface.post_reply(text, as_reply, silent).await;
     activity.seal();
 }
 
@@ -678,7 +665,6 @@ mod tests {
 
         fn limits(&self) -> SizeLimits {
             SizeLimits {
-                reply_budget: 1800,
                 activity_line_cap: 20,
                 activity_char_cap: 1800,
                 activity_send_max: 1990,
@@ -758,7 +744,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn long_final_reply_splits_with_first_chunk_pinging_rest_silent() {
+    async fn final_reply_is_handed_whole_to_post_reply() {
         let surface = FakeSurface::default();
         let mut activity = Activity::new(&surface);
         let mut held = Some("x".repeat(4000));
@@ -766,11 +752,9 @@ mod tests {
         let mut title_seed = None;
         flush_final(&surface, &mut activity, &mut reply, &mut held, &mut title_seed).await;
         let posts = surface.posts.lock().unwrap();
-        assert!(posts.len() >= 2);
+        assert_eq!(posts.len(), 1);
+        assert_eq!(posts[0].0.chars().count(), 4000);
         assert!(posts[0].1.as_reply && !posts[0].1.silent);
-        for chunk in &posts[1..] {
-            assert!(chunk.1.silent && !chunk.1.as_reply);
-        }
     }
 
     #[tokio::test]

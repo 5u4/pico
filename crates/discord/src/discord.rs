@@ -156,6 +156,25 @@ async fn busy_queue(
 }
 
 const MSG_CONTENT_CAP: usize = 1900;
+const REPLY_BUDGET: usize = 1800;
+
+fn render_reply(text: &str, as_reply: bool, silent: bool) -> Vec<(String, pico_core::surface::PostOpts)> {
+    use pico_core::surface::PostOpts;
+    let listed = pico_core::render::tables_to_lists(text);
+    let chunks = pico_core::render::split_to_budget(&pico_core::render::defang_mentions(&listed), REPLY_BUDGET);
+    chunks
+        .into_iter()
+        .enumerate()
+        .map(|(i, chunk)| {
+            let opts = if i == 0 {
+                PostOpts { as_reply, silent }
+            } else {
+                PostOpts::SILENT
+            };
+            (chunk, opts)
+        })
+        .collect()
+}
 
 async fn deliver_busy(ctx: Context<'_>, mode: StreamingBehavior, message: String) -> Result<(), Error> {
     let text = message.trim();
@@ -1138,7 +1157,6 @@ impl pico_core::surface::Surface for DiscordSurface {
 
     fn limits(&self) -> pico_core::surface::SizeLimits {
         pico_core::surface::SizeLimits {
-            reply_budget: 1800,
             activity_line_cap: 20,
             activity_char_cap: 1800,
             activity_send_max: 1990,
@@ -1175,6 +1193,12 @@ impl pico_core::surface::Surface for DiscordSurface {
                 tracing::warn!(error = %e, "surface post failed");
                 None
             }
+        }
+    }
+
+    async fn post_reply(&self, text: &str, as_reply: bool, silent: bool) {
+        for (chunk, opts) in render_reply(text, as_reply, silent) {
+            self.post(&chunk, opts).await;
         }
     }
 
@@ -1304,5 +1328,58 @@ mod tests {
             }
             _ => panic!("expected worktree route"),
         }
+    }
+
+    #[test]
+    fn short_reply_is_one_chunk_with_given_opts() {
+        use pico_core::surface::PostOpts;
+        let out = super::render_reply("hello", true, false);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0, "hello");
+        assert_eq!(
+            out[0].1,
+            PostOpts {
+                as_reply: true,
+                silent: false
+            }
+        );
+    }
+
+    #[test]
+    fn long_reply_splits_first_pings_rest_silent() {
+        use pico_core::surface::PostOpts;
+        let out = super::render_reply(&"x".repeat(4000), true, false);
+        assert!(out.len() >= 2);
+        assert_eq!(
+            out[0].1,
+            PostOpts {
+                as_reply: true,
+                silent: false
+            }
+        );
+        for (_, opts) in &out[1..] {
+            assert_eq!(*opts, PostOpts::SILENT);
+        }
+        for (chunk, _) in &out {
+            assert!(chunk.chars().count() <= super::REPLY_BUDGET);
+        }
+    }
+
+    #[test]
+    fn render_reply_defangs_mentions() {
+        let out = super::render_reply("ping <@1> and @everyone now", true, false);
+        assert_eq!(out.len(), 1);
+        assert!(!out[0].0.contains("@everyone"));
+        assert!(!out[0].0.contains("<@1>"));
+        assert!(out[0].0.contains('\u{200b}'));
+    }
+
+    #[test]
+    fn render_reply_flattens_tables() {
+        let table = "| Name | Age |\n| --- | --- |\n| Alice | 30 |";
+        let out = super::render_reply(table, true, false);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].0.contains("**Alice**"));
+        assert!(!out[0].0.contains("---"));
     }
 }
