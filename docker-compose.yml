@@ -19,6 +19,16 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    ports:
+      # noVNC for manual camofox login. The 127.0.0.1: prefix blocks host/LAN exposure;
+      # noVNC is passwordless (x11vnc -nopw). NOTE: with VNC_BIND=0.0.0.0 below, 6080 is
+      # still reachable from other containers on this compose network (e.g. hindsight) —
+      # set VNC_PASSWORD before exposing past container-local/loopback.
+      - "127.0.0.1:6080:6080"
+    # VNC_BIND makes camofox's noVNC bind the container bridge (not container-loopback),
+    # else the published port can't reach it: Docker DNATs host 127.0.0.1 -> bridge IP.
+    environment:
+      VNC_BIND: "0.0.0.0"
     volumes:
       - ${HOME}/.pico:/home/pico/.pico
       - ${HOME}/.omp:/home/pico/.omp
