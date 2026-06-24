@@ -13,10 +13,7 @@ use crate::{
     omp::{
         client::OmpClient,
         pool::ThreadSession,
-        protocol::{
-            AssistantMessageEvent, OmpEvent, ToolCall, ToolCallEnd, ToolCallStart, ToolCallUpdate, UiRequest,
-            UiResponse,
-        },
+        protocol::{AssistantMessageEvent, OmpEvent, ToolCall, ToolCallEnd, ToolCallUpdate, UiRequest, UiResponse},
     },
     render,
     surface::{ConversationId, PostOpts, Surface, UiOutcome, UiReply},
@@ -142,14 +139,13 @@ pub async fn drive_turn<S: Surface>(
                 if let Some(prev) = held.take() {
                     commit_text(surface, &mut activity, &prev, false, true).await;
                 }
-                match &tool {
-                    ToolCallStart::Task(call) => {
-                        activity.flush().await;
-                        if subagents.start(call).await {
-                            activity.seal();
-                        }
+                if tool.tool_name == "task" {
+                    activity.flush().await;
+                    if subagents.start(&tool).await {
+                        activity.seal();
                     }
-                    _ => activity.start(&tool).await,
+                } else {
+                    activity.start(&tool).await;
                 }
             }
             Some(OmpEvent::ToolUpdate(tool)) => {
@@ -389,18 +385,20 @@ impl<'a, S: Surface> Activity<'a, S> {
         self.sealed = true;
     }
 
-    async fn start(&mut self, tool: &ToolCallStart) {
-        let line = render::tool_activity_line(tool);
+    async fn start(&mut self, tool: &ToolCall) {
+        let Some(line) = self.surface.tool_activity_line(tool) else {
+            return;
+        };
         if let Some(placement) = self.append(line).await {
-            self.placements.insert(tool.call().tool_call_id.clone(), placement);
+            self.placements.insert(tool.tool_call_id.clone(), placement);
         }
     }
 
     async fn thinking(&mut self, content: &str) {
-        let line = render::thinking_line(content);
-        if !line.is_empty() {
-            self.append(line).await;
-        }
+        let Some(line) = self.surface.thinking_line(content) else {
+            return;
+        };
+        self.append(line).await;
     }
 
     async fn end(&mut self, tool: &ToolCallEnd) {
@@ -417,7 +415,7 @@ impl<'a, S: Surface> Activity<'a, S> {
         let Some(current) = host.lines.get(line_idx) else {
             return;
         };
-        let next = render::with_failure_line(current, error.as_deref());
+        let next = self.surface.failure_line(current, error.as_deref());
         if next == *current {
             return;
         }
@@ -672,6 +670,23 @@ mod tests {
         async fn ui(&self, _req: &UiRequest) -> UiOutcome {
             UiOutcome::Notified { posted: false }
         }
+
+        fn tool_activity_line(&self, call: &ToolCall) -> Option<String> {
+            Some(format!("🔧 {}", call.tool_name))
+        }
+
+        fn thinking_line(&self, content: &str) -> Option<String> {
+            let t = content.trim();
+            (!t.is_empty()).then(|| format!("🧠 {t}"))
+        }
+
+        fn failure_line(&self, current: &str, error: Option<&str>) -> String {
+            let body = current.find(' ').map_or("", |i| &current[i..]);
+            match error {
+                Some(e) => format!("❌{body} — {e}"),
+                None => format!("❌{body}"),
+            }
+        }
     }
 
     #[tokio::test]
@@ -755,6 +770,30 @@ mod tests {
         assert_eq!(after_alpha, 1);
         assert_eq!(after_beta, 1);
         assert_eq!(after_gamma, 2);
+    }
+
+    #[tokio::test]
+    async fn tool_failure_rewrites_its_activity_line() {
+        let surface = FakeSurface::default();
+        let mut activity = Activity::new(&surface);
+        let call = ToolCall {
+            tool_call_id: "t1".to_owned(),
+            tool_name: "bash".to_owned(),
+            args: serde_json::json!({}),
+            intent: None,
+        };
+        activity.start(&call).await;
+        let end = ToolCallEnd {
+            tool_call_id: "t1".to_owned(),
+            tool_name: "bash".to_owned(),
+            result: serde_json::json!({ "content": [{ "type": "text", "text": "boom" }] }),
+            is_error: true,
+        };
+        activity.end(&end).await;
+        activity.flush().await;
+        let edits = surface.edits.lock().unwrap();
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].1, "❌ bash — boom");
     }
 
     #[test]

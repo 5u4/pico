@@ -5,7 +5,7 @@ use std::{
 
 use pico_core::omp::{
     client::{OmpClient, SpawnConfig},
-    protocol::{AssistantMessageEvent, OmpEvent, ToolCallStart, UiResponse},
+    protocol::{AssistantMessageEvent, OmpEvent, UiResponse},
 };
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
@@ -128,10 +128,10 @@ async fn classifies_a_real_tool_call() {
             .expect("timed out waiting for omp events")
             .expect("event stream closed before agent_end");
         match event {
-            OmpEvent::ToolStart(ToolCallStart::Bash(call)) => {
+            OmpEvent::ToolStart(call) if call.tool_name == "bash" => {
                 bash_command = Some(call.args["command"].as_str().unwrap_or_default().to_owned());
             }
-            OmpEvent::ToolStart(other) => other_tools.push(other.call().tool_name.clone()),
+            OmpEvent::ToolStart(call) => other_tools.push(call.tool_name.clone()),
             OmpEvent::AgentEnd => break,
             OmpEvent::Error(e) => panic!("omp reported an error: {e}"),
             _ => {}
@@ -174,7 +174,7 @@ async fn task_update_carries_subagent_progress() {
             .expect("timed out waiting for omp events")
             .expect("event stream closed before agent_end");
         match event {
-            OmpEvent::ToolStart(ToolCallStart::Task(_)) => saw_task_start = true,
+            OmpEvent::ToolStart(call) if call.tool_name == "task" => saw_task_start = true,
             OmpEvent::ToolUpdate(update)
                 if update.tool_name == "task" && update.partial_result["details"]["progress"].is_array() =>
             {
@@ -264,7 +264,7 @@ async fn abort_ends_an_in_flight_turn() {
             .expect("timed out waiting for the bash tool to start")
             .expect("event stream closed before the tool started");
         match event {
-            OmpEvent::ToolStart(ToolCallStart::Bash(_)) => break,
+            OmpEvent::ToolStart(call) if call.tool_name == "bash" => break,
             OmpEvent::AgentEnd => panic!("turn ended before the bash tool started"),
             OmpEvent::Error(e) => panic!("omp reported an error: {e}"),
             _ => {}
