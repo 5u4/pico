@@ -34,6 +34,10 @@ pub trait Surface: Send + Sync {
     async fn say(&self, text: &str) {
         self.post(text, PostOpts::PLAIN).await;
     }
+
+    async fn post_reply(&self, text: &str, as_reply: bool, silent: bool) {
+        self.post(text, PostOpts { as_reply, silent }).await;
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -59,7 +63,6 @@ impl PostOpts {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SizeLimits {
-    pub reply_budget: usize,
     pub activity_line_cap: usize,
     pub activity_char_cap: usize,
     pub activity_send_max: usize,
