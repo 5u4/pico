@@ -15,7 +15,6 @@ serde_json.workspace = true
 serenity.workspace = true
 sqlx.workspace = true
 tokio.workspace = true
-toml.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
 ulid.workspace = true

@@ -26,7 +26,14 @@ pub async fn load(db: &SqlitePool, platform: &str, thread_id: &str) -> Option<Th
             return None;
         }
     };
-    match parse(row) {
+    let base = match pico_shared::paths::pico_home() {
+        Ok(base) => base,
+        Err(e) => {
+            tracing::warn!(%thread_id, error = %format!("{e:#}"), "pico_home invalid; cannot resolve thread marker");
+            return None;
+        }
+    };
+    match parse(row, &base) {
         Some(marker) => Some(marker),
         None => {
             tracing::warn!(%thread_id, "thread marker invalid; re-resolving from binding");
@@ -46,18 +53,20 @@ async fn fetch(db: &SqlitePool, platform: &str, thread_id: &str) -> color_eyre::
     .wrap_err("loading thread marker")
 }
 
-fn parse((profile, cwd, base_repo, default_branch, closed_at): Columns) -> Option<ThreadMarker> {
+fn parse(
+    (profile, cwd, base_repo, default_branch, closed_at): Columns,
+    base: &std::path::Path,
+) -> Option<ThreadMarker> {
     if !pico_shared::validate::is_valid_profile(&profile) {
         return None;
     }
-    let base = pico_shared::paths::pico_home().ok()?;
-    let cwd = pico_shared::paths::from_portable(&cwd, &base)?;
+    let cwd = pico_shared::paths::from_portable(&cwd, base)?;
     let worktree = match (base_repo, default_branch) {
         (Some(base_repo), Some(default_branch)) => {
             if !pico_shared::validate::is_valid_branch(&default_branch) {
                 return None;
             }
-            let base_repo = pico_shared::paths::from_portable(&base_repo, &base)?;
+            let base_repo = pico_shared::paths::from_portable(&base_repo, base)?;
             Some(WorktreeOrigin {
                 base_repo,
                 default_branch,
