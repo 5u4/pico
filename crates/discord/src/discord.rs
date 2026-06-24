@@ -655,13 +655,13 @@ async fn worktree_close(ctx: Context<'_>) -> Result<(), Error> {
             format!("✅ Worktree thread closed. Removed worktree and branch `pico/{thread_id}`. Conversation history preserved."),
         )
         .await;
+    let _ = ctx.say("Closed.").await;
     if let Err(e) = channel
         .edit_thread(ctx.serenity_context(), serenity::EditThread::new().archived(true).locked(true))
         .await
     {
         tracing::warn!(%thread_id, error = %e, "archive+lock after close failed");
     }
-    ctx.say("Closed.").await?;
     Ok(())
 }
 
