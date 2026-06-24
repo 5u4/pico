@@ -5,39 +5,39 @@ use pico_core::{
 use serde::Deserialize;
 
 #[derive(Debug, Clone)]
-pub(crate) enum ToolCallStart {
-    Read(ToolCall),
-    Search(ToolCall),
-    Find(ToolCall),
-    Lsp(ToolCall),
-    Edit(ToolCall),
-    Write(ToolCall),
-    Bash(ToolCall),
-    Browser(ToolCall),
-    Eval(ToolCall),
-    WebSearch(ToolCall),
-    Learn(ToolCall),
-    Recall(ToolCall),
-    Reflect(ToolCall),
-    Retain(ToolCall),
-    Task(ToolCall),
-    Job(ToolCall),
-    Todo(ToolCall),
-    Github(ToolCall),
-    Irc(ToolCall),
-    AstGrep(ToolCall),
-    AstEdit(ToolCall),
-    Debug(ToolCall),
-    InspectImage(ToolCall),
-    ManageSkill(ToolCall),
-    Resolve(ToolCall),
-    GenerateImage(ToolCall),
-    Camo(ToolCall),
-    Unknown(ToolCall),
+pub(crate) enum ToolCallStart<'a> {
+    Read(&'a ToolCall),
+    Search(&'a ToolCall),
+    Find(&'a ToolCall),
+    Lsp(&'a ToolCall),
+    Edit(&'a ToolCall),
+    Write(&'a ToolCall),
+    Bash(&'a ToolCall),
+    Browser(&'a ToolCall),
+    Eval(&'a ToolCall),
+    WebSearch(&'a ToolCall),
+    Learn(&'a ToolCall),
+    Recall(&'a ToolCall),
+    Reflect(&'a ToolCall),
+    Retain(&'a ToolCall),
+    Task(&'a ToolCall),
+    Job(&'a ToolCall),
+    Todo(&'a ToolCall),
+    Github(&'a ToolCall),
+    Irc(&'a ToolCall),
+    AstGrep(&'a ToolCall),
+    AstEdit(&'a ToolCall),
+    Debug(&'a ToolCall),
+    InspectImage(&'a ToolCall),
+    ManageSkill(&'a ToolCall),
+    Resolve(&'a ToolCall),
+    GenerateImage(&'a ToolCall),
+    Camo(&'a ToolCall),
+    Unknown(&'a ToolCall),
 }
 
-impl From<ToolCall> for ToolCallStart {
-    fn from(call: ToolCall) -> Self {
+impl<'a> From<&'a ToolCall> for ToolCallStart<'a> {
+    fn from(call: &'a ToolCall) -> Self {
         match call.tool_name.as_str() {
             "read" => Self::Read(call),
             "search" => Self::Search(call),
@@ -71,8 +71,8 @@ impl From<ToolCall> for ToolCallStart {
     }
 }
 
-impl ToolCallStart {
-    pub(crate) fn call(&self) -> &ToolCall {
+impl<'a> ToolCallStart<'a> {
+    pub(crate) fn call(&self) -> &'a ToolCall {
         match self {
             Self::Read(c)
             | Self::Search(c)
@@ -109,7 +109,7 @@ impl ToolCallStart {
 const ACTIVITY_DETAIL: usize = 60;
 const ERROR_DETAIL: usize = 60;
 
-pub(crate) fn tool_activity_line(tool: &ToolCallStart) -> String {
+pub(crate) fn tool_activity_line(tool: &ToolCallStart<'_>) -> String {
     let raw = &tool.call().args;
     let a = Args::deserialize(raw).unwrap_or_default();
     let first_path = a.paths.first().map(String::as_str).unwrap_or_default();
@@ -437,12 +437,13 @@ mod tests {
     use super::*;
 
     fn line(name: &str, args: serde_json::Value) -> String {
-        tool_activity_line(&ToolCallStart::from(pico_core::omp::protocol::ToolCall {
+        let call = pico_core::omp::protocol::ToolCall {
             tool_call_id: "id".to_owned(),
             tool_name: name.to_owned(),
             args,
             intent: None,
-        }))
+        };
+        tool_activity_line(&ToolCallStart::from(&call))
     }
 
     #[test]

@@ -1020,9 +1020,7 @@ impl pico_core::surface::Surface for DiscordSurface {
     }
 
     fn tool_activity_line(&self, call: &pico_core::omp::protocol::ToolCall) -> Option<String> {
-        Some(crate::activity::tool_activity_line(&crate::activity::ToolCallStart::from(
-            call.clone(),
-        )))
+        Some(crate::activity::tool_activity_line(&crate::activity::ToolCallStart::from(call)))
     }
 
     fn thinking_line(&self, content: &str) -> Option<String> {
