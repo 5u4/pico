@@ -26,17 +26,20 @@ pub async fn get(db: &SqlitePool, platform: &str, channel_id: &str) -> color_eyr
     .fetch_optional(db)
     .await
     .wrap_err("loading binding")?;
-    Ok(row.and_then(parse))
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let base = pico_shared::paths::pico_home()?;
+    Ok(parse(row, &base))
 }
 
-fn parse((profile, kind, cwd, base_repo, default_branch): Row) -> Option<Binding> {
+fn parse((profile, kind, cwd, base_repo, default_branch): Row, base: &std::path::Path) -> Option<Binding> {
     if !pico_shared::validate::is_valid_profile(&profile) {
         return None;
     }
-    let base = pico_shared::paths::pico_home().ok()?;
     let kind = match kind.as_str() {
         "regular" => BindingKind::Regular {
-            cwd: pico_shared::paths::from_portable(&cwd?, &base),
+            cwd: pico_shared::paths::from_portable(&cwd?, base)?,
         },
         "worktree" => {
             let default_branch = default_branch.unwrap_or_else(|| DEFAULT_BRANCH.to_owned());
@@ -44,7 +47,7 @@ fn parse((profile, kind, cwd, base_repo, default_branch): Row) -> Option<Binding
                 return None;
             }
             BindingKind::Worktree {
-                base_repo: pico_shared::paths::from_portable(&base_repo?, &base),
+                base_repo: pico_shared::paths::from_portable(&base_repo?, base)?,
                 default_branch,
             }
         }
@@ -256,6 +259,19 @@ mod tests {
         let cwd = root.join("work");
         std::fs::create_dir_all(&cwd).unwrap();
         assert!(set_regular(&pool, "discord", "555", "../evil", &cwd).await.is_err());
+        pool.close().await;
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn tampered_parent_escape_cwd_is_rejected() {
+        let root = temp_dir("escape");
+        let pool = db(&root).await;
+        sqlx::query("INSERT INTO bindings (platform, channel_id, profile, kind, cwd) VALUES ('discord', '999', 'default', 'regular', '../escape')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(get(&pool, "discord", "999").await.unwrap().is_none());
         pool.close().await;
         std::fs::remove_dir_all(&root).ok();
     }

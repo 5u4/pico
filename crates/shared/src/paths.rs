@@ -108,9 +108,15 @@ pub fn to_portable(path: &Path, base: &Path) -> String {
     }
 }
 
-pub fn from_portable(stored: &str, base: &Path) -> PathBuf {
+pub fn from_portable(stored: &str, base: &Path) -> Option<PathBuf> {
     let path = expand_home(stored);
-    if path.is_absolute() { path } else { base.join(path) }
+    if path.is_absolute() {
+        return Some(path);
+    }
+    if path.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+        return None;
+    }
+    Some(base.join(path))
 }
 
 #[cfg(test)]
@@ -123,7 +129,7 @@ mod tests {
         let abs = Path::new("/home/pico/.pico/worker/worktrees/c/t");
         let stored = to_portable(abs, base);
         assert_eq!(stored, "worker/worktrees/c/t");
-        assert_eq!(from_portable(&stored, base), abs);
+        assert_eq!(from_portable(&stored, base).unwrap(), abs);
     }
 
     #[test]
@@ -132,15 +138,22 @@ mod tests {
         let abs = Path::new("/srv/external/repo");
         let stored = to_portable(abs, base);
         assert_eq!(stored, "/srv/external/repo");
-        assert_eq!(from_portable(&stored, base), abs);
+        assert_eq!(from_portable(&stored, base).unwrap(), abs);
     }
 
     #[test]
     fn legacy_absolute_under_base_still_resolves() {
         let base = Path::new("/home/pico/.pico");
         assert_eq!(
-            from_portable("/home/pico/.pico/worker/worktrees/c/t", base),
+            from_portable("/home/pico/.pico/worker/worktrees/c/t", base).unwrap(),
             Path::new("/home/pico/.pico/worker/worktrees/c/t")
         );
+    }
+
+    #[test]
+    fn rejects_relative_parent_escape() {
+        let base = Path::new("/home/pico/.pico");
+        assert!(from_portable("../outside", base).is_none());
+        assert!(from_portable("worker/../../escape", base).is_none());
     }
 }

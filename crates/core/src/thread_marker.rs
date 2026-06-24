@@ -51,19 +51,13 @@ fn parse((profile, cwd, base_repo, default_branch, closed_at): Columns) -> Optio
         return None;
     }
     let base = pico_shared::paths::pico_home().ok()?;
-    let cwd = pico_shared::paths::from_portable(&cwd, &base);
-    if !cwd.is_absolute() {
-        return None;
-    }
+    let cwd = pico_shared::paths::from_portable(&cwd, &base)?;
     let worktree = match (base_repo, default_branch) {
         (Some(base_repo), Some(default_branch)) => {
             if !pico_shared::validate::is_valid_branch(&default_branch) {
                 return None;
             }
-            let base_repo = pico_shared::paths::from_portable(&base_repo, &base);
-            if !base_repo.is_absolute() {
-                return None;
-            }
+            let base_repo = pico_shared::paths::from_portable(&base_repo, &base)?;
             Some(WorktreeOrigin {
                 base_repo,
                 default_branch,
