@@ -106,10 +106,9 @@ pub async fn drive_turn<S: Surface>(
             recv = tokio::time::timeout(idle_wait, session.events.recv()) => match recv {
                 Ok(event) => event,
                 Err(_) if settling => {
-                    if let Some(text) = deferred.pop_front() {
+                    if forward_next_pending(&session.client, &mut deferred, &mut rx).await? {
                         explicit_runs_pending += 1;
                         settling = false;
-                        session.client.prompt(&text).await?;
                         continue;
                     }
                     break;
@@ -211,16 +210,11 @@ pub async fn drive_turn<S: Surface>(
                 } else {
                     subagents.clear_one_backgrounded();
                 }
-                let next = deferred.pop_front().or_else(|| rx.try_recv().ok().map(|(t, _mode)| t));
-                match next {
-                    Some(text) => {
-                        explicit_runs_pending += 1;
-                        session.client.prompt(&text).await?;
-                    }
-                    None => {
-                        awaiting_deferred = subagents.has_pending_background();
-                        settling = true;
-                    }
+                if forward_next_pending(&session.client, &mut deferred, &mut rx).await? {
+                    explicit_runs_pending += 1;
+                } else {
+                    awaiting_deferred = subagents.has_pending_background();
+                    settling = true;
                 }
             }
             Some(OmpEvent::Error(e)) => {
@@ -247,6 +241,26 @@ pub async fn drive_turn<S: Surface>(
     subagents.flush_all(false).await;
     flush_final(surface, &mut activity, &mut reply, &mut held, title_seed).await;
     Ok(TurnOutcome::Live)
+}
+
+async fn forward_next_pending(
+    client: &OmpClient,
+    deferred: &mut std::collections::VecDeque<String>,
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<(String, StreamingBehavior)>,
+) -> color_eyre::Result<bool> {
+    let next = deferred
+        .pop_front()
+        .map(|text| (text, StreamingBehavior::Queue))
+        .or_else(|| rx.try_recv().ok());
+    let Some((text, mode)) = next else {
+        return Ok(false);
+    };
+    match mode {
+        StreamingBehavior::Queue => client.prompt(&text).await?,
+        StreamingBehavior::FollowUp => client.follow_up(&text).await?,
+        StreamingBehavior::Steer => client.steer(&text).await?,
+    }
+    Ok(true)
 }
 
 enum UiDisposition {

@@ -134,7 +134,7 @@ async fn busy(_ctx: Context<'_>) -> Result<(), Error> {
 #[poise::command(slash_command, rename = "steer")]
 async fn busy_steer(
     ctx: Context<'_>,
-    #[description = "Message to inject into the running turn"] message: String,
+    #[description = "Message to inject into the currently-running turn"] message: String,
 ) -> Result<(), Error> {
     deliver_busy(ctx, StreamingBehavior::Steer, message).await
 }
@@ -142,7 +142,7 @@ async fn busy_steer(
 #[poise::command(slash_command, rename = "follow_up")]
 async fn busy_follow_up(
     ctx: Context<'_>,
-    #[description = "Message to inject into the running turn"] message: String,
+    #[description = "Message to run as a follow-up after the current turn"] message: String,
 ) -> Result<(), Error> {
     deliver_busy(ctx, StreamingBehavior::FollowUp, message).await
 }
@@ -150,7 +150,7 @@ async fn busy_follow_up(
 #[poise::command(slash_command, rename = "queue")]
 async fn busy_queue(
     ctx: Context<'_>,
-    #[description = "Message to inject into the running turn"] message: String,
+    #[description = "Message to run as a fresh prompt after the current turn ends"] message: String,
 ) -> Result<(), Error> {
     deliver_busy(ctx, StreamingBehavior::Queue, message).await
 }
