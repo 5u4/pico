@@ -15,6 +15,11 @@ pub trait Surface: Send + Sync {
 
     async fn ui(&self, req: &UiRequest) -> UiOutcome;
 
+    async fn set_title(&self, title: &str) -> bool {
+        let _ = title;
+        false
+    }
+
     async fn say(&self, text: &str) {
         self.post(text, PostOpts::PLAIN).await;
     }

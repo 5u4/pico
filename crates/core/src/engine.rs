@@ -127,7 +127,7 @@ pub async fn drive_turn<S: Surface>(
                     content
                 };
                 reply.clear();
-                hold_segment(surface, &mut activity, &mut held, seg).await;
+                hold_segment(surface, &mut activity, &mut held, title_seed, seg).await;
             }
             Some(OmpEvent::Message(AssistantMessageEvent::ThinkingEnd { content })) => {
                 if req.surface_thinking {
@@ -137,7 +137,7 @@ pub async fn drive_turn<S: Surface>(
             Some(OmpEvent::ToolStart(tool)) => {
                 if !reply.trim().is_empty() {
                     let seg = std::mem::take(&mut reply);
-                    hold_segment(surface, &mut activity, &mut held, seg).await;
+                    hold_segment(surface, &mut activity, &mut held, title_seed, seg).await;
                 }
                 if let Some(prev) = held.take() {
                     commit_text(surface, &mut activity, &prev, false, true).await;
@@ -188,7 +188,7 @@ pub async fn drive_turn<S: Surface>(
             Some(OmpEvent::TurnEnd) => {
                 if !reply.trim().is_empty() {
                     let seg = std::mem::take(&mut reply);
-                    hold_segment(surface, &mut activity, &mut held, seg).await;
+                    hold_segment(surface, &mut activity, &mut held, title_seed, seg).await;
                 }
             }
             Some(OmpEvent::AgentEnd) => {
@@ -311,13 +311,20 @@ async fn commit_text<S: Surface>(
     activity.seal();
 }
 
-async fn hold_segment<S: Surface>(surface: &S, activity: &mut Activity<'_, S>, held: &mut Option<String>, seg: String) {
+async fn hold_segment<S: Surface>(
+    surface: &S,
+    activity: &mut Activity<'_, S>,
+    held: &mut Option<String>,
+    title_seed: &mut Option<String>,
+    seg: String,
+) {
     if seg.trim().is_empty() {
         return;
     }
     if let Some(prev) = held.take() {
         commit_text(surface, activity, &prev, false, true).await;
     }
+    *title_seed = Some(seg.clone());
     *held = Some(seg);
 }
 
@@ -330,11 +337,10 @@ async fn flush_final<S: Surface>(
 ) {
     if !reply.trim().is_empty() {
         let seg = std::mem::take(reply);
-        hold_segment(surface, activity, held, seg).await;
+        hold_segment(surface, activity, held, title_seed, seg).await;
     }
     if let Some(text) = held.take() {
         commit_text(surface, activity, &text, true, false).await;
-        *title_seed = Some(text);
     }
 }
 
@@ -675,8 +681,8 @@ mod tests {
         let mut held = None;
         let mut reply = String::new();
         let mut title_seed = None;
-        hold_segment(&surface, &mut activity, &mut held, "first".to_owned()).await;
-        hold_segment(&surface, &mut activity, &mut held, "second".to_owned()).await;
+        hold_segment(&surface, &mut activity, &mut held, &mut title_seed, "first".to_owned()).await;
+        hold_segment(&surface, &mut activity, &mut held, &mut title_seed, "second".to_owned()).await;
         flush_final(&surface, &mut activity, &mut reply, &mut held, &mut title_seed).await;
         let posts = surface.posts.lock().unwrap();
         assert_eq!(posts.len(), 2);
@@ -685,6 +691,27 @@ mod tests {
         assert_eq!(posts[1].0, "second");
         assert!(posts[1].1.as_reply && !posts[1].1.silent);
         assert_eq!(title_seed.as_deref(), Some("second"));
+    }
+
+    #[tokio::test]
+    async fn title_seed_survives_turn_ending_on_a_tool() {
+        let surface = FakeSurface::default();
+        let mut activity = Activity::new(&surface);
+        let mut held = None;
+        let mut reply = String::new();
+        let mut title_seed = None;
+        hold_segment(
+            &surface,
+            &mut activity,
+            &mut held,
+            &mut title_seed,
+            "the substantive answer".to_owned(),
+        )
+        .await;
+        let prev = held.take().unwrap();
+        commit_text(&surface, &mut activity, &prev, false, true).await;
+        flush_final(&surface, &mut activity, &mut reply, &mut held, &mut title_seed).await;
+        assert_eq!(title_seed.as_deref(), Some("the substantive answer"));
     }
 
     #[tokio::test]
