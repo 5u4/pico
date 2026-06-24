@@ -9,4 +9,5 @@ pub mod prompt;
 pub mod render;
 pub mod surface;
 pub mod thread_marker;
+pub mod title;
 pub mod worktree;
