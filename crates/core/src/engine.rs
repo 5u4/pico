@@ -62,6 +62,7 @@ pub async fn drive_turn<S: Surface>(
     let mut settling = false;
     let mut explicit_runs_pending: usize = 1;
     let mut awaiting_deferred = false;
+    let mut deferred: std::collections::VecDeque<String> = std::collections::VecDeque::new();
 
     let mut reply = String::new();
     let mut activity = Activity::new(surface);
@@ -88,19 +89,31 @@ pub async fn drive_turn<S: Surface>(
                 }
                 continue;
             }
-            Some(text) = rx.recv() => {
-                let forwarded = match req.mode {
+            Some((text, mode)) = rx.recv() => {
+                let forwarded = match mode {
                     StreamingBehavior::FollowUp => session.client.follow_up(&text).await,
                     StreamingBehavior::Steer => session.client.steer(&text).await,
+                    StreamingBehavior::Queue => {
+                        deferred.push_back(text);
+                        continue;
+                    }
                 };
                 if let Err(e) = forwarded {
-                    tracing::warn!(error = %format!("{e:#}"), mode = ?req.mode, "forwarding mid-turn message to omp failed");
+                    tracing::warn!(error = %format!("{e:#}"), mode = ?mode, "forwarding mid-turn message to omp failed");
                 }
                 continue;
             }
             recv = tokio::time::timeout(idle_wait, session.events.recv()) => match recv {
                 Ok(event) => event,
-                Err(_) if settling => break,
+                Err(_) if settling => {
+                    if let Some(text) = deferred.pop_front() {
+                        explicit_runs_pending += 1;
+                        settling = false;
+                        session.client.prompt(&text).await?;
+                        continue;
+                    }
+                    break;
+                }
                 Err(_) => {
                     tracing::warn!(timeout = ?STALL_TIMEOUT, "turn made no progress; resetting wedged OMP session");
                     activity.flush().await;
@@ -198,12 +211,13 @@ pub async fn drive_turn<S: Surface>(
                 } else {
                     subagents.clear_one_backgrounded();
                 }
-                match rx.try_recv() {
-                    Ok(text) => {
+                let next = deferred.pop_front().or_else(|| rx.try_recv().ok().map(|(t, _mode)| t));
+                match next {
+                    Some(text) => {
                         explicit_runs_pending += 1;
                         session.client.prompt(&text).await?;
                     }
-                    Err(_) => {
+                    None => {
                         awaiting_deferred = subagents.has_pending_background();
                         settling = true;
                     }

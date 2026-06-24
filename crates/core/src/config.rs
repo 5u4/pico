@@ -8,6 +8,7 @@ pub enum StreamingBehavior {
     FollowUp,
     #[default]
     Steer,
+    Queue,
 }
 
 pub struct ProfileConfig {

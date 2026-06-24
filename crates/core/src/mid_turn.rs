@@ -6,8 +6,8 @@ use tokio::sync::mpsc;
 use crate::{config::StreamingBehavior, surface::ConversationId};
 
 struct Sink {
-    tx: mpsc::UnboundedSender<String>,
-    mode: StreamingBehavior,
+    tx: mpsc::UnboundedSender<(String, StreamingBehavior)>,
+    default_mode: StreamingBehavior,
 }
 
 #[derive(Clone, Default)]
@@ -16,20 +16,28 @@ pub struct MidTurnQueue {
 }
 
 impl MidTurnQueue {
-    pub fn deliver(&self, conversation: &ConversationId, text: &str) -> Option<StreamingBehavior> {
+    pub fn deliver(
+        &self,
+        conversation: &ConversationId,
+        text: &str,
+        mode_override: Option<StreamingBehavior>,
+    ) -> Option<StreamingBehavior> {
         let map = self.inner.lock();
         let sink = map.get(conversation)?;
-        sink.tx.send(text.to_owned()).ok()?;
-        Some(sink.mode)
+        let mode = mode_override.unwrap_or(sink.default_mode);
+        sink.tx.send((text.to_owned(), mode)).ok()?;
+        Some(mode)
     }
 
     pub fn register(
         &self,
         conversation: &ConversationId,
-        mode: StreamingBehavior,
-    ) -> (mpsc::UnboundedReceiver<String>, SinkGuard) {
+        default_mode: StreamingBehavior,
+    ) -> (mpsc::UnboundedReceiver<(String, StreamingBehavior)>, SinkGuard) {
         let (tx, rx) = mpsc::unbounded_channel();
-        self.inner.lock().insert(conversation.clone(), Sink { tx, mode });
+        self.inner
+            .lock()
+            .insert(conversation.clone(), Sink { tx, default_mode });
         (
             rx,
             SinkGuard {
@@ -62,16 +70,27 @@ mod tests {
     #[test]
     fn deliver_without_running_turn_is_none() {
         let q = MidTurnQueue::default();
-        assert!(q.deliver(&conv(1), "hi").is_none());
+        assert!(q.deliver(&conv(1), "hi", None).is_none());
     }
 
     #[test]
     fn deliver_reaches_registered_turn_and_is_isolated_per_channel() {
         let q = MidTurnQueue::default();
         let (mut rx, _g) = q.register(&conv(1), StreamingBehavior::Steer);
-        assert_eq!(q.deliver(&conv(1), "hello"), Some(StreamingBehavior::Steer));
-        assert_eq!(rx.try_recv().unwrap(), "hello");
-        assert!(q.deliver(&conv(2), "x").is_none());
+        assert_eq!(q.deliver(&conv(1), "hello", None), Some(StreamingBehavior::Steer));
+        assert_eq!(rx.try_recv().unwrap(), ("hello".to_owned(), StreamingBehavior::Steer));
+        assert!(q.deliver(&conv(2), "x", None).is_none());
+    }
+
+    #[test]
+    fn mode_override_wins_over_registered_default() {
+        let q = MidTurnQueue::default();
+        let (mut rx, _g) = q.register(&conv(1), StreamingBehavior::Steer);
+        assert_eq!(
+            q.deliver(&conv(1), "x", Some(StreamingBehavior::Queue)),
+            Some(StreamingBehavior::Queue)
+        );
+        assert_eq!(rx.try_recv().unwrap(), ("x".to_owned(), StreamingBehavior::Queue));
     }
 
     #[test]
@@ -79,6 +98,6 @@ mod tests {
         let q = MidTurnQueue::default();
         let (_rx, g) = q.register(&conv(1), StreamingBehavior::FollowUp);
         drop(g);
-        assert!(q.deliver(&conv(1), "late").is_none());
+        assert!(q.deliver(&conv(1), "late", None).is_none());
     }
 }

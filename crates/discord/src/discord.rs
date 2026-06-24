@@ -43,7 +43,15 @@ pub(crate) fn framework(
 ) -> poise::Framework<Data, Error> {
     poise::Framework::builder()
         .options(poise::FrameworkOptions {
-            commands: vec![ping(), bind(), dev_deploy(), update(), worktree(), cancel_turn()],
+            commands: vec![
+                ping(),
+                bind(),
+                dev_deploy(),
+                update(),
+                worktree(),
+                cancel_turn(),
+                busy(),
+            ],
             event_handler: |ctx, event, framework, data| Box::pin(on_event(ctx, event, framework.bot_id, data)),
             command_check: Some(|ctx| Box::pin(command_in_registered_guild(ctx))),
             ..Default::default()
@@ -112,6 +120,122 @@ async fn cancel_turn(ctx: Context<'_>) -> Result<(), Error> {
         ctx.say("Nothing to cancel.").await?;
     }
     Ok(())
+}
+
+#[poise::command(
+    slash_command,
+    subcommands("busy_steer", "busy_follow_up", "busy_queue"),
+    subcommand_required
+)]
+async fn busy(_ctx: Context<'_>) -> Result<(), Error> {
+    Ok(())
+}
+
+#[poise::command(slash_command, rename = "steer")]
+async fn busy_steer(
+    ctx: Context<'_>,
+    #[description = "Message to inject into the running turn"] message: String,
+) -> Result<(), Error> {
+    deliver_busy(ctx, StreamingBehavior::Steer, message).await
+}
+
+#[poise::command(slash_command, rename = "follow_up")]
+async fn busy_follow_up(
+    ctx: Context<'_>,
+    #[description = "Message to inject into the running turn"] message: String,
+) -> Result<(), Error> {
+    deliver_busy(ctx, StreamingBehavior::FollowUp, message).await
+}
+
+#[poise::command(slash_command, rename = "queue")]
+async fn busy_queue(
+    ctx: Context<'_>,
+    #[description = "Message to inject into the running turn"] message: String,
+) -> Result<(), Error> {
+    deliver_busy(ctx, StreamingBehavior::Queue, message).await
+}
+
+const MSG_CONTENT_CAP: usize = 1900;
+
+async fn deliver_busy(ctx: Context<'_>, mode: StreamingBehavior, message: String) -> Result<(), Error> {
+    let text = message.trim();
+    if text.is_empty() {
+        ctx.send(
+            poise::CreateReply::default()
+                .content("message can't be empty")
+                .ephemeral(true),
+        )
+        .await?;
+        return Ok(());
+    }
+
+    let in_thread = match ctx.channel_id().to_channel(ctx.serenity_context()).await? {
+        serenity::Channel::Guild(ch) => is_thread(ch.kind),
+        _ => false,
+    };
+    if !in_thread {
+        ctx.send(
+            poise::CreateReply::default()
+                .content("Use /busy inside a thread where pico is working.")
+                .ephemeral(true),
+        )
+        .await?;
+        return Ok(());
+    }
+
+    let root = &ctx.data().root;
+    let root_config = match pico_core::config::load_root(&pico_shared::paths::worker_config(root)) {
+        Ok(config) => config,
+        Err(e) => {
+            ctx.send(
+                poise::CreateReply::default()
+                    .content(format!("❌ worker config error: {e}"))
+                    .ephemeral(true),
+            )
+            .await?;
+            return Ok(());
+        }
+    };
+
+    let sent_at =
+        pico_core::prompt::format_sent_at(serenity::Timestamp::now().unix_timestamp(), root_config.timezone());
+    let display_name = ctx
+        .author_member()
+        .await
+        .and_then(|member| member.nick.clone())
+        .or_else(|| ctx.author().global_name.clone())
+        .unwrap_or_else(|| ctx.author().name.clone());
+    let wrapped = pico_core::prompt::wrap_discord_message(ctx.author().id.get(), &display_name, &sent_at, text);
+
+    let conv = ConversationId::new("discord", &ctx.channel_id().to_string());
+    match ctx.data().mid_turn.deliver(&conv, &wrapped, Some(mode)) {
+        Some(resolved) => {
+            let (emoji, label) = busy_label(resolved);
+            let echo = format!("{emoji} `{label}` · {display_name}: {text}");
+            ctx.say(pico_core::render::truncate(
+                &pico_core::render::defang_mentions(&echo),
+                MSG_CONTENT_CAP,
+            ))
+            .await?;
+        }
+        None => {
+            ctx.send(
+                poise::CreateReply::default()
+                    .content("pico isn't busy here — just send your message normally.")
+                    .ephemeral(true),
+            )
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+fn busy_label(mode: StreamingBehavior) -> (&'static str, &'static str) {
+    match mode {
+        StreamingBehavior::Steer => (REACT_STEER, "steer"),
+        StreamingBehavior::FollowUp => (REACT_FOLLOW_UP, "follow_up"),
+        StreamingBehavior::Queue => (REACT_QUEUE, "queue"),
+    }
 }
 
 #[poise::command(slash_command, rename = "dev-deploy")]
@@ -721,7 +845,7 @@ async fn route_message(
     let wrapped = pico_core::prompt::wrap_discord_message(message.author.id.get(), &display_name, &sent_at, prompt);
 
     if in_thread
-        && let Some(mode) = mid_turn.deliver(&ConversationId::new("discord", &channel.id.to_string()), &wrapped)
+        && let Some(mode) = mid_turn.deliver(&ConversationId::new("discord", &channel.id.to_string()), &wrapped, None)
     {
         react_queued(&ctx, &message, mode).await;
         return Ok(());
@@ -979,11 +1103,13 @@ fn channel_display_name(
 
 const REACT_FOLLOW_UP: &str = "📥";
 const REACT_STEER: &str = "↪️";
+const REACT_QUEUE: &str = "⏳";
 
 async fn react_queued(ctx: &serenity::Context, message: &serenity::Message, mode: StreamingBehavior) {
     let emoji = match mode {
         StreamingBehavior::FollowUp => REACT_FOLLOW_UP,
         StreamingBehavior::Steer => REACT_STEER,
+        StreamingBehavior::Queue => REACT_QUEUE,
     };
     if let Err(e) = message
         .react(ctx, serenity::ReactionType::Unicode(emoji.to_owned()))
