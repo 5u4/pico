@@ -65,12 +65,15 @@ RUN apt-get update \
      x11vnc novnc python3-websockify procps \
      && rm -rf /var/lib/apt/lists/*
 
-# Enable the camofox-browser `vnc` plugin: it ships disabled in the package's
-# camofox.config.json, and the plugin allowlist ignores ENABLE_VNC unless the config
-# lists it enabled. Flip it on so the worker-spawned daemon exposes noVNC for manual login.
+# Adapt the camofox-browser `vnc` plugin for pico's unprivileged (non-root) container:
+# (1) it ships disabled in camofox.config.json and the plugin allowlist ignores
+#     ENABLE_VNC unless the config lists it enabled — flip it on; (2) vnc-watcher.sh
+#     writes websockify/x11vnc logs under /var/log, which the `pico` user cannot write —
+#     redirect them to /tmp so the watcher doesn't die and noVNC actually starts.
 RUN CDIR="$(npm root -g)/@askjo/camofox-browser" \
      && jq '.plugins.vnc.enabled = true' "$CDIR/camofox.config.json" > "$CDIR/camofox.config.json.tmp" \
-     && mv "$CDIR/camofox.config.json.tmp" "$CDIR/camofox.config.json"
+     && mv "$CDIR/camofox.config.json.tmp" "$CDIR/camofox.config.json" \
+     && sed -i 's#/var/log/#/tmp/#g' "$CDIR/plugins/vnc/vnc-watcher.sh"
 
 # Non-root user. UID/GID overridable to match a host user when bind mounts need it.
 ARG PICO_UID=1000
