@@ -1065,7 +1065,7 @@ impl pico_core::surface::Surface for DiscordSurface {
         {
             Ok(_) => true,
             Err(e) => {
-                tracing::warn!(error = %format!("{e:#}"), "surface set_title failed");
+                tracing::warn!(error = %format!("{e:#}"), %title, "surface set_title failed");
                 false
             }
         }

@@ -15,8 +15,7 @@ pub trait Surface: Send + Sync {
 
     async fn ui(&self, req: &UiRequest) -> UiOutcome;
 
-    async fn set_title(&self, title: &str) -> bool {
-        let _ = title;
+    async fn set_title(&self, _title: &str) -> bool {
         false
     }
 
