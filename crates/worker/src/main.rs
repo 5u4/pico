@@ -53,6 +53,10 @@ async fn main() -> color_eyre::Result<()> {
         "pico worker starting"
     );
 
+    let config_path = pico_shared::paths::worker_config(&args.root);
+    let root_config = pico_core::config::load_root(&config_path)?;
+    require_discord(root_config.platforms(), &config_path)?;
+
     let app = pico_discord::app::App::build(&args.root, args.socket.clone()).await?;
 
     let on_connected = {
@@ -118,5 +122,49 @@ async fn report_ready(socket: &Path, token: &str) -> color_eyre::Result<Option<p
             tracing::debug!("no ready ack within 10s; ignoring");
             Ok(None)
         }
+    }
+}
+
+fn require_discord(platforms: &[String], config_path: &Path) -> color_eyre::Result<()> {
+    let mut run_discord = false;
+    for name in platforms {
+        match name.as_str() {
+            "discord" => run_discord = true,
+            other => color_eyre::eyre::bail!(
+                "unknown platform {other:?} in {} (known platforms: discord)",
+                config_path.display()
+            ),
+        }
+    }
+    if !run_discord {
+        color_eyre::eyre::bail!(
+            "no platforms configured: set platforms = [\"discord\"] in {}",
+            config_path.display()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn names(values: &[&str]) -> Vec<String> {
+        values.iter().map(|v| (*v).to_owned()).collect()
+    }
+
+    #[test]
+    fn accepts_discord() {
+        assert!(require_discord(&names(&["discord"]), Path::new("/x")).is_ok());
+    }
+
+    #[test]
+    fn rejects_unknown_platform() {
+        assert!(require_discord(&names(&["discord", "slack"]), Path::new("/x")).is_err());
+    }
+
+    #[test]
+    fn rejects_empty_list() {
+        assert!(require_discord(&names(&[]), Path::new("/x")).is_err());
     }
 }

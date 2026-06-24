@@ -1432,6 +1432,7 @@ dependencies = [
  "pico-core",
  "pico-shared",
  "poise",
+ "serde",
  "serde_json",
  "serenity",
  "sqlx",
@@ -1450,6 +1451,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "toml",
  "tracing",
  "tracing-appender",
  "tracing-error",
@@ -1477,6 +1479,7 @@ name = "pico-worker"
 version = "0.1.0"
 dependencies = [
  "color-eyre",
+ "pico-core",
  "pico-discord",
  "pico-shared",
  "serde_json",

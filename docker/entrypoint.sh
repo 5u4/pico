@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PICO_HOME="${HOME:-/home/pico}"
-REPO="$PICO_HOME/.pico/agent"
-BIN="$PICO_HOME/.local/bin"
+HOME_DIR="${HOME:-/home/pico}"
+REPO="$HOME_DIR/.pico/agent"
+BIN="$HOME_DIR/.local/bin"
 # Shared cargo target for pico's OWN builds (this startup build + the worker's
 # /update and /dev-deploy). Scoped here and never exported into the supervisor
 # env, so unrelated projects the agent builds keep their own target dir. The
 # .cargo/config.toml written below gives the agent's cargo in a pico worktree the
 # same dir.
-PICO_TARGET="$PICO_HOME/.cache/build/pico-target"
+PICO_TARGET="$HOME_DIR/.cache/build/pico-target"
 
 # Runs entirely as the unprivileged pico user (USER pico in the Dockerfile) — there
 # is no root phase. Volume writability is guaranteed by the image (pico-owned dirs
@@ -38,7 +38,7 @@ fi
 # Preflight: confirm we own our writable paths. The usual failure is a stale
 # root-owned named volume carried over from the old root-based image — surface it
 # with a fix instead of a cryptic EACCES deep inside cargo or the supervisor.
-for d in "$PICO_TARGET" "$PICO_HOME/.pico/supervisor"; do
+for d in "$PICO_TARGET" "$HOME_DIR/.pico/supervisor"; do
   mkdir -p "$d" 2>/dev/null || true
   if [ ! -w "$d" ]; then
     echo "[entrypoint] FATAL: $d is not writable by $(id -un) (uid $(id -u))." >&2
@@ -71,7 +71,7 @@ CARGO_TARGET_DIR="$PICO_TARGET" cargo build --release -p pico-supervisor -p pico
 
 SUP="$PICO_TARGET/release/pico-supervisor"
 WORKER="$PICO_TARGET/release/pico-worker"
-CURRENT="$PICO_HOME/.pico/supervisor/slots/current"
+CURRENT="$HOME_DIR/.pico/supervisor/slots/current"
 
 mkdir -p "$BIN"
 ln -sf "$SUP" "$BIN/pico-supervisor"

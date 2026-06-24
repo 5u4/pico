@@ -18,15 +18,22 @@ pub struct WorktreeOrigin {
 
 type Columns = (String, String, Option<String>, Option<String>, Option<String>);
 
-pub async fn load(db: &SqlitePool, thread_id: &str) -> Option<ThreadMarker> {
-    let row = match fetch(db, thread_id).await {
+pub async fn load(db: &SqlitePool, platform: &str, thread_id: &str) -> Option<ThreadMarker> {
+    let row = match fetch(db, platform, thread_id).await {
         Ok(row) => row?,
         Err(e) => {
             tracing::warn!(%thread_id, error = %format!("{e:#}"), "thread marker unreadable; re-resolving from binding");
             return None;
         }
     };
-    match parse(row) {
+    let base = match pico_shared::paths::pico_home() {
+        Ok(base) => base,
+        Err(e) => {
+            tracing::warn!(%thread_id, error = %format!("{e:#}"), "pico_home invalid; cannot resolve thread marker");
+            return None;
+        }
+    };
+    match parse(row, &base) {
         Some(marker) => Some(marker),
         None => {
             tracing::warn!(%thread_id, "thread marker invalid; re-resolving from binding");
@@ -35,33 +42,31 @@ pub async fn load(db: &SqlitePool, thread_id: &str) -> Option<ThreadMarker> {
     }
 }
 
-async fn fetch(db: &SqlitePool, thread_id: &str) -> color_eyre::Result<Option<Columns>> {
+async fn fetch(db: &SqlitePool, platform: &str, thread_id: &str) -> color_eyre::Result<Option<Columns>> {
     sqlx::query_as::<_, Columns>(
-        "SELECT profile, cwd, base_repo, default_branch, closed_at FROM threads WHERE thread_id = ?",
+        "SELECT profile, cwd, base_repo, default_branch, closed_at FROM threads WHERE platform = ? AND thread_id = ?",
     )
+    .bind(platform)
     .bind(thread_id)
     .fetch_optional(db)
     .await
     .wrap_err("loading thread marker")
 }
 
-fn parse((profile, cwd, base_repo, default_branch, closed_at): Columns) -> Option<ThreadMarker> {
-    if !crate::bindings::is_valid_profile(&profile) {
+fn parse(
+    (profile, cwd, base_repo, default_branch, closed_at): Columns,
+    base: &std::path::Path,
+) -> Option<ThreadMarker> {
+    if !pico_shared::validate::is_valid_profile(&profile) {
         return None;
     }
-    let cwd = crate::bindings::expand_home(&cwd);
-    if !cwd.is_absolute() {
-        return None;
-    }
+    let cwd = pico_shared::paths::from_portable(&cwd, base)?;
     let worktree = match (base_repo, default_branch) {
         (Some(base_repo), Some(default_branch)) => {
-            if !crate::bindings::is_valid_branch(&default_branch) {
+            if !pico_shared::validate::is_valid_branch(&default_branch) {
                 return None;
             }
-            let base_repo = crate::bindings::expand_home(&base_repo);
-            if !base_repo.is_absolute() {
-                return None;
-            }
+            let base_repo = pico_shared::paths::from_portable(&base_repo, base)?;
             Some(WorktreeOrigin {
                 base_repo,
                 default_branch,
@@ -78,31 +83,34 @@ fn parse((profile, cwd, base_repo, default_branch, closed_at): Columns) -> Optio
     })
 }
 
-pub async fn save(db: &SqlitePool, thread_id: &str, marker: &ThreadMarker) {
-    if let Err(e) = write(db, thread_id, marker).await {
+pub async fn save(db: &SqlitePool, platform: &str, thread_id: &str, marker: &ThreadMarker) {
+    if let Err(e) = write(db, platform, thread_id, marker).await {
         tracing::warn!(%thread_id, error = %format!("{e:#}"), "persisting thread marker failed");
     }
 }
 
-async fn write(db: &SqlitePool, thread_id: &str, marker: &ThreadMarker) -> color_eyre::Result<()> {
+async fn write(db: &SqlitePool, platform: &str, thread_id: &str, marker: &ThreadMarker) -> color_eyre::Result<()> {
+    let base = pico_shared::paths::pico_home()?;
+    let cwd = pico_shared::paths::to_portable(&marker.cwd, &base);
     let base_repo = marker
         .worktree
         .as_ref()
-        .map(|w| w.base_repo.to_string_lossy().into_owned());
+        .map(|w| pico_shared::paths::to_portable(&w.base_repo, &base));
     let default_branch = marker.worktree.as_ref().map(|w| w.default_branch.clone());
     sqlx::query(
-        "INSERT INTO threads (thread_id, profile, cwd, base_repo, default_branch, closed_at) \
-         VALUES (?, ?, ?, ?, ?, ?) \
-         ON CONFLICT(thread_id) DO UPDATE SET \
+        "INSERT INTO threads (platform, thread_id, profile, cwd, base_repo, default_branch, closed_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?) \
+         ON CONFLICT(platform, thread_id) DO UPDATE SET \
              profile = excluded.profile, \
              cwd = excluded.cwd, \
              base_repo = excluded.base_repo, \
              default_branch = excluded.default_branch, \
              closed_at = excluded.closed_at",
     )
+    .bind(platform)
     .bind(thread_id)
     .bind(&marker.profile)
-    .bind(marker.cwd.to_string_lossy().into_owned())
+    .bind(cwd)
     .bind(base_repo)
     .bind(default_branch)
     .bind(marker.closed_at.clone())
@@ -114,6 +122,7 @@ async fn write(db: &SqlitePool, thread_id: &str, marker: &ThreadMarker) -> color
 
 pub async fn tombstone(
     db: &SqlitePool,
+    platform: &str,
     thread_id: &str,
     marker: ThreadMarker,
     closed_at: String,
@@ -122,7 +131,7 @@ pub async fn tombstone(
         closed_at: Some(closed_at),
         ..marker
     };
-    write(db, thread_id, &marker).await
+    write(db, platform, thread_id, &marker).await
 }
 
 #[cfg(test)]
@@ -156,7 +165,10 @@ mod tests {
         base_repo: Option<&str>,
         default_branch: Option<&str>,
     ) {
-        sqlx::query("INSERT INTO threads (thread_id, profile, cwd, base_repo, default_branch) VALUES (?, ?, ?, ?, ?)")
+        sqlx::query(
+            "INSERT INTO threads (platform, thread_id, profile, cwd, base_repo, default_branch) VALUES (?, ?, ?, ?, ?, ?)",
+        )
+            .bind("discord")
             .bind(thread_id)
             .bind(profile)
             .bind(cwd)
@@ -172,6 +184,7 @@ mod tests {
         let (db, dir) = test_pool("reg").await;
         super::save(
             &db,
+            "discord",
             "222222222222222222",
             &super::ThreadMarker {
                 profile: "sen".into(),
@@ -181,7 +194,7 @@ mod tests {
             },
         )
         .await;
-        let m = super::load(&db, "222222222222222222").await.unwrap();
+        let m = super::load(&db, "discord", "222222222222222222").await.unwrap();
         assert_eq!(m.profile, "sen");
         assert_eq!(m.cwd, PathBuf::from("/work"));
         assert!(m.worktree.is_none());
@@ -197,6 +210,7 @@ mod tests {
             async move {
                 super::save(
                     &db,
+                    "discord",
                     "222222222222222222",
                     &super::ThreadMarker {
                         profile: profile.into(),
@@ -210,7 +224,7 @@ mod tests {
         };
         save("sen", "/work").await;
         save("dev", "/elsewhere").await;
-        let m = super::load(&db, "222222222222222222").await.unwrap();
+        let m = super::load(&db, "discord", "222222222222222222").await.unwrap();
         assert_eq!(m.profile, "dev");
         assert_eq!(m.cwd, PathBuf::from("/elsewhere"));
         db.close().await;
@@ -222,6 +236,7 @@ mod tests {
         let (db, dir) = test_pool("wt2reg").await;
         super::save(
             &db,
+            "discord",
             "222222222222222222",
             &super::ThreadMarker {
                 profile: "sen".into(),
@@ -236,6 +251,7 @@ mod tests {
         .await;
         super::save(
             &db,
+            "discord",
             "222222222222222222",
             &super::ThreadMarker {
                 profile: "dev".into(),
@@ -245,7 +261,7 @@ mod tests {
             },
         )
         .await;
-        let m = super::load(&db, "222222222222222222").await.unwrap();
+        let m = super::load(&db, "discord", "222222222222222222").await.unwrap();
         assert_eq!(m.profile, "dev");
         assert_eq!(m.cwd, PathBuf::from("/work"));
         assert!(m.worktree.is_none());
@@ -259,6 +275,7 @@ mod tests {
         let (db, dir) = test_pool("wt").await;
         super::save(
             &db,
+            "discord",
             "222222222222222222",
             &super::ThreadMarker {
                 profile: "sen".into(),
@@ -271,7 +288,11 @@ mod tests {
             },
         )
         .await;
-        let wt = super::load(&db, "222222222222222222").await.unwrap().worktree.unwrap();
+        let wt = super::load(&db, "discord", "222222222222222222")
+            .await
+            .unwrap()
+            .worktree
+            .unwrap();
         assert_eq!(wt.base_repo, PathBuf::from("/repo"));
         assert_eq!(wt.default_branch, "origin/main");
         db.close().await;
@@ -281,7 +302,7 @@ mod tests {
     #[tokio::test]
     async fn absent_marker_is_none() {
         let (db, dir) = test_pool("absent").await;
-        assert!(super::load(&db, "222222222222222222").await.is_none());
+        assert!(super::load(&db, "discord", "222222222222222222").await.is_none());
         db.close().await;
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -290,16 +311,18 @@ mod tests {
     async fn invalid_profile_is_rejected() {
         let (db, dir) = test_pool("badprofile").await;
         insert_raw(&db, "222222222222222222", "../escape", "/work", None, None).await;
-        assert!(super::load(&db, "222222222222222222").await.is_none());
+        assert!(super::load(&db, "discord", "222222222222222222").await.is_none());
         db.close().await;
         std::fs::remove_dir_all(&dir).ok();
     }
 
     #[tokio::test]
-    async fn relative_cwd_is_rejected() {
+    async fn relative_cwd_resolves_against_root() {
         let (db, dir) = test_pool("relcwd").await;
-        insert_raw(&db, "222222222222222222", "sen", "relative/dir", None, None).await;
-        assert!(super::load(&db, "222222222222222222").await.is_none());
+        insert_raw(&db, "222222222222222222", "sen", "worker/x", None, None).await;
+        let base = pico_shared::paths::pico_home().unwrap();
+        let m = super::load(&db, "discord", "222222222222222222").await.unwrap();
+        assert_eq!(m.cwd, base.join("worker/x"));
         db.close().await;
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -308,13 +331,13 @@ mod tests {
     async fn half_worktree_origin_is_rejected() {
         let (db, dir) = test_pool("halfwt").await;
         insert_raw(&db, "222222222222222222", "sen", "/wt/c/t", Some("/repo"), None).await;
-        assert!(super::load(&db, "222222222222222222").await.is_none());
+        assert!(super::load(&db, "discord", "222222222222222222").await.is_none());
         db.close().await;
         std::fs::remove_dir_all(&dir).ok();
     }
 
     #[tokio::test]
-    async fn tampered_worktree_origin_is_rejected() {
+    async fn tampered_worktree_branch_is_rejected() {
         let (db, dir) = test_pool("tampwt").await;
         insert_raw(
             &db,
@@ -325,17 +348,7 @@ mod tests {
             Some("--upload-pack=x"),
         )
         .await;
-        assert!(super::load(&db, "222222222222222222").await.is_none());
-        insert_raw(
-            &db,
-            "333333333333333333",
-            "sen",
-            "/wt/c/t",
-            Some("rel/repo"),
-            Some("origin/main"),
-        )
-        .await;
-        assert!(super::load(&db, "333333333333333333").await.is_none());
+        assert!(super::load(&db, "discord", "222222222222222222").await.is_none());
         db.close().await;
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -345,6 +358,7 @@ mod tests {
         let (db, dir) = test_pool("tomb").await;
         super::save(
             &db,
+            "discord",
             "222222222222222222",
             &super::ThreadMarker {
                 profile: "sen".into(),
@@ -357,12 +371,12 @@ mod tests {
             },
         )
         .await;
-        let marker = super::load(&db, "222222222222222222").await.unwrap();
+        let marker = super::load(&db, "discord", "222222222222222222").await.unwrap();
         assert!(marker.closed_at.is_none());
-        super::tombstone(&db, "222222222222222222", marker, "2026-06-17T00:00:00Z".into())
+        super::tombstone(&db, "discord", "222222222222222222", marker, "2026-06-17T00:00:00Z".into())
             .await
             .unwrap();
-        let reloaded = super::load(&db, "222222222222222222").await.unwrap();
+        let reloaded = super::load(&db, "discord", "222222222222222222").await.unwrap();
         assert_eq!(reloaded.closed_at.as_deref(), Some("2026-06-17T00:00:00Z"));
         let wt = reloaded.worktree.unwrap();
         assert_eq!(wt.base_repo, PathBuf::from("/repo"));

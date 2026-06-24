@@ -55,7 +55,7 @@ struct TempRoot {
 }
 
 impl TempRoot {
-    fn new(bot_token: &str, channel_id: u64, guild_id: u64) -> TempRoot {
+    fn new(bot_token: &str, guild_id: u64) -> TempRoot {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -70,24 +70,15 @@ impl TempRoot {
 
         let profile = path.join("profiles").join("default");
         std::fs::create_dir_all(&profile).unwrap();
-        std::fs::write(
-            profile.join("config.toml"),
-            "[llm]\nmodel = \"github-copilot/gpt-4o-mini\"\n\n[discord]\nstreaming_behavior = \"follow_up\"\n",
-        )
-        .unwrap();
+        std::fs::write(profile.join("profile.toml"), "[llm]\nmodel = \"github-copilot/gpt-4o-mini\"\n").unwrap();
 
         let workdir = path.join("work");
         std::fs::create_dir_all(&workdir).unwrap();
-        let bindings = format!(
-            "[[binding]]\nchannel_id = \"{channel_id}\"\nprofile = \"default\"\nkind = \"regular\"\ncwd = \"{}\"\n",
+        let discord = format!(
+            "[[guild]]\nid = \"{guild_id}\"\nprofile = \"default\"\ncwd = \"{}\"\n\n[render]\nstreaming_behavior = \"follow_up\"\n",
             workdir.display()
         );
-        std::fs::write(path.join("bindings.toml"), bindings).unwrap();
-        let config = format!(
-            "[[guild]]\nid = \"{guild_id}\"\nprofile = \"default\"\ncwd = \"{}\"\n",
-            workdir.display()
-        );
-        std::fs::write(path.join("config.toml"), config).unwrap();
+        std::fs::write(path.join("discord.toml"), discord).unwrap();
 
         TempRoot { path }
     }
@@ -184,7 +175,7 @@ async fn scripted_omp_drives_thread_and_real_smoke() {
         .parse()
         .expect("E2E_CHANNEL_ID must be a snowflake");
     let guild_id: u64 = var("E2E_GUILD_ID").parse().expect("E2E_GUILD_ID must be a snowflake");
-    let root = TempRoot::new(&pico_token, channel_id, guild_id);
+    let root = TempRoot::new(&pico_token, guild_id);
 
     let bindir = root.path.join("bin");
     std::fs::create_dir_all(&bindir).unwrap();
@@ -375,8 +366,11 @@ async fn scripted_omp_drives_thread_and_real_smoke() {
     .await;
 
     std::fs::write(
-        root.path.join("profiles").join("default").join("config.toml"),
-        "[llm]\nmodel = \"github-copilot/gpt-4o-mini\"\n\n[discord]\nstreaming_behavior = \"steer\"\n",
+        root.path.join("discord.toml"),
+        format!(
+            "[[guild]]\nid = \"{guild_id}\"\nprofile = \"default\"\ncwd = \"{}\"\n\n[render]\nstreaming_behavior = \"steer\"\n",
+            root.path.join("work").display()
+        ),
     )
     .unwrap();
     let (st_acked, st_alpha, st_separate) = queue_scenario(
