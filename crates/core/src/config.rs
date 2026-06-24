@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use serde::Deserialize;
 
@@ -60,6 +63,7 @@ pub struct RootConfig {
     worktrees_dir: Option<PathBuf>,
     timezone: chrono_tz::Tz,
     platforms: Vec<String>,
+    schedule: ScheduleConfig,
 }
 
 impl RootConfig {
@@ -74,6 +78,17 @@ impl RootConfig {
     pub fn platforms(&self) -> &[String] {
         &self.platforms
     }
+
+    pub fn schedule(&self) -> ScheduleConfig {
+        self.schedule
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScheduleConfig {
+    pub grace: Duration,
+    pub script_timeout: Duration,
+    pub cap: Duration,
 }
 
 #[derive(Deserialize, Default)]
@@ -85,12 +100,25 @@ struct RawRootConfig {
     timezone: Option<String>,
     #[serde(default)]
     platforms: Vec<String>,
+    #[serde(default)]
+    schedule: Option<RawSchedule>,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawWorktree {
     dir: String,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RawSchedule {
+    #[serde(default)]
+    grace_secs: Option<u64>,
+    #[serde(default)]
+    script_timeout_secs: Option<u64>,
+    #[serde(default)]
+    cap_secs: Option<u64>,
 }
 
 pub fn load_root(config_path: &Path) -> color_eyre::Result<RootConfig> {
@@ -114,10 +142,17 @@ pub fn load_root(config_path: &Path) -> color_eyre::Result<RootConfig> {
         })?,
         None => chrono_tz::UTC,
     };
+    let raw_schedule = raw.schedule.unwrap_or_default();
+    let schedule = ScheduleConfig {
+        grace: Duration::from_secs(raw_schedule.grace_secs.unwrap_or(7200)),
+        script_timeout: Duration::from_secs(raw_schedule.script_timeout_secs.unwrap_or(60)),
+        cap: Duration::from_secs(raw_schedule.cap_secs.unwrap_or(60)),
+    };
     Ok(RootConfig {
         worktrees_dir,
         timezone,
         platforms: raw.platforms,
+        schedule,
     })
 }
 
@@ -301,6 +336,24 @@ mod tests {
         std::fs::write(&path, "timezone = \"UTC\"\n").unwrap();
         assert!(super::load_root(&path).unwrap().platforms().is_empty());
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn load_root_reads_schedule_overrides_and_defaults() {
+        let dir = temp_dir("rootschedule");
+        let path = dir.join("worker.toml");
+        std::fs::write(&path, "[schedule]\ngrace_secs = 600\nscript_timeout_secs = 30\ncap_secs = 15\n").unwrap();
+        let sched = super::load_root(&path).unwrap().schedule();
+        assert_eq!(sched.grace, std::time::Duration::from_secs(600));
+        assert_eq!(sched.script_timeout, std::time::Duration::from_secs(30));
+        assert_eq!(sched.cap, std::time::Duration::from_secs(15));
+
+        std::fs::write(&path, "timezone = \"UTC\"\n").unwrap();
+        let defaults = super::load_root(&path).unwrap().schedule();
+        assert_eq!(defaults.grace, std::time::Duration::from_secs(7200));
+        assert_eq!(defaults.script_timeout, std::time::Duration::from_secs(60));
+        assert_eq!(defaults.cap, std::time::Duration::from_secs(60));
         std::fs::remove_dir_all(&dir).ok();
     }
 }

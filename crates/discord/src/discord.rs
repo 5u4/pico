@@ -51,6 +51,7 @@ pub(crate) fn framework(
                 worktree(),
                 cancel_turn(),
                 busy(),
+                schedule_command(),
             ],
             event_handler: |ctx, event, framework, data| Box::pin(on_event(ctx, event, framework.bot_id, data)),
             command_check: Some(|ctx| Box::pin(command_in_registered_guild(ctx))),
@@ -64,17 +65,48 @@ pub(crate) fn framework(
                 if pico_core::config::any_browser_enabled(&root) {
                     tracker.spawn(pico_core::omp::camofox::ensure_engine(cancel.clone()));
                 }
+                if let Err(e) = crate::schedule_host::write_schedule_extension(&root) {
+                    tracing::warn!(error = %format!("{e:#}"), "writing schedule extension failed; schedule tools unavailable");
+                }
+                let root = Arc::new(root);
+                let pending_answers = crate::ui::PendingAnswers::default();
+                let mid_turn = MidTurnQueue::default();
+                let cancels = CancelRegistry::default();
+                let host = crate::schedule_host::DiscordScheduleHost {
+                    ctx: ctx.clone(),
+                    db: db.clone(),
+                    pool: Arc::clone(&pool),
+                    camofox: Arc::clone(&camofox),
+                    mid_turn: mid_turn.clone(),
+                    cancels: cancels.clone(),
+                    pending_answers: pending_answers.clone(),
+                    root: Arc::clone(&root),
+                    cancel: cancel.clone(),
+                };
+                match pico_core::config::load_root(&pico_shared::paths::worker_config(&root)) {
+                    Ok(root_config) => {
+                        let sched_db = db.clone();
+                        let sched_cancel = cancel.clone();
+                        let cfg = root_config.schedule();
+                        tracker.spawn(async move {
+                            pico_core::schedule::run(&sched_db, host, cfg, sched_cancel).await;
+                        });
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %format!("{e:#}"), "loading worker config for scheduler failed; scheduler not started");
+                    }
+                }
                 Ok(Data {
-                    root: Arc::new(root),
+                    root,
                     db,
                     pool,
                     camofox,
                     supervisor_socket,
                     cancel,
                     tracker,
-                    pending_answers: crate::ui::PendingAnswers::default(),
-                    mid_turn: MidTurnQueue::default(),
-                    cancels: CancelRegistry::default(),
+                    pending_answers,
+                    mid_turn,
+                    cancels,
                 })
             })
         })
@@ -106,6 +138,47 @@ async fn command_in_registered_guild(ctx: Context<'_>) -> Result<bool, Error> {
 async fn ping(ctx: Context<'_>) -> Result<(), Error> {
     ctx.say("Pong!").await?;
     Ok(())
+}
+
+#[poise::command(slash_command, rename = "schedule")]
+async fn schedule_command(ctx: Context<'_>) -> Result<(), Error> {
+    let Some(guild_id) = ctx.guild_id() else {
+        ctx.say("Schedules only exist inside a configured server.").await?;
+        return Ok(());
+    };
+    let schedules = match pico_core::schedule::list(&ctx.data().db, "discord", &guild_id.to_string()).await {
+        Ok(schedules) => schedules,
+        Err(e) => {
+            ctx.say(format!("error reading schedules: {e}")).await?;
+            return Ok(());
+        }
+    };
+    if schedules.is_empty() {
+        ctx.say("No schedules for this server.").await?;
+        return Ok(());
+    }
+    let mut body = String::from("📅 Schedules\n");
+    for s in &schedules {
+        body.push_str(&format!(
+            "• `{}` {} [{}] — {} — next {}\n",
+            s.id,
+            s.name,
+            schedule_state_label(s.state),
+            s.trigger.describe(),
+            s.next_run_at.to_rfc3339()
+        ));
+    }
+    let body = pico_core::render::truncate(&pico_core::render::defang_mentions(&body), MSG_CONTENT_CAP);
+    ctx.say(body).await?;
+    Ok(())
+}
+
+fn schedule_state_label(state: pico_core::schedule::State) -> &'static str {
+    match state {
+        pico_core::schedule::State::Active => "active",
+        pico_core::schedule::State::Disabled => "disabled",
+        pico_core::schedule::State::Triggered => "triggered",
+    }
 }
 
 #[poise::command(slash_command, rename = "cancel")]
@@ -765,7 +838,7 @@ async fn on_event(
     Ok(())
 }
 
-enum Route {
+pub(crate) enum Route {
     Regular {
         profile: String,
         cwd: std::path::PathBuf,
@@ -777,7 +850,7 @@ enum Route {
     },
 }
 
-fn resolve_route(guild_default: &GuildDefault, binding: Option<&Binding>) -> Route {
+pub(crate) fn resolve_route(guild_default: &GuildDefault, binding: Option<&Binding>) -> Route {
     match binding {
         Some(b) => match &b.kind {
             BindingKind::Regular { cwd } => Route::Regular {
@@ -1002,16 +1075,121 @@ async fn route_message(
     };
     tracing::info!(%thread_id, %profile, in_thread, "driving omp turn");
 
-    let session_dir = pico_shared::paths::profile_session_dir(&root, &profile, &thread_id);
-    std::fs::create_dir_all(&session_dir).wrap_err_with(|| format!("create session dir {}", session_dir.display()))?;
-    let identity = pico_shared::paths::profile_identity(&root, &profile);
-    let append_dest = session_dir.join("append.md");
+    let title_cwd = cwd.clone();
     let guild_name = guild_id.name(&ctx.cache);
     let (channel_name, thread_label) = if in_thread {
         (channel_display_name(&ctx, guild_id, bound_channel), channel.name.clone())
     } else {
         (Some(channel.name.clone()), thread_name(prompt))
     };
+    let spawn = drive_thread_turn(
+        &ctx,
+        &root,
+        &pool,
+        &camofox,
+        &cancel,
+        &pending_answers,
+        &mid_turn,
+        &cancels,
+        TurnInputs {
+            thread_id: thread_id.clone(),
+            target,
+            profile,
+            cwd,
+            worktree_origin,
+            wrapped: &wrapped,
+            trigger: in_thread.then_some(message.id),
+            author: message.author.id,
+            guild_id,
+            guild_name,
+            bound_channel,
+            channel_name,
+            thread_label,
+            render: discord_config.render(),
+        },
+    )
+    .await?;
+    if !in_thread {
+        let title_surface = DiscordSurface {
+            ctx: ctx.clone(),
+            channel: target,
+            trigger: None,
+            author: message.author.id,
+            pending: pending_answers.clone(),
+            cancel: cancel.clone(),
+        };
+        tracker.spawn(pico_core::title::generate_and_apply(
+            title_surface,
+            Arc::clone(&spawn.handle),
+            Arc::clone(&pool),
+            prompt.to_owned(),
+            spawn.title_seed,
+            title_cwd,
+            cancel.clone(),
+        ));
+    }
+    if spawn.result? == pico_core::engine::TurnOutcome::Dead {
+        pool.forget(&thread_id);
+    }
+    Ok(())
+}
+
+pub(crate) struct TurnInputs<'a> {
+    pub(crate) thread_id: String,
+    pub(crate) target: serenity::ChannelId,
+    pub(crate) profile: String,
+    pub(crate) cwd: std::path::PathBuf,
+    pub(crate) worktree_origin: Option<pico_core::thread_marker::WorktreeOrigin>,
+    pub(crate) wrapped: &'a str,
+    pub(crate) trigger: Option<serenity::MessageId>,
+    pub(crate) author: serenity::UserId,
+    pub(crate) guild_id: serenity::GuildId,
+    pub(crate) guild_name: Option<String>,
+    pub(crate) bound_channel: serenity::ChannelId,
+    pub(crate) channel_name: Option<String>,
+    pub(crate) thread_label: String,
+    pub(crate) render: crate::config::Render,
+}
+
+pub(crate) struct TurnSpawn {
+    pub(crate) handle: Arc<pico_core::omp::pool::ThreadHandle>,
+    pub(crate) title_seed: Option<String>,
+    pub(crate) result: color_eyre::Result<pico_core::engine::TurnOutcome>,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn drive_thread_turn(
+    ctx: &serenity::Context,
+    root: &std::path::Path,
+    pool: &OmpPool,
+    camofox: &CamofoxDaemon,
+    cancel: &CancellationToken,
+    pending_answers: &crate::ui::PendingAnswers,
+    mid_turn: &MidTurnQueue,
+    cancels: &CancelRegistry,
+    inputs: TurnInputs<'_>,
+) -> color_eyre::Result<TurnSpawn> {
+    let TurnInputs {
+        thread_id,
+        target,
+        profile,
+        cwd,
+        worktree_origin,
+        wrapped,
+        trigger,
+        author,
+        guild_id,
+        guild_name,
+        bound_channel,
+        channel_name,
+        thread_label,
+        render,
+    } = inputs;
+
+    let session_dir = pico_shared::paths::profile_session_dir(root, &profile, &thread_id);
+    std::fs::create_dir_all(&session_dir).wrap_err_with(|| format!("create session dir {}", session_dir.display()))?;
+    let identity = pico_shared::paths::profile_identity(root, &profile);
+    let append_dest = session_dir.join("append.md");
     let context_block = pico_core::prompt::runtime_context_block(&pico_core::prompt::RuntimeContext {
         guild: (guild_id.get(), guild_name.as_deref()),
         channel: (bound_channel.get(), channel_name.as_deref()),
@@ -1033,14 +1211,22 @@ async fn route_message(
             None
         }
     };
-    let profile_config = pico_core::config::load(&pico_shared::paths::profile_config(&root, &profile))?;
-    let title_cwd = cwd.clone();
-    let (extensions, env) = if profile_config.browser_enabled {
+    let profile_config = pico_core::config::load(&pico_shared::paths::profile_config(root, &profile))?;
+    let (mut extensions, mut env) = if profile_config.browser_enabled {
         camofox.ensure_started().await;
         camofox.injection(&profile, &thread_id)
     } else {
         (Vec::new(), Vec::new())
     };
+    let schedule_extension = crate::schedule_host::schedule_extension_path(root);
+    if schedule_extension.is_file() {
+        extensions.push(schedule_extension);
+    }
+    env.push(("PICO_PLATFORM".to_owned(), "discord".to_owned()));
+    env.push(("PICO_GUILD_ID".to_owned(), guild_id.get().to_string()));
+    env.push(("PICO_CHANNEL_ID".to_owned(), bound_channel.get().to_string()));
+    env.push(("PICO_THREAD_ID".to_owned(), thread_id.clone()));
+    env.push(("PICO_USER_ID".to_owned(), author.get().to_string()));
     let config = pico_core::omp::client::SpawnConfig {
         model: profile_config.model,
         cwd: Some(cwd),
@@ -1059,47 +1245,26 @@ async fn route_message(
         let surface = DiscordSurface {
             ctx: ctx.clone(),
             channel: target,
-            trigger: in_thread.then_some(message.id),
-            author: message.author.id,
+            trigger,
+            author,
             pending: pending_answers.clone(),
             cancel: cancel.clone(),
         };
         let req = pico_core::engine::TurnRequest {
             conversation: &conversation,
-            prompt: &wrapped,
-            surface_thinking: discord_config.render().surface_thinking,
-            mode: discord_config.render().streaming_behavior,
-            cancel: &cancel,
+            prompt: wrapped,
+            surface_thinking: render.surface_thinking,
+            mode: render.streaming_behavior,
+            cancel,
         };
-        let rt = pico_core::engine::TurnRuntime {
-            mid_turn: &mid_turn,
-            cancels: &cancels,
-        };
+        let rt = pico_core::engine::TurnRuntime { mid_turn, cancels };
         pico_core::engine::drive_turn(&surface, &mut session, req, rt, &mut title_seed).await
     };
-    if !in_thread {
-        let title_surface = DiscordSurface {
-            ctx: ctx.clone(),
-            channel: target,
-            trigger: None,
-            author: message.author.id,
-            pending: pending_answers.clone(),
-            cancel: cancel.clone(),
-        };
-        tracker.spawn(pico_core::title::generate_and_apply(
-            title_surface,
-            Arc::clone(&handle),
-            Arc::clone(&pool),
-            prompt.to_owned(),
-            title_seed,
-            title_cwd,
-            cancel.clone(),
-        ));
-    }
-    if result? == pico_core::engine::TurnOutcome::Dead {
-        pool.forget(&thread_id);
-    }
-    Ok(())
+    Ok(TurnSpawn {
+        handle,
+        title_seed,
+        result,
+    })
 }
 
 fn sender_display_name(message: &serenity::Message) -> String {
@@ -1111,7 +1276,7 @@ fn sender_display_name(message: &serenity::Message) -> String {
         .unwrap_or_else(|| message.author.name.clone())
 }
 
-fn channel_display_name(
+pub(crate) fn channel_display_name(
     ctx: &serenity::Context,
     guild_id: serenity::GuildId,
     id: serenity::ChannelId,
@@ -1269,6 +1434,7 @@ mod tests {
         GuildDefault {
             profile: profile.to_owned(),
             cwd: PathBuf::from(cwd),
+            home_channel: None,
         }
     }
 

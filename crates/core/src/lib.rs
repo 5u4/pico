@@ -7,6 +7,7 @@ pub mod mid_turn;
 pub mod omp;
 pub mod prompt;
 pub mod render;
+pub mod schedule;
 pub mod surface;
 pub mod thread_marker;
 pub mod title;
