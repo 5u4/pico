@@ -2,7 +2,7 @@ use std::{sync::Arc, time::Duration};
 
 use color_eyre::eyre::{WrapErr, bail, eyre};
 use pico_core::{
-    bindings::{Binding, BindingKind, Bindings},
+    bindings::{Binding, BindingKind},
     cancel::CancelRegistry,
     config::StreamingBehavior,
     mid_turn::MidTurnQueue,
@@ -16,9 +16,10 @@ use pico_shared::proto;
 use poise::serenity_prelude as serenity;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
+use crate::config::GuildDefault;
+
 pub(crate) struct Data {
     root: Arc<std::path::PathBuf>,
-    bindings: Arc<parking_lot::Mutex<Bindings>>,
     db: sqlx::SqlitePool,
     pool: Arc<OmpPool>,
     camofox: Arc<CamofoxDaemon>,
@@ -36,7 +37,6 @@ type Context<'a> = poise::Context<'a, Data, Error>;
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn framework(
     root: std::path::PathBuf,
-    bindings: Bindings,
     db: sqlx::SqlitePool,
     pool: Arc<OmpPool>,
     ready_tx: tokio::sync::oneshot::Sender<()>,
@@ -61,7 +61,6 @@ pub(crate) fn framework(
                 }
                 Ok(Data {
                     root: Arc::new(root),
-                    bindings: Arc::new(parking_lot::Mutex::new(bindings)),
                     db,
                     pool,
                     camofox,
@@ -82,14 +81,14 @@ async fn command_in_registered_guild(ctx: Context<'_>) -> Result<bool, Error> {
         ctx.say("Commands only work inside a configured server.").await?;
         return Ok(false);
     };
-    let root_config = match pico_core::config::load_root(&pico_shared::paths::worker_config(&ctx.data().root)) {
+    let discord_config = match crate::config::load(&pico_shared::paths::discord_config(&ctx.data().root)) {
         Ok(config) => config,
         Err(e) => {
             ctx.say(format!("config error: {e}")).await?;
             return Ok(false);
         }
     };
-    if root_config.guild(&guild_id.to_string()).is_some() {
+    if discord_config.guild(&guild_id.to_string()).is_some() {
         Ok(true)
     } else {
         ctx.say("This server isn't configured, so I can't run commands here.")
@@ -121,7 +120,7 @@ async fn cancel_turn(ctx: Context<'_>) -> Result<(), Error> {
 #[poise::command(slash_command, rename = "dev-deploy")]
 async fn dev_deploy(ctx: Context<'_>) -> Result<(), Error> {
     let thread_id = ctx.channel_id().to_string();
-    let Some(marker) = pico_core::thread_marker::load(&ctx.data().db, &thread_id).await else {
+    let Some(marker) = pico_core::thread_marker::load(&ctx.data().db, "discord", &thread_id).await else {
         ctx.say("❌ this thread has no working dir yet — send it a message first, then retry.")
             .await?;
         return Ok(());
@@ -334,18 +333,19 @@ async fn bind_set(
             .await?;
         return Ok(());
     }
-    let path = pico_shared::paths::worker_bindings(&data.root);
-    match pico_core::bindings::set(&path, &channel.to_string(), &profile, std::path::Path::new(&cwd)) {
-        Ok(()) => match pico_core::bindings::load(&path) {
-            Ok(reloaded) => {
-                *data.bindings.lock() = reloaded;
-                ctx.say(format!("bound <#{channel}> → profile `{profile}`, cwd `{cwd}`"))
-                    .await?;
-            }
-            Err(e) => {
-                ctx.say(format!("written to disk, but reload failed: {e}")).await?;
-            }
-        },
+    match pico_core::bindings::set_regular(
+        &data.db,
+        "discord",
+        &channel.to_string(),
+        &profile,
+        std::path::Path::new(&cwd),
+    )
+    .await
+    {
+        Ok(()) => {
+            ctx.say(format!("bound <#{channel}> → profile `{profile}`, cwd `{cwd}`"))
+                .await?;
+        }
         Err(e) => {
             ctx.say(format!("bind failed: {e}")).await?;
         }
@@ -370,25 +370,20 @@ async fn bind_worktree(
         return Ok(());
     }
     let branch = branch.unwrap_or_else(|| pico_core::bindings::DEFAULT_BRANCH.to_owned());
-    let base_path = pico_core::bindings::expand_home(&base_repo);
+    let base_path = pico_shared::paths::expand_home(&base_repo);
     if let Err(e) = pico_core::worktree::validate_base_repo(&base_path, &branch).await {
         ctx.say(format!("not a usable worktree base: {e}")).await?;
         return Ok(());
     }
-    let path = pico_shared::paths::worker_bindings(&data.root);
-    match pico_core::bindings::set_worktree(&path, &channel.to_string(), &profile, &base_path, &branch) {
-        Ok(()) => match pico_core::bindings::load(&path) {
-            Ok(reloaded) => {
-                *data.bindings.lock() = reloaded;
-                ctx.say(format!(
-                    "bound <#{channel}> → worktree profile `{profile}`, base `{base_repo}`, branch `{branch}`"
-                ))
-                .await?;
-            }
-            Err(e) => {
-                ctx.say(format!("written to disk, but reload failed: {e}")).await?;
-            }
-        },
+    match pico_core::bindings::set_worktree(&data.db, "discord", &channel.to_string(), &profile, &base_path, &branch)
+        .await
+    {
+        Ok(()) => {
+            ctx.say(format!(
+                "bound <#{channel}> → worktree profile `{profile}`, base `{base_repo}`, branch `{branch}`"
+            ))
+            .await?;
+        }
         Err(e) => {
             ctx.say(format!("bind failed: {e}")).await?;
         }
@@ -400,17 +395,10 @@ async fn bind_worktree(
 async fn bind_unset(ctx: Context<'_>) -> Result<(), Error> {
     let data = ctx.data();
     let channel = bindable_channel(ctx).await?;
-    let path = pico_shared::paths::worker_bindings(&data.root);
-    match pico_core::bindings::unset(&path, &channel.to_string()) {
-        Ok(true) => match pico_core::bindings::load(&path) {
-            Ok(reloaded) => {
-                *data.bindings.lock() = reloaded;
-                ctx.say(format!("unbound <#{channel}>")).await?;
-            }
-            Err(e) => {
-                ctx.say(format!("removed from disk, but reload failed: {e}")).await?;
-            }
-        },
+    match pico_core::bindings::unset(&data.db, "discord", &channel.to_string()).await {
+        Ok(true) => {
+            ctx.say(format!("unbound <#{channel}>")).await?;
+        }
         Ok(false) => {
             ctx.say("this channel was not bound").await?;
         }
@@ -425,25 +413,23 @@ async fn bind_unset(ctx: Context<'_>) -> Result<(), Error> {
 async fn bind_show(ctx: Context<'_>) -> Result<(), Error> {
     let data = ctx.data();
     let channel = bindable_channel(ctx).await?;
-    let reply = {
-        let bindings = data.bindings.lock();
-        match bindings.get(&channel.to_string()) {
-            Some(b) => match &b.kind {
-                BindingKind::Regular { cwd } => {
-                    format!("<#{channel}> → profile `{}`, cwd `{}`", b.profile, cwd.display())
-                }
-                BindingKind::Worktree {
-                    base_repo,
-                    default_branch,
-                } => format!(
-                    "<#{channel}> → worktree profile `{}`, base `{}`, branch `{}`",
-                    b.profile,
-                    base_repo.display(),
-                    default_branch
-                ),
-            },
-            None => "this channel is not bound".to_owned(),
-        }
+    let reply = match pico_core::bindings::get(&data.db, "discord", &channel.to_string()).await {
+        Ok(Some(b)) => match &b.kind {
+            BindingKind::Regular { cwd } => {
+                format!("<#{channel}> → profile `{}`, cwd `{}`", b.profile, cwd.display())
+            }
+            BindingKind::Worktree {
+                base_repo,
+                default_branch,
+            } => format!(
+                "<#{channel}> → worktree profile `{}`, base `{}`, branch `{}`",
+                b.profile,
+                base_repo.display(),
+                default_branch
+            ),
+        },
+        Ok(None) => "this channel is not bound".to_owned(),
+        Err(e) => format!("error reading binding: {e}"),
     };
     ctx.say(reply).await?;
     Ok(())
@@ -475,7 +461,7 @@ async fn worktree_close(ctx: Context<'_>) -> Result<(), Error> {
     let thread_id = ctx.channel_id().to_string();
     ctx.defer_ephemeral().await?;
 
-    let marker = match pico_core::thread_marker::load(&data.db, &thread_id).await {
+    let marker = match pico_core::thread_marker::load(&data.db, "discord", &thread_id).await {
         Some(marker) if marker.worktree.is_some() => marker,
         _ => {
             ctx.say("❌ not a worktree thread; nothing to close.").await?;
@@ -514,7 +500,7 @@ async fn worktree_close(ctx: Context<'_>) -> Result<(), Error> {
     }
 
     let closed_at = serenity::Timestamp::now().to_string();
-    if let Err(e) = pico_core::thread_marker::tombstone(&data.db, &thread_id, marker, closed_at).await {
+    if let Err(e) = pico_core::thread_marker::tombstone(&data.db, "discord", &thread_id, marker, closed_at).await {
         ctx.say(format!(
             "❌ worktree removed, but writing the closed marker failed: {e} — retry to finish."
         ))
@@ -607,7 +593,6 @@ async fn on_event(
         }
         let ctx = ctx.clone();
         let root = Arc::clone(&data.root);
-        let bindings = Arc::clone(&data.bindings);
         let db = data.db.clone();
         let pool = Arc::clone(&data.pool);
         let camofox = Arc::clone(&data.camofox);
@@ -621,7 +606,6 @@ async fn on_event(
             if let Err(e) = route_message(
                 ctx,
                 root,
-                bindings,
                 db,
                 pool,
                 camofox,
@@ -653,7 +637,7 @@ enum Route {
     },
 }
 
-fn resolve_route(guild_default: &pico_core::config::GuildDefault, binding: Option<&Binding>) -> Route {
+fn resolve_route(guild_default: &GuildDefault, binding: Option<&Binding>) -> Route {
     match binding {
         Some(b) => match &b.kind {
             BindingKind::Regular { cwd } => Route::Regular {
@@ -680,7 +664,6 @@ fn resolve_route(guild_default: &pico_core::config::GuildDefault, binding: Optio
 async fn route_message(
     ctx: serenity::Context,
     root: Arc<std::path::PathBuf>,
-    bindings: Arc<parking_lot::Mutex<Bindings>>,
     db: sqlx::SqlitePool,
     pool: Arc<OmpPool>,
     camofox: Arc<CamofoxDaemon>,
@@ -706,8 +689,15 @@ async fn route_message(
             return Ok(());
         }
     };
+    let discord_config = match crate::config::load(&pico_shared::paths::discord_config(&root)) {
+        Ok(config) => config,
+        Err(e) => {
+            message.reply(&ctx, format!("❌ discord config error: {e}")).await?;
+            return Ok(());
+        }
+    };
 
-    let Some(guild_default) = root_config.guild(&guild_id.to_string()) else {
+    let Some(guild_default) = discord_config.guild(&guild_id.to_string()) else {
         tracing::debug!(%guild_id, "guild not configured; ignoring message");
         return Ok(());
     };
@@ -740,10 +730,8 @@ async fn route_message(
         return Ok(());
     }
 
-    let route = {
-        let table = bindings.lock();
-        resolve_route(guild_default, table.get(&bound_channel.to_string()))
-    };
+    let binding = pico_core::bindings::get(&db, "discord", &bound_channel.to_string()).await?;
+    let route = resolve_route(guild_default, binding.as_ref());
 
     if !in_thread
         && let Route::Regular { cwd, .. } = &route
@@ -775,7 +763,7 @@ async fn route_message(
     };
     let thread_id = target.to_string();
 
-    let (profile, cwd, worktree_origin) = match pico_core::thread_marker::load(&db, &thread_id).await {
+    let (profile, cwd, worktree_origin) = match pico_core::thread_marker::load(&db, "discord", &thread_id).await {
         Some(marker) => {
             if let Some(closed_at) = &marker.closed_at {
                 target
@@ -859,6 +847,7 @@ async fn route_message(
             };
             pico_core::thread_marker::save(
                 &db,
+                "discord",
                 &thread_id,
                 &pico_core::thread_marker::ThreadMarker {
                     profile: profile.clone(),
@@ -938,8 +927,8 @@ async fn route_message(
         let req = pico_core::engine::TurnRequest {
             conversation: &conversation,
             prompt: &wrapped,
-            surface_thinking: profile_config.surface_thinking,
-            mode: profile_config.streaming_behavior,
+            surface_thinking: discord_config.render().surface_thinking,
+            mode: discord_config.render().streaming_behavior,
             cancel: &cancel,
         };
         let rt = pico_core::engine::TurnRuntime {
@@ -1212,10 +1201,9 @@ fn strip_wrapping_quotes(s: &str) -> &str {
 mod tests {
     use std::path::PathBuf;
 
-    use pico_core::{
-        bindings::{Binding, BindingKind},
-        config::GuildDefault,
-    };
+    use pico_core::bindings::{Binding, BindingKind};
+
+    use crate::config::GuildDefault;
 
     fn guild_default(profile: &str, cwd: &str) -> GuildDefault {
         GuildDefault {
@@ -1226,7 +1214,6 @@ mod tests {
 
     fn binding(profile: &str, cwd: &str) -> Binding {
         Binding {
-            channel_id: "123456789012345678".to_owned(),
             profile: profile.to_owned(),
             kind: BindingKind::Regular {
                 cwd: PathBuf::from(cwd),
@@ -1263,7 +1250,6 @@ mod tests {
     fn worktree_binding_routes_to_worktree() {
         let d = guild_default("default", "/default");
         let b = Binding {
-            channel_id: "123456789012345678".to_owned(),
             profile: "sen".to_owned(),
             kind: BindingKind::Worktree {
                 base_repo: PathBuf::from("/repo"),

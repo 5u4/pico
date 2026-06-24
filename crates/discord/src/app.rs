@@ -15,7 +15,6 @@ pub struct App {
 impl App {
     pub async fn build(root: &Path, supervisor_socket: Option<std::path::PathBuf>) -> color_eyre::Result<App> {
         let token = read_secret(root, "discord_bot_token")?;
-        let bindings = pico_core::bindings::load(&pico_shared::paths::worker_bindings(root))?;
         let db = pico_core::db::open(root).await.wrap_err("opening worker database")?;
         match crate::approval::reconcile_pending_aborted(&db).await {
             Ok(0) => {}
@@ -33,7 +32,6 @@ impl App {
         let client = serenity::ClientBuilder::new(&token, intents)
             .framework(crate::discord::framework(
                 root.to_path_buf(),
-                bindings,
                 db,
                 pool,
                 ready_tx,
