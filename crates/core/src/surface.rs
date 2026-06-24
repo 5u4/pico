@@ -1,4 +1,4 @@
-use crate::omp::protocol::UiRequest;
+use crate::omp::protocol::{ToolCall, UiRequest};
 
 #[allow(async_fn_in_trait)]
 pub trait Surface: Send + Sync {
@@ -17,6 +17,18 @@ pub trait Surface: Send + Sync {
 
     async fn set_title(&self, _title: &str) -> bool {
         false
+    }
+
+    fn tool_activity_line(&self, _call: &ToolCall) -> Option<String> {
+        None
+    }
+
+    fn thinking_line(&self, _content: &str) -> Option<String> {
+        None
+    }
+
+    fn failure_line(&self, current: &str, _error: Option<&str>) -> String {
+        current.to_owned()
     }
 
     async fn say(&self, text: &str) {

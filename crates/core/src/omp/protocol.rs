@@ -75,7 +75,7 @@ pub(crate) struct RpcResponse {
 pub enum OmpEvent {
     AgentStart,
     Message(AssistantMessageEvent),
-    ToolStart(ToolCallStart),
+    ToolStart(ToolCall),
     ToolUpdate(ToolCallUpdate),
     ToolEnd(ToolCallEnd),
     UiRequest(UiRequest),
@@ -110,97 +110,6 @@ pub struct ToolCall {
     pub args: serde_json::Value,
     #[serde(default)]
     pub intent: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(from = "ToolCall")]
-pub enum ToolCallStart {
-    Read(ToolCall),
-    Search(ToolCall),
-    Find(ToolCall),
-    Lsp(ToolCall),
-    Edit(ToolCall),
-    Write(ToolCall),
-    Bash(ToolCall),
-    Browser(ToolCall),
-    Eval(ToolCall),
-    WebSearch(ToolCall),
-    Task(ToolCall),
-    Job(ToolCall),
-    Todo(ToolCall),
-    Github(ToolCall),
-    Irc(ToolCall),
-    AstGrep(ToolCall),
-    AstEdit(ToolCall),
-    Debug(ToolCall),
-    InspectImage(ToolCall),
-    ManageSkill(ToolCall),
-    Resolve(ToolCall),
-    GenerateImage(ToolCall),
-    Camo(ToolCall),
-    Unknown(ToolCall),
-}
-
-impl From<ToolCall> for ToolCallStart {
-    fn from(call: ToolCall) -> Self {
-        match call.tool_name.as_str() {
-            "read" => Self::Read(call),
-            "search" => Self::Search(call),
-            "find" => Self::Find(call),
-            "lsp" => Self::Lsp(call),
-            "edit" => Self::Edit(call),
-            "write" => Self::Write(call),
-            "bash" => Self::Bash(call),
-            "browser" => Self::Browser(call),
-            "eval" => Self::Eval(call),
-            "web_search" => Self::WebSearch(call),
-            "task" => Self::Task(call),
-            "job" => Self::Job(call),
-            "todo" => Self::Todo(call),
-            "github" => Self::Github(call),
-            "irc" => Self::Irc(call),
-            "ast_grep" => Self::AstGrep(call),
-            "ast_edit" => Self::AstEdit(call),
-            "debug" => Self::Debug(call),
-            "inspect_image" => Self::InspectImage(call),
-            "manage_skill" => Self::ManageSkill(call),
-            "resolve" => Self::Resolve(call),
-            "generate_image" => Self::GenerateImage(call),
-            name if name.starts_with("camo_") => Self::Camo(call),
-            _ => Self::Unknown(call),
-        }
-    }
-}
-
-impl ToolCallStart {
-    pub fn call(&self) -> &ToolCall {
-        match self {
-            Self::Read(c)
-            | Self::Search(c)
-            | Self::Find(c)
-            | Self::Lsp(c)
-            | Self::Edit(c)
-            | Self::Write(c)
-            | Self::Bash(c)
-            | Self::Browser(c)
-            | Self::Eval(c)
-            | Self::WebSearch(c)
-            | Self::Task(c)
-            | Self::Job(c)
-            | Self::Todo(c)
-            | Self::Github(c)
-            | Self::Irc(c)
-            | Self::AstGrep(c)
-            | Self::AstEdit(c)
-            | Self::Debug(c)
-            | Self::InspectImage(c)
-            | Self::ManageSkill(c)
-            | Self::Resolve(c)
-            | Self::GenerateImage(c)
-            | Self::Camo(c)
-            | Self::Unknown(c) => c,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -391,7 +300,7 @@ pub(crate) enum Inbound {
     MessageUpdate {
         assistant_message_event: AssistantMessageEvent,
     },
-    ToolExecutionStart(ToolCallStart),
+    ToolExecutionStart(ToolCall),
     ToolExecutionUpdate(ToolCallUpdate),
     ToolExecutionEnd(ToolCallEnd),
     ExtensionUiRequest(UiRequest),
@@ -517,7 +426,7 @@ mod tests {
         match parse(
             r#"{"type":"tool_execution_start","toolCallId":"call_1","toolName":"bash","args":{"command":"echo hi"},"intent":"Running echo"}"#,
         ) {
-            Inbound::ToolExecutionStart(ToolCallStart::Bash(c)) => {
+            Inbound::ToolExecutionStart(c) => {
                 assert_eq!(c.tool_call_id, "call_1");
                 assert_eq!(c.tool_name, "bash");
                 assert_eq!(c.args["command"], "echo hi");
@@ -537,7 +446,7 @@ mod tests {
         }
 
         match parse(r#"{"type":"tool_execution_start","toolCallId":"c","toolName":"mcp__x","args":{}}"#) {
-            Inbound::ToolExecutionStart(ToolCallStart::Unknown(c)) => assert_eq!(c.tool_name, "mcp__x"),
+            Inbound::ToolExecutionStart(c) => assert_eq!(c.tool_name, "mcp__x"),
             other => panic!("expected unknown tool start, got {other:?}"),
         }
     }

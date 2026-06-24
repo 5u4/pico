@@ -1019,6 +1019,21 @@ impl pico_core::surface::Surface for DiscordSurface {
         }
     }
 
+    fn tool_activity_line(&self, call: &pico_core::omp::protocol::ToolCall) -> Option<String> {
+        Some(crate::activity::tool_activity_line(&crate::activity::ToolCallStart::from(
+            call.clone(),
+        )))
+    }
+
+    fn thinking_line(&self, content: &str) -> Option<String> {
+        let line = crate::activity::thinking_line(content);
+        (!line.is_empty()).then_some(line)
+    }
+
+    fn failure_line(&self, current: &str, error: Option<&str>) -> String {
+        crate::activity::failure_line(current, error)
+    }
+
     async fn post(&self, text: &str, opts: pico_core::surface::PostOpts) -> Option<serenity::MessageId> {
         let mut message = serenity::CreateMessage::new().content(text.to_owned());
         if opts.as_reply
