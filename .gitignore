@@ -7,3 +7,4 @@ target/
 !.env.hindsight.example
 .omp
 tmp
+docker-compose.override.yml
