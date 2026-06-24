@@ -57,6 +57,21 @@ RUN CAMOFOX_SKIP_DOWNLOAD=1 npm install -g @askjo/camofox-browser@${CAMOFOX_BROW
      && chmod +x /usr/local/bin/camofox-fetch-engine \
      && npm cache clean --force
 
+# Interactive-login VNC stack for the camofox-browser `vnc` plugin: x11vnc attaches to
+# Camoufox's Xvfb, noVNC + websockify (port 6080) expose it so a human can log into
+# sites / solve CAPTCHAs by hand; procps backs the plugin's Xvfb-display detection.
+RUN apt-get update \
+     && apt-get install -y --no-install-recommends \
+     x11vnc novnc python3-websockify procps \
+     && rm -rf /var/lib/apt/lists/*
+
+# Enable the camofox-browser `vnc` plugin: it ships disabled in the package's
+# camofox.config.json, and the plugin allowlist ignores ENABLE_VNC unless the config
+# lists it enabled. Flip it on so the worker-spawned daemon exposes noVNC for manual login.
+RUN CDIR="$(npm root -g)/@askjo/camofox-browser" \
+     && jq '.plugins.vnc.enabled = true' "$CDIR/camofox.config.json" > "$CDIR/camofox.config.json.tmp" \
+     && mv "$CDIR/camofox.config.json.tmp" "$CDIR/camofox.config.json"
+
 # Non-root user. UID/GID overridable to match a host user when bind mounts need it.
 ARG PICO_UID=1000
 ARG PICO_GID=1000
