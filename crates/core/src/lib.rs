@@ -8,6 +8,7 @@ pub mod omp;
 pub mod prompt;
 pub mod render;
 pub mod schedule;
+pub mod session;
 pub mod surface;
 pub mod thread_marker;
 pub mod title;

@@ -1135,6 +1135,7 @@ async fn route_message(
                     cwd: cwd.clone(),
                     worktree: worktree.clone(),
                     closed_at: None,
+                    channel_id: Some(bound_channel.to_string()),
                 },
             )
             .await;
@@ -1217,33 +1218,6 @@ pub(crate) struct TurnInputs<'a> {
     pub(crate) render: crate::config::Render,
 }
 
-pub(crate) struct TurnSpawn {
-    pub(crate) handle: Arc<pico_core::omp::pool::ThreadHandle>,
-    pub(crate) title_seed: Option<String>,
-    pub(crate) result: color_eyre::Result<pico_core::engine::TurnOutcome>,
-}
-
-fn latest_session_file(session_dir: &std::path::Path) -> Option<std::path::PathBuf> {
-    let mut newest: Option<(std::time::SystemTime, std::path::PathBuf)> = None;
-    for entry in std::fs::read_dir(session_dir).ok()?.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
-            continue;
-        }
-        let Ok(modified) = entry.metadata().and_then(|m| m.modified()) else {
-            continue;
-        };
-        let replace = match &newest {
-            Some((latest, _)) => modified > *latest,
-            None => true,
-        };
-        if replace {
-            newest = Some((modified, path));
-        }
-    }
-    newest.map(|(_, path)| path)
-}
-
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn drive_thread_turn(
     ctx: &serenity::Context,
@@ -1255,7 +1229,7 @@ pub(crate) async fn drive_thread_turn(
     mid_turn: &MidTurnQueue,
     cancels: &CancelRegistry,
     inputs: TurnInputs<'_>,
-) -> color_eyre::Result<TurnSpawn> {
+) -> color_eyre::Result<pico_core::session::TurnSpawn> {
     let TurnInputs {
         thread_id,
         target,
@@ -1273,79 +1247,56 @@ pub(crate) async fn drive_thread_turn(
         render,
     } = inputs;
 
-    let session_dir = pico_shared::paths::profile_session_dir(root, &profile, &thread_id);
-    std::fs::create_dir_all(&session_dir).wrap_err_with(|| format!("create session dir {}", session_dir.display()))?;
-    let identity = pico_shared::paths::profile_identity(root, &profile);
-    let append_dest = session_dir.join("append.md");
+    let guild_line = pico_core::prompt::id_value(guild_id.get(), guild_name.as_deref());
+    let channel_line = pico_core::prompt::id_value(bound_channel.get(), channel_name.as_deref());
+    let thread_line = pico_core::prompt::id_value(target.get(), Some(&thread_label));
     let context_block = pico_core::prompt::runtime_context_block(&pico_core::prompt::RuntimeContext {
-        guild: (guild_id.get(), guild_name.as_deref()),
-        channel: (bound_channel.get(), channel_name.as_deref()),
-        thread: (target.get(), &thread_label),
+        platform: "discord",
+        extra: &[("guild", guild_line)],
+        channel: &channel_line,
+        thread: &thread_line,
         profile: &profile,
         cwd: &cwd,
         worktree: worktree_origin
             .as_ref()
             .map(|w| (w.base_repo.as_path(), w.default_branch.as_str())),
     });
-    let append_prompt = match pico_core::prompt::assemble_append(
-        &append_dest,
-        identity.is_file().then_some(identity.as_path()),
-        &context_block,
-    ) {
-        Ok(path) => Some(path),
-        Err(e) => {
-            tracing::warn!(error = %format!("{e:#}"), "assembling pico append prompt failed; spawning omp without it");
-            None
-        }
+    let identity = pico_core::omp::client::SessionIdentity {
+        platform: "discord".to_owned(),
+        guild: guild_id.get().to_string(),
+        channel: bound_channel.get().to_string(),
+        thread: thread_id.clone(),
+        user: author.get().to_string(),
     };
-    let profile_config = pico_core::config::load(&pico_shared::paths::profile_config(root, &profile))?;
-    if profile_config.browser_enabled {
-        camofox.ensure_started().await;
-    }
-    let continue_from_file = latest_session_file(&session_dir);
-    let config = pico_core::omp::client::SessionConfig {
-        model: profile_config.model,
-        cwd,
-        session_dir,
-        continue_from_file,
-        append_system_prompt: append_prompt,
-        identity: pico_core::omp::client::SessionIdentity {
-            platform: "discord".to_owned(),
-            guild: guild_id.get().to_string(),
-            channel: bound_channel.get().to_string(),
-            thread: thread_id.clone(),
-            user: author.get().to_string(),
-        },
-    };
-
-    let handle = pool.get_or_spawn(&thread_id, &config).await?;
-    let mut title_seed: Option<String> = None;
     let conversation = ConversationId::new("discord", &thread_id);
-    let result = {
-        let mut session = handle.lock().await;
-        let surface = DiscordSurface {
-            ctx: ctx.clone(),
-            channel: target,
-            trigger,
-            author,
-            pending: pending_answers.clone(),
-            cancel: cancel.clone(),
-        };
-        let req = pico_core::engine::TurnRequest {
-            conversation: &conversation,
-            prompt: wrapped,
-            surface_thinking: render.surface_thinking,
-            mode: render.streaming_behavior,
-            cancel,
-        };
-        let rt = pico_core::engine::TurnRuntime { mid_turn, cancels };
-        pico_core::engine::drive_turn(&surface, &mut session, req, rt, &mut title_seed).await
+    let surface = DiscordSurface {
+        ctx: ctx.clone(),
+        channel: target,
+        trigger,
+        author,
+        pending: pending_answers.clone(),
+        cancel: cancel.clone(),
     };
-    Ok(TurnSpawn {
-        handle,
-        title_seed,
-        result,
+    pico_core::session::run_turn(pico_core::session::RunTurn {
+        surface: &surface,
+        pool,
+        root,
+        profile: &profile,
+        cwd,
+        identity,
+        context_block: &context_block,
+        surface_rules: include_str!("discord_surface.md"),
+        wrapped,
+        surface_thinking: render.surface_thinking,
+        mode: render.streaming_behavior,
+        camofox,
+        mid_turn,
+        cancels,
+        cancel,
+        conversation: &conversation,
+        thread_id: &thread_id,
     })
+    .await
 }
 
 fn sender_display_name(message: &serenity::Message) -> String {

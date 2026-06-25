@@ -226,6 +226,7 @@ impl DiscordScheduleHost {
                 cwd: cwd.clone(),
                 worktree: worktree_origin.clone(),
                 closed_at: None,
+                channel_id: Some(sched.target.clone()),
             },
         )
         .await;

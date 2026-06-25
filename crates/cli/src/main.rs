@@ -1,6 +1,9 @@
 use clap::{Parser, Subcommand};
 
+mod bind;
+mod chat;
 mod schedule;
+mod terminal_surface;
 
 #[derive(Parser)]
 #[command(name = "pico", version, about = "pico command-line interface")]
@@ -11,6 +14,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    Chat(chat::ChatArgs),
     #[command(subcommand)]
     Schedule(schedule::ScheduleCommand),
 }
@@ -20,6 +24,7 @@ async fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
     let cli = Cli::parse();
     match cli.command {
+        Command::Chat(args) => chat::run(args).await,
         Command::Schedule(cmd) => schedule::run(cmd).await,
     }
 }
