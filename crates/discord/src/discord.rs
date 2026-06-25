@@ -406,7 +406,7 @@ async fn build_and_deploy(ctx: Context<'_>, build_dir: std::path::PathBuf, what:
         return Ok(());
     };
     ctx.say(format!(
-        "🔨 building pico-worker from {what} — I'll post the result here when it lands."
+        "🔨 building pico-worker + pico-cli from {what} — I'll post the result here when it lands."
     ))
     .await?;
     let report_to = ctx.channel_id().get().to_string();
@@ -450,7 +450,15 @@ async fn build_worker(build_dir: &std::path::Path) -> color_eyre::Result<std::pa
     let target_dir = pico_shared::paths::pico_build_target_dir()?;
     let _build = DEPLOY_BUILD_LOCK.lock().await;
     let child = tokio::process::Command::new("cargo")
-        .args(["build", "--release", "-p", "pico-worker", "--target-dir"])
+        .args([
+            "build",
+            "--release",
+            "-p",
+            "pico-worker",
+            "-p",
+            "pico-cli",
+            "--target-dir",
+        ])
         .arg(&target_dir)
         .current_dir(build_dir)
         .stdin(std::process::Stdio::null())
@@ -475,8 +483,31 @@ async fn build_worker(build_dir: &std::path::Path) -> color_eyre::Result<std::pa
             .collect();
         bail!("cargo build failed ({}):\n{tail}", out.status);
     }
+    link_cli(&target_dir).await;
     bun_install_host(build_dir).await;
     snapshot(&target_dir).await
+}
+
+async fn link_cli(target_dir: &std::path::Path) {
+    let cli = target_dir.join("release").join("pico");
+    let bin_dir = match pico_shared::paths::local_bin_dir() {
+        Ok(dir) => dir,
+        Err(e) => {
+            tracing::warn!(error = %format!("{e:#}"), "cannot resolve local bin dir; skipping pico CLI symlink");
+            return;
+        }
+    };
+    if let Err(e) = tokio::fs::create_dir_all(&bin_dir).await {
+        tracing::warn!(error = %e, dir = %bin_dir.display(), "creating local bin dir failed; skipping pico CLI symlink");
+        return;
+    }
+    let link = bin_dir.join("pico");
+    let _ = tokio::fs::remove_file(&link).await;
+    if let Err(e) = tokio::fs::symlink(&cli, &link).await {
+        tracing::warn!(error = %e, link = %link.display(), target = %cli.display(), "symlinking pico CLI failed; schedule extension may not find pico");
+    } else {
+        tracing::info!(link = %link.display(), target = %cli.display(), "linked pico CLI");
+    }
 }
 
 async fn bun_install_host(build_dir: &std::path::Path) {

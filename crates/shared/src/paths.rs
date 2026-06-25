@@ -30,6 +30,10 @@ pub fn pico_build_target_dir() -> color_eyre::Result<PathBuf> {
     Ok(home()?.join(".cache").join("build").join("pico-target"))
 }
 
+pub fn local_bin_dir() -> color_eyre::Result<PathBuf> {
+    Ok(home()?.join(".local").join("bin"))
+}
+
 pub fn supervisor_dir() -> color_eyre::Result<PathBuf> {
     Ok(pico_home()?.join("supervisor"))
 }
