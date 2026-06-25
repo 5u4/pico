@@ -75,11 +75,26 @@ pub enum FireOutcome {
     Transient,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub enum HomeNotice {
+    ScriptFailed { reason: String, stderr_tail: String },
+    Missed { due: DateTime<Utc> },
+    Disabled(DisableReason),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum DisableReason {
+    TargetUnresolvable,
+    OriginUnreachable,
+    TargetUnreachable,
+    ConsecutiveFailures(i64),
+}
+
 pub trait ScheduleHost: Send + Sync {
     fn resolve_cwd(&self, sched: &Schedule) -> impl Future<Output = color_eyre::Result<Option<PathBuf>>> + Send;
     fn fire(&self, sched: &Schedule, wrapped_prompt: &str) -> impl Future<Output = FireOutcome> + Send;
     fn post_raw(&self, sched: &Schedule, text: &str) -> impl Future<Output = FireOutcome> + Send;
-    fn notify_home(&self, sched: &Schedule, text: &str) -> impl Future<Output = ()> + Send;
+    fn notify_home(&self, sched: &Schedule, notice: &HomeNotice) -> impl Future<Output = ()> + Send;
 }
 
 impl Mode {
@@ -450,16 +465,8 @@ pub async fn fire_one<H: ScheduleHost>(
 ) -> color_eyre::Result<()> {
     match missed_gate(sched, now, cfg.grace) {
         Disposition::MissedOneshot => {
-            host.notify_home(
-                sched,
-                &format!(
-                    "missed scheduled job {:?} (id {}); it was due {}",
-                    sched.name,
-                    sched.id,
-                    store_ts(sched.next_run_at)
-                ),
-            )
-            .await;
+            host.notify_home(sched, &HomeNotice::Missed { due: sched.next_run_at })
+                .await;
             finish_oneshot(db, &sched.id, None).await?;
             return Ok(());
         }
@@ -474,14 +481,8 @@ pub async fn fire_one<H: ScheduleHost>(
         Ok(Some(cwd)) => cwd,
         Ok(None) => {
             disable(db, &sched.id).await?;
-            host.notify_home(
-                sched,
-                &format!(
-                    "scheduled job {:?} (id {}) can no longer resolve its target; disabled",
-                    sched.name, sched.id
-                ),
-            )
-            .await;
+            host.notify_home(sched, &HomeNotice::Disabled(DisableReason::TargetUnresolvable))
+                .await;
             return Ok(());
         }
         Err(e) => {
@@ -493,7 +494,7 @@ pub async fn fire_one<H: ScheduleHost>(
     match gate::run_script(sched.script.as_deref(), &cwd, cfg.script_timeout).await {
         gate::Gate::Skip => advance_or_finish(db, sched, now).await?,
         gate::Gate::Failure { reason, stderr_tail } => {
-            host.notify_home(sched, &failure_notice(sched, &reason, &stderr_tail))
+            host.notify_home(sched, &HomeNotice::ScriptFailed { reason, stderr_tail })
                 .await;
             record_transient(db, host, sched, now).await?;
         }
@@ -521,14 +522,8 @@ async fn proceed<H: ScheduleHost>(
             FireOutcome::Delivered => advance_or_finish(db, sched, now).await?,
             FireOutcome::TargetGone => {
                 disable(db, &sched.id).await?;
-                host.notify_home(
-                    sched,
-                    &format!(
-                        "scheduled job {:?} (id {}) could not reach its origin; disabled",
-                        sched.name, sched.id
-                    ),
-                )
-                .await;
+                host.notify_home(sched, &HomeNotice::Disabled(DisableReason::OriginUnreachable))
+                    .await;
             }
             FireOutcome::Transient => record_transient(db, host, sched, now).await?,
         }
@@ -537,14 +532,8 @@ async fn proceed<H: ScheduleHost>(
             FireOutcome::Delivered => advance_or_finish(db, sched, now).await?,
             FireOutcome::TargetGone => {
                 disable(db, &sched.id).await?;
-                host.notify_home(
-                    sched,
-                    &format!(
-                        "scheduled job {:?} (id {}) could not reach its target; disabled",
-                        sched.name, sched.id
-                    ),
-                )
-                .await;
+                host.notify_home(sched, &HomeNotice::Disabled(DisableReason::TargetUnreachable))
+                    .await;
             }
             FireOutcome::Transient => record_transient(db, host, sched, now).await?,
         }
@@ -583,14 +572,8 @@ async fn record_transient<H: ScheduleHost>(
     let failures = record_failure(db, &sched.id).await?;
     if failures >= MAX_CONSECUTIVE_FAILURES {
         disable(db, &sched.id).await?;
-        host.notify_home(
-            sched,
-            &format!(
-                "scheduled job {:?} (id {}) auto-disabled after {failures} consecutive failures",
-                sched.name, sched.id
-            ),
-        )
-        .await;
+        host.notify_home(sched, &HomeNotice::Disabled(DisableReason::ConsecutiveFailures(failures)))
+            .await;
     } else {
         match &sched.trigger {
             Trigger::Oneshot { .. } => {
@@ -633,17 +616,6 @@ fn missed_gate(sched: &Schedule, now: DateTime<Utc>, grace: Duration) -> Disposi
             Some(following) if late >= (following - sched.next_run_at) => Disposition::SkipStale,
             _ => Disposition::Fire,
         },
-    }
-}
-
-fn failure_notice(sched: &Schedule, reason: &str, stderr_tail: &str) -> String {
-    if stderr_tail.is_empty() {
-        format!("scheduled job {:?} (id {}) failed: {reason}", sched.name, sched.id)
-    } else {
-        format!(
-            "scheduled job {:?} (id {}) failed: {reason}\nstderr: {stderr_tail}",
-            sched.name, sched.id
-        )
     }
 }
 
@@ -837,7 +809,7 @@ mod tests {
     struct FakeCalls {
         fired: Vec<String>,
         posted: Vec<String>,
-        notified: Vec<String>,
+        notified: Vec<HomeNotice>,
     }
 
     #[derive(Clone)]
@@ -872,8 +844,8 @@ mod tests {
             FireOutcome::Delivered
         }
 
-        async fn notify_home(&self, _sched: &Schedule, text: &str) {
-            self.calls.lock().notified.push(text.to_owned());
+        async fn notify_home(&self, _sched: &Schedule, notice: &HomeNotice) {
+            self.calls.lock().notified.push(notice.clone());
         }
     }
 
@@ -1106,7 +1078,7 @@ mod tests {
             let calls = host.calls.lock();
             assert!(calls.fired.is_empty());
             assert_eq!(calls.notified.len(), 1);
-            assert!(calls.notified[0].contains("missed"));
+            assert!(matches!(calls.notified[0], HomeNotice::Missed { .. }));
         }
         assert_eq!(get(&db, &sched.id).await.unwrap().unwrap().state, State::Triggered);
         cleanup(db, dir).await;
@@ -1201,7 +1173,7 @@ mod tests {
                 "transient fires emit no per-failure spam, only the disable notice"
             );
             assert!(
-                calls.notified[0].contains("auto-disabled"),
+                matches!(calls.notified[0], HomeNotice::Disabled(DisableReason::ConsecutiveFailures(_))),
                 "the single notice is the auto-disable notice"
             );
         }

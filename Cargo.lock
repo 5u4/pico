@@ -1604,6 +1604,7 @@ dependencies = [
 name = "pico-discord"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "color-eyre",
  "dotenvy",
  "parking_lot",
