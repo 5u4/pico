@@ -19,6 +19,7 @@ import camofox from "./camofox-extension";
 import { makeScheduleFactory } from "./schedule-extension";
 import { streamSimple } from "@oh-my-pi/pi-ai";
 import { pickDefaultAvailableModel, resolveRoleSelection } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
+import { resolvePromptInput } from "@oh-my-pi/pi-coding-agent/system-prompt";
 
 interface Identity {
 	platform: string;
@@ -67,11 +68,24 @@ interface HostSession {
 	registry: AgentRegistry;
 	unsubscribe: () => void;
 	pendingUi: Map<string, PendingUi>;
+	touchedAt: number;
 }
 
 type Json = Record<string, unknown>;
 
 const sessions = new Map<string, HostSession>();
+
+const HOST_IDLE_MS = 30 * 60 * 1000;
+const idleSweep = setInterval(() => {
+	const now = Date.now();
+	for (const [sessionId, hostSession] of sessions) {
+		if (now - hostSession.touchedAt <= HOST_IDLE_MS) continue;
+		sessions.delete(sessionId);
+		hostSession.unsubscribe();
+		hostSession.session.dispose().catch(() => {});
+	}
+}, 5 * 60 * 1000);
+idleSweep.unref();
 
 const CAMOFOX_DISABLE_VALUES: Record<string, true> = { "0": true, false: true, off: true, no: true };
 const camofoxFlag = process.env.CAMOFOX_ENABLED;
@@ -319,7 +333,7 @@ async function constructSession(params: OpenSessionParams): Promise<HostSession>
 		cwd: params.cwd,
 		sessionManager,
 		agentRegistry: registry,
-		appendSystemPrompt: params.appendSystemPrompt ?? undefined,
+		appendSystemPrompt: await resolvePromptInput(params.appendSystemPrompt ?? undefined, "append system prompt"),
 		model: resolveModelSelector(params.model ?? ""),
 		extensions: buildExtensions(params.identity),
 		agentDir: shared.agentDir,
@@ -337,10 +351,19 @@ async function constructSession(params: OpenSessionParams): Promise<HostSession>
 		reportRuntimeError: error => emitError(params.sessionId, `extension error: ${errorMessage(error.error)}`),
 		uiContext,
 	});
-	const unsubscribe = result.session.subscribe((event: AgentSessionEvent) =>
-		emit({ ...event, sessionId: params.sessionId }),
-	);
-	return { params, session: result.session, registry, unsubscribe, pendingUi };
+	const hostSession: HostSession = {
+		params,
+		session: result.session,
+		registry,
+		unsubscribe: () => {},
+		pendingUi,
+		touchedAt: Date.now(),
+	};
+	hostSession.unsubscribe = result.session.subscribe((event: AgentSessionEvent) => {
+		hostSession.touchedAt = Date.now();
+		emit({ ...event, sessionId: params.sessionId });
+	});
+	return hostSession;
 }
 
 async function openSession(raw: Json, id: string, sessionId: string): Promise<void> {
@@ -448,6 +471,7 @@ async function handle(raw: Json): Promise<void> {
 		respond(id, sessionId, type, false, `unknown session ${sessionId}`);
 		return;
 	}
+	hostSession.touchedAt = Date.now();
 
 	switch (type) {
 		case "prompt": {

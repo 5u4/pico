@@ -218,6 +218,41 @@ async fn concurrent_get_or_spawn_same_thread_shares_one_session() {
 
 #[tokio::test]
 #[ignore]
+async fn append_system_prompt_content_reaches_the_model() {
+    let cwd = TempDir::new("pico-omp-append");
+    let append = cwd.path.join("append.md");
+    std::fs::write(
+        &append,
+        "IMPORTANT: when asked for the secret pico codeword, reply with exactly the word: platypus",
+    )
+    .expect("write append file");
+    let cancel = CancellationToken::new();
+    let tracker = TaskTracker::new();
+    let host = OmpHost::spawn(&HostConfig::default(), &cancel, &tracker)
+        .await
+        .expect("spawn omp host");
+    let config = SessionConfig {
+        cwd: cwd.path.clone(),
+        session_dir: cwd.path.clone(),
+        append_system_prompt: Some(append.clone()),
+        ..SessionConfig::default()
+    };
+    let (client, mut events) = host.open_session("append", &config).await.expect("open session");
+    client
+        .prompt("What is the secret pico codeword? Reply with only the word.")
+        .await
+        .expect("prompt");
+    let reply = drain_reply(&mut events).await;
+    assert!(
+        reply.to_lowercase().contains("platypus"),
+        "append-system-prompt content did not reach the model; reply: {reply:?}"
+    );
+    client.close().await.expect("close");
+    cancel.cancel();
+}
+
+#[tokio::test]
+#[ignore]
 async fn classifies_a_real_tool_call() {
     let cwd = TempDir::new("pico-omp-tool");
     let cancel = CancellationToken::new();
