@@ -28,7 +28,7 @@ git config --global --get-all safe.directory 2>/dev/null | grep -qxF "$REPO" \
   mkdir -p "$REPO/.cargo" \
     && printf '[build]\nrustc-wrapper = "sccache"\nincremental = false\n' > "$REPO/.cargo/config.toml"
 } 2>/dev/null \
-  || echo "[entrypoint] WARN: could not write $REPO/.cargo/config.toml; agent worktree builds won't use sccache or isolate their target dir" >&2
+  || echo "[entrypoint] WARN: could not write $REPO/.cargo/config.toml; agent worktree builds won't use sccache" >&2
 
 OMP_HOST="$REPO/omp-host"
 export PICO_OMP_HOST="$OMP_HOST/host.ts"
