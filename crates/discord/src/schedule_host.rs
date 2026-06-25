@@ -416,8 +416,8 @@ fn build_notice_embed(sched: &Schedule, notice: &HomeNotice) -> serenity::Create
             embed = embed.field("Reason", reason, false);
             let stderr = stderr_tail.trim();
             if !stderr.is_empty() {
-                let stderr = pico_core::render::truncate(&pico_core::render::defang_mentions(stderr), 1000);
-                let stderr = stderr.replace("```", "`\u{200b}`\u{200b}`");
+                let stderr = pico_core::render::defang_mentions(stderr).replace("```", "`\u{200b}`\u{200b}`");
+                let stderr = pico_core::render::truncate(&stderr, 1000);
                 embed = embed.field("stderr", format!("```\n{stderr}\n```"), false);
             }
         }
@@ -571,6 +571,21 @@ mod tests {
         let fields = v["fields"].as_array().unwrap();
         let stderr = fields.iter().find(|f| f["name"] == "stderr").unwrap();
         let value = stderr["value"].as_str().unwrap();
+        let inner = value.trim_start_matches("```\n").trim_end_matches("\n```");
+        assert!(!inner.contains("```"));
+    }
+
+    #[test]
+    fn script_failed_fence_heavy_stderr_stays_within_field_limit() {
+        let notice = HomeNotice::ScriptFailed {
+            reason: "boom".to_owned(),
+            stderr_tail: "```".repeat(800),
+        };
+        let v = serde_json::to_value(build_notice_embed(&sample_schedule(), &notice)).unwrap();
+        let fields = v["fields"].as_array().unwrap();
+        let stderr = fields.iter().find(|f| f["name"] == "stderr").unwrap();
+        let value = stderr["value"].as_str().unwrap();
+        assert!(value.chars().count() <= 1024);
         let inner = value.trim_start_matches("```\n").trim_end_matches("\n```");
         assert!(!inner.contains("```"));
     }
