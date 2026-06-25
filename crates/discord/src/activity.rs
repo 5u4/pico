@@ -33,6 +33,7 @@ pub(crate) enum ToolCallStart<'a> {
     Resolve(&'a ToolCall),
     GenerateImage(&'a ToolCall),
     Camo(&'a ToolCall),
+    Schedule(&'a ToolCall),
     Unknown(&'a ToolCall),
 }
 
@@ -66,6 +67,7 @@ impl<'a> From<&'a ToolCall> for ToolCallStart<'a> {
             "reflect" => Self::Reflect(call),
             "retain" => Self::Retain(call),
             name if name.starts_with("camo_") => Self::Camo(call),
+            name if name.starts_with("schedule_") => Self::Schedule(call),
             _ => Self::Unknown(call),
         }
     }
@@ -101,6 +103,7 @@ impl<'a> ToolCallStart<'a> {
             | Self::Resolve(c)
             | Self::GenerateImage(c)
             | Self::Camo(c)
+            | Self::Schedule(c)
             | Self::Unknown(c) => c,
         }
     }
@@ -149,6 +152,7 @@ pub(crate) fn tool_activity_line(tool: &ToolCallStart<'_>) -> String {
         ToolCallStart::Resolve(call) => resolve_line(&call.args),
         ToolCallStart::GenerateImage(call) => locate("🎨", prefer([str_arg(&call.args, "subject"), "generate_image"])),
         ToolCallStart::Camo(call) => camo_line(&call.tool_name, &call.args),
+        ToolCallStart::Schedule(call) => schedule_line(&call.tool_name, &call.args),
         ToolCallStart::Learn(call) => locate("🎓", str_arg(&call.args, "memory")),
         ToolCallStart::Recall(call) => locate("🗃️", str_arg(&call.args, "query")),
         ToolCallStart::Reflect(call) => locate("🪞", str_arg(&call.args, "query")),
@@ -258,6 +262,16 @@ fn camo_line(name: &str, args: &serde_json::Value) -> String {
     } else {
         format!("🌐 {action} {}", truncate(detail, ACTIVITY_DETAIL))
     }
+}
+
+fn schedule_line(name: &str, args: &serde_json::Value) -> String {
+    let action = name.strip_prefix("schedule_").unwrap_or(name);
+    let detail = match name {
+        "schedule_create" => str_arg(args, "name"),
+        "schedule_remove" | "schedule_enable" | "schedule_disable" => str_arg(args, "id"),
+        _ => "",
+    };
+    verb_line("📅", "schedule", action, detail)
 }
 
 fn todo_line(args: &serde_json::Value) -> String {
@@ -525,6 +539,14 @@ mod tests {
             line("camo_navigate", json!({ "macro": "@google_search", "query": "rust" })),
             "🌐 navigate rust"
         );
+        assert_eq!(
+            line("schedule_create", json!({ "name": "daily digest", "mode": "fresh" })),
+            "📅 create daily digest"
+        );
+        assert_eq!(line("schedule_list", json!({})), "📅 list");
+        assert_eq!(line("schedule_remove", json!({ "id": "01ABC" })), "📅 remove 01ABC");
+        assert_eq!(line("schedule_enable", json!({ "id": "01ABC" })), "📅 enable 01ABC");
+        assert_eq!(line("schedule_disable", json!({ "id": "01ABC" })), "📅 disable 01ABC");
     }
 
     #[test]
