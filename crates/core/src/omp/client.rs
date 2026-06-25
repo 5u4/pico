@@ -54,6 +54,7 @@ pub struct SessionConfig {
     pub continue_from_file: Option<PathBuf>,
     pub append_system_prompt: Option<PathBuf>,
     pub identity: SessionIdentity,
+    pub profile: String,
 }
 
 pub struct OmpHost {

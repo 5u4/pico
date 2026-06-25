@@ -74,6 +74,7 @@ pub async fn run_turn<S: Surface>(p: RunTurn<'_, S>) -> color_eyre::Result<TurnS
         continue_from_file,
         append_system_prompt: append_prompt,
         identity: p.identity,
+        profile: p.profile.to_owned(),
     };
 
     let handle = p.pool.get_or_spawn(p.thread_id, &config).await?;

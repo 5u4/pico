@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -16,6 +17,8 @@ use crate::omp::{
     protocol::OmpEvent,
 };
 
+type HostSlot = Arc<tokio::sync::Mutex<Option<Arc<OmpHost>>>>;
+
 const IDLE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
 const SWEEP_INTERVAL: Duration = Duration::from_secs(60);
@@ -28,6 +31,7 @@ pub struct ThreadSession {
 pub struct ThreadHandle {
     inner: tokio::sync::Mutex<ThreadSession>,
     last_active: AtomicU64,
+    profile: String,
 }
 
 impl ThreadHandle {
@@ -36,14 +40,19 @@ impl ThreadHandle {
         self.inner.lock().await
     }
 
+    pub fn profile(&self) -> &str {
+        &self.profile
+    }
+
     async fn close(&self) -> color_eyre::Result<()> {
         self.inner.lock().await.client.close().await
     }
 }
 
 pub struct OmpPool {
+    root: PathBuf,
     host_config: HostConfig,
-    host: tokio::sync::Mutex<Option<Arc<OmpHost>>>,
+    hosts: tokio::sync::Mutex<HashMap<String, HostSlot>>,
     sessions: Mutex<HashMap<String, Arc<ThreadHandle>>>,
     open_lock: tokio::sync::Mutex<()>,
     cancel: CancellationToken,
@@ -58,10 +67,16 @@ pub enum CloseOutcome {
 }
 
 impl OmpPool {
-    pub fn new(host_config: HostConfig, cancel: CancellationToken, tracker: &TaskTracker) -> Arc<OmpPool> {
+    pub fn new(
+        root: PathBuf,
+        host_config: HostConfig,
+        cancel: CancellationToken,
+        tracker: &TaskTracker,
+    ) -> Arc<OmpPool> {
         let pool = Arc::new(OmpPool {
+            root,
             host_config,
-            host: tokio::sync::Mutex::new(None),
+            hosts: tokio::sync::Mutex::new(HashMap::new()),
             sessions: Mutex::new(HashMap::new()),
             open_lock: tokio::sync::Mutex::new(()),
             cancel: cancel.clone(),
@@ -81,21 +96,32 @@ impl OmpPool {
         pool
     }
 
-    async fn host(&self) -> color_eyre::Result<Arc<OmpHost>> {
-        let mut slot = self.host.lock().await;
-        if let Some(host) = slot.as_ref() {
-            if host.is_alive() {
-                return Ok(Arc::clone(host));
-            }
-            self.sessions.lock().clear();
+    async fn host(&self, profile: &str) -> color_eyre::Result<Arc<OmpHost>> {
+        let slot = {
+            let mut hosts = self.hosts.lock().await;
+            Arc::clone(
+                hosts
+                    .entry(profile.to_owned())
+                    .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(None))),
+            )
+        };
+        let mut guard = slot.lock().await;
+        if let Some(host) = guard.as_ref()
+            && host.is_alive()
+        {
+            return Ok(Arc::clone(host));
         }
-        let host = OmpHost::spawn(&self.host_config, &self.cancel, &self.tracker).await?;
-        *slot = Some(Arc::clone(&host));
+        if guard.is_some() {
+            self.sessions.lock().retain(|_, handle| handle.profile != profile);
+        }
+        let config = profile_host_config(&self.host_config, &self.root, profile);
+        let host = OmpHost::spawn(&config, &self.cancel, &self.tracker).await?;
+        *guard = Some(Arc::clone(&host));
         Ok(host)
     }
 
     pub async fn get_or_spawn(&self, thread_id: &str, config: &SessionConfig) -> color_eyre::Result<Arc<ThreadHandle>> {
-        let host = self.host().await?;
+        let host = self.host(&config.profile).await?;
         if let Some(handle) = self.sessions.lock().get(thread_id) {
             return Ok(Arc::clone(handle));
         }
@@ -109,6 +135,7 @@ impl OmpPool {
         let handle = Arc::new(ThreadHandle {
             inner: tokio::sync::Mutex::new(ThreadSession { client, events }),
             last_active: AtomicU64::new(now_millis()),
+            profile: config.profile.clone(),
         });
         self.sessions.lock().insert(thread_id.to_owned(), Arc::clone(&handle));
         Ok(handle)
@@ -140,8 +167,8 @@ impl OmpPool {
         CloseOutcome::Closed
     }
 
-    pub async fn complete(&self, system: &str, prompt: &str) -> Option<String> {
-        let host = match self.host().await {
+    pub async fn complete(&self, profile: &str, system: &str, prompt: &str) -> Option<String> {
+        let host = match self.host(profile).await {
             Ok(host) => host,
             Err(e) => {
                 tracing::warn!(error = %format!("{e:#}"), "spawning omp host for completion failed");
@@ -180,6 +207,22 @@ impl OmpPool {
             }
         }
     }
+
+    #[doc(hidden)]
+    pub async fn host_count(&self) -> usize {
+        self.hosts.lock().await.len()
+    }
+}
+
+fn profile_host_config(base: &HostConfig, root: &Path, profile: &str) -> HostConfig {
+    let mut env = base.env.clone();
+    env.push((
+        "PICO_PROFILE_DIR".to_owned(),
+        pico_shared::paths::profile_dir(root, profile)
+            .to_string_lossy()
+            .into_owned(),
+    ));
+    HostConfig { env }
 }
 
 fn now_millis() -> u64 {
@@ -205,7 +248,12 @@ mod tests {
     async fn evictor_stops_on_cancel_so_the_tracker_drains() {
         let cancel = CancellationToken::new();
         let tracker = TaskTracker::new();
-        let _pool = OmpPool::new(HostConfig::default(), cancel.clone(), &tracker);
+        let _pool = OmpPool::new(
+            std::path::PathBuf::from("/tmp"),
+            HostConfig::default(),
+            cancel.clone(),
+            &tracker,
+        );
         cancel.cancel();
         tracker.close();
         tokio::time::timeout(Duration::from_secs(5), tracker.wait())
@@ -217,7 +265,12 @@ mod tests {
     async fn close_absent_thread_reports_absent() {
         let cancel = CancellationToken::new();
         let tracker = TaskTracker::new();
-        let pool = OmpPool::new(HostConfig::default(), cancel.clone(), &tracker);
+        let pool = OmpPool::new(
+            std::path::PathBuf::from("/tmp"),
+            HostConfig::default(),
+            cancel.clone(),
+            &tracker,
+        );
         assert_eq!(pool.close("222222222222222222").await, CloseOutcome::Absent);
         cancel.cancel();
         tracker.close();
@@ -228,5 +281,21 @@ mod tests {
         assert_eq!(close_decision(None), CloseOutcome::Absent);
         assert_eq!(close_decision(Some(1)), CloseOutcome::Closed);
         assert_eq!(close_decision(Some(2)), CloseOutcome::Busy);
+    }
+
+    #[test]
+    fn profile_host_config_appends_profile_dir_env() {
+        let base = HostConfig {
+            env: vec![("CAMOFOX_BASE_URL".to_owned(), "http://127.0.0.1:9377".to_owned())],
+        };
+        let alpha = profile_host_config(&base, Path::new("/srv/pico"), "alpha");
+        let map: HashMap<String, String> = alpha.env.into_iter().collect();
+        assert_eq!(map["CAMOFOX_BASE_URL"], "http://127.0.0.1:9377");
+        assert_eq!(map["PICO_PROFILE_DIR"], "/srv/pico/profiles/alpha");
+
+        let beta = profile_host_config(&base, Path::new("/srv/pico"), "beta");
+        let beta_map: HashMap<String, String> = beta.env.into_iter().collect();
+        assert_eq!(beta_map["PICO_PROFILE_DIR"], "/srv/pico/profiles/beta");
+        assert_ne!(map["PICO_PROFILE_DIR"], beta_map["PICO_PROFILE_DIR"]);
     }
 }
