@@ -450,15 +450,7 @@ async fn build_worker(build_dir: &std::path::Path) -> color_eyre::Result<std::pa
     let target_dir = pico_shared::paths::pico_build_target_dir()?;
     let _build = DEPLOY_BUILD_LOCK.lock().await;
     let child = tokio::process::Command::new("cargo")
-        .args([
-            "build",
-            "--release",
-            "-p",
-            "pico-worker",
-            "-p",
-            "pico-cli",
-            "--target-dir",
-        ])
+        .args(["build", "--release", "-p", "pico-worker", "--target-dir"])
         .arg(&target_dir)
         .current_dir(build_dir)
         .stdin(std::process::Stdio::null())
@@ -483,30 +475,47 @@ async fn build_worker(build_dir: &std::path::Path) -> color_eyre::Result<std::pa
             .collect();
         bail!("cargo build failed ({}):\n{tail}", out.status);
     }
-    link_cli(&target_dir).await;
+    install_cli(build_dir, &target_dir).await;
     bun_install_host(build_dir).await;
     snapshot(&target_dir).await
 }
 
-async fn link_cli(target_dir: &std::path::Path) {
-    let cli = target_dir.join("release").join("pico");
-    let bin_dir = match pico_shared::paths::local_bin_dir() {
-        Ok(dir) => dir,
+async fn install_cli(build_dir: &std::path::Path, target_dir: &std::path::Path) {
+    let root = match pico_shared::paths::local_install_root() {
+        Ok(root) => root,
         Err(e) => {
-            tracing::warn!(error = %format!("{e:#}"), "cannot resolve local bin dir; skipping pico CLI symlink");
+            tracing::warn!(error = %format!("{e:#}"), "cannot resolve local install root; skipping pico CLI install");
             return;
         }
     };
-    if let Err(e) = tokio::fs::create_dir_all(&bin_dir).await {
-        tracing::warn!(error = %e, dir = %bin_dir.display(), "creating local bin dir failed; skipping pico CLI symlink");
-        return;
-    }
-    let link = bin_dir.join("pico");
-    let _ = tokio::fs::remove_file(&link).await;
-    if let Err(e) = tokio::fs::symlink(&cli, &link).await {
-        tracing::warn!(error = %e, link = %link.display(), target = %cli.display(), "symlinking pico CLI failed; schedule extension may not find pico");
-    } else {
-        tracing::info!(link = %link.display(), target = %cli.display(), "linked pico CLI");
+    let child = tokio::process::Command::new("cargo")
+        .args(["install", "--locked", "--path"])
+        .arg(build_dir.join("crates").join("cli"))
+        .arg("--root")
+        .arg(&root)
+        .arg("--target-dir")
+        .arg(target_dir)
+        .arg("--force")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn();
+    let child = match child {
+        Ok(child) => child,
+        Err(e) => {
+            tracing::warn!(error = %e, "spawning `cargo install` for pico CLI failed; schedule extension may not find pico");
+            return;
+        }
+    };
+    match tokio::time::timeout(BUILD_TIMEOUT, child.wait_with_output()).await {
+        Ok(Ok(out)) if out.status.success() => tracing::info!("pico CLI install ok"),
+        Ok(Ok(out)) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            tracing::warn!(status = %out.status, %stderr, "pico CLI `cargo install` failed; schedule extension may not find pico");
+        }
+        Ok(Err(e)) => tracing::warn!(error = %e, "waiting on pico CLI `cargo install` failed"),
+        Err(_) => tracing::warn!("pico CLI `cargo install` timed out"),
     }
 }
 

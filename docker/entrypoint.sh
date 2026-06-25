@@ -66,8 +66,8 @@ if [ -S /var/run/docker.sock ]; then
   fi
 fi
 
-echo "[entrypoint] building pico-supervisor + pico-worker + pico-cli (release; first run pulls deps)…"
-CARGO_TARGET_DIR="$PICO_TARGET" cargo build --release -p pico-supervisor -p pico-worker -p pico-cli
+echo "[entrypoint] building pico-supervisor + pico-worker (release; first run pulls deps)…"
+CARGO_TARGET_DIR="$PICO_TARGET" cargo build --release -p pico-supervisor -p pico-worker
 
 SUP="$PICO_TARGET/release/pico-supervisor"
 WORKER="$PICO_TARGET/release/pico-worker"
@@ -76,8 +76,8 @@ CURRENT="$HOME_DIR/.pico/supervisor/slots/current"
 mkdir -p "$BIN"
 ln -sf "$SUP" "$BIN/pico-supervisor"
 ln -sf "$WORKER" "$BIN/pico-worker"
-PICO_CLI="$PICO_TARGET/release/pico"
-ln -sf "$PICO_CLI" "$BIN/pico"
+cargo install --locked --path crates/cli --root "$HOME_DIR/.local" --target-dir "$PICO_TARGET" --force \
+  || echo "[entrypoint] pico-cli install failed; schedule CLI unavailable"
 
 echo "[entrypoint] starting supervisor daemon…"
 "$SUP" &
