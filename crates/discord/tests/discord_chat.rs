@@ -178,10 +178,12 @@ async fn scripted_omp_drives_thread_and_real_smoke() {
     let root = TempRoot::new(&pico_token, guild_id);
 
     let pidfile = root.path.join("scripted-omp.pid");
+    let mut set_host = false;
     if std::env::var_os("PICO_OMP_HOST").is_none() {
         let host_entry = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../omp-host/host.ts");
         if let Ok(canon) = std::fs::canonicalize(&host_entry) {
             unsafe { std::env::set_var("PICO_OMP_HOST", canon) };
+            set_host = true;
         }
     }
     unsafe {
@@ -434,6 +436,9 @@ async fn scripted_omp_drives_thread_and_real_smoke() {
     }
     let _ = shutdown_tx.send(());
     let shutdown = tokio::time::timeout(Duration::from_secs(15), server).await;
+    if set_host {
+        unsafe { std::env::remove_var("PICO_OMP_HOST") };
+    }
 
     assert!(thread.is_some(), "pico never opened a thread for the bound-channel message");
     assert!(replied, "pico opened a thread but never posted the scripted reply");

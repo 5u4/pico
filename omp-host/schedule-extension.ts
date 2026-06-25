@@ -44,7 +44,9 @@ export function makeScheduleFactory(identity) {
     }
 
     async function mutate(verb, id) {
-      const r = await runPico([verb, id, "--scope", scope]);
+      const args = [verb, id];
+      if (scope) args.push("--scope", scope);
+      const r = await runPico(args);
       if (r.code !== 0) {
         const parsed = parseJson(r.stdout);
         throw new Error((parsed && parsed.error) || r.stderr || r.stdout || `pico exited ${r.code}`);
@@ -96,11 +98,12 @@ export function makeScheduleFactory(identity) {
           mode: p.mode,
           trigger: p.trigger,
           platform,
-          scope,
-          origin,
-          created_by: createdBy,
-          target: p.target_channel !== undefined ? p.target_channel : channel,
         };
+        if (scope) payload.scope = scope;
+        if (origin) payload.origin = origin;
+        if (createdBy) payload.created_by = createdBy;
+        const target = p.target_channel !== undefined ? p.target_channel : channel;
+        if (target) payload.target = target;
         if (p.script !== undefined) payload.script = p.script;
         if (p.prompt !== undefined) payload.prompt = p.prompt;
         const created = await createOrList(["create", "--json", JSON.stringify(payload)]);
@@ -115,7 +118,9 @@ export function makeScheduleFactory(identity) {
       description: "List the scheduled jobs for this server (id, name, mode, trigger, next run, state).",
       parameters: z.object({}),
       async execute() {
-        const items = await createOrList(["list", "--json", "--scope", scope]);
+        const listArgs = ["list", "--json"];
+        if (scope) listArgs.push("--scope", scope);
+        const items = await createOrList(listArgs);
         const arr = Array.isArray(items) ? items : [];
         if (arr.length === 0) return ok("No schedules.", { schedules: [] });
         const lines = arr.map((s) => {

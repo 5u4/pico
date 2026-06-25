@@ -81,8 +81,7 @@ const idleSweep = setInterval(() => {
 	for (const [sessionId, hostSession] of sessions) {
 		if (now - hostSession.touchedAt <= HOST_IDLE_MS) continue;
 		sessions.delete(sessionId);
-		hostSession.unsubscribe();
-		hostSession.session.dispose().catch(() => {});
+		void disposeSession(hostSession);
 	}
 }, 5 * 60 * 1000);
 idleSweep.unref();
@@ -120,6 +119,15 @@ function respond(id: string, sessionId: string, command: string, success: boolea
 
 function emitError(sessionId: string, message: string): void {
 	emit({ type: "error", sessionId, message });
+}
+
+async function disposeSession(hostSession: HostSession): Promise<void> {
+	for (const pending of hostSession.pendingUi.values()) {
+		pending.resolve({ cancelled: true, timedOut: false });
+	}
+	hostSession.pendingUi.clear();
+	hostSession.unsubscribe();
+	await hostSession.session.dispose().catch(() => {});
 }
 
 class SessionUIContext {
@@ -409,8 +417,7 @@ async function runCommand(
 
 async function newSession(id: string, sessionId: string, hostSession: HostSession): Promise<void> {
 	try {
-		hostSession.unsubscribe();
-		await hostSession.session.dispose();
+		await disposeSession(hostSession);
 		const fresh = await constructSession({ ...hostSession.params, continueFromFile: null });
 		sessions.set(sessionId, fresh);
 		respond(id, sessionId, "new_session", true);
@@ -423,12 +430,7 @@ async function newSession(id: string, sessionId: string, hostSession: HostSessio
 
 async function closeSession(id: string, sessionId: string, hostSession: HostSession): Promise<void> {
 	sessions.delete(sessionId);
-	hostSession.unsubscribe();
-	try {
-		await hostSession.session.dispose();
-	} catch (e) {
-		emitError(sessionId, errorMessage(e));
-	}
+	await disposeSession(hostSession);
 	respond(id, sessionId, "close_session", true);
 }
 
