@@ -273,21 +273,11 @@ function resolveModelSelector(selector: string): Model {
 	return fuzzy ?? shared.defaultModel;
 }
 
-function cheapestAvailableModel(): Model {
-	const available = shared.modelRegistry.getAvailable();
-	const copilot = available.filter(model => model.provider === "github-copilot");
-	const model =
-		copilot.find(candidate => /haiku/.test(candidate.id)) ??
-		copilot.find(candidate => !/opus/.test(candidate.id)) ??
-		copilot[0] ??
-		available[0];
-	if (!model) throw new Error("no available model for completion");
-	return model;
-}
-
 async function runCompletion(id: string, system: string, prompt: string): Promise<void> {
 	try {
-		const model = cheapestAvailableModel();
+		const model =
+			resolveRoleSelection(["smol", "default"], shared.settings, shared.modelRegistry.getAvailable(), shared.modelRegistry)
+				?.model ?? shared.defaultModel;
 		const stream = streamSimple(
 			model,
 			{
