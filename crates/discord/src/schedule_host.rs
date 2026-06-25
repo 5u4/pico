@@ -226,7 +226,7 @@ impl DiscordScheduleHost {
                     ),
                     Err(e) => {
                         tracing::warn!(error = %format!("{e:#}"), schedule_id = %sched.id, "scheduled worktree setup failed");
-                        return FireOutcome::Delivered;
+                        return FireOutcome::Transient;
                     }
                 }
             }

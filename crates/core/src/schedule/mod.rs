@@ -392,6 +392,7 @@ async fn set_next_run(
 
 const MAX_CONSECUTIVE_FAILURES: i64 = 3;
 const MIN_IDLE: Duration = Duration::from_secs(1);
+const TRANSIENT_RETRY_BACKOFF: Duration = Duration::from_secs(300);
 
 pub async fn run<H: ScheduleHost + 'static>(db: &SqlitePool, host: H, cfg: ScheduleConfig, cancel: CancellationToken) {
     let db = db.clone();
@@ -591,7 +592,12 @@ async fn record_transient<H: ScheduleHost>(
         )
         .await;
     } else {
-        advance_after_failure(db, sched, now).await?;
+        match &sched.trigger {
+            Trigger::Oneshot { .. } => {
+                set_next_run(db, &sched.id, now, trunc_secs(now + to_delta(TRANSIENT_RETRY_BACKOFF))).await?;
+            }
+            _ => advance_after_failure(db, sched, now).await?,
+        }
     }
     Ok(())
 }
@@ -1199,6 +1205,41 @@ mod tests {
                 "the single notice is the auto-disable notice"
             );
         }
+        cleanup(db, dir).await;
+    }
+
+    #[tokio::test]
+    async fn fire_one_oneshot_transient_retries_and_is_not_consumed() {
+        let (db, dir) = temp_db("fire-oneshot-transient").await;
+        let at = now() + TimeDelta::seconds(3600);
+        let created = create(&db, new_oneshot(Some("ping"), None, at)).await.unwrap();
+        let mut host = FakeHost::new();
+        host.fire_outcome = FireOutcome::Transient;
+
+        let mut sched = created.clone();
+        for expected in 1..=2 {
+            fire_one(&db, &host, &cfg(), &sched, sched.next_run_at).await.unwrap();
+            let reloaded = get(&db, &sched.id).await.unwrap().unwrap();
+            assert_eq!(reloaded.consecutive_failures, expected);
+            assert_eq!(
+                reloaded.state,
+                State::Active,
+                "a transient oneshot retries and is never consumed as Triggered"
+            );
+            assert!(
+                reloaded.next_run_at > sched.next_run_at,
+                "a transient oneshot backs off for a later retry"
+            );
+            sched = reloaded;
+        }
+
+        fire_one(&db, &host, &cfg(), &sched, sched.next_run_at).await.unwrap();
+        let reloaded = get(&db, &sched.id).await.unwrap().unwrap();
+        assert_eq!(
+            reloaded.state,
+            State::Disabled,
+            "the third consecutive transient failure disables the oneshot, never silently Triggered"
+        );
         cleanup(db, dir).await;
     }
 }
