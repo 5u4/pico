@@ -11,7 +11,7 @@ use crate::{
     config::StreamingBehavior,
     mid_turn::MidTurnQueue,
     omp::{
-        client::OmpClient,
+        client::OmpSessionHandle,
         pool::ThreadSession,
         protocol::{AssistantMessageEvent, OmpEvent, ToolCall, ToolCallEnd, ToolCallUpdate, UiRequest, UiResponse},
     },
@@ -240,7 +240,7 @@ pub async fn drive_turn<S: Surface>(
 }
 
 async fn forward_next_pending(
-    client: &OmpClient,
+    client: &OmpSessionHandle,
     deferred: &mut std::collections::VecDeque<String>,
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<(String, StreamingBehavior)>,
 ) -> color_eyre::Result<bool> {
@@ -274,20 +274,24 @@ fn ui_request_id(req: &UiRequest) -> Option<&str> {
     }
 }
 
-async fn handle_ui<S: Surface>(surface: &S, client: &OmpClient, req: &UiRequest) -> UiDisposition {
+async fn handle_ui<S: Surface>(surface: &S, client: &OmpSessionHandle, req: &UiRequest) -> UiDisposition {
     match req {
         UiRequest::Cancel { .. } | UiRequest::Ignore => UiDisposition::Continue { posted: false },
         UiRequest::Unknown { id, method } => {
             tracing::warn!(%method, "unrecognised extension_ui_request; auto-cancelled");
             if let Some(id) = id {
-                let _ = client.ui_response(&UiResponse::cancelled(id, false)).await;
+                let _ = client
+                    .ui_response(&UiResponse::cancelled(client.session_id(), id, false))
+                    .await;
             }
             UiDisposition::Continue { posted: false }
         }
         _ => match surface.ui(req).await {
             UiOutcome::Cancelled => {
                 if let Some(id) = ui_request_id(req) {
-                    let _ = client.ui_response(&UiResponse::cancelled(id, false)).await;
+                    let _ = client
+                        .ui_response(&UiResponse::cancelled(client.session_id(), id, false))
+                        .await;
                 }
                 UiDisposition::Cancelled
             }
@@ -295,9 +299,9 @@ async fn handle_ui<S: Surface>(surface: &S, client: &OmpClient, req: &UiRequest)
             UiOutcome::Respond { reply, posted } => {
                 if let Some(id) = ui_request_id(req) {
                     let resp = match &reply {
-                        UiReply::Value(v) => UiResponse::value(id, v),
-                        UiReply::Confirmed(b) => UiResponse::confirmed(id, *b),
-                        UiReply::Dismissed { timed_out } => UiResponse::cancelled(id, *timed_out),
+                        UiReply::Value(v) => UiResponse::value(client.session_id(), id, v),
+                        UiReply::Confirmed(b) => UiResponse::confirmed(client.session_id(), id, *b),
+                        UiReply::Dismissed { timed_out } => UiResponse::cancelled(client.session_id(), id, *timed_out),
                     };
                     let _ = client.ui_response(&resp).await;
                 }

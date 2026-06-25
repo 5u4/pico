@@ -57,7 +57,7 @@ async fn camofox_opens_a_tab_and_snapshots() {
     pico_core::omp::camofox::ensure_engine(cancel.clone()).await;
     daemon.ensure_started().await;
 
-    let env: HashMap<String, String> = daemon.injection("default", "e2e").1.into_iter().collect();
+    let env: HashMap<String, String> = daemon.host_env(true).into_iter().collect();
     let base = env["CAMOFOX_BASE_URL"].clone();
     let key = env["CAMOFOX_ACCESS_KEY"].clone();
 
@@ -87,29 +87,4 @@ async fn camofox_opens_a_tab_and_snapshots() {
     tracker.close();
     tracker.wait().await;
     std::fs::remove_dir_all(&root).ok();
-}
-
-#[test]
-#[ignore = "live: needs omp on PATH + an authenticated model"]
-fn omp_loads_extension_and_registers_camo_tools() {
-    let ext = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/omp/camofox_extension.ts");
-    let cwd = temp_root();
-    let output = std::process::Command::new("omp")
-        .args(["-p", "--no-lsp", "--no-session", "--auto-approve", "-e"])
-        .arg(&ext)
-        .arg("Reply with ONLY a comma-separated list of the exact names of every tool you can call.")
-        .current_dir(&cwd)
-        .env("CAMOFOX_BASE_URL", "http://127.0.0.1:1")
-        .env("CAMOFOX_USER_ID", "t")
-        .env("CAMOFOX_SESSION_KEY", "t")
-        .env("CAMOFOX_ACCESS_KEY", "k")
-        .output()
-        .expect("run omp");
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stdout.contains("camo_"),
-        "omp exposed no camo_* tools (extension failed to load?)\nstdout: {stdout}\nstderr: {stderr}"
-    );
-    std::fs::remove_dir_all(&cwd).ok();
 }

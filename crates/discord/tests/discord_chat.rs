@@ -1,5 +1,5 @@
 use std::{
-    os::unix::fs::{PermissionsExt, symlink},
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::Command,
     sync::LazyLock,
@@ -177,12 +177,19 @@ async fn scripted_omp_drives_thread_and_real_smoke() {
     let guild_id: u64 = var("E2E_GUILD_ID").parse().expect("E2E_GUILD_ID must be a snowflake");
     let root = TempRoot::new(&pico_token, guild_id);
 
-    let bindir = root.path.join("bin");
-    std::fs::create_dir_all(&bindir).unwrap();
-    symlink(&*SCRIPTED_OMP, bindir.join("omp")).unwrap();
-    let original_path = std::env::var("PATH").unwrap_or_default();
-    let shadowed = format!("{}:{}", bindir.display(), original_path);
-    unsafe { std::env::set_var("PATH", shadowed) };
+    let pidfile = root.path.join("scripted-omp.pid");
+    let mut set_host = false;
+    if std::env::var_os("PICO_OMP_HOST").is_none() {
+        let host_entry = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../omp-host/host.ts");
+        if let Ok(canon) = std::fs::canonicalize(&host_entry) {
+            unsafe { std::env::set_var("PICO_OMP_HOST", canon) };
+            set_host = true;
+        }
+    }
+    unsafe {
+        std::env::set_var("PICO_OMP_BIN", &*SCRIPTED_OMP);
+        std::env::set_var("SCRIPTED_OMP_PIDFILE", &pidfile);
+    }
 
     let app = App::build(&root.path, None).await.expect("build pico app");
     let (connected_tx, connected_rx) = oneshot::channel();
@@ -384,7 +391,16 @@ async fn scripted_omp_drives_thread_and_real_smoke() {
     )
     .await;
 
-    unsafe { std::env::set_var("PATH", original_path) };
+    unsafe {
+        std::env::remove_var("PICO_OMP_BIN");
+        std::env::remove_var("SCRIPTED_OMP_PIDFILE");
+    }
+    if let Ok(raw) = std::fs::read_to_string(&pidfile)
+        && let Ok(pid) = raw.trim().parse::<u32>()
+    {
+        let _ = Command::new("kill").arg("-KILL").arg(pid.to_string()).status();
+    }
+    tokio::time::sleep(Duration::from_secs(3)).await;
     let mut smoke_ok = false;
     if let Ok(smoke_msg) = channel
         .say(&driver, format!("Reply with exactly the single word: pong (e2e {marker})"))
@@ -420,6 +436,9 @@ async fn scripted_omp_drives_thread_and_real_smoke() {
     }
     let _ = shutdown_tx.send(());
     let shutdown = tokio::time::timeout(Duration::from_secs(15), server).await;
+    if set_host {
+        unsafe { std::env::remove_var("PICO_OMP_HOST") };
+    }
 
     assert!(thread.is_some(), "pico never opened a thread for the bound-channel message");
     assert!(replied, "pico opened a thread but never posted the scripted reply");

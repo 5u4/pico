@@ -30,10 +30,10 @@ git config --global --get-all safe.directory 2>/dev/null | grep -qxF "$REPO" \
 } 2>/dev/null \
   || echo "[entrypoint] WARN: could not write $REPO/.cargo/config.toml; agent worktree builds won't share the cargo cache" >&2
 
-if ! command -v omp >/dev/null 2>&1; then
-  echo "[entrypoint] installing omp (latest)…"
-  bun add -g @oh-my-pi/pi-coding-agent
-fi
+OMP_HOST="$REPO/omp-host"
+export PICO_OMP_HOST="$OMP_HOST/host.ts"
+echo "[entrypoint] installing omp-host deps into $OMP_HOST (pinned SDK; first run pulls deps)…"
+( cd "$OMP_HOST" && bun install )
 
 # Preflight: confirm we own our writable paths. The usual failure is a stale
 # root-owned named volume carried over from the old root-based image — surface it

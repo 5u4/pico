@@ -78,10 +78,6 @@ pub fn camofox_dir(root: &Path) -> PathBuf {
     root.join("camofox")
 }
 
-pub fn camofox_extension(root: &Path) -> PathBuf {
-    camofox_dir(root).join("extension.ts")
-}
-
 pub fn camofox_profile_dir(root: &Path) -> PathBuf {
     camofox_dir(root).join("profiles")
 }

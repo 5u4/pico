@@ -1,17 +1,90 @@
-use std::io::{BufRead, Write};
+use std::{
+    collections::HashMap,
+    io::{BufRead, Stdout, Write},
+    sync::{Arc, Mutex},
+    thread,
+    time::Duration,
+};
 
 use serde_json::{Value, json};
 
+type Out = Arc<Mutex<Stdout>>;
+
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("scripted-omp 0.0.0");
-    } else if args.first().map(String::as_str) == Some("config") {
-        println!(r#"{{"value":{{"smol":"scripted/smol","default":"scripted/default"}}}}"#);
-    } else if args.iter().any(|a| a == "-p") {
-        println!("Scripted thread title");
-    } else {
-        run_rpc();
+    let out: Out = Arc::new(Mutex::new(std::io::stdout()));
+    if let Ok(path) = std::env::var("SCRIPTED_OMP_PIDFILE") {
+        let _ = std::fs::write(path, std::process::id().to_string());
+    }
+    emit(&out, &json!({ "type": "ready" }));
+
+    let stdin = std::io::stdin();
+    let mut queue_pending: HashMap<String, String> = HashMap::new();
+    for line in stdin.lock().lines() {
+        let Ok(line) = line else { break };
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(frame) = serde_json::from_str::<Value>(trimmed) else {
+            continue;
+        };
+        dispatch(&out, &frame, &mut queue_pending);
+    }
+}
+
+fn dispatch(out: &Out, frame: &Value, queue_pending: &mut HashMap<String, String>) {
+    let kind = frame.get("type").and_then(Value::as_str).unwrap_or_default();
+    let id = frame.get("id").and_then(Value::as_str).unwrap_or_default();
+    let session_id = frame.get("sessionId").and_then(Value::as_str).unwrap_or_default();
+    match kind {
+        "completion" => emit(
+            out,
+            &json!({
+                "type": "response",
+                "id": id,
+                "command": "completion",
+                "success": true,
+                "result": "Scripted thread title",
+            }),
+        ),
+        "prompt" => {
+            ack(out, "prompt", id, session_id);
+            handle_prompt(out, session_id, frame, queue_pending);
+        }
+        "follow_up" | "steer" => {
+            ack(out, kind, id, session_id);
+            if let Some(marker) = queue_pending.remove(session_id) {
+                let message = frame.get("message").and_then(Value::as_str).unwrap_or_default();
+                emit_queue_tail(out, session_id, &marker, kind, unwrap_message(message));
+            }
+        }
+        _ if !id.is_empty() => ack(out, kind, id, session_id),
+        _ => {}
+    }
+}
+
+fn handle_prompt(out: &Out, session_id: &str, frame: &Value, queue_pending: &mut HashMap<String, String>) {
+    emit(out, &event(session_id, "agent_start"));
+    let message = frame.get("message").and_then(Value::as_str).unwrap_or_default();
+    let message = unwrap_message(message);
+    match message.trim().split_once(' ') {
+        Some(("SEQ", marker)) => {
+            emit_seq(out, session_id, marker);
+            emit(out, &event(session_id, "agent_end"));
+        }
+        Some(("WHITE", marker)) => {
+            emit_white(out, session_id, marker);
+            emit(out, &event(session_id, "agent_end"));
+        }
+        Some(("BGTASK", marker)) => emit_bgtask(out, session_id, marker),
+        Some(("QUEUE", marker)) => {
+            emit_queue_head(out, session_id, marker);
+            queue_pending.insert(session_id.to_owned(), marker.to_owned());
+        }
+        _ => {
+            emit(out, &text_delta(session_id, &reply_for(message)));
+            emit(out, &event(session_id, "agent_end"));
+        }
     }
 }
 
@@ -34,165 +107,164 @@ fn unwrap_message(message: &str) -> &str {
     message
 }
 
-fn emit_seq(out: &mut impl Write, marker: &str) {
-    let frames = [
-        json!({ "type": "tool_execution_start", "toolCallId": "seq-a", "toolName": "read", "args": { "path": format!("ACT-A-{marker}") } }),
-        json!({ "type": "tool_execution_end", "toolCallId": "seq-a", "toolName": "read", "result": {}, "isError": false }),
-        json!({ "type": "tool_execution_start", "toolCallId": "seq-task", "toolName": "task", "args": { "agent": "task", "tasks": [{ "id": "seq-child", "description": format!("SEQCHILD-{marker}") }] } }),
-        json!({ "type": "tool_execution_end", "toolCallId": "seq-task", "toolName": "task", "result": {}, "isError": false }),
-        json!({ "type": "tool_execution_start", "toolCallId": "seq-b", "toolName": "read", "args": { "path": format!("ACT-B-{marker}") } }),
-        json!({ "type": "tool_execution_end", "toolCallId": "seq-b", "toolName": "read", "result": {}, "isError": false }),
-    ];
-    for frame in &frames {
-        emit(out, frame);
-    }
-}
-
-fn emit_bgtask(out: &mut impl Write, marker: &str) {
-    let run1 = [
-        json!({ "type": "tool_execution_start", "toolCallId": "bg-task", "toolName": "task", "args": { "agent": "task", "tasks": [{ "id": "bg-child", "description": format!("BGCHILD-{marker}") }] } }),
-        json!({ "type": "tool_execution_end", "toolCallId": "bg-task", "toolName": "task", "result": { "async": { "state": "running" } }, "isError": false }),
-        json!({ "type": "message_update", "assistantMessageEvent": { "type": "text_delta", "delta": format!("BGKICK-{marker}") } }),
-        json!({ "type": "turn_end" }),
-        json!({ "type": "agent_end" }),
-    ];
-    for frame in &run1 {
-        emit(out, frame);
-    }
-    std::thread::sleep(std::time::Duration::from_secs(4));
-    let run2 = [
-        json!({ "type": "agent_start" }),
-        json!({ "type": "message_update", "assistantMessageEvent": { "type": "text_delta", "delta": format!("BGDONE-{marker}") } }),
-        json!({ "type": "turn_end" }),
-        json!({ "type": "agent_end" }),
-    ];
-    for frame in &run2 {
-        emit(out, frame);
-    }
-}
-
-fn emit_white(out: &mut impl Write, marker: &str) {
-    let frames = [
-        json!({ "type": "message_update", "assistantMessageEvent": { "type": "text_start", "contentIndex": 0 } }),
-        json!({ "type": "message_update", "assistantMessageEvent": { "type": "text_delta", "contentIndex": 0, "delta": format!("PRE-{marker}") } }),
-        json!({ "type": "message_update", "assistantMessageEvent": { "type": "text_end", "contentIndex": 0, "content": format!("PRE-{marker}") } }),
-        json!({ "type": "tool_execution_start", "toolCallId": "white-a", "toolName": "read", "args": { "path": format!("WACT-{marker}") } }),
-        json!({ "type": "tool_execution_end", "toolCallId": "white-a", "toolName": "read", "result": {}, "isError": false }),
-        json!({ "type": "message_update", "assistantMessageEvent": { "type": "text_start", "contentIndex": 0 } }),
-        json!({ "type": "message_update", "assistantMessageEvent": { "type": "text_delta", "contentIndex": 0, "delta": format!("POST-{marker}") } }),
-        json!({ "type": "message_update", "assistantMessageEvent": { "type": "text_end", "contentIndex": 0, "content": format!("POST-{marker}") } }),
-        json!({ "type": "turn_end" }),
-    ];
-    for frame in &frames {
-        emit(out, frame);
-    }
-}
-
-fn run_rpc() {
-    let stdin = std::io::stdin();
-    let mut out = std::io::stdout();
-    emit(&mut out, &json!({ "type": "ready" }));
-
-    let mut lines = stdin.lock().lines();
-    while let Some(Ok(line)) = lines.next() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let Ok(frame) = serde_json::from_str::<Value>(trimmed) else {
-            continue;
-        };
-        let kind = frame.get("type").and_then(Value::as_str).unwrap_or_default();
-        let id = frame.get("id").and_then(Value::as_str).unwrap_or_default();
-        match kind {
-            "prompt" => {
-                ack(&mut out, "prompt", id);
-                emit(&mut out, &json!({ "type": "agent_start" }));
-                let message = frame.get("message").and_then(Value::as_str).unwrap_or_default();
-                let message = unwrap_message(message);
-                match message.trim().split_once(' ') {
-                    Some(("SEQ", marker)) => emit_seq(&mut out, marker),
-                    Some(("WHITE", marker)) => emit_white(&mut out, marker),
-                    Some(("BGTASK", marker)) => {
-                        emit_bgtask(&mut out, marker);
-                        continue;
-                    }
-                    Some(("QUEUE", marker)) => {
-                        run_queue(&mut out, &mut lines, marker);
-                        continue;
-                    }
-                    _ => emit(
-                        &mut out,
-                        &json!({
-                            "type": "message_update",
-                            "assistantMessageEvent": { "type": "text_delta", "delta": reply_for(message) },
-                        }),
-                    ),
-                }
-                emit(&mut out, &json!({ "type": "agent_end" }));
-            }
-            _ if !id.is_empty() => ack(&mut out, kind, id),
-            _ => {}
-        }
-    }
-}
-
-fn run_queue<R: std::io::BufRead>(out: &mut impl Write, lines: &mut std::io::Lines<R>, marker: &str) {
+fn emit_seq(out: &Out, session_id: &str, marker: &str) {
     emit(
         out,
-        &json!({ "type": "tool_execution_start", "toolCallId": format!("q-{marker}"), "toolName": "read", "args": { "path": format!("QWAIT-{marker}") } }),
+        &tool_start(session_id, "seq-a", "read", json!({ "path": format!("ACT-A-{marker}") })),
+    );
+    emit(out, &tool_end(session_id, "seq-a", "read"));
+    emit(
+        out,
+        &tool_start(
+            session_id,
+            "seq-task",
+            "task",
+            json!({ "agent": "task", "tasks": [{ "id": "seq-child", "description": format!("SEQCHILD-{marker}") }] }),
+        ),
+    );
+    emit(out, &tool_end(session_id, "seq-task", "task"));
+    emit(
+        out,
+        &tool_start(session_id, "seq-b", "read", json!({ "path": format!("ACT-B-{marker}") })),
+    );
+    emit(out, &tool_end(session_id, "seq-b", "read"));
+}
+
+fn emit_bgtask(out: &Out, session_id: &str, marker: &str) {
+    emit(
+        out,
+        &tool_start(
+            session_id,
+            "bg-task",
+            "task",
+            json!({ "agent": "task", "tasks": [{ "id": "bg-child", "description": format!("BGCHILD-{marker}") }] }),
+        ),
     );
     emit(
         out,
-        &json!({ "type": "tool_execution_end", "toolCallId": format!("q-{marker}"), "toolName": "read", "result": {}, "isError": false }),
+        &json!({
+            "type": "tool_execution_end",
+            "sessionId": session_id,
+            "toolCallId": "bg-task",
+            "toolName": "task",
+            "result": { "async": { "state": "running" } },
+            "isError": false,
+        }),
     );
+    emit(out, &text_delta(session_id, &format!("BGKICK-{marker}")));
+    emit(out, &event(session_id, "turn_end"));
+    emit(out, &event(session_id, "agent_end"));
 
-    let mut queued: Option<(String, String)> = None;
-    for line in lines {
-        let Ok(line) = line else { break };
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let Ok(frame) = serde_json::from_str::<Value>(trimmed) else {
-            continue;
-        };
-        let kind = frame.get("type").and_then(Value::as_str).unwrap_or_default();
-        let id = frame.get("id").and_then(Value::as_str).unwrap_or_default();
-        if !id.is_empty() {
-            ack(out, kind, id);
-        }
-        if kind == "follow_up" || kind == "steer" {
-            let message = frame.get("message").and_then(Value::as_str).unwrap_or_default();
-            queued = Some((kind.to_owned(), unwrap_message(message).to_owned()));
-            break;
-        }
-    }
-
-    let cmd = queued.as_ref().map_or("none", |(kind, _)| kind.as_str());
-    emit(
-        out,
-        &json!({ "type": "message_update", "assistantMessageEvent": { "type": "text_delta", "delta": format!("ALPHA-{marker}-{cmd}") } }),
-    );
-    emit(out, &json!({ "type": "turn_end" }));
-    if let Some((_, msg)) = &queued {
-        emit(
-            out,
-            &json!({ "type": "message_update", "assistantMessageEvent": { "type": "text_delta", "delta": reply_for(msg) } }),
-        );
-        emit(out, &json!({ "type": "turn_end" }));
-    }
-    emit(out, &json!({ "type": "agent_end" }));
+    let out = Arc::clone(out);
+    let session_id = session_id.to_owned();
+    let marker = marker.to_owned();
+    thread::spawn(move || {
+        thread::sleep(Duration::from_secs(4));
+        emit(&out, &event(&session_id, "agent_start"));
+        emit(&out, &text_delta(&session_id, &format!("BGDONE-{marker}")));
+        emit(&out, &event(&session_id, "turn_end"));
+        emit(&out, &event(&session_id, "agent_end"));
+    });
 }
 
-fn ack(out: &mut impl Write, command: &str, id: &str) {
+fn emit_white(out: &Out, session_id: &str, marker: &str) {
+    emit(out, &white_text(session_id, "text_start", None));
     emit(
         out,
-        &json!({ "type": "response", "command": command, "success": true, "id": id }),
+        &white_text(session_id, "text_delta", Some(("delta", format!("PRE-{marker}")))),
+    );
+    emit(
+        out,
+        &white_text(session_id, "text_end", Some(("content", format!("PRE-{marker}")))),
+    );
+    emit(
+        out,
+        &tool_start(session_id, "white-a", "read", json!({ "path": format!("WACT-{marker}") })),
+    );
+    emit(out, &tool_end(session_id, "white-a", "read"));
+    emit(out, &white_text(session_id, "text_start", None));
+    emit(
+        out,
+        &white_text(session_id, "text_delta", Some(("delta", format!("POST-{marker}")))),
+    );
+    emit(
+        out,
+        &white_text(session_id, "text_end", Some(("content", format!("POST-{marker}")))),
+    );
+    emit(out, &event(session_id, "turn_end"));
+}
+
+fn emit_queue_head(out: &Out, session_id: &str, marker: &str) {
+    emit(
+        out,
+        &tool_start(
+            session_id,
+            &format!("q-{marker}"),
+            "read",
+            json!({ "path": format!("QWAIT-{marker}") }),
+        ),
+    );
+    emit(out, &tool_end(session_id, &format!("q-{marker}"), "read"));
+}
+
+fn emit_queue_tail(out: &Out, session_id: &str, marker: &str, cmd: &str, message: &str) {
+    emit(out, &text_delta(session_id, &format!("ALPHA-{marker}-{cmd}")));
+    emit(out, &event(session_id, "turn_end"));
+    emit(out, &text_delta(session_id, &reply_for(message)));
+    emit(out, &event(session_id, "turn_end"));
+    emit(out, &event(session_id, "agent_end"));
+}
+
+fn event(session_id: &str, ty: &str) -> Value {
+    json!({ "type": ty, "sessionId": session_id })
+}
+
+fn text_delta(session_id: &str, delta: &str) -> Value {
+    json!({
+        "type": "message_update",
+        "sessionId": session_id,
+        "assistantMessageEvent": { "type": "text_delta", "delta": delta },
+    })
+}
+
+fn white_text(session_id: &str, ty: &str, field: Option<(&str, String)>) -> Value {
+    let mut ev = json!({ "type": ty, "contentIndex": 0 });
+    if let Some((key, value)) = field {
+        ev[key] = Value::String(value);
+    }
+    json!({ "type": "message_update", "sessionId": session_id, "assistantMessageEvent": ev })
+}
+
+fn tool_start(session_id: &str, tool_call_id: &str, tool_name: &str, args: Value) -> Value {
+    json!({
+        "type": "tool_execution_start",
+        "sessionId": session_id,
+        "toolCallId": tool_call_id,
+        "toolName": tool_name,
+        "args": args,
+    })
+}
+
+fn tool_end(session_id: &str, tool_call_id: &str, tool_name: &str) -> Value {
+    json!({
+        "type": "tool_execution_end",
+        "sessionId": session_id,
+        "toolCallId": tool_call_id,
+        "toolName": tool_name,
+        "result": {},
+        "isError": false,
+    })
+}
+
+fn ack(out: &Out, command: &str, id: &str, session_id: &str) {
+    emit(
+        out,
+        &json!({ "type": "response", "id": id, "sessionId": session_id, "command": command, "success": true }),
     );
 }
 
-fn emit(out: &mut impl Write, frame: &Value) {
-    let _ = writeln!(out, "{frame}");
-    let _ = out.flush();
+fn emit(out: &Out, frame: &Value) {
+    let mut guard = out.lock().unwrap_or_else(|e| e.into_inner());
+    let _ = writeln!(guard, "{frame}");
+    let _ = guard.flush();
 }
