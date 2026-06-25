@@ -261,19 +261,12 @@ fn camo_line(name: &str, args: &serde_json::Value) -> String {
 }
 
 fn todo_line(args: &serde_json::Value) -> String {
-    let Some(first) = args
-        .get("ops")
-        .and_then(serde_json::Value::as_array)
-        .and_then(|o| o.first())
-    else {
-        return "📋 todo".to_owned();
-    };
-    let op = str_arg(first, "op");
+    let op = str_arg(args, "op");
     let detail = match op {
-        "init" => format!("init {} tasks", todo_init_count(first)),
+        "init" => format!("init {} tasks", todo_init_count(args)),
         "append" => {
-            let phase = str_arg(first, "phase");
-            let n = first
+            let phase = str_arg(args, "phase");
+            let n = args
                 .get("items")
                 .and_then(serde_json::Value::as_array)
                 .map_or(0, Vec::len);
@@ -284,7 +277,7 @@ fn todo_line(args: &serde_json::Value) -> String {
             }
         }
         "done" | "start" | "drop" => {
-            let what = prefer([str_arg(first, "task"), str_arg(first, "phase")]);
+            let what = prefer([str_arg(args, "task"), str_arg(args, "phase")]);
             if what.is_empty() {
                 op.to_owned()
             } else {
@@ -297,11 +290,11 @@ fn todo_line(args: &serde_json::Value) -> String {
     format!("📋 {}", truncate(&detail, ACTIVITY_DETAIL))
 }
 
-fn todo_init_count(op: &serde_json::Value) -> usize {
-    if let Some(items) = op.get("items").and_then(serde_json::Value::as_array) {
+fn todo_init_count(args: &serde_json::Value) -> usize {
+    if let Some(items) = args.get("items").and_then(serde_json::Value::as_array) {
         return items.len();
     }
-    let Some(phases) = op.get("list").and_then(serde_json::Value::as_array) else {
+    let Some(phases) = args.get("list").and_then(serde_json::Value::as_array) else {
         return 0;
     };
     phases
@@ -472,26 +465,20 @@ mod tests {
         assert_eq!(
             line(
                 "todo",
-                json!({ "ops": [{ "op": "init", "list": [{ "phase": "A", "items": ["x", "y"] }, { "phase": "B", "items": ["z"] }] }] })
+                json!({ "op": "init", "list": [{ "phase": "A", "items": ["x", "y"] }, { "phase": "B", "items": ["z"] }] })
             ),
             "📋 init 3 tasks"
         );
+        assert_eq!(line("todo", json!({ "op": "init", "items": ["a", "b"] })), "📋 init 2 tasks");
         assert_eq!(
-            line("todo", json!({ "ops": [{ "op": "init", "items": ["a", "b"] }] })),
-            "📋 init 2 tasks"
-        );
-        assert_eq!(
-            line("todo", json!({ "ops": [{ "op": "done", "task": "Wire workspace" }] })),
+            line("todo", json!({ "op": "done", "task": "Wire workspace" })),
             "📋 done: Wire workspace"
         );
         assert_eq!(
-            line(
-                "todo",
-                json!({ "ops": [{ "op": "append", "phase": "Auth", "items": ["a", "b"] }] })
-            ),
+            line("todo", json!({ "op": "append", "phase": "Auth", "items": ["a", "b"] })),
             "📋 append Auth (2)"
         );
-        assert_eq!(line("todo", json!({ "ops": [{ "op": "view" }] })), "📋 view");
+        assert_eq!(line("todo", json!({ "op": "view" })), "📋 view");
         assert_eq!(
             line("github", json!({ "op": "search_issues", "query": "rust async" })),
             "🐙 search_issues rust async"
@@ -519,12 +506,9 @@ mod tests {
         assert_eq!(line("camo_type", json!({ "text": "hi" })), "🌐 type hi");
         assert_eq!(line("camo_list_tabs", json!({})), "🌐 list tabs");
         assert_eq!(line("todo", json!({})), "📋 todo");
-        assert_eq!(
-            line("todo", json!({ "ops": [{ "op": "append", "items": ["a"] }] })),
-            "📋 append 1"
-        );
-        assert_eq!(line("todo", json!({ "ops": [{ "op": "done" }] })), "📋 done");
-        assert_eq!(line("todo", json!({ "ops": [{ "op": "" }] })), "📋 todo");
+        assert_eq!(line("todo", json!({ "op": "append", "items": ["a"] })), "📋 append 1");
+        assert_eq!(line("todo", json!({ "op": "done" })), "📋 done");
+        assert_eq!(line("todo", json!({ "op": "" })), "📋 todo");
         assert_eq!(
             line("github", json!({ "op": "pr_view", "pr": 42, "repo": "o/r" })),
             "🐙 pr_view o/r"
