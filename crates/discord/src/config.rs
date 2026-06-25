@@ -14,6 +14,7 @@ pub struct DiscordConfig {
 pub struct GuildDefault {
     pub profile: String,
     pub cwd: PathBuf,
+    pub home_channel: Option<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -49,6 +50,8 @@ struct RawGuild {
     cwd: String,
     #[serde(default)]
     profile: Option<String>,
+    #[serde(default, deserialize_with = "de_snowflake_opt")]
+    home_channel: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -91,7 +94,22 @@ pub fn load(path: &Path) -> color_eyre::Result<DiscordConfig> {
         if guilds.contains_key(&g.id) {
             return Err(color_eyre::eyre::eyre!("duplicate guild {}", g.id));
         }
-        guilds.insert(g.id, GuildDefault { profile, cwd });
+        if let Some(home) = &g.home_channel
+            && !is_valid_snowflake(home)
+        {
+            return Err(color_eyre::eyre::eyre!(
+                "guild {}: invalid home_channel {home:?} (must match ^[0-9]{{17,20}}$)",
+                g.id
+            ));
+        }
+        guilds.insert(
+            g.id,
+            GuildDefault {
+                profile,
+                cwd,
+                home_channel: g.home_channel,
+            },
+        );
     }
 
     let render = raw.render.map(Render::from).unwrap_or(Render {
@@ -138,6 +156,32 @@ where
     de.deserialize_any(Snowflake)
 }
 
+fn de_snowflake_opt<'de, D>(de: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct OptSnowflake;
+    impl<'de> serde::de::Visitor<'de> for OptSnowflake {
+        type Value = Option<String>;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("an optional Discord snowflake id as a quoted string or bare integer")
+        }
+        fn visit_none<E: serde::de::Error>(self) -> Result<Option<String>, E> {
+            Ok(None)
+        }
+        fn visit_unit<E: serde::de::Error>(self) -> Result<Option<String>, E> {
+            Ok(None)
+        }
+        fn visit_some<D2>(self, de: D2) -> Result<Option<String>, D2::Error>
+        where
+            D2: serde::Deserializer<'de>,
+        {
+            de_snowflake(de).map(Some)
+        }
+    }
+    de.deserialize_option(OptSnowflake)
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -174,6 +218,37 @@ mod tests {
         assert_eq!(b.cwd, PathBuf::from("/var"));
         assert!(cfg.guild("999999999999999999").is_none());
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn reads_home_channel_and_defaults_none() {
+        let dir = temp_dir("home_channel");
+        let path = dir.join("discord.toml");
+        std::fs::write(
+            &path,
+            "[[guild]]\nid = \"123456789012345678\"\ncwd = \"/tmp\"\nhome_channel = \"234567890123456789\"\n\n[[guild]]\nid = \"345678901234567890\"\ncwd = \"/var\"\n",
+        )
+        .unwrap();
+        let cfg = load(&path).unwrap();
+        assert_eq!(
+            cfg.guild("123456789012345678").unwrap().home_channel.as_deref(),
+            Some("234567890123456789")
+        );
+        assert_eq!(cfg.guild("345678901234567890").unwrap().home_channel, None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn rejects_bad_home_channel() {
+        let dir = temp_dir("bad_home");
+        let path = dir.join("discord.toml");
+        std::fs::write(
+            &path,
+            "[[guild]]\nid = \"123456789012345678\"\ncwd = \"/tmp\"\nhome_channel = \"nope\"\n",
+        )
+        .unwrap();
+        assert!(load(&path).is_err());
         std::fs::remove_dir_all(&dir).ok();
     }
 

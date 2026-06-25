@@ -82,6 +82,35 @@ pub fn format_sent_at(unix_secs: i64, tz: chrono_tz::Tz) -> String {
         .unwrap_or_default()
 }
 
+pub fn wrap_scheduled_job(
+    name: &str,
+    trigger_desc: &str,
+    fired_at: &str,
+    prompt: &str,
+    context: Option<&str>,
+) -> String {
+    let mut out = format!(
+        "<scheduled-job name=\"{}\" trigger=\"{}\" fired_at=\"{}\" />\n",
+        escape_attr(name),
+        escape_attr(trigger_desc),
+        escape_attr(fired_at)
+    );
+    out.push_str(
+        "This is an automated scheduled run — no user is present. Work autonomously, make\n\
+         reasonable decisions, and put your final answer directly in your response. Do not\n\
+         ask questions or wait for follow-up.\n\n",
+    );
+    out.push_str(prompt);
+    if let Some(context) = context
+        && !context.trim().is_empty()
+    {
+        out.push_str("\n\n<script-output>\n");
+        out.push_str(&escape_text(context));
+        out.push_str("\n</script-output>");
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -204,5 +233,40 @@ mod tests {
         assert!(summer.ends_with("-07:00"), "Vancouver is PDT in summer: {summer}");
         let winter = format_sent_at(1_700_000_000, chrono_tz::America::Vancouver);
         assert!(winter.ends_with("-08:00"), "Vancouver is PST in winter: {winter}");
+    }
+
+    #[test]
+    fn wrap_scheduled_job_includes_header_prompt_and_script_output() {
+        let out = wrap_scheduled_job(
+            "Digest",
+            "every 3600s",
+            "2026-06-24T09:00:00Z",
+            "Summarize the day.",
+            Some("3 PRs merged"),
+        );
+        assert!(out.starts_with(
+            "<scheduled-job name=\"Digest\" trigger=\"every 3600s\" fired_at=\"2026-06-24T09:00:00Z\" />\n"
+        ));
+        assert!(out.contains("no user is present"));
+        assert!(out.contains("Summarize the day."));
+        assert!(out.contains("<script-output>\n3 PRs merged\n</script-output>"));
+    }
+
+    #[test]
+    fn wrap_scheduled_job_omits_script_output_without_context() {
+        let none = wrap_scheduled_job("R", "oneshot", "t", "do it", None);
+        assert!(!none.contains("<script-output>"));
+        let empty = wrap_scheduled_job("R", "oneshot", "t", "do it", Some("   "));
+        assert!(!empty.contains("<script-output>"));
+    }
+
+    #[test]
+    fn wrap_scheduled_job_escapes_attributes_and_context_but_not_prompt() {
+        let out = wrap_scheduled_job("a\"<b>", "x & y", "t", "raw <tag> stays", Some("ctx <evil> & </script-output>"));
+        assert!(out.contains("name=\"a&quot;&lt;b&gt;\""));
+        assert!(out.contains("trigger=\"x &amp; y\""));
+        assert!(out.contains("raw <tag> stays"));
+        assert!(out.contains("ctx &lt;evil&gt; &amp; &lt;/script-output&gt;"));
+        assert_eq!(out.matches("</script-output>").count(), 1);
     }
 }
