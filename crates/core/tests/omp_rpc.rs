@@ -43,6 +43,7 @@ async fn open_session(
     let config = SessionConfig {
         cwd: cwd.path.clone(),
         session_dir: cwd.path.clone(),
+        profile: "default".into(),
         ..SessionConfig::default()
     };
     let (client, events) = host.open_session(session_id, &config).await.expect("open_session");
@@ -140,11 +141,13 @@ async fn two_sessions_on_one_host_stay_isolated() {
     let cfg_a = SessionConfig {
         cwd: cwd_a.path.clone(),
         session_dir: cwd_a.path.clone(),
+        profile: "default".into(),
         ..SessionConfig::default()
     };
     let cfg_b = SessionConfig {
         cwd: cwd_b.path.clone(),
         session_dir: cwd_b.path.clone(),
+        profile: "default".into(),
         ..SessionConfig::default()
     };
     let (client_a, mut events_a) = host.open_session("mux-a", &cfg_a).await.expect("open session a");
@@ -184,10 +187,11 @@ async fn concurrent_get_or_spawn_same_thread_shares_one_session() {
     let cwd = TempDir::new("pico-omp-race");
     let cancel = CancellationToken::new();
     let tracker = TaskTracker::new();
-    let pool = OmpPool::new(HostConfig::default(), cancel.clone(), &tracker);
+    let pool = OmpPool::new(cwd.path.clone(), HostConfig::default(), cancel.clone(), &tracker);
     let cfg = SessionConfig {
         cwd: cwd.path.clone(),
         session_dir: cwd.path.clone(),
+        profile: "default".into(),
         ..SessionConfig::default()
     };
 
@@ -235,6 +239,7 @@ async fn append_system_prompt_content_reaches_the_model() {
         cwd: cwd.path.clone(),
         session_dir: cwd.path.clone(),
         append_system_prompt: Some(append.clone()),
+        profile: "default".into(),
         ..SessionConfig::default()
     };
     let (client, mut events) = host.open_session("append", &config).await.expect("open session");
@@ -412,5 +417,179 @@ async fn abort_ends_an_in_flight_turn() {
     assert!(saw_end, "abort did not end the turn; agent_end never arrived");
 
     client.close().await.expect("close");
+    cancel.cancel();
+}
+
+#[tokio::test]
+#[ignore]
+async fn distinct_profiles_get_distinct_hosts() {
+    let root = TempDir::new("pico-omp-profiles-root");
+    let cwd_a = TempDir::new("pico-omp-profiles-a");
+    let cwd_b = TempDir::new("pico-omp-profiles-b");
+    let cancel = CancellationToken::new();
+    let tracker = TaskTracker::new();
+    let pool = OmpPool::new(root.path.clone(), HostConfig::default(), cancel.clone(), &tracker);
+    let cfg_a = SessionConfig {
+        cwd: cwd_a.path.clone(),
+        session_dir: cwd_a.path.clone(),
+        profile: "alpha".into(),
+        ..SessionConfig::default()
+    };
+    let cfg_b = SessionConfig {
+        cwd: cwd_b.path.clone(),
+        session_dir: cwd_b.path.clone(),
+        profile: "bravo".into(),
+        ..SessionConfig::default()
+    };
+
+    let handle_a = pool
+        .get_or_spawn("profile-alpha", &cfg_a)
+        .await
+        .expect("open alpha session");
+    let handle_b = pool
+        .get_or_spawn("profile-bravo", &cfg_b)
+        .await
+        .expect("open bravo session");
+
+    assert!(
+        !Arc::ptr_eq(&handle_a, &handle_b),
+        "distinct profiles must get distinct sessions"
+    );
+    assert_eq!(
+        pool.host_count().await,
+        2,
+        "two distinct profiles must spawn two distinct hosts"
+    );
+
+    let mut session_a = handle_a.lock().await;
+    let mut session_b = handle_b.lock().await;
+    session_a
+        .client
+        .prompt("Reply with exactly the word: alpha")
+        .await
+        .expect("prompt alpha");
+    session_b
+        .client
+        .prompt("Reply with exactly the word: bravo")
+        .await
+        .expect("prompt bravo");
+    let reply_a = drain_reply(&mut session_a.events).await;
+    let reply_b = drain_reply(&mut session_b.events).await;
+
+    assert!(reply_a.to_lowercase().contains("alpha"), "profile alpha reply was: {reply_a:?}");
+    assert!(
+        !reply_a.to_lowercase().contains("bravo"),
+        "profile alpha leaked profile bravo's reply: {reply_a:?}"
+    );
+    assert!(reply_b.to_lowercase().contains("bravo"), "profile bravo reply was: {reply_b:?}");
+    assert!(
+        !reply_b.to_lowercase().contains("alpha"),
+        "profile bravo leaked profile alpha's reply: {reply_b:?}"
+    );
+
+    cancel.cancel();
+}
+
+#[tokio::test]
+#[ignore]
+async fn same_profile_threads_share_one_host() {
+    let root = TempDir::new("pico-omp-share-root");
+    let cwd_a = TempDir::new("pico-omp-share-a");
+    let cwd_b = TempDir::new("pico-omp-share-b");
+    let cancel = CancellationToken::new();
+    let tracker = TaskTracker::new();
+    let pool = OmpPool::new(root.path.clone(), HostConfig::default(), cancel.clone(), &tracker);
+    let cfg_a = SessionConfig {
+        cwd: cwd_a.path.clone(),
+        session_dir: cwd_a.path.clone(),
+        profile: "default".into(),
+        ..SessionConfig::default()
+    };
+    let cfg_b = SessionConfig {
+        cwd: cwd_b.path.clone(),
+        session_dir: cwd_b.path.clone(),
+        profile: "default".into(),
+        ..SessionConfig::default()
+    };
+
+    let handle_a = pool
+        .get_or_spawn("share-one", &cfg_a)
+        .await
+        .expect("open first session");
+    let handle_b = pool
+        .get_or_spawn("share-two", &cfg_b)
+        .await
+        .expect("open second session");
+
+    assert!(
+        !Arc::ptr_eq(&handle_a, &handle_b),
+        "distinct threads must get distinct sessions"
+    );
+    assert_eq!(
+        pool.host_count().await,
+        1,
+        "two threads under one profile must share a single host"
+    );
+
+    let mut session = handle_a.lock().await;
+    session
+        .client
+        .prompt("Reply with exactly the word: pong")
+        .await
+        .expect("shared-host prompt");
+    let reply = drain_reply(&mut session.events).await;
+    assert!(reply.to_lowercase().contains("pong"), "shared-host reply was: {reply:?}");
+
+    cancel.cancel();
+}
+
+#[tokio::test]
+#[ignore]
+async fn rebinding_a_thread_to_a_new_profile_replaces_the_session() {
+    let root = TempDir::new("pico-omp-rebind-root");
+    let cwd_a = TempDir::new("pico-omp-rebind-a");
+    let cwd_b = TempDir::new("pico-omp-rebind-b");
+    let cancel = CancellationToken::new();
+    let tracker = TaskTracker::new();
+    let pool = OmpPool::new(root.path.clone(), HostConfig::default(), cancel.clone(), &tracker);
+    let cfg_a = SessionConfig {
+        cwd: cwd_a.path.clone(),
+        session_dir: cwd_a.path.clone(),
+        profile: "alpha".into(),
+        ..SessionConfig::default()
+    };
+    let cfg_b = SessionConfig {
+        cwd: cwd_b.path.clone(),
+        session_dir: cwd_b.path.clone(),
+        profile: "bravo".into(),
+        ..SessionConfig::default()
+    };
+
+    let handle_a = pool
+        .get_or_spawn("rebound-thread", &cfg_a)
+        .await
+        .expect("open alpha session");
+    assert_eq!(handle_a.profile(), "alpha");
+
+    let handle_b = pool
+        .get_or_spawn("rebound-thread", &cfg_b)
+        .await
+        .expect("reopen under bravo");
+
+    assert_eq!(
+        handle_b.profile(),
+        "bravo",
+        "same thread reopened under a new profile must get the new profile's session"
+    );
+    assert!(
+        !Arc::ptr_eq(&handle_a, &handle_b),
+        "a profile change must not return the stale session"
+    );
+    assert_eq!(
+        pool.host_count().await,
+        2,
+        "the new profile's host must be spawned alongside the old one"
+    );
+
     cancel.cancel();
 }

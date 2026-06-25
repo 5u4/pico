@@ -77,7 +77,7 @@ pub async fn run(mut args: ChatArgs) -> color_eyre::Result<()> {
     let host_config = HostConfig {
         env: camofox.host_env(pico_core::config::any_browser_enabled(&root)),
     };
-    let pool = OmpPool::new(host_config, cancel.clone(), &tracker);
+    let pool = OmpPool::new(root.clone(), host_config, cancel.clone(), &tracker);
 
     let result = run_session(&db, &root, &pool, &camofox, &cancel, &dir, &channel, args).await;
 

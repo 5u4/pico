@@ -23,7 +23,8 @@ pub async fn generate_and_apply<S: Surface>(
     answer: Option<String>,
     cancel: CancellationToken,
 ) {
-    let Some(title) = generate(&pool, &query, answer.as_deref(), &cancel).await else {
+    let profile = handle.profile().to_owned();
+    let Some(title) = generate(&pool, &profile, &query, answer.as_deref(), &cancel).await else {
         return;
     };
     if surface.set_title(&title).await {
@@ -41,7 +42,13 @@ pub async fn generate_and_apply<S: Surface>(
     }
 }
 
-pub async fn generate(pool: &OmpPool, query: &str, answer: Option<&str>, cancel: &CancellationToken) -> Option<String> {
+pub async fn generate(
+    pool: &OmpPool,
+    profile: &str,
+    query: &str,
+    answer: Option<&str>,
+    cancel: &CancellationToken,
+) -> Option<String> {
     let request = format!("<request>\n{}\n</request>", sanitize_input(query));
     let reply = answer
         .map(|a| format!("\n\n<reply>\n{}\n</reply>", sanitize_input(a)))
@@ -51,7 +58,7 @@ pub async fn generate(pool: &OmpPool, query: &str, answer: Option<&str>, cancel:
 
     let result = tokio::select! {
         () = cancel.cancelled() => return None,
-        result = tokio::time::timeout(TITLE_TIMEOUT, pool.complete(&system, prompt)) => result,
+        result = tokio::time::timeout(TITLE_TIMEOUT, pool.complete(profile, &system, prompt)) => result,
     };
     match result {
         Ok(Some(raw)) => sanitize_title(&raw),

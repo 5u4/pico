@@ -20,6 +20,9 @@ import { makeScheduleFactory } from "./schedule-extension";
 import { streamSimple } from "@oh-my-pi/pi-ai";
 import { pickDefaultAvailableModel, resolveRoleSelection } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { resolvePromptInput } from "@oh-my-pi/pi-coding-agent/system-prompt";
+import { registerProvider, reset as resetCapabilities } from "@oh-my-pi/pi-coding-agent/capability";
+import { scanSkillsFromDir, buildRuleFromMarkdown, loadFilesFromDir } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
+import * as path from "node:path";
 
 interface Identity {
 	platform: string;
@@ -89,6 +92,28 @@ idleSweep.unref();
 const CAMOFOX_DISABLE_VALUES: Record<string, true> = { "0": true, false: true, off: true, no: true };
 const camofoxFlag = process.env.CAMOFOX_ENABLED;
 const camofoxEnabled = camofoxFlag === undefined ? true : !CAMOFOX_DISABLE_VALUES[camofoxFlag.toLowerCase()];
+
+const profileDir = process.env.PICO_PROFILE_DIR;
+if (profileDir) {
+	registerProvider("skills", {
+		id: "pico-profile",
+		displayName: "Pico Profile",
+		description: "Per-profile skills and rules from the active pico profile",
+		priority: 150,
+		load: async ctx => scanSkillsFromDir(ctx, { dir: path.join(profileDir, "skills"), providerId: "pico-profile", level: "user" }),
+	});
+	registerProvider("rules", {
+		id: "pico-profile",
+		displayName: "Pico Profile",
+		description: "Per-profile skills and rules from the active pico profile",
+		priority: 150,
+		load: async ctx =>
+			loadFilesFromDir(ctx, path.join(profileDir, "rules"), "pico-profile", "user", {
+				extensions: ["md", "mdc"],
+				transform: (name, content, p, source) => buildRuleFromMarkdown(name, content, p, source),
+			}),
+	});
+}
 
 let shared!: SharedHost;
 
@@ -321,6 +346,7 @@ function parseIdentity(value: unknown): Identity {
 
 async function constructSession(params: OpenSessionParams): Promise<HostSession> {
 	AsyncJobManager.setInstance(undefined);
+	resetCapabilities();
 	const registry = new AgentRegistry();
 	const sessionManager = params.continueFromFile
 		? await SessionManager.open(params.continueFromFile, params.sessionDir)
@@ -338,10 +364,7 @@ async function constructSession(params: OpenSessionParams): Promise<HostSession>
 		settings: shared.settings,
 		authStorage: shared.authStorage,
 		modelRegistry: shared.modelRegistry,
-		enableLsp: false,
-		enableMCP: false,
 		skipPythonPreflight: true,
-		disableExtensionDiscovery: true,
 	});
 	result.setToolUIContext(uiContext, true);
 	await initializeExtensions(result.session, {

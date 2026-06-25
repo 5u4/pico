@@ -27,7 +27,7 @@ impl App {
         let host_config = pico_core::omp::client::HostConfig {
             env: camofox.host_env(pico_core::config::any_browser_enabled(root)),
         };
-        let pool = OmpPool::new(host_config, cancel.clone(), &tracker);
+        let pool = OmpPool::new(root.to_path_buf(), host_config, cancel.clone(), &tracker);
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
         let intents = serenity::GatewayIntents::GUILDS
             | serenity::GatewayIntents::GUILD_MESSAGES
