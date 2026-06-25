@@ -542,3 +542,54 @@ async fn same_profile_threads_share_one_host() {
 
     cancel.cancel();
 }
+
+#[tokio::test]
+#[ignore]
+async fn rebinding_a_thread_to_a_new_profile_replaces_the_session() {
+    let root = TempDir::new("pico-omp-rebind-root");
+    let cwd_a = TempDir::new("pico-omp-rebind-a");
+    let cwd_b = TempDir::new("pico-omp-rebind-b");
+    let cancel = CancellationToken::new();
+    let tracker = TaskTracker::new();
+    let pool = OmpPool::new(root.path.clone(), HostConfig::default(), cancel.clone(), &tracker);
+    let cfg_a = SessionConfig {
+        cwd: cwd_a.path.clone(),
+        session_dir: cwd_a.path.clone(),
+        profile: "alpha".into(),
+        ..SessionConfig::default()
+    };
+    let cfg_b = SessionConfig {
+        cwd: cwd_b.path.clone(),
+        session_dir: cwd_b.path.clone(),
+        profile: "bravo".into(),
+        ..SessionConfig::default()
+    };
+
+    let handle_a = pool
+        .get_or_spawn("rebound-thread", &cfg_a)
+        .await
+        .expect("open alpha session");
+    assert_eq!(handle_a.profile(), "alpha");
+
+    let handle_b = pool
+        .get_or_spawn("rebound-thread", &cfg_b)
+        .await
+        .expect("reopen under bravo");
+
+    assert_eq!(
+        handle_b.profile(),
+        "bravo",
+        "same thread reopened under a new profile must get the new profile's session"
+    );
+    assert!(
+        !Arc::ptr_eq(&handle_a, &handle_b),
+        "a profile change must not return the stale session"
+    );
+    assert_eq!(
+        pool.host_count().await,
+        2,
+        "the new profile's host must be spawned alongside the old one"
+    );
+
+    cancel.cancel();
+}

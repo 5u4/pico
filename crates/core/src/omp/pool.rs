@@ -121,13 +121,17 @@ impl OmpPool {
     }
 
     pub async fn get_or_spawn(&self, thread_id: &str, config: &SessionConfig) -> color_eyre::Result<Arc<ThreadHandle>> {
-        let host = self.host(&config.profile).await?;
-        if let Some(handle) = self.sessions.lock().get(thread_id) {
+        if let Some(handle) = self.sessions.lock().get(thread_id)
+            && handle.profile == config.profile
+        {
             return Ok(Arc::clone(handle));
         }
 
+        let host = self.host(&config.profile).await?;
         let _open = self.open_lock.lock().await;
-        if let Some(handle) = self.sessions.lock().get(thread_id) {
+        if let Some(handle) = self.sessions.lock().get(thread_id)
+            && handle.profile == config.profile
+        {
             return Ok(Arc::clone(handle));
         }
 
