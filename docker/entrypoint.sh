@@ -4,11 +4,10 @@ set -euo pipefail
 HOME_DIR="${HOME:-/home/pico}"
 REPO="$HOME_DIR/.pico/agent"
 BIN="$HOME_DIR/.local/bin"
-# Shared cargo target for pico's OWN builds (this startup build + the worker's
-# /update and /dev-deploy). Scoped here and never exported into the supervisor
-# env, so unrelated projects the agent builds keep their own target dir. The
-# .cargo/config.toml written below gives the agent's cargo in a pico worktree the
-# same dir.
+# Shared cargo target for pico's OWN deploy builds (this startup build + the worker's
+# /update and /dev-deploy), which all pass --target-dir explicitly. Scoped here and never
+# exported into the supervisor env, so unrelated projects the agent builds keep their own
+# target dir.
 PICO_TARGET="$HOME_DIR/.cache/build/pico-target"
 
 # Runs entirely as the unprivileged pico user (USER pico in the Dockerfile) — there
@@ -19,16 +18,17 @@ cd "$REPO"
 git config --global --get-all safe.directory 2>/dev/null | grep -qxF "$REPO" \
   || git config --global --add safe.directory "$REPO"
 
-# Point any cargo rooted in this repo (and the agent's worktrees of it) at the
-# shared pico target dir. Best-effort: only the agent's own builds rely on it (the
-# startup build and /update, /dev-deploy pass --target-dir explicitly), so a
-# read-only repo mount just loses cache sharing rather than aborting startup with a
-# cryptic error ahead of the writability preflight below.
+# Give any cargo rooted in this repo (and the agent's symlinked worktrees of it) an sccache
+# rustc-wrapper plus per-worktree target isolation: no target-dir, so each worktree builds
+# into its own ./target and never collides with another worktree on a shared .rmeta, and
+# incremental=false because sccache only caches non-incremental compiles. Best-effort: a
+# read-only repo mount just loses the cache rather than aborting startup ahead of the
+# writability preflight below.
 {
   mkdir -p "$REPO/.cargo" \
-    && printf '[build]\ntarget-dir = "%s"\n' "$PICO_TARGET" > "$REPO/.cargo/config.toml"
+    && printf '[build]\nrustc-wrapper = "sccache"\nincremental = false\n' > "$REPO/.cargo/config.toml"
 } 2>/dev/null \
-  || echo "[entrypoint] WARN: could not write $REPO/.cargo/config.toml; agent worktree builds won't share the cargo cache" >&2
+  || echo "[entrypoint] WARN: could not write $REPO/.cargo/config.toml; agent worktree builds won't use sccache or isolate their target dir" >&2
 
 OMP_HOST="$REPO/omp-host"
 export PICO_OMP_HOST="$OMP_HOST/host.ts"

@@ -6,6 +6,18 @@ RUN apt-get update \
      git ripgrep ca-certificates curl unzip jq python3 python3-venv build-essential pkg-config \
      && rm -rf /var/lib/apt/lists/*
 
+# sccache (pinned), baked as the rustc-wrapper for pico's own cargo builds. Static-musl
+# release binary, arch-detected, to /usr/local/bin. Baked not fetched-at-runtime: it is the
+# repo .cargo/config.toml rustc-wrapper, so a missing binary would fail every pico cargo build.
+ARG SCCACHE_VERSION=v0.16.0
+RUN arch="$(uname -m)" \
+     && tarball="sccache-${SCCACHE_VERSION}-${arch}-unknown-linux-musl" \
+     && curl -fsSL "https://github.com/mozilla/sccache/releases/download/${SCCACHE_VERSION}/${tarball}.tar.gz" -o /tmp/sccache.tar.gz \
+     && tar -xzf /tmp/sccache.tar.gz -C /tmp \
+     && install -m 0755 "/tmp/${tarball}/sccache" /usr/local/bin/sccache \
+     && rm -rf /tmp/sccache.tar.gz "/tmp/${tarball}" \
+     && sccache --version
+
 # Docker CLI (system-wide).
 RUN install -m 0755 -d /etc/apt/keyrings \
      && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
@@ -92,7 +104,9 @@ RUN groupadd -g "$PICO_GID" pico \
 # /dev-deploy) or via the entrypoint-written ~/.pico/agent/.cargo/config.toml.
 ENV HOME=/home/pico \
      BUN_INSTALL=/home/pico/.bun \
-     CARGO_HOME=/home/pico/.cache/build/cargo
+     CARGO_HOME=/home/pico/.cache/build/cargo \
+     SCCACHE_DIR=/home/pico/.cache/build/sccache \
+     SCCACHE_CACHE_SIZE=20G
 RUN curl -fsSL https://bun.sh/install | bash \
      && curl -LsSf https://astral.sh/uv/install.sh | sh \
      && mkdir -p /home/pico/.cache/build /home/pico/.pico/supervisor /home/pico/.local/bin \
