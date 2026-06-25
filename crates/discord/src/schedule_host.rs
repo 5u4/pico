@@ -9,7 +9,7 @@ use pico_core::{
     config::StreamingBehavior,
     mid_turn::MidTurnQueue,
     omp::{camofox::CamofoxDaemon, pool::OmpPool},
-    schedule::{FireOutcome, Mode, Schedule, ScheduleHost},
+    schedule::{DisableReason, FireOutcome, HomeNotice, Mode, Schedule, ScheduleHost},
     surface::ConversationId,
     thread_marker::{ThreadMarker, WorktreeOrigin},
 };
@@ -349,7 +349,7 @@ impl ScheduleHost for DiscordScheduleHost {
         }
     }
 
-    async fn notify_home(&self, sched: &Schedule, text: &str) {
+    async fn notify_home(&self, sched: &Schedule, notice: &HomeNotice) {
         let Some(config) = self.load_config() else {
             return;
         };
@@ -365,10 +365,9 @@ impl ScheduleHost for DiscordScheduleHost {
             tracing::warn!(home = %home, schedule_id = %sched.id, "invalid home_channel id");
             return;
         };
-        let jump = format!("https://discord.com/channels/{}/{}", sched.scope, sched.origin);
-        let notice = format!("📅 {} (id {})\n{}\nthread: {}", sched.name, sched.id, text, jump);
-        let body = pico_core::render::truncate(&pico_core::render::defang_mentions(&notice), POST_CAP);
-        if let Err(e) = channel.say(&self.ctx, body).await {
+        let embed = build_notice_embed(sched, notice);
+        let msg = serenity::CreateMessage::new().embed(embed);
+        if let Err(e) = channel.send_message(&self.ctx, msg).await {
             tracing::warn!(error = %format!("{e:#}"), schedule_id = %sched.id, "posting scheduled home notice failed");
         }
     }
@@ -388,6 +387,54 @@ fn fresh_thread_label(name: &str) -> String {
     } else {
         label
     }
+}
+
+fn build_notice_embed(sched: &Schedule, notice: &HomeNotice) -> serenity::CreateEmbed {
+    let (title, colour) = match notice {
+        HomeNotice::ScriptFailed { .. } => ("⚠️ Scheduled job failed", serenity::Colour::new(0xE67E22)),
+        HomeNotice::Missed { .. } => ("🕐 Scheduled job missed", serenity::Colour::new(0x95A5A6)),
+        HomeNotice::Disabled(_) => ("🛑 Schedule disabled", serenity::Colour::new(0xE74C3C)),
+    };
+    let description = format!("[open thread](https://discord.com/channels/{}/{})", sched.scope, sched.origin);
+    let job = pico_core::render::truncate(&pico_core::render::defang_mentions(&sched.name), 200);
+    let mode = match sched.mode {
+        Mode::Continue => "continue",
+        Mode::Fresh => "fresh",
+    };
+    let mut embed = serenity::CreateEmbed::new()
+        .title(title)
+        .colour(colour)
+        .timestamp(serenity::Timestamp::now())
+        .description(description)
+        .field("Job", job, true)
+        .field("ID", &sched.id, true)
+        .field("Trigger", sched.trigger.describe(), true)
+        .field("Mode", mode, true);
+    match notice {
+        HomeNotice::ScriptFailed { reason, stderr_tail } => {
+            let reason = pico_core::render::truncate(&pico_core::render::defang_mentions(reason), 1000);
+            embed = embed.field("Reason", reason, false);
+            let stderr = stderr_tail.trim();
+            if !stderr.is_empty() {
+                let stderr = pico_core::render::defang_mentions(stderr).replace("```", "`\u{200b}`\u{200b}`");
+                let stderr = pico_core::render::truncate(&stderr, 1000);
+                embed = embed.field("stderr", format!("```\n{stderr}\n```"), false);
+            }
+        }
+        HomeNotice::Missed { due } => {
+            embed = embed.field("Due", due.to_rfc3339_opts(chrono::SecondsFormat::Secs, true), true);
+        }
+        HomeNotice::Disabled(reason) => {
+            let cause = match reason {
+                DisableReason::TargetUnresolvable => "target can no longer be resolved".to_owned(),
+                DisableReason::OriginUnreachable => "could not reach the origin thread".to_owned(),
+                DisableReason::TargetUnreachable => "could not reach the target channel".to_owned(),
+                DisableReason::ConsecutiveFailures(n) => format!("auto-disabled after {n} consecutive failures"),
+            };
+            embed = embed.field("Reason", cause, false);
+        }
+    }
+    embed
 }
 
 fn parse_channel(value: &str) -> Option<serenity::ChannelId> {
@@ -425,4 +472,121 @@ fn is_permanent_target_error(e: &serenity::Error) -> bool {
         return false;
     };
     resp.status_code.as_u16() == 403 || resp.error.code == MISSING_ACCESS || resp.error.code == MISSING_PERMISSIONS
+}
+
+#[cfg(test)]
+mod tests {
+    use pico_core::schedule::{DisableReason, HomeNotice, Mode, Schedule, State, Trigger};
+
+    use super::build_notice_embed;
+
+    fn sample_schedule() -> Schedule {
+        let ts = chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        Schedule {
+            id: "sched_abc".to_owned(),
+            platform: "discord".to_owned(),
+            scope: "111".to_owned(),
+            name: "nightly report".to_owned(),
+            created_by: "222".to_owned(),
+            created_at: ts,
+            mode: Mode::Continue,
+            origin: "333".to_owned(),
+            target: "444".to_owned(),
+            trigger: Trigger::Interval {
+                every: std::time::Duration::from_secs(60),
+            },
+            script: None,
+            prompt: None,
+            next_run_at: ts,
+            last_run_at: None,
+            consecutive_failures: 0,
+            state: State::Active,
+        }
+    }
+
+    fn has_field(v: &serde_json::Value, name: &str) -> bool {
+        v["fields"]
+            .as_array()
+            .is_some_and(|fields| fields.iter().any(|f| f["name"] == name))
+    }
+
+    #[test]
+    fn script_failed_with_stderr_renders_stderr_field() {
+        let notice = HomeNotice::ScriptFailed {
+            reason: "exit code 1".to_owned(),
+            stderr_tail: "boom\npanic".to_owned(),
+        };
+        let v = serde_json::to_value(build_notice_embed(&sample_schedule(), &notice)).unwrap();
+        assert_eq!(v["title"], "⚠️ Scheduled job failed");
+        assert_eq!(v["color"].as_u64(), Some(0xE67E22));
+        assert!(has_field(&v, "Job"));
+        assert!(has_field(&v, "ID"));
+        assert!(has_field(&v, "Reason"));
+        assert!(has_field(&v, "stderr"));
+    }
+
+    #[test]
+    fn script_failed_empty_stderr_omits_field() {
+        let notice = HomeNotice::ScriptFailed {
+            reason: "nonzero".to_owned(),
+            stderr_tail: "   \n  ".to_owned(),
+        };
+        let v = serde_json::to_value(build_notice_embed(&sample_schedule(), &notice)).unwrap();
+        assert!(has_field(&v, "Reason"));
+        assert!(!has_field(&v, "stderr"));
+    }
+
+    #[test]
+    fn missed_renders_due_field() {
+        let due = chrono::DateTime::from_timestamp(1_700_000_500, 0).unwrap();
+        let v = serde_json::to_value(build_notice_embed(&sample_schedule(), &HomeNotice::Missed { due })).unwrap();
+        assert_eq!(v["title"], "🕐 Scheduled job missed");
+        assert_eq!(v["color"].as_u64(), Some(0x95A5A6));
+        assert!(has_field(&v, "Due"));
+    }
+
+    #[test]
+    fn disabled_consecutive_failures_reason_text() {
+        let notice = HomeNotice::Disabled(DisableReason::ConsecutiveFailures(3));
+        let v = serde_json::to_value(build_notice_embed(&sample_schedule(), &notice)).unwrap();
+        assert_eq!(v["title"], "🛑 Schedule disabled");
+        assert_eq!(v["color"].as_u64(), Some(0xE74C3C));
+        let fields = v["fields"].as_array().unwrap();
+        let reason = fields.iter().find(|f| f["name"] == "Reason").unwrap();
+        assert!(
+            reason["value"]
+                .as_str()
+                .unwrap()
+                .contains("auto-disabled after 3 consecutive failures")
+        );
+    }
+
+    #[test]
+    fn script_failed_stderr_escapes_code_fence() {
+        let notice = HomeNotice::ScriptFailed {
+            reason: "boom".to_owned(),
+            stderr_tail: "before ``` after".to_owned(),
+        };
+        let v = serde_json::to_value(build_notice_embed(&sample_schedule(), &notice)).unwrap();
+        let fields = v["fields"].as_array().unwrap();
+        let stderr = fields.iter().find(|f| f["name"] == "stderr").unwrap();
+        let value = stderr["value"].as_str().unwrap();
+        let inner = value.trim_start_matches("```\n").trim_end_matches("\n```");
+        assert!(!inner.contains("```"));
+    }
+
+    #[test]
+    fn script_failed_fence_heavy_stderr_stays_within_field_limit() {
+        let notice = HomeNotice::ScriptFailed {
+            reason: "boom".to_owned(),
+            stderr_tail: "```".repeat(800),
+        };
+        let v = serde_json::to_value(build_notice_embed(&sample_schedule(), &notice)).unwrap();
+        let fields = v["fields"].as_array().unwrap();
+        let stderr = fields.iter().find(|f| f["name"] == "stderr").unwrap();
+        let value = stderr["value"].as_str().unwrap();
+        assert!(value.chars().count() <= 1024);
+        let inner = value.trim_start_matches("```\n").trim_end_matches("\n```");
+        assert!(!inner.contains("```"));
+    }
 }
