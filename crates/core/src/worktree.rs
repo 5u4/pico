@@ -18,8 +18,21 @@ fn branch_name(thread_id: &str) -> String {
     format!("pico/{thread_id}")
 }
 
+fn safe_component(channel_id: &str) -> String {
+    let mapped: String = channel_id
+        .chars()
+        .map(|c| if std::path::is_separator(c) || c == ':' { '_' } else { c })
+        .collect();
+    let trimmed = mapped.trim_start_matches('_');
+    if trimmed.is_empty() {
+        "_".to_owned()
+    } else {
+        trimmed.to_owned()
+    }
+}
+
 pub fn worktree_path(worktrees_dir: &Path, channel_id: &str, thread_id: &str) -> PathBuf {
-    worktrees_dir.join(channel_id).join(thread_id)
+    worktrees_dir.join(safe_component(channel_id)).join(thread_id)
 }
 
 pub async fn ensure(
@@ -292,6 +305,17 @@ mod tests {
         git(&repo, &["add", "."]);
         git(&repo, &["commit", "-m", "seed"]);
         repo
+    }
+
+    #[test]
+    fn worktree_path_keeps_path_channel_under_worktrees_dir() {
+        let wt = Path::new("/srv/worktrees");
+        let numeric = super::worktree_path(wt, "111111111111111111", "abc");
+        assert_eq!(numeric, wt.join("111111111111111111").join("abc"));
+
+        let abs = super::worktree_path(wt, "/home/sen/project", "abc");
+        assert!(abs.starts_with(wt), "absolute channel escaped worktrees_dir: {}", abs.display());
+        assert_eq!(abs, wt.join("home_sen_project").join("abc"));
     }
 
     #[tokio::test]

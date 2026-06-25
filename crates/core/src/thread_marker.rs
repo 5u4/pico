@@ -8,6 +8,7 @@ pub struct ThreadMarker {
     pub cwd: PathBuf,
     pub worktree: Option<WorktreeOrigin>,
     pub closed_at: Option<String>,
+    pub channel_id: Option<String>,
 }
 
 #[derive(Clone)]
@@ -16,7 +17,7 @@ pub struct WorktreeOrigin {
     pub default_branch: String,
 }
 
-type Columns = (String, String, Option<String>, Option<String>, Option<String>);
+type Columns = (String, String, Option<String>, Option<String>, Option<String>, Option<String>);
 
 pub async fn load(db: &SqlitePool, platform: &str, thread_id: &str) -> Option<ThreadMarker> {
     let row = match fetch(db, platform, thread_id).await {
@@ -44,7 +45,7 @@ pub async fn load(db: &SqlitePool, platform: &str, thread_id: &str) -> Option<Th
 
 async fn fetch(db: &SqlitePool, platform: &str, thread_id: &str) -> color_eyre::Result<Option<Columns>> {
     sqlx::query_as::<_, Columns>(
-        "SELECT profile, cwd, base_repo, default_branch, closed_at FROM threads WHERE platform = ? AND thread_id = ?",
+        "SELECT profile, cwd, base_repo, default_branch, closed_at, channel_id FROM threads WHERE platform = ? AND thread_id = ?",
     )
     .bind(platform)
     .bind(thread_id)
@@ -54,7 +55,7 @@ async fn fetch(db: &SqlitePool, platform: &str, thread_id: &str) -> color_eyre::
 }
 
 fn parse(
-    (profile, cwd, base_repo, default_branch, closed_at): Columns,
+    (profile, cwd, base_repo, default_branch, closed_at, channel_id): Columns,
     base: &std::path::Path,
 ) -> Option<ThreadMarker> {
     if !pico_shared::validate::is_valid_profile(&profile) {
@@ -80,6 +81,7 @@ fn parse(
         cwd,
         worktree,
         closed_at,
+        channel_id,
     })
 }
 
@@ -98,14 +100,15 @@ async fn write(db: &SqlitePool, platform: &str, thread_id: &str, marker: &Thread
         .map(|w| pico_shared::paths::to_portable(&w.base_repo, &base));
     let default_branch = marker.worktree.as_ref().map(|w| w.default_branch.clone());
     sqlx::query(
-        "INSERT INTO threads (platform, thread_id, profile, cwd, base_repo, default_branch, closed_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?) \
+        "INSERT INTO threads (platform, thread_id, profile, cwd, base_repo, default_branch, closed_at, channel_id) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT(platform, thread_id) DO UPDATE SET \
              profile = excluded.profile, \
              cwd = excluded.cwd, \
              base_repo = excluded.base_repo, \
              default_branch = excluded.default_branch, \
-             closed_at = excluded.closed_at",
+             closed_at = excluded.closed_at, \
+             channel_id = excluded.channel_id",
     )
     .bind(platform)
     .bind(thread_id)
@@ -114,6 +117,7 @@ async fn write(db: &SqlitePool, platform: &str, thread_id: &str, marker: &Thread
     .bind(base_repo)
     .bind(default_branch)
     .bind(marker.closed_at.clone())
+    .bind(marker.channel_id.clone())
     .execute(db)
     .await
     .wrap_err("writing thread marker")?;
@@ -132,6 +136,55 @@ pub async fn tombstone(
         ..marker
     };
     write(db, platform, thread_id, &marker).await
+}
+
+pub struct ThreadEntry {
+    pub thread_id: String,
+    pub profile: String,
+    pub cwd: PathBuf,
+    pub worktree: Option<WorktreeOrigin>,
+}
+
+type OpenRow = (String, String, String, Option<String>, Option<String>);
+
+pub async fn list_open(db: &SqlitePool, platform: &str, channel_id: &str) -> Vec<ThreadEntry> {
+    let rows = match list_open_rows(db, platform, channel_id).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!(error = %format!("{e:#}"), "listing open threads failed");
+            return Vec::new();
+        }
+    };
+    let base = match pico_shared::paths::pico_home() {
+        Ok(base) => base,
+        Err(e) => {
+            tracing::warn!(error = %format!("{e:#}"), "pico_home invalid; cannot list open threads");
+            return Vec::new();
+        }
+    };
+    rows.into_iter()
+        .filter_map(|(thread_id, profile, cwd, base_repo, default_branch)| {
+            let marker = parse((profile, cwd, base_repo, default_branch, None, None), &base)?;
+            Some(ThreadEntry {
+                thread_id,
+                profile: marker.profile,
+                cwd: marker.cwd,
+                worktree: marker.worktree,
+            })
+        })
+        .collect()
+}
+
+async fn list_open_rows(db: &SqlitePool, platform: &str, channel_id: &str) -> color_eyre::Result<Vec<OpenRow>> {
+    sqlx::query_as::<_, OpenRow>(
+        "SELECT thread_id, profile, cwd, base_repo, default_branch FROM threads \
+         WHERE platform = ? AND channel_id = ? AND closed_at IS NULL",
+    )
+    .bind(platform)
+    .bind(channel_id)
+    .fetch_all(db)
+    .await
+    .wrap_err("listing open threads")
 }
 
 #[cfg(test)]
@@ -191,6 +244,7 @@ mod tests {
                 cwd: PathBuf::from("/work"),
                 worktree: None,
                 closed_at: None,
+                channel_id: None,
             },
         )
         .await;
@@ -217,6 +271,7 @@ mod tests {
                         cwd: PathBuf::from(cwd),
                         worktree: None,
                         closed_at: None,
+                        channel_id: None,
                     },
                 )
                 .await;
@@ -246,6 +301,7 @@ mod tests {
                     default_branch: "origin/main".into(),
                 }),
                 closed_at: Some("2026-06-17T00:00:00Z".into()),
+                channel_id: None,
             },
         )
         .await;
@@ -258,6 +314,7 @@ mod tests {
                 cwd: PathBuf::from("/work"),
                 worktree: None,
                 closed_at: None,
+                channel_id: None,
             },
         )
         .await;
@@ -285,6 +342,7 @@ mod tests {
                     default_branch: "origin/main".into(),
                 }),
                 closed_at: None,
+                channel_id: None,
             },
         )
         .await;
@@ -368,6 +426,7 @@ mod tests {
                     default_branch: "origin/main".into(),
                 }),
                 closed_at: None,
+                channel_id: None,
             },
         )
         .await;
@@ -381,6 +440,40 @@ mod tests {
         let wt = reloaded.worktree.unwrap();
         assert_eq!(wt.base_repo, PathBuf::from("/repo"));
         assert_eq!(wt.default_branch, "origin/main");
+        db.close().await;
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn list_open_returns_only_open_threads_for_channel() {
+        let (db, dir) = test_pool("listopen").await;
+        let save_open = |thread_id: &'static str, closed: Option<&'static str>| {
+            let db = db.clone();
+            async move {
+                super::save(
+                    &db,
+                    "cli",
+                    thread_id,
+                    &super::ThreadMarker {
+                        profile: "sen".into(),
+                        cwd: PathBuf::from("/work"),
+                        worktree: None,
+                        closed_at: closed.map(str::to_owned),
+                        channel_id: Some("100".into()),
+                    },
+                )
+                .await;
+            }
+        };
+        save_open("thread-a", None).await;
+        save_open("thread-b", None).await;
+        save_open("thread-c", Some("2026-06-25T00:00:00Z")).await;
+        let open = super::list_open(&db, "cli", "100").await;
+        assert_eq!(open.len(), 2);
+        let ids: std::collections::HashSet<String> = open.into_iter().map(|e| e.thread_id).collect();
+        assert!(ids.contains("thread-a"));
+        assert!(ids.contains("thread-b"));
+        assert!(!ids.contains("thread-c"));
         db.close().await;
         std::fs::remove_dir_all(&dir).ok();
     }
