@@ -406,7 +406,7 @@ async fn build_and_deploy(ctx: Context<'_>, build_dir: std::path::PathBuf, what:
         return Ok(());
     };
     ctx.say(format!(
-        "🔨 building pico-worker from {what} — I'll post the result here when it lands."
+        "🔨 building pico-worker + pico-cli from {what} — I'll post the result here when it lands."
     ))
     .await?;
     let report_to = ctx.channel_id().get().to_string();
@@ -475,8 +475,48 @@ async fn build_worker(build_dir: &std::path::Path) -> color_eyre::Result<std::pa
             .collect();
         bail!("cargo build failed ({}):\n{tail}", out.status);
     }
+    install_cli(build_dir, &target_dir).await;
     bun_install_host(build_dir).await;
     snapshot(&target_dir).await
+}
+
+async fn install_cli(build_dir: &std::path::Path, target_dir: &std::path::Path) {
+    let root = match pico_shared::paths::local_install_root() {
+        Ok(root) => root,
+        Err(e) => {
+            tracing::warn!(error = %format!("{e:#}"), "cannot resolve local install root; skipping pico CLI install");
+            return;
+        }
+    };
+    let child = tokio::process::Command::new("cargo")
+        .args(["install", "--locked", "--path"])
+        .arg(build_dir.join("crates").join("cli"))
+        .arg("--root")
+        .arg(&root)
+        .arg("--target-dir")
+        .arg(target_dir)
+        .arg("--force")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn();
+    let child = match child {
+        Ok(child) => child,
+        Err(e) => {
+            tracing::warn!(error = %e, "spawning `cargo install` for pico CLI failed; schedule extension may not find pico");
+            return;
+        }
+    };
+    match tokio::time::timeout(BUILD_TIMEOUT, child.wait_with_output()).await {
+        Ok(Ok(out)) if out.status.success() => tracing::info!("pico CLI install ok"),
+        Ok(Ok(out)) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            tracing::warn!(status = %out.status, %stderr, "pico CLI `cargo install` failed; schedule extension may not find pico");
+        }
+        Ok(Err(e)) => tracing::warn!(error = %e, "waiting on pico CLI `cargo install` failed"),
+        Err(_) => tracing::warn!("pico CLI `cargo install` timed out"),
+    }
 }
 
 async fn bun_install_host(build_dir: &std::path::Path) {
