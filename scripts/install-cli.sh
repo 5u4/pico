@@ -27,15 +27,15 @@ if [ -f "$HOST_DIR/package.json" ]; then
 else
   echo "→ bun install in $REPO_DIR/omp-host (this checkout)"
   (cd "$REPO_DIR/omp-host" && bun install)
-  echo "  note: \$PICO_OMP_HOST default is $OMP_HOST, which does not exist."
-  echo "        export PICO_OMP_HOST=$REPO_DIR/omp-host/host.ts  (or deploy the host to ~/.pico/agent/omp-host)"
+  echo "  note: no omp-host package found at $HOST_DIR."
+  echo "        point the CLI at this checkout:  export PICO_OMP_HOST=$REPO_DIR/omp-host/host.ts"
 fi
 
 echo
 echo "✓ installed. Next:"
 echo "  - ensure $PREFIX/bin is on your PATH"
-echo "  - cd into a project folder, then:  pico bind        (regular: this folder)"
-echo "                                or:  pico bind --worktree <base_repo>   (isolated worktree per chat)"
+echo "  - cd into a project folder, then:  pico chat bind        (regular: this folder)"
+echo "                                or:  pico chat bind --worktree <base_repo>   (isolated worktree per chat)"
 echo "  - start chatting:                  pico chat"
 echo
 echo "  pico chat needs Bun + the omp-host (installed above) and reuses your"

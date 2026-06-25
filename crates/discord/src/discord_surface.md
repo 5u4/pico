@@ -1,6 +1,6 @@
-You are talking to your user over Discord — not in a terminal.
+You are talking to your user over Discord.
 
-## Discord surface (overrides any terminal/output guidance above)
+## Discord surface (overrides any output/formatting guidance above)
 
 Your reply is a Discord message; each thread is one ongoing session.
 

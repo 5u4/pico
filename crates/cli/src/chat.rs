@@ -33,10 +33,17 @@ const SHORT_ID_LEN: usize = 8;
 
 #[derive(Args)]
 pub struct ChatArgs {
+    #[command(subcommand)]
+    action: Option<ChatAction>,
     #[arg(long)]
     new: bool,
     #[arg(long, value_name = "THREAD_ID")]
     resume: Option<String>,
+}
+
+#[derive(clap::Subcommand)]
+enum ChatAction {
+    Bind(crate::bind::BindArgs),
 }
 
 pub(crate) fn current_dir() -> color_eyre::Result<PathBuf> {
@@ -53,7 +60,12 @@ pub(crate) async fn open_db(root: &Path) -> color_eyre::Result<sqlx::SqlitePool>
     pico_core::db::open(root).await.wrap_err("opening worker database")
 }
 
-pub async fn run(args: ChatArgs) -> color_eyre::Result<()> {
+pub async fn run(mut args: ChatArgs) -> color_eyre::Result<()> {
+    if let Some(action) = args.action.take() {
+        return match action {
+            ChatAction::Bind(bind_args) => crate::bind::run(bind_args).await,
+        };
+    }
     let dir = current_dir()?;
     let channel = channel_id(&dir);
     let root = pico_shared::paths::worker_root()?;
