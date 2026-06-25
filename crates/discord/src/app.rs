@@ -23,7 +23,11 @@ impl App {
         }
         let cancel = CancellationToken::new();
         let tracker = TaskTracker::new();
-        let pool = OmpPool::new(cancel.clone(), &tracker);
+        let camofox = pico_core::omp::camofox::CamofoxDaemon::new(root, cancel.clone(), &tracker);
+        let host_config = pico_core::omp::client::HostConfig {
+            env: camofox.host_env(pico_core::config::any_browser_enabled(root)),
+        };
+        let pool = OmpPool::new(host_config, cancel.clone(), &tracker);
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
         let intents = serenity::GatewayIntents::GUILDS
             | serenity::GatewayIntents::GUILD_MESSAGES
@@ -34,6 +38,7 @@ impl App {
                 root.to_path_buf(),
                 db,
                 pool,
+                camofox,
                 ready_tx,
                 supervisor_socket,
                 cancel.clone(),

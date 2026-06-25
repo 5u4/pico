@@ -36,6 +36,7 @@ pub(crate) fn framework(
     root: std::path::PathBuf,
     db: sqlx::SqlitePool,
     pool: Arc<OmpPool>,
+    camofox: Arc<CamofoxDaemon>,
     ready_tx: tokio::sync::oneshot::Sender<()>,
     supervisor_socket: Option<std::path::PathBuf>,
     cancel: CancellationToken,
@@ -61,12 +62,8 @@ pub(crate) fn framework(
             Box::pin(async move {
                 poise::builtins::register_globally(ctx, &framework.options().commands).await?;
                 let _ = ready_tx.send(());
-                let camofox = CamofoxDaemon::new(&root, cancel.clone(), &tracker);
                 if pico_core::config::any_browser_enabled(&root) {
                     tracker.spawn(pico_core::omp::camofox::ensure_engine(cancel.clone()));
-                }
-                if let Err(e) = crate::schedule_host::write_schedule_extension(&root) {
-                    tracing::warn!(error = %format!("{e:#}"), "writing schedule extension failed; schedule tools unavailable");
                 }
                 let root = Arc::new(root);
                 let pending_answers = crate::ui::PendingAnswers::default();
@@ -478,7 +475,38 @@ async fn build_worker(build_dir: &std::path::Path) -> color_eyre::Result<std::pa
             .collect();
         bail!("cargo build failed ({}):\n{tail}", out.status);
     }
+    bun_install_host(build_dir).await;
     snapshot(&target_dir).await
+}
+
+async fn bun_install_host(build_dir: &std::path::Path) {
+    let host_dir = build_dir.join("omp-host");
+    let child = tokio::process::Command::new("bun")
+        .arg("install")
+        .current_dir(&host_dir)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn();
+    let child = match child {
+        Ok(child) => child,
+        Err(e) => {
+            tracing::warn!(error = %e, dir = %host_dir.display(), "spawning `bun install` for omp-host failed; keeping existing node_modules");
+            return;
+        }
+    };
+    match tokio::time::timeout(BUILD_TIMEOUT, child.wait_with_output()).await {
+        Ok(Ok(out)) if out.status.success() => tracing::info!("omp-host `bun install` ok"),
+        Ok(Ok(out)) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            tracing::warn!(status = %out.status, %stderr, "omp-host `bun install` failed; keeping existing node_modules");
+        }
+        Ok(Err(e)) => {
+            tracing::warn!(error = %e, "waiting on omp-host `bun install` failed; keeping existing node_modules")
+        }
+        Err(_) => tracing::warn!("omp-host `bun install` timed out; keeping existing node_modules"),
+    }
 }
 
 async fn snapshot(target_dir: &std::path::Path) -> color_eyre::Result<std::path::PathBuf> {
@@ -701,7 +729,7 @@ async fn worktree_close(ctx: Context<'_>) -> Result<(), Error> {
         return Ok(());
     }
 
-    if data.pool.close(&thread_id) == pico_core::omp::pool::CloseOutcome::Busy {
+    if data.pool.close(&thread_id).await == pico_core::omp::pool::CloseOutcome::Busy {
         ctx.say("⏳ a turn is running on this thread; wait for it to finish and retry.")
             .await?;
         return Ok(());
@@ -1075,7 +1103,6 @@ async fn route_message(
     };
     tracing::info!(%thread_id, %profile, in_thread, "driving omp turn");
 
-    let title_cwd = cwd.clone();
     let guild_name = guild_id.name(&ctx.cache);
     let (channel_name, thread_label) = if in_thread {
         (channel_display_name(&ctx, guild_id, bound_channel), channel.name.clone())
@@ -1124,12 +1151,11 @@ async fn route_message(
             Arc::clone(&pool),
             prompt.to_owned(),
             spawn.title_seed,
-            title_cwd,
             cancel.clone(),
         ));
     }
     if spawn.result? == pico_core::engine::TurnOutcome::Dead {
-        pool.forget(&thread_id);
+        pool.forget(&thread_id).await;
     }
     Ok(())
 }
@@ -1155,6 +1181,27 @@ pub(crate) struct TurnSpawn {
     pub(crate) handle: Arc<pico_core::omp::pool::ThreadHandle>,
     pub(crate) title_seed: Option<String>,
     pub(crate) result: color_eyre::Result<pico_core::engine::TurnOutcome>,
+}
+
+fn latest_session_file(session_dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    let mut newest: Option<(std::time::SystemTime, std::path::PathBuf)> = None;
+    for entry in std::fs::read_dir(session_dir).ok()?.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let Ok(modified) = entry.metadata().and_then(|m| m.modified()) else {
+            continue;
+        };
+        let replace = match &newest {
+            Some((latest, _)) => modified > *latest,
+            None => true,
+        };
+        if replace {
+            newest = Some((modified, path));
+        }
+    }
+    newest.map(|(_, path)| path)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1212,29 +1259,23 @@ pub(crate) async fn drive_thread_turn(
         }
     };
     let profile_config = pico_core::config::load(&pico_shared::paths::profile_config(root, &profile))?;
-    let (mut extensions, mut env) = if profile_config.browser_enabled {
+    if profile_config.browser_enabled {
         camofox.ensure_started().await;
-        camofox.injection(&profile, &thread_id)
-    } else {
-        (Vec::new(), Vec::new())
-    };
-    let schedule_extension = crate::schedule_host::schedule_extension_path(root);
-    if schedule_extension.is_file() {
-        extensions.push(schedule_extension);
     }
-    env.push(("PICO_PLATFORM".to_owned(), "discord".to_owned()));
-    env.push(("PICO_GUILD_ID".to_owned(), guild_id.get().to_string()));
-    env.push(("PICO_CHANNEL_ID".to_owned(), bound_channel.get().to_string()));
-    env.push(("PICO_THREAD_ID".to_owned(), thread_id.clone()));
-    env.push(("PICO_USER_ID".to_owned(), author.get().to_string()));
-    let config = pico_core::omp::client::SpawnConfig {
+    let continue_from_file = latest_session_file(&session_dir);
+    let config = pico_core::omp::client::SessionConfig {
         model: profile_config.model,
-        cwd: Some(cwd),
-        session_dir: Some(session_dir),
-        continue_session: true,
+        cwd,
+        session_dir,
+        continue_from_file,
         append_system_prompt: append_prompt,
-        extensions,
-        env,
+        identity: pico_core::omp::client::SessionIdentity {
+            platform: "discord".to_owned(),
+            guild: guild_id.get().to_string(),
+            channel: bound_channel.get().to_string(),
+            thread: thread_id.clone(),
+            user: author.get().to_string(),
+        },
     };
 
     let handle = pool.get_or_spawn(&thread_id, &config).await?;

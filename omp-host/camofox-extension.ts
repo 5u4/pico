@@ -1,16 +1,3 @@
-// Embedded in the pico worker binary and written to `<root>/camofox/extension.ts`
-// at startup; loaded via `omp --extension` for browser-enabled profiles. Registers
-// the camo_* tools that drive a worker-owned Camoufox (anti-detection Firefox)
-// daemon over its REST API. All wiring comes from env the worker injects per turn:
-//   CAMOFOX_BASE_URL  — loopback daemon URL (pinned port)
-//   CAMOFOX_USER_ID   — profile name (one cookie/storage jar per profile)
-//   CAMOFOX_SESSION_KEY — Discord thread id (tab grouping within the profile)
-//   CAMOFOX_ACCESS_KEY  — generated Bearer token the daemon requires
-//
-// Self-contained on purpose (no imports): runs in omp's bun runtime with global
-// fetch/Buffer/URLSearchParams. A down daemon surfaces as a tool error so the
-// model falls back to the read tool or omp's native browser.
-
 export default function camofox(pi) {
   const z = pi.zod;
 

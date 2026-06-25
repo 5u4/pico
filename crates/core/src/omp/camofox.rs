@@ -15,8 +15,6 @@ use tokio::{
 };
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
-const EXTENSION_SOURCE: &str = include_str!("camofox_extension.ts");
-
 const DEFAULT_PORT: u16 = 9377;
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(15);
 const HEALTH_POLL: Duration = Duration::from_millis(250);
@@ -38,7 +36,6 @@ pub struct CamofoxDaemon {
     port: u16,
     access_key: String,
     profile_dir: PathBuf,
-    extension_path: PathBuf,
     state: Mutex<State>,
     cancel: CancellationToken,
     tracker: TaskTracker,
@@ -48,16 +45,11 @@ impl CamofoxDaemon {
     pub fn new(root: &Path, cancel: CancellationToken, tracker: &TaskTracker) -> Arc<CamofoxDaemon> {
         let port = pick_free_port().unwrap_or(DEFAULT_PORT);
         let access_key = format!("{}{}", ulid::Ulid::new(), ulid::Ulid::new()).to_lowercase();
-        let extension_path = pico_shared::paths::camofox_extension(root);
-        if let Err(e) = write_extension(&extension_path) {
-            tracing::warn!(error = %format!("{e:#}"), "writing camofox extension failed; browser tools will be unavailable");
-        }
         let daemon = Arc::new(CamofoxDaemon {
             base_url: format!("http://127.0.0.1:{port}"),
             port,
             access_key,
             profile_dir: pico_shared::paths::camofox_profile_dir(root),
-            extension_path,
             state: Mutex::new(State {
                 child: None,
                 retry_after: None,
@@ -74,19 +66,13 @@ impl CamofoxDaemon {
         daemon
     }
 
-    pub fn injection(&self, profile: &str, thread_id: &str) -> (Vec<PathBuf>, Vec<(String, String)>) {
-        let extensions = if self.extension_path.is_file() {
-            vec![self.extension_path.clone()]
-        } else {
-            Vec::new()
-        };
-        let env = vec![
+    pub fn host_env(&self, enabled: bool) -> Vec<(String, String)> {
+        vec![
             ("CAMOFOX_BASE_URL".to_owned(), self.base_url.clone()),
-            ("CAMOFOX_USER_ID".to_owned(), profile.to_owned()),
-            ("CAMOFOX_SESSION_KEY".to_owned(), thread_id.to_owned()),
+            ("CAMOFOX_USER_ID".to_owned(), pico_shared::paths::DEFAULT_PROFILE.to_owned()),
             ("CAMOFOX_ACCESS_KEY".to_owned(), self.access_key.clone()),
-        ];
-        (extensions, env)
+            ("CAMOFOX_ENABLED".to_owned(), if enabled { "1" } else { "0" }.to_owned()),
+        ]
     }
 
     pub async fn ensure_started(&self) {
@@ -234,14 +220,6 @@ fn engine_present() -> bool {
     std::env::var_os("HOME").is_some_and(|home| Path::new(&home).join(".cache/camoufox/version.json").is_file())
 }
 
-fn write_extension(path: &Path) -> color_eyre::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).wrap_err_with(|| format!("create {}", parent.display()))?;
-    }
-    std::fs::write(path, EXTENSION_SOURCE).wrap_err_with(|| format!("write {}", path.display()))?;
-    Ok(())
-}
-
 async fn http_get_ok(port: u16, path: &str, bearer: &str) -> bool {
     let attempt = async {
         let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.ok()?;
@@ -290,28 +268,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn injection_carries_pinned_url_key_and_per_turn_identity() {
+    async fn host_env_carries_pinned_url_default_profile_and_key() {
         let tmp = std::env::temp_dir().join(format!("pico-camo-{}", ulid::Ulid::new()));
         let cancel = CancellationToken::new();
         let tracker = TaskTracker::new();
         let daemon = CamofoxDaemon::new(&tmp, cancel, &tracker);
 
-        let (exts, env) = daemon.injection("acme", "thread-42");
-        assert_eq!(exts, vec![pico_shared::paths::camofox_extension(&tmp)]);
-        assert!(exts[0].is_file());
-
-        let map: std::collections::HashMap<_, _> = env.into_iter().collect();
+        let map: std::collections::HashMap<_, _> = daemon.host_env(true).into_iter().collect();
         assert_eq!(map["CAMOFOX_BASE_URL"], daemon.base_url);
         assert!(map["CAMOFOX_BASE_URL"].starts_with("http://127.0.0.1:"));
-        assert_eq!(map["CAMOFOX_USER_ID"], "acme");
-        assert_eq!(map["CAMOFOX_SESSION_KEY"], "thread-42");
+        assert_eq!(map["CAMOFOX_USER_ID"], "default");
         assert_eq!(map["CAMOFOX_ACCESS_KEY"], daemon.access_key);
         assert!(!daemon.access_key.is_empty());
+        assert_eq!(map["CAMOFOX_ENABLED"], "1");
 
-        let (_, env2) = daemon.injection("acme", "thread-42");
-        let map2: std::collections::HashMap<_, _> = env2.into_iter().collect();
-        assert_eq!(map2["CAMOFOX_BASE_URL"], map["CAMOFOX_BASE_URL"]);
-        assert_eq!(map2["CAMOFOX_ACCESS_KEY"], map["CAMOFOX_ACCESS_KEY"]);
+        let disabled: std::collections::HashMap<_, _> = daemon.host_env(false).into_iter().collect();
+        assert_eq!(disabled["CAMOFOX_ENABLED"], "0");
 
         std::fs::remove_dir_all(&tmp).ok();
     }

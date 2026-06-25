@@ -3,7 +3,7 @@ use std::{
     sync::Arc,
 };
 
-use color_eyre::eyre::{WrapErr, eyre};
+use color_eyre::eyre::eyre;
 use pico_core::{
     cancel::CancelRegistry,
     config::StreamingBehavior,
@@ -21,8 +21,6 @@ use crate::{
     discord::{Route, TurnInputs, channel_display_name, drive_thread_turn, resolve_route},
 };
 
-const SCHEDULE_EXTENSION: &str = include_str!("schedule_extension.ts");
-
 const UNKNOWN_CHANNEL: isize = 10003;
 
 const MISSING_ACCESS: isize = 50001;
@@ -30,19 +28,6 @@ const MISSING_ACCESS: isize = 50001;
 const MISSING_PERMISSIONS: isize = 50013;
 
 const POST_CAP: usize = 1900;
-
-pub(crate) fn schedule_extension_path(root: &Path) -> PathBuf {
-    root.join("schedule").join("extension.ts")
-}
-
-pub(crate) fn write_schedule_extension(root: &Path) -> color_eyre::Result<PathBuf> {
-    let path = schedule_extension_path(root);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).wrap_err_with(|| format!("create {}", parent.display()))?;
-    }
-    std::fs::write(&path, SCHEDULE_EXTENSION).wrap_err_with(|| format!("write {}", path.display()))?;
-    Ok(path)
-}
 
 pub(crate) struct DiscordScheduleHost {
     pub(crate) ctx: serenity::Context,
@@ -282,7 +267,7 @@ impl DiscordScheduleHost {
         .await
         {
             Ok(spawn) => match spawn.result {
-                Ok(pico_core::engine::TurnOutcome::Dead) => self.pool.forget(&thread_id),
+                Ok(pico_core::engine::TurnOutcome::Dead) => self.pool.forget(&thread_id).await,
                 Ok(pico_core::engine::TurnOutcome::Live) => {}
                 Err(e) => tracing::warn!(error = %format!("{e:#}"), %thread_id, "scheduled turn failed"),
             },

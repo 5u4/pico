@@ -1,64 +1,94 @@
-use std::{collections::HashMap, path::PathBuf, process::Stdio, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    process::Stdio,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 use color_eyre::eyre::{WrapErr, eyre};
 use parking_lot::Mutex;
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
-    process::{Child, ChildStderr, ChildStdin, ChildStdout, Command as ProcCommand},
+    process::{ChildStderr, ChildStdin, ChildStdout, Command as ProcCommand},
     sync::{Mutex as AsyncMutex, mpsc, oneshot},
 };
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
-use crate::omp::protocol::{Command, Inbound, OmpEvent, RequestId, RpcResponse, UiResponse};
+use crate::omp::protocol::{Command, Identity, Inbound, OmpEvent, RequestId, RpcResponse, UiResponse};
 
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
 
-const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
-
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
+
+const HOST_ENTRY_ENV: &str = "PICO_OMP_HOST";
+
+const HOST_BIN_ENV: &str = "PICO_OMP_BIN";
 
 type Pending = Arc<Mutex<HashMap<RequestId, oneshot::Sender<RpcResponse>>>>;
 
+type Sessions = Arc<Mutex<HashMap<String, mpsc::UnboundedSender<OmpEvent>>>>;
+
 #[derive(Debug, Default, Clone)]
-pub struct SpawnConfig {
-    pub model: Option<String>,
-    pub cwd: Option<PathBuf>,
-    pub session_dir: Option<PathBuf>,
-    pub continue_session: bool,
-    pub append_system_prompt: Option<PathBuf>,
-    pub extensions: Vec<PathBuf>,
+pub struct HostConfig {
     pub env: Vec<(String, String)>,
 }
 
-pub struct OmpClient {
-    child: Child,
-    stdin: AsyncMutex<ChildStdin>,
-    pending: Pending,
+#[derive(Debug, Default, Clone)]
+pub struct SessionIdentity {
+    pub platform: String,
+    pub guild: String,
+    pub channel: String,
+    pub thread: String,
+    pub user: String,
 }
 
-fn build_command(config: &SpawnConfig) -> ProcCommand {
-    let mut cmd = ProcCommand::new("omp");
-    cmd.arg("--mode").arg("rpc");
-    if let Some(model) = &config.model {
-        cmd.arg("--model").arg(model);
-    }
-    if let Some(cwd) = &config.cwd {
-        cmd.current_dir(cwd);
-        cmd.arg("--cwd").arg(cwd);
-    }
-    if let Some(session_dir) = &config.session_dir {
-        cmd.arg("--session-dir").arg(session_dir);
-    }
-    if config.continue_session {
-        cmd.arg("--continue");
-    }
-    if let Some(prompt) = &config.append_system_prompt {
-        cmd.arg("--append-system-prompt").arg(prompt);
-    }
-    for extension in &config.extensions {
-        cmd.arg("--extension").arg(extension);
-    }
-    for (key, value) in &config.env {
+#[derive(Debug, Default, Clone)]
+pub struct SessionConfig {
+    pub model: Option<String>,
+    pub cwd: PathBuf,
+    pub session_dir: PathBuf,
+    pub continue_from_file: Option<PathBuf>,
+    pub append_system_prompt: Option<PathBuf>,
+    pub identity: SessionIdentity,
+}
+
+pub struct OmpHost {
+    stdin: AsyncMutex<ChildStdin>,
+    pending: Pending,
+    sessions: Sessions,
+    alive: Arc<AtomicBool>,
+}
+
+pub struct OmpSessionHandle {
+    host: Arc<OmpHost>,
+    session_id: String,
+}
+
+fn resolve_host_entry(explicit: Option<PathBuf>, home: Option<PathBuf>) -> PathBuf {
+    explicit.unwrap_or_else(|| home.unwrap_or_default().join(".pico/agent/omp-host/host.ts"))
+}
+
+fn host_entry() -> PathBuf {
+    resolve_host_entry(
+        std::env::var_os(HOST_ENTRY_ENV).map(PathBuf::from),
+        std::env::var_os("HOME").map(PathBuf::from),
+    )
+}
+
+fn build_command(host: &HostConfig) -> ProcCommand {
+    let mut cmd = match std::env::var_os(HOST_BIN_ENV) {
+        Some(bin) => ProcCommand::new(bin),
+        None => {
+            let mut cmd = ProcCommand::new("bun");
+            cmd.arg("run").arg(host_entry());
+            cmd
+        }
+    };
+    for (key, value) in &host.env {
         cmd.env(key, value);
     }
     cmd.stdin(Stdio::piped())
@@ -68,117 +98,107 @@ fn build_command(config: &SpawnConfig) -> ProcCommand {
     cmd
 }
 
-impl OmpClient {
+impl OmpHost {
     pub async fn spawn(
-        config: &SpawnConfig,
+        host: &HostConfig,
         cancel: &CancellationToken,
         tracker: &TaskTracker,
-    ) -> color_eyre::Result<(OmpClient, mpsc::UnboundedReceiver<OmpEvent>)> {
-        let mut cmd = build_command(config);
+    ) -> color_eyre::Result<Arc<OmpHost>> {
+        let mut cmd = build_command(host);
 
-        let mut child = cmd.spawn().wrap_err("spawn `omp --mode rpc`")?;
-        let stdin = child.stdin.take().ok_or_else(|| eyre!("omp child has no stdin"))?;
-        let stdout = child.stdout.take().ok_or_else(|| eyre!("omp child has no stdout"))?;
-        let stderr = child.stderr.take().ok_or_else(|| eyre!("omp child has no stderr"))?;
+        let mut child = cmd.spawn().wrap_err("spawn `bun run` omp host")?;
+        let stdin = child.stdin.take().ok_or_else(|| eyre!("omp host has no stdin"))?;
+        let stdout = child.stdout.take().ok_or_else(|| eyre!("omp host has no stdout"))?;
+        let stderr = child.stderr.take().ok_or_else(|| eyre!("omp host has no stderr"))?;
 
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
-        let (event_tx, event_rx) = mpsc::unbounded_channel();
+        let sessions: Sessions = Arc::new(Mutex::new(HashMap::new()));
         let (ready_tx, ready_rx) = oneshot::channel();
+        let alive = Arc::new(AtomicBool::new(true));
 
         tracker.spawn(drain_stderr(stderr, cancel.clone()));
-        tracker.spawn(read_loop(stdout, Arc::clone(&pending), event_tx, ready_tx, cancel.clone()));
+        tracker.spawn(read_loop(
+            stdout,
+            Arc::clone(&pending),
+            Arc::clone(&sessions),
+            Arc::clone(&alive),
+            ready_tx,
+            cancel.clone(),
+        ));
 
         match tokio::time::timeout(READY_TIMEOUT, ready_rx).await {
-            Ok(Ok(())) => tracing::debug!(model = ?config.model, "omp --mode rpc ready"),
+            Ok(Ok(())) => tracing::debug!("omp host ready"),
             Ok(Err(_)) => {
                 let _ = child.start_kill();
-                return Err(eyre!("omp exited before sending its ready frame"));
+                return Err(eyre!("omp host exited before sending its ready frame"));
             }
             Err(_) => {
                 let _ = child.start_kill();
-                return Err(eyre!("omp did not send a ready frame within {READY_TIMEOUT:?}"));
+                return Err(eyre!("omp host did not send a ready frame within {READY_TIMEOUT:?}"));
             }
         }
 
-        let client = OmpClient {
-            child,
+        let shutdown = cancel.clone();
+        tracker.spawn(async move {
+            shutdown.cancelled().await;
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+        });
+
+        Ok(Arc::new(OmpHost {
             stdin: AsyncMutex::new(stdin),
             pending,
+            sessions,
+            alive,
+        }))
+    }
+
+    pub fn is_alive(&self) -> bool {
+        self.alive.load(Ordering::Relaxed)
+    }
+
+    pub async fn open_session(
+        self: &Arc<Self>,
+        session_id: &str,
+        config: &SessionConfig,
+    ) -> color_eyre::Result<(OmpSessionHandle, mpsc::UnboundedReceiver<OmpEvent>)> {
+        let (event_tx, event_rx) = mpsc::unbounded_channel();
+        self.sessions.lock().insert(session_id.to_owned(), event_tx);
+
+        let id = RequestId::new();
+        let identity = Identity {
+            platform: &config.identity.platform,
+            guild: &config.identity.guild,
+            channel: &config.identity.channel,
+            thread: &config.identity.thread,
+            user: &config.identity.user,
         };
-        Ok((client, event_rx))
-    }
-
-    pub async fn prompt(&self, message: &str) -> color_eyre::Result<()> {
-        let id = RequestId::new();
-        self.dispatch(&id, &Command::Prompt { id: &id, message }).await
-    }
-
-    pub async fn steer(&self, message: &str) -> color_eyre::Result<()> {
-        let id = RequestId::new();
-        self.dispatch(&id, &Command::Steer { id: &id, message }).await
-    }
-
-    pub async fn follow_up(&self, message: &str) -> color_eyre::Result<()> {
-        let id = RequestId::new();
-        self.dispatch(&id, &Command::FollowUp { id: &id, message }).await
-    }
-
-    pub async fn abort(&self) -> color_eyre::Result<()> {
-        let id = RequestId::new();
-        self.dispatch(&id, &Command::Abort { id: &id }).await
-    }
-
-    pub async fn new_session(&self) -> color_eyre::Result<()> {
-        let id = RequestId::new();
-        self.dispatch(&id, &Command::NewSession { id: &id }).await
-    }
-
-    pub async fn set_model(&self, provider: &str, model_id: &str) -> color_eyre::Result<()> {
-        let id = RequestId::new();
-        self.dispatch(
-            &id,
-            &Command::SetModel {
-                id: &id,
-                provider,
-                model_id,
-            },
-        )
-        .await
-    }
-
-    pub async fn set_session_name(&self, name: &str) -> color_eyre::Result<()> {
-        let id = RequestId::new();
-        self.dispatch(&id, &Command::SetSessionName { id: &id, name }).await
-    }
-
-    pub async fn shutdown(self) -> color_eyre::Result<()> {
-        let OmpClient { mut child, stdin, .. } = self;
-        drop(stdin);
-        match tokio::time::timeout(SHUTDOWN_TIMEOUT, child.wait()).await {
-            Ok(Ok(status)) => {
-                tracing::debug!(%status, "omp exited");
-                Ok(())
-            }
-            Ok(Err(e)) => Err(e).wrap_err("wait for omp to exit"),
-            Err(_) => {
-                let _ = child.start_kill();
-                tracing::warn!("omp did not exit within {SHUTDOWN_TIMEOUT:?}; killed");
-                Ok(())
-            }
+        let cmd = Command::OpenSession {
+            id: &id,
+            session_id,
+            cwd: &config.cwd,
+            session_dir: &config.session_dir,
+            continue_from_file: config.continue_from_file.as_deref(),
+            append_system_prompt: config.append_system_prompt.as_deref(),
+            model: config.model.as_deref(),
+            identity,
+        };
+        if let Err(e) = self.dispatch(&id, &cmd).await {
+            self.sessions.lock().remove(session_id);
+            return Err(e);
         }
+
+        let handle = OmpSessionHandle {
+            host: Arc::clone(self),
+            session_id: session_id.to_owned(),
+        };
+        Ok((handle, event_rx))
     }
 
-    pub async fn ui_response(&self, response: &UiResponse<'_>) -> color_eyre::Result<()> {
-        let mut stdin = self.stdin.lock().await;
-        pico_shared::proto::write_frame(&mut *stdin, response)
-            .await
-            .wrap_err("write extension_ui_response")
-    }
-
-    async fn dispatch(&self, id: &RequestId, cmd: &Command<'_>) -> color_eyre::Result<()> {
+    async fn send_and_await(&self, id: &RequestId, cmd: &Command<'_>) -> color_eyre::Result<RpcResponse> {
         let (tx, rx) = oneshot::channel();
         self.pending.lock().insert(id.clone(), tx);
-        tracing::debug!(command = cmd.kind(), %id, "sending omp command");
+        tracing::debug!(command = cmd.kind(), %id, "sending omp host command");
 
         let write = {
             let mut stdin = self.stdin.lock().await;
@@ -186,33 +206,188 @@ impl OmpClient {
         };
         if let Err(e) = write {
             self.pending.lock().remove(id);
-            return Err(e).wrap_err("write omp command");
+            return Err(e).wrap_err("write omp host command");
         }
 
-        let resp = match tokio::time::timeout(RESPONSE_TIMEOUT, rx).await {
-            Ok(Ok(resp)) => resp,
-            Ok(Err(_)) => return Err(eyre!("omp exited before responding to `{id}`")),
+        match tokio::time::timeout(RESPONSE_TIMEOUT, rx).await {
+            Ok(Ok(resp)) => Ok(resp),
+            Ok(Err(_)) => Err(eyre!("omp host exited before responding to `{id}`")),
             Err(_) => {
                 self.pending.lock().remove(id);
-                return Err(eyre!("omp did not respond to `{id}` within {RESPONSE_TIMEOUT:?}"));
+                Err(eyre!("omp host did not respond to `{id}` within {RESPONSE_TIMEOUT:?}"))
             }
-        };
+        }
+    }
+
+    async fn dispatch(&self, id: &RequestId, cmd: &Command<'_>) -> color_eyre::Result<()> {
+        let resp = self.send_and_await(id, cmd).await?;
         if resp.success {
             Ok(())
         } else {
             let detail = resp
                 .error
                 .as_deref()
-                .unwrap_or("omp reported failure without a message");
-            Err(eyre!("omp `{}` failed: {detail}", resp.command))
+                .unwrap_or("omp host reported failure without a message");
+            Err(eyre!("omp host `{}` failed: {detail}", resp.command))
         }
+    }
+
+    pub async fn completion(&self, system: &str, prompt: &str) -> color_eyre::Result<Option<String>> {
+        let id = RequestId::new();
+        let resp = self
+            .send_and_await(
+                &id,
+                &Command::Completion {
+                    id: &id,
+                    system,
+                    prompt,
+                },
+            )
+            .await?;
+        Ok(if resp.success { resp.result } else { None })
+    }
+}
+
+impl OmpSessionHandle {
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    pub async fn prompt(&self, message: &str) -> color_eyre::Result<()> {
+        let id = RequestId::new();
+        self.host
+            .dispatch(
+                &id,
+                &Command::Prompt {
+                    id: &id,
+                    session_id: &self.session_id,
+                    message,
+                },
+            )
+            .await
+    }
+
+    pub async fn steer(&self, message: &str) -> color_eyre::Result<()> {
+        let id = RequestId::new();
+        self.host
+            .dispatch(
+                &id,
+                &Command::Steer {
+                    id: &id,
+                    session_id: &self.session_id,
+                    message,
+                },
+            )
+            .await
+    }
+
+    pub async fn follow_up(&self, message: &str) -> color_eyre::Result<()> {
+        let id = RequestId::new();
+        self.host
+            .dispatch(
+                &id,
+                &Command::FollowUp {
+                    id: &id,
+                    session_id: &self.session_id,
+                    message,
+                },
+            )
+            .await
+    }
+
+    pub async fn abort(&self) -> color_eyre::Result<()> {
+        let id = RequestId::new();
+        self.host
+            .dispatch(
+                &id,
+                &Command::Abort {
+                    id: &id,
+                    session_id: &self.session_id,
+                },
+            )
+            .await
+    }
+
+    pub async fn new_session(&self) -> color_eyre::Result<()> {
+        let id = RequestId::new();
+        self.host
+            .dispatch(
+                &id,
+                &Command::NewSession {
+                    id: &id,
+                    session_id: &self.session_id,
+                },
+            )
+            .await
+    }
+
+    pub async fn set_model(&self, provider: &str, model_id: &str) -> color_eyre::Result<()> {
+        let id = RequestId::new();
+        self.host
+            .dispatch(
+                &id,
+                &Command::SetModel {
+                    id: &id,
+                    session_id: &self.session_id,
+                    provider,
+                    model_id,
+                },
+            )
+            .await
+    }
+
+    pub async fn set_session_name(&self, name: &str) -> color_eyre::Result<()> {
+        let id = RequestId::new();
+        self.host
+            .dispatch(
+                &id,
+                &Command::SetSessionName {
+                    id: &id,
+                    session_id: &self.session_id,
+                    name,
+                },
+            )
+            .await
+    }
+
+    pub async fn ui_response(&self, response: &UiResponse<'_>) -> color_eyre::Result<()> {
+        let mut stdin = self.host.stdin.lock().await;
+        pico_shared::proto::write_frame(&mut *stdin, response)
+            .await
+            .wrap_err("write extension_ui_response")
+    }
+
+    pub async fn close(&self) -> color_eyre::Result<()> {
+        let id = RequestId::new();
+        let result = self
+            .host
+            .dispatch(
+                &id,
+                &Command::CloseSession {
+                    id: &id,
+                    session_id: &self.session_id,
+                },
+            )
+            .await;
+        self.host.sessions.lock().remove(&self.session_id);
+        result
+    }
+}
+
+fn route(sessions: &Sessions, session_id: &str, event: OmpEvent) {
+    match sessions.lock().get(session_id) {
+        Some(tx) => {
+            let _ = tx.send(event);
+        }
+        None => tracing::debug!(%session_id, "omp host: event for unknown session"),
     }
 }
 
 async fn read_loop(
     stdout: ChildStdout,
     pending: Pending,
-    event_tx: mpsc::UnboundedSender<OmpEvent>,
+    sessions: Sessions,
+    alive: Arc<AtomicBool>,
     ready_tx: oneshot::Sender<()>,
     cancel: CancellationToken,
 ) {
@@ -230,7 +405,7 @@ async fn read_loop(
             Ok(0) => break,
             Ok(_) => {}
             Err(e) => {
-                tracing::warn!(error = %e, "omp stdout read error");
+                tracing::warn!(error = %e, "omp host stdout read error");
                 break;
             }
         }
@@ -241,8 +416,8 @@ async fn read_loop(
         let frame: Inbound = match serde_json::from_str(trimmed) {
             Ok(frame) => frame,
             Err(e) => {
-                tracing::warn!(error = %e, bytes = trimmed.len(), "omp: undecodable frame");
-                tracing::debug!(frame = %trimmed, "omp: undecodable frame contents");
+                tracing::warn!(error = %e, bytes = trimmed.len(), "omp host: undecodable frame");
+                tracing::debug!(frame = %trimmed, "omp host: undecodable frame contents");
                 continue;
             }
         };
@@ -260,43 +435,39 @@ async fn read_loop(
                         let _ = tx.send(resp);
                     }
                     None if !resp.success => {
-                        let msg = resp.error.unwrap_or_else(|| format!("omp `{}` failed", resp.command));
-                        let _ = event_tx.send(OmpEvent::Error(msg));
+                        let msg = resp
+                            .error
+                            .unwrap_or_else(|| format!("omp host `{}` failed", resp.command));
+                        route(&sessions, &resp.session_id, OmpEvent::Error(msg));
                     }
-                    None => tracing::debug!(command = %resp.command, "omp: response with no waiter"),
+                    None => tracing::debug!(command = %resp.command, "omp host: response with no waiter"),
                 }
             }
-            Inbound::AgentStart => {
-                let _ = event_tx.send(OmpEvent::AgentStart);
-            }
-            Inbound::AgentEnd => {
-                let _ = event_tx.send(OmpEvent::AgentEnd);
-            }
-            Inbound::TurnEnd => {
-                let _ = event_tx.send(OmpEvent::TurnEnd);
-            }
+            Inbound::AgentStart { session_id } => route(&sessions, &session_id, OmpEvent::AgentStart),
+            Inbound::AgentEnd { session_id } => route(&sessions, &session_id, OmpEvent::AgentEnd),
+            Inbound::TurnEnd { session_id } => route(&sessions, &session_id, OmpEvent::TurnEnd),
             Inbound::MessageUpdate {
+                session_id,
                 assistant_message_event,
-            } => {
-                let _ = event_tx.send(OmpEvent::Message(assistant_message_event));
+            } => route(&sessions, &session_id, OmpEvent::Message(assistant_message_event)),
+            Inbound::ToolExecutionStart { session_id, call } => {
+                route(&sessions, &session_id, OmpEvent::ToolStart(call))
             }
-            Inbound::ToolExecutionStart(tool) => {
-                let _ = event_tx.send(OmpEvent::ToolStart(tool));
+            Inbound::ToolExecutionUpdate { session_id, update } => {
+                route(&sessions, &session_id, OmpEvent::ToolUpdate(update))
             }
-            Inbound::ToolExecutionUpdate(tool) => {
-                let _ = event_tx.send(OmpEvent::ToolUpdate(tool));
+            Inbound::ToolExecutionEnd { session_id, end } => route(&sessions, &session_id, OmpEvent::ToolEnd(end)),
+            Inbound::ExtensionUiRequest { session_id, request } => {
+                route(&sessions, &session_id, OmpEvent::UiRequest(request))
             }
-            Inbound::ToolExecutionEnd(tool) => {
-                let _ = event_tx.send(OmpEvent::ToolEnd(tool));
-            }
-            Inbound::ExtensionUiRequest(req) => {
-                let _ = event_tx.send(OmpEvent::UiRequest(req));
-            }
+            Inbound::Error { session_id, message } => route(&sessions, &session_id, OmpEvent::Error(message)),
             Inbound::Unknown => {}
         }
     }
 
     pending.lock().clear();
+    sessions.lock().clear();
+    alive.store(false, Ordering::Relaxed);
 }
 
 async fn drain_stderr(stderr: ChildStderr, cancel: CancellationToken) {
@@ -320,80 +491,88 @@ mod tests {
     use super::*;
 
     #[test]
-    fn build_command_starts_child_in_configured_cwd() {
-        let cwd = std::env::temp_dir().join("pico-cwd");
-        let config = SpawnConfig {
-            cwd: Some(cwd.clone()),
-            ..SpawnConfig::default()
-        };
-        let cmd = build_command(&config);
-        assert_eq!(cmd.as_std().get_current_dir(), Some(cwd.as_path()));
+    fn resolve_host_entry_prefers_explicit() {
+        assert_eq!(
+            resolve_host_entry(Some(PathBuf::from("/x/host.ts")), Some(PathBuf::from("/home/u"))),
+            PathBuf::from("/x/host.ts"),
+        );
     }
 
     #[test]
-    fn build_command_without_cwd_inherits_worker_dir() {
-        let cmd = build_command(&SpawnConfig::default());
-        assert_eq!(cmd.as_std().get_current_dir(), None);
+    fn resolve_host_entry_defaults_under_home() {
+        assert_eq!(
+            resolve_host_entry(None, Some(PathBuf::from("/home/u"))),
+            PathBuf::from("/home/u/.pico/agent/omp-host/host.ts"),
+        );
+    }
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn with_bin_env<T>(value: Option<&str>, f: impl FnOnce() -> T) -> T {
+        let _guard = ENV_LOCK.lock();
+        let prev = std::env::var_os(HOST_BIN_ENV);
+        unsafe {
+            match value {
+                Some(v) => std::env::set_var(HOST_BIN_ENV, v),
+                None => std::env::remove_var(HOST_BIN_ENV),
+            }
+        }
+        let out = f();
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var(HOST_BIN_ENV, v),
+                None => std::env::remove_var(HOST_BIN_ENV),
+            }
+        }
+        out
     }
 
     #[test]
-    fn build_command_injects_extensions_and_env() {
-        let ext = std::path::PathBuf::from("/x/extension.ts");
-        let config = SpawnConfig {
-            extensions: vec![ext.clone()],
+    fn build_command_runs_bun_with_host_env() {
+        let host = HostConfig {
             env: vec![
                 ("CAMOFOX_BASE_URL".to_owned(), "http://127.0.0.1:9377".to_owned()),
-                ("CAMOFOX_USER_ID".to_owned(), "acme".to_owned()),
+                ("CAMOFOX_USER_ID".to_owned(), "default".to_owned()),
             ],
-            ..SpawnConfig::default()
         };
-        let cmd = build_command(&config);
-        let std_cmd = cmd.as_std();
-        let args: Vec<String> = std_cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
-        let i = args
-            .iter()
-            .position(|a| a == "--extension")
-            .expect("--extension arg present");
-        assert_eq!(args[i + 1], ext.to_string_lossy());
-        let envs: std::collections::HashMap<String, String> = std_cmd
-            .get_envs()
-            .filter_map(|(k, v)| Some((k.to_string_lossy().into_owned(), v?.to_string_lossy().into_owned())))
-            .collect();
-        assert_eq!(envs.get("CAMOFOX_BASE_URL").map(String::as_str), Some("http://127.0.0.1:9377"));
-        assert_eq!(envs.get("CAMOFOX_USER_ID").map(String::as_str), Some("acme"));
+        with_bin_env(None, || {
+            let cmd = build_command(&host);
+            let std_cmd = cmd.as_std();
+            assert_eq!(std_cmd.get_program(), "bun");
+            let args: Vec<String> = std_cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+            assert_eq!(args.first().map(String::as_str), Some("run"));
+            let envs: HashMap<String, String> = std_cmd
+                .get_envs()
+                .filter_map(|(k, v)| Some((k.to_string_lossy().into_owned(), v?.to_string_lossy().into_owned())))
+                .collect();
+            assert_eq!(envs.get("CAMOFOX_BASE_URL").map(String::as_str), Some("http://127.0.0.1:9377"));
+            assert_eq!(envs.get("CAMOFOX_USER_ID").map(String::as_str), Some("default"));
+        });
     }
 
     #[test]
-    fn build_command_passes_append_system_prompt() {
-        let append = std::path::PathBuf::from("/x/append.md");
-        let config = SpawnConfig {
-            append_system_prompt: Some(append.clone()),
-            ..SpawnConfig::default()
+    fn build_command_default_injects_no_env() {
+        with_bin_env(None, || {
+            let cmd = build_command(&HostConfig::default());
+            assert_eq!(cmd.as_std().get_envs().count(), 0);
+        });
+    }
+
+    #[test]
+    fn build_command_override_spawns_bin_directly() {
+        let host = HostConfig {
+            env: vec![("CAMOFOX_BASE_URL".to_owned(), "http://127.0.0.1:9377".to_owned())],
         };
-        let cmd = build_command(&config);
-        let args: Vec<String> = cmd
-            .as_std()
-            .get_args()
-            .map(|a| a.to_string_lossy().into_owned())
-            .collect();
-        let a = args
-            .iter()
-            .position(|a| a == "--append-system-prompt")
-            .expect("--append-system-prompt present");
-        assert_eq!(args[a + 1], append.to_string_lossy());
-    }
-
-    #[test]
-    fn build_command_default_passes_no_append_prompt() {
-        let cmd = build_command(&SpawnConfig::default());
-        assert!(cmd.as_std().get_args().all(|a| a != "--append-system-prompt"));
-    }
-
-    #[test]
-    fn build_command_default_injects_no_extension_or_env() {
-        let cmd = build_command(&SpawnConfig::default());
-        let std_cmd = cmd.as_std();
-        assert!(std_cmd.get_args().all(|a| a != "--extension"));
-        assert_eq!(std_cmd.get_envs().count(), 0);
+        with_bin_env(Some("/opt/pico/scripted-omp"), || {
+            let cmd = build_command(&host);
+            let std_cmd = cmd.as_std();
+            assert_eq!(std_cmd.get_program(), "/opt/pico/scripted-omp");
+            assert_eq!(std_cmd.get_args().count(), 0);
+            let envs: HashMap<String, String> = std_cmd
+                .get_envs()
+                .filter_map(|(k, v)| Some((k.to_string_lossy().into_owned(), v?.to_string_lossy().into_owned())))
+                .collect();
+            assert_eq!(envs.get("CAMOFOX_BASE_URL").map(String::as_str), Some("http://127.0.0.1:9377"));
+        });
     }
 }

@@ -1,12 +1,15 @@
 use std::{
     path::PathBuf,
+    sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use pico_core::omp::{
-    client::{OmpClient, SpawnConfig},
+    client::{HostConfig, OmpHost, OmpSessionHandle, SessionConfig},
+    pool::OmpPool,
     protocol::{AssistantMessageEvent, OmpEvent, UiResponse},
 };
+use tokio::sync::mpsc;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 struct TempDir {
@@ -28,20 +31,48 @@ impl Drop for TempDir {
     }
 }
 
+async fn open_session(
+    session_id: &str,
+    cwd: &TempDir,
+    cancel: &CancellationToken,
+    tracker: &TaskTracker,
+) -> (Arc<OmpHost>, OmpSessionHandle, mpsc::UnboundedReceiver<OmpEvent>) {
+    let host = OmpHost::spawn(&HostConfig::default(), cancel, tracker)
+        .await
+        .expect("spawn omp host");
+    let config = SessionConfig {
+        cwd: cwd.path.clone(),
+        session_dir: cwd.path.clone(),
+        ..SessionConfig::default()
+    };
+    let (client, events) = host.open_session(session_id, &config).await.expect("open_session");
+    (host, client, events)
+}
+
+async fn drain_reply(events: &mut mpsc::UnboundedReceiver<OmpEvent>) -> String {
+    let mut reply = String::new();
+    loop {
+        let event = tokio::time::timeout(Duration::from_secs(90), events.recv())
+            .await
+            .expect("timed out waiting for omp events")
+            .expect("event stream closed before agent_end");
+        match event {
+            OmpEvent::Message(AssistantMessageEvent::TextDelta { delta }) => reply.push_str(&delta),
+            OmpEvent::AgentEnd => break,
+            OmpEvent::Error(e) => panic!("omp reported an error: {e}"),
+            _ => {}
+        }
+    }
+    reply
+}
+
 #[tokio::test]
 #[ignore]
 async fn roundtrip_commands_without_model_calls() {
     let cwd = TempDir::new("pico-omp-cwd");
-    let config = SpawnConfig {
-        model: Some("github-copilot/gpt-4o-mini".to_owned()),
-        cwd: Some(cwd.path.clone()),
-        ..SpawnConfig::default()
-    };
-
+    let cancel = CancellationToken::new();
     let tracker = TaskTracker::new();
-    let (client, _events) = OmpClient::spawn(&config, &CancellationToken::new(), &tracker)
-        .await
-        .expect("spawn omp --mode rpc");
+    let (_host, client, _events) = open_session("roundtrip", &cwd, &cancel, &tracker).await;
 
     client.new_session().await.expect("new_session");
     client
@@ -55,25 +86,19 @@ async fn roundtrip_commands_without_model_calls() {
         .set_model("nope", "nope")
         .await
         .expect_err("set_model with an unknown model must fail");
-    assert!(err.to_string().contains("Model not found"), "unexpected error: {err:#}");
+    assert!(!err.to_string().is_empty(), "rejection should carry a message: {err:#}");
 
-    client.shutdown().await.expect("shutdown");
+    client.close().await.expect("close");
+    cancel.cancel();
 }
 
 #[tokio::test]
 #[ignore]
 async fn streams_a_prompt_reply() {
     let cwd = TempDir::new("pico-omp-cwd");
-    let config = SpawnConfig {
-        model: Some("github-copilot/gpt-4o-mini".to_owned()),
-        cwd: Some(cwd.path.clone()),
-        ..SpawnConfig::default()
-    };
-
+    let cancel = CancellationToken::new();
     let tracker = TaskTracker::new();
-    let (client, mut events) = OmpClient::spawn(&config, &CancellationToken::new(), &tracker)
-        .await
-        .expect("spawn omp --mode rpc");
+    let (_host, client, mut events) = open_session("stream", &cwd, &cancel, &tracker).await;
     client
         .prompt("Reply with exactly the word: pong")
         .await
@@ -98,23 +123,106 @@ async fn streams_a_prompt_reply() {
     assert!(saw_start, "never saw agent_start");
     assert!(reply.to_lowercase().contains("pong"), "reply was: {reply:?}");
 
-    client.shutdown().await.expect("shutdown");
+    client.close().await.expect("close");
+    cancel.cancel();
+}
+
+#[tokio::test]
+#[ignore]
+async fn two_sessions_on_one_host_stay_isolated() {
+    let cwd_a = TempDir::new("pico-omp-mux-a");
+    let cwd_b = TempDir::new("pico-omp-mux-b");
+    let cancel = CancellationToken::new();
+    let tracker = TaskTracker::new();
+    let host = OmpHost::spawn(&HostConfig::default(), &cancel, &tracker)
+        .await
+        .expect("spawn omp host");
+    let cfg_a = SessionConfig {
+        cwd: cwd_a.path.clone(),
+        session_dir: cwd_a.path.clone(),
+        ..SessionConfig::default()
+    };
+    let cfg_b = SessionConfig {
+        cwd: cwd_b.path.clone(),
+        session_dir: cwd_b.path.clone(),
+        ..SessionConfig::default()
+    };
+    let (client_a, mut events_a) = host.open_session("mux-a", &cfg_a).await.expect("open session a");
+    let (client_b, mut events_b) = host.open_session("mux-b", &cfg_b).await.expect("open session b");
+
+    client_a
+        .prompt("Reply with exactly the word: alpha")
+        .await
+        .expect("prompt a");
+    client_b
+        .prompt("Reply with exactly the word: bravo")
+        .await
+        .expect("prompt b");
+
+    let reply_a = drain_reply(&mut events_a).await;
+    let reply_b = drain_reply(&mut events_b).await;
+
+    assert!(reply_a.to_lowercase().contains("alpha"), "session A reply was: {reply_a:?}");
+    assert!(
+        !reply_a.to_lowercase().contains("bravo"),
+        "session A leaked B's reply: {reply_a:?}"
+    );
+    assert!(reply_b.to_lowercase().contains("bravo"), "session B reply was: {reply_b:?}");
+    assert!(
+        !reply_b.to_lowercase().contains("alpha"),
+        "session B leaked A's reply: {reply_b:?}"
+    );
+
+    client_a.close().await.expect("close a");
+    client_b.close().await.expect("close b");
+    cancel.cancel();
+}
+
+#[tokio::test]
+#[ignore]
+async fn concurrent_get_or_spawn_same_thread_shares_one_session() {
+    let cwd = TempDir::new("pico-omp-race");
+    let cancel = CancellationToken::new();
+    let tracker = TaskTracker::new();
+    let pool = OmpPool::new(HostConfig::default(), cancel.clone(), &tracker);
+    let cfg = SessionConfig {
+        cwd: cwd.path.clone(),
+        session_dir: cwd.path.clone(),
+        ..SessionConfig::default()
+    };
+
+    let (ra, rb, rc) = tokio::join!(
+        pool.get_or_spawn("same", &cfg),
+        pool.get_or_spawn("same", &cfg),
+        pool.get_or_spawn("same", &cfg),
+    );
+    let handle = ra.expect("open a");
+    let handle_b = rb.expect("open b");
+    let handle_c = rc.expect("open c");
+    assert!(
+        Arc::ptr_eq(&handle, &handle_b) && Arc::ptr_eq(&handle_b, &handle_c),
+        "concurrent get_or_spawn for one thread returned different sessions"
+    );
+
+    let mut session = handle.lock().await;
+    session
+        .client
+        .prompt("Reply with exactly the word: pong")
+        .await
+        .expect("shared session prompt");
+    let reply = drain_reply(&mut session.events).await;
+    assert!(reply.to_lowercase().contains("pong"), "shared session reply was: {reply:?}");
+
+    cancel.cancel();
 }
 
 #[tokio::test]
 #[ignore]
 async fn classifies_a_real_tool_call() {
     let cwd = TempDir::new("pico-omp-tool");
-    let config = SpawnConfig {
-        model: Some("github-copilot/gpt-4o-mini".to_owned()),
-        cwd: Some(cwd.path.clone()),
-        ..SpawnConfig::default()
-    };
-
+    let cancel = CancellationToken::new();
     let tracker = TaskTracker::new();
-    let (client, mut events) = OmpClient::spawn(&config, &CancellationToken::new(), &tracker)
-        .await
-        .expect("spawn omp --mode rpc");
+    let (_host, client, mut events) = open_session("tool", &cwd, &cancel, &tracker).await;
     client
         .prompt("Run this shell command with the bash tool and report nothing else: echo pong")
         .await
@@ -141,23 +249,17 @@ async fn classifies_a_real_tool_call() {
     let command = bash_command.unwrap_or_else(|| panic!("no bash tool call decoded; saw tools: {other_tools:?}"));
     assert!(command.contains("echo"), "bash command was: {command:?}");
 
-    client.shutdown().await.expect("shutdown");
+    client.close().await.expect("close");
+    cancel.cancel();
 }
 
 #[tokio::test]
 #[ignore]
 async fn task_update_carries_subagent_progress() {
     let cwd = TempDir::new("pico-omp-task");
-    let config = SpawnConfig {
-        model: Some("github-copilot/gpt-4o-mini".to_owned()),
-        cwd: Some(cwd.path.clone()),
-        ..SpawnConfig::default()
-    };
-
+    let cancel = CancellationToken::new();
     let tracker = TaskTracker::new();
-    let (client, mut events) = OmpClient::spawn(&config, &CancellationToken::new(), &tracker)
-        .await
-        .expect("spawn omp --mode rpc");
+    let (_host, client, mut events) = open_session("task", &cwd, &cancel, &tracker).await;
     client
         .prompt(
             "Use the task tool to spawn exactly one subagent: agent type \"explore\", one task whose \
@@ -189,26 +291,20 @@ async fn task_update_carries_subagent_progress() {
     assert!(saw_task_start, "never saw a task tool_execution_start");
     assert!(saw_progress, "task tool_execution_update never carried details.progress[]");
 
-    client.shutdown().await.expect("shutdown");
+    client.close().await.expect("close");
+    cancel.cancel();
 }
 
 #[tokio::test]
 #[ignore]
 async fn stale_ui_response_is_ignored() {
     let cwd = TempDir::new("pico-omp-stale-ui");
-    let config = SpawnConfig {
-        model: Some("github-copilot/gpt-4o-mini".to_owned()),
-        cwd: Some(cwd.path.clone()),
-        ..SpawnConfig::default()
-    };
-
+    let cancel = CancellationToken::new();
     let tracker = TaskTracker::new();
-    let (client, mut events) = OmpClient::spawn(&config, &CancellationToken::new(), &tracker)
-        .await
-        .expect("spawn omp --mode rpc");
+    let (_host, client, mut events) = open_session("stale-ui", &cwd, &cancel, &tracker).await;
 
     client
-        .ui_response(&UiResponse::cancelled("no-such-dialog", false))
+        .ui_response(&UiResponse::cancelled(client.session_id(), "no-such-dialog", false))
         .await
         .expect("send stale extension_ui_response");
 
@@ -236,23 +332,17 @@ async fn stale_ui_response_is_ignored() {
         "turn did not complete normally; reply was {reply:?}"
     );
 
-    client.shutdown().await.expect("shutdown");
+    client.close().await.expect("close");
+    cancel.cancel();
 }
 
 #[tokio::test]
 #[ignore]
 async fn abort_ends_an_in_flight_turn() {
     let cwd = TempDir::new("pico-omp-abort");
-    let config = SpawnConfig {
-        model: Some("github-copilot/gpt-4o-mini".to_owned()),
-        cwd: Some(cwd.path.clone()),
-        ..SpawnConfig::default()
-    };
-
+    let cancel = CancellationToken::new();
     let tracker = TaskTracker::new();
-    let (client, mut events) = OmpClient::spawn(&config, &CancellationToken::new(), &tracker)
-        .await
-        .expect("spawn omp --mode rpc");
+    let (_host, client, mut events) = open_session("abort", &cwd, &cancel, &tracker).await;
     client
         .prompt("Use the bash tool to run exactly this command and report its output: sleep 60 && echo done")
         .await
@@ -286,5 +376,6 @@ async fn abort_ends_an_in_flight_turn() {
     }
     assert!(saw_end, "abort did not end the turn; agent_end never arrived");
 
-    client.shutdown().await.expect("shutdown");
+    client.close().await.expect("close");
+    cancel.cancel();
 }

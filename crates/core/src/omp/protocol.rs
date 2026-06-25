@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use serde::{Deserialize, Serialize};
 use ulid::Ulid;
 
@@ -17,40 +19,78 @@ impl std::fmt::Display for RequestId {
 }
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct Identity<'a> {
+    pub platform: &'a str,
+    pub guild: &'a str,
+    pub channel: &'a str,
+    pub thread: &'a str,
+    pub user: &'a str,
+}
+
+#[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case", rename_all_fields = "camelCase")]
 pub(crate) enum Command<'a> {
+    OpenSession {
+        id: &'a RequestId,
+        session_id: &'a str,
+        cwd: &'a Path,
+        session_dir: &'a Path,
+        continue_from_file: Option<&'a Path>,
+        append_system_prompt: Option<&'a Path>,
+        model: Option<&'a str>,
+        identity: Identity<'a>,
+    },
+    CloseSession {
+        id: &'a RequestId,
+        session_id: &'a str,
+    },
     Prompt {
         id: &'a RequestId,
+        session_id: &'a str,
         message: &'a str,
     },
     Steer {
         id: &'a RequestId,
+        session_id: &'a str,
         message: &'a str,
     },
     FollowUp {
         id: &'a RequestId,
+        session_id: &'a str,
         message: &'a str,
     },
     Abort {
         id: &'a RequestId,
+        session_id: &'a str,
     },
     NewSession {
         id: &'a RequestId,
+        session_id: &'a str,
     },
     SetModel {
         id: &'a RequestId,
+        session_id: &'a str,
         provider: &'a str,
         model_id: &'a str,
     },
     SetSessionName {
         id: &'a RequestId,
+        session_id: &'a str,
         name: &'a str,
+    },
+    Completion {
+        id: &'a RequestId,
+        system: &'a str,
+        prompt: &'a str,
     },
 }
 
 impl Command<'_> {
     pub(crate) fn kind(&self) -> &'static str {
         match self {
+            Command::OpenSession { .. } => "open_session",
+            Command::CloseSession { .. } => "close_session",
             Command::Prompt { .. } => "prompt",
             Command::Steer { .. } => "steer",
             Command::FollowUp { .. } => "follow_up",
@@ -58,17 +98,23 @@ impl Command<'_> {
             Command::NewSession { .. } => "new_session",
             Command::SetModel { .. } => "set_model",
             Command::SetSessionName { .. } => "set_session_name",
+            Command::Completion { .. } => "completion",
         }
     }
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct RpcResponse {
     pub id: Option<RequestId>,
+    #[serde(default)]
+    pub session_id: String,
     pub command: String,
     pub success: bool,
     #[serde(default)]
     pub error: Option<String>,
+    #[serde(default)]
+    pub result: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -241,6 +287,8 @@ impl From<RawUiRequest> for UiRequest {
 pub struct UiResponse<'a> {
     #[serde(rename = "type")]
     kind: &'static str,
+    #[serde(rename = "sessionId")]
+    session_id: &'a str,
     id: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     value: Option<&'a str>,
@@ -255,9 +303,10 @@ pub struct UiResponse<'a> {
 impl<'a> UiResponse<'a> {
     const KIND: &'static str = "extension_ui_response";
 
-    pub fn value(id: &'a str, value: &'a str) -> Self {
+    pub fn value(session_id: &'a str, id: &'a str, value: &'a str) -> Self {
         Self {
             kind: Self::KIND,
+            session_id,
             id,
             value: Some(value),
             confirmed: None,
@@ -266,9 +315,10 @@ impl<'a> UiResponse<'a> {
         }
     }
 
-    pub fn confirmed(id: &'a str, confirmed: bool) -> Self {
+    pub fn confirmed(session_id: &'a str, id: &'a str, confirmed: bool) -> Self {
         Self {
             kind: Self::KIND,
+            session_id,
             id,
             value: None,
             confirmed: Some(confirmed),
@@ -277,9 +327,10 @@ impl<'a> UiResponse<'a> {
         }
     }
 
-    pub fn cancelled(id: &'a str, timed_out: bool) -> Self {
+    pub fn cancelled(session_id: &'a str, id: &'a str, timed_out: bool) -> Self {
         Self {
             kind: Self::KIND,
+            session_id,
             id,
             value: None,
             confirmed: None,
@@ -294,16 +345,43 @@ impl<'a> UiResponse<'a> {
 pub(crate) enum Inbound {
     Ready,
     Response(RpcResponse),
-    AgentStart,
-    AgentEnd,
-    TurnEnd,
+    AgentStart {
+        session_id: String,
+    },
+    AgentEnd {
+        session_id: String,
+    },
+    TurnEnd {
+        session_id: String,
+    },
     MessageUpdate {
+        session_id: String,
         assistant_message_event: AssistantMessageEvent,
     },
-    ToolExecutionStart(ToolCall),
-    ToolExecutionUpdate(ToolCallUpdate),
-    ToolExecutionEnd(ToolCallEnd),
-    ExtensionUiRequest(UiRequest),
+    ToolExecutionStart {
+        session_id: String,
+        #[serde(flatten)]
+        call: ToolCall,
+    },
+    ToolExecutionUpdate {
+        session_id: String,
+        #[serde(flatten)]
+        update: ToolCallUpdate,
+    },
+    ToolExecutionEnd {
+        session_id: String,
+        #[serde(flatten)]
+        end: ToolCallEnd,
+    },
+    ExtensionUiRequest {
+        session_id: String,
+        #[serde(flatten)]
+        request: UiRequest,
+    },
+    Error {
+        session_id: String,
+        message: String,
+    },
     #[serde(other)]
     Unknown,
 }
@@ -320,20 +398,27 @@ mod tests {
     fn serializes_commands_with_camelcase_fields() {
         let id = RequestId("req_0".to_owned());
         assert_eq!(
-            serde_json::to_value(Command::Prompt { id: &id, message: "hi" }).unwrap(),
-            serde_json::json!({"type": "prompt", "id": "req_0", "message": "hi"}),
+            serde_json::to_value(Command::Prompt {
+                id: &id,
+                session_id: "t1",
+                message: "hi",
+            })
+            .unwrap(),
+            serde_json::json!({"type": "prompt", "id": "req_0", "sessionId": "t1", "message": "hi"}),
         );
         assert_eq!(
             serde_json::to_value(Command::FollowUp {
                 id: &id,
-                message: "more"
+                session_id: "t1",
+                message: "more",
             })
             .unwrap(),
-            serde_json::json!({"type": "follow_up", "id": "req_0", "message": "more"}),
+            serde_json::json!({"type": "follow_up", "id": "req_0", "sessionId": "t1", "message": "more"}),
         );
         assert_eq!(
             serde_json::to_value(Command::SetModel {
                 id: &id,
+                session_id: "t1",
                 provider: "github-copilot",
                 model_id: "gpt-4o-mini",
             })
@@ -341,13 +426,92 @@ mod tests {
             serde_json::json!({
                 "type": "set_model",
                 "id": "req_0",
+                "sessionId": "t1",
                 "provider": "github-copilot",
                 "modelId": "gpt-4o-mini",
             }),
         );
         assert_eq!(
-            serde_json::to_value(Command::NewSession { id: &id }).unwrap(),
-            serde_json::json!({"type": "new_session", "id": "req_0"}),
+            serde_json::to_value(Command::NewSession {
+                id: &id,
+                session_id: "t1"
+            })
+            .unwrap(),
+            serde_json::json!({"type": "new_session", "id": "req_0", "sessionId": "t1"}),
+        );
+        assert_eq!(
+            serde_json::to_value(Command::Abort {
+                id: &id,
+                session_id: "t1"
+            })
+            .unwrap(),
+            serde_json::json!({"type": "abort", "id": "req_0", "sessionId": "t1"}),
+        );
+        assert_eq!(
+            serde_json::to_value(Command::Completion {
+                id: &id,
+                system: "You output one short title.",
+                prompt: "Write the thread title now.",
+            })
+            .unwrap(),
+            serde_json::json!({
+                "type": "completion",
+                "id": "req_0",
+                "system": "You output one short title.",
+                "prompt": "Write the thread title now.",
+            }),
+        );
+    }
+
+    #[test]
+    fn serializes_open_and_close_session() {
+        let id = RequestId("req_1".to_owned());
+        let cwd = Path::new("/work/tree");
+        let dir = Path::new("/sessions/t1");
+        let cont = Path::new("/sessions/t1/abc.jsonl");
+        assert_eq!(
+            serde_json::to_value(Command::OpenSession {
+                id: &id,
+                session_id: "t1",
+                cwd,
+                session_dir: dir,
+                continue_from_file: Some(cont),
+                append_system_prompt: None,
+                model: Some("github-copilot/claude"),
+                identity: Identity {
+                    platform: "discord",
+                    guild: "1",
+                    channel: "2",
+                    thread: "3",
+                    user: "4",
+                },
+            })
+            .unwrap(),
+            serde_json::json!({
+                "type": "open_session",
+                "id": "req_1",
+                "sessionId": "t1",
+                "cwd": "/work/tree",
+                "sessionDir": "/sessions/t1",
+                "continueFromFile": "/sessions/t1/abc.jsonl",
+                "appendSystemPrompt": null,
+                "model": "github-copilot/claude",
+                "identity": {
+                    "platform": "discord",
+                    "guild": "1",
+                    "channel": "2",
+                    "thread": "3",
+                    "user": "4",
+                },
+            }),
+        );
+        assert_eq!(
+            serde_json::to_value(Command::CloseSession {
+                id: &id,
+                session_id: "t1"
+            })
+            .unwrap(),
+            serde_json::json!({"type": "close_session", "id": "req_1", "sessionId": "t1"}),
         );
     }
 
@@ -362,9 +526,10 @@ mod tests {
     fn routes_ready_and_response_frames() {
         assert!(matches!(parse(r#"{"type":"ready"}"#), Inbound::Ready));
 
-        match parse(r#"{"id":"p1","type":"response","command":"prompt","success":true}"#) {
+        match parse(r#"{"id":"p1","type":"response","sessionId":"s1","command":"prompt","success":true}"#) {
             Inbound::Response(r) => {
                 assert_eq!(r.id, Some(RequestId("p1".to_owned())));
+                assert_eq!(r.session_id, "s1");
                 assert_eq!(r.command, "prompt");
                 assert!(r.success);
                 assert!(r.error.is_none());
@@ -373,7 +538,7 @@ mod tests {
         }
 
         match parse(
-            r#"{"id":"b","type":"response","command":"set_model","success":false,"error":"Model not found: nope/nope"}"#,
+            r#"{"id":"b","type":"response","sessionId":"s1","command":"set_model","success":false,"error":"Model not found: nope/nope"}"#,
         ) {
             Inbound::Response(r) => {
                 assert!(!r.success);
@@ -384,12 +549,38 @@ mod tests {
     }
 
     #[test]
+    fn decodes_completion_response_with_result() {
+        match parse(
+            r#"{"id":"c1","type":"response","command":"completion","success":true,"result":"Fix the reconnect bug"}"#,
+        ) {
+            Inbound::Response(r) => {
+                assert_eq!(r.id, Some(RequestId("c1".to_owned())));
+                assert_eq!(r.command, "completion");
+                assert!(r.success);
+                assert_eq!(r.session_id, "");
+                assert_eq!(r.result.as_deref(), Some("Fix the reconnect bug"));
+            }
+            other => panic!("expected response, got {other:?}"),
+        }
+        match parse(r#"{"id":"c2","type":"response","command":"completion","success":false,"error":"boom"}"#) {
+            Inbound::Response(r) => {
+                assert!(!r.success);
+                assert!(r.result.is_none());
+                assert_eq!(r.error.as_deref(), Some("boom"));
+            }
+            other => panic!("expected response, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn decodes_text_delta_inside_message_update() {
-        let line = r#"{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"pong","partial":{"role":"assistant","content":[]}},"message":{"role":"assistant","content":[]}}"#;
+        let line = r#"{"type":"message_update","sessionId":"s1","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"pong","partial":{"role":"assistant","content":[]}},"message":{"role":"assistant","content":[]}}"#;
         match parse(line) {
             Inbound::MessageUpdate {
+                session_id,
                 assistant_message_event: AssistantMessageEvent::TextDelta { delta },
             } => {
+                assert_eq!(session_id, "s1");
                 assert_eq!(delta, "pong");
             }
             other => panic!("expected text delta, got {other:?}"),
@@ -399,23 +590,25 @@ mod tests {
     #[test]
     fn decodes_thinking_end_and_collapses_other_deltas() {
         match parse(
-            r#"{"type":"message_update","assistantMessageEvent":{"type":"thinking_end","contentIndex":0,"content":"the plan"}}"#,
+            r#"{"type":"message_update","sessionId":"s1","assistantMessageEvent":{"type":"thinking_end","contentIndex":0,"content":"the plan"}}"#,
         ) {
             Inbound::MessageUpdate {
                 assistant_message_event: AssistantMessageEvent::ThinkingEnd { content },
+                ..
             } => {
                 assert_eq!(content, "the plan");
             }
             other => panic!("expected thinking end, got {other:?}"),
         }
         for line in [
-            r#"{"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","contentIndex":0,"delta":"hmm"}}"#,
-            r#"{"type":"message_update","assistantMessageEvent":{"type":"toolcall_start","contentIndex":0}}"#,
+            r#"{"type":"message_update","sessionId":"s1","assistantMessageEvent":{"type":"thinking_delta","contentIndex":0,"delta":"hmm"}}"#,
+            r#"{"type":"message_update","sessionId":"s1","assistantMessageEvent":{"type":"toolcall_start","contentIndex":0}}"#,
         ] {
             assert!(matches!(
                 parse(line),
                 Inbound::MessageUpdate {
-                    assistant_message_event: AssistantMessageEvent::Other
+                    assistant_message_event: AssistantMessageEvent::Other,
+                    ..
                 },
             ));
         }
@@ -424,41 +617,46 @@ mod tests {
     #[test]
     fn decodes_tool_execution_frames() {
         match parse(
-            r#"{"type":"tool_execution_start","toolCallId":"call_1","toolName":"bash","args":{"command":"echo hi"},"intent":"Running echo"}"#,
+            r#"{"type":"tool_execution_start","sessionId":"s1","toolCallId":"call_1","toolName":"bash","args":{"command":"echo hi"},"intent":"Running echo"}"#,
         ) {
-            Inbound::ToolExecutionStart(c) => {
-                assert_eq!(c.tool_call_id, "call_1");
-                assert_eq!(c.tool_name, "bash");
-                assert_eq!(c.args["command"], "echo hi");
-                assert_eq!(c.intent.as_deref(), Some("Running echo"));
+            Inbound::ToolExecutionStart { session_id, call } => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(call.tool_call_id, "call_1");
+                assert_eq!(call.tool_name, "bash");
+                assert_eq!(call.args["command"], "echo hi");
+                assert_eq!(call.intent.as_deref(), Some("Running echo"));
             }
             other => panic!("expected tool start, got {other:?}"),
         }
 
         match parse(
-            r#"{"type":"tool_execution_end","toolCallId":"call_1","toolName":"bash","result":{"content":[]},"isError":false}"#,
+            r#"{"type":"tool_execution_end","sessionId":"s1","toolCallId":"call_1","toolName":"bash","result":{"content":[]},"isError":false}"#,
         ) {
-            Inbound::ToolExecutionEnd(t) => {
-                assert_eq!(t.tool_call_id, "call_1");
-                assert!(!t.is_error);
+            Inbound::ToolExecutionEnd { session_id, end } => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(end.tool_call_id, "call_1");
+                assert!(!end.is_error);
             }
             other => panic!("expected tool end, got {other:?}"),
         }
 
-        match parse(r#"{"type":"tool_execution_start","toolCallId":"c","toolName":"mcp__x","args":{}}"#) {
-            Inbound::ToolExecutionStart(c) => assert_eq!(c.tool_name, "mcp__x"),
+        match parse(
+            r#"{"type":"tool_execution_start","sessionId":"s2","toolCallId":"c","toolName":"mcp__x","args":{}}"#,
+        ) {
+            Inbound::ToolExecutionStart { call, .. } => assert_eq!(call.tool_name, "mcp__x"),
             other => panic!("expected unknown tool start, got {other:?}"),
         }
     }
 
     #[test]
     fn decodes_tool_execution_update_with_task_progress() {
-        let line = r#"{"type":"tool_execution_update","toolCallId":"call_2","toolName":"task","args":{"agent":"explore"},"partialResult":{"content":[{"type":"text","text":"Running..."}],"details":{"progress":[{"index":0,"status":"running","currentTool":"read"}]}}}"#;
+        let line = r#"{"type":"tool_execution_update","sessionId":"s1","toolCallId":"call_2","toolName":"task","args":{"agent":"explore"},"partialResult":{"content":[{"type":"text","text":"Running..."}],"details":{"progress":[{"index":0,"status":"running","currentTool":"read"}]}}}"#;
         match parse(line) {
-            Inbound::ToolExecutionUpdate(t) => {
-                assert_eq!(t.tool_call_id, "call_2");
-                assert_eq!(t.tool_name, "task");
-                assert_eq!(t.partial_result["details"]["progress"][0]["currentTool"], "read");
+            Inbound::ToolExecutionUpdate { session_id, update } => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(update.tool_call_id, "call_2");
+                assert_eq!(update.tool_name, "task");
+                assert_eq!(update.partial_result["details"]["progress"][0]["currentTool"], "read");
             }
             other => panic!("expected tool update, got {other:?}"),
         }
@@ -466,22 +664,48 @@ mod tests {
 
     #[test]
     fn agent_lifecycle_and_unknown_frames() {
-        assert!(matches!(parse(r#"{"type":"agent_start"}"#), Inbound::AgentStart));
-        assert!(matches!(parse(r#"{"type":"agent_end","messages":[]}"#), Inbound::AgentEnd));
-        assert!(matches!(parse(r#"{"type":"turn_start"}"#), Inbound::Unknown));
+        match parse(r#"{"type":"agent_start","sessionId":"s9"}"#) {
+            Inbound::AgentStart { session_id } => assert_eq!(session_id, "s9"),
+            other => panic!("expected agent_start, got {other:?}"),
+        }
+        assert!(matches!(
+            parse(r#"{"type":"agent_end","sessionId":"s1","messages":[]}"#),
+            Inbound::AgentEnd { .. },
+        ));
+        assert!(matches!(
+            parse(r#"{"type":"turn_end","sessionId":"s1"}"#),
+            Inbound::TurnEnd { .. },
+        ));
+        assert!(matches!(parse(r#"{"type":"turn_start","sessionId":"s1"}"#), Inbound::Unknown));
+    }
+
+    #[test]
+    fn decodes_error_frame() {
+        match parse(r#"{"type":"error","sessionId":"s1","message":"AgentBusyError"}"#) {
+            Inbound::Error { session_id, message } => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(message, "AgentBusyError");
+            }
+            other => panic!("expected error, got {other:?}"),
+        }
     }
 
     #[test]
     fn decodes_extension_ui_requests() {
         match parse(
-            r#"{"type":"extension_ui_request","id":"u1","method":"select","title":"Pick","options":["A","B","Other (type your own)"],"timeout":5000}"#,
+            r#"{"type":"extension_ui_request","sessionId":"s1","id":"u1","method":"select","title":"Pick","options":["A","B","Other (type your own)"],"timeout":5000}"#,
         ) {
-            Inbound::ExtensionUiRequest(UiRequest::Select {
-                id,
-                title,
-                options,
-                timeout,
-            }) => {
+            Inbound::ExtensionUiRequest {
+                session_id,
+                request:
+                    UiRequest::Select {
+                        id,
+                        title,
+                        options,
+                        timeout,
+                    },
+            } => {
+                assert_eq!(session_id, "s1");
                 assert_eq!(id, "u1");
                 assert_eq!(title, "Pick");
                 assert_eq!(options, ["A", "B", "Other (type your own)"]);
@@ -489,51 +713,77 @@ mod tests {
             }
             other => panic!("expected select, got {other:?}"),
         }
-        match parse(r#"{"type":"extension_ui_request","id":"u2","method":"editor","title":"Enter your response:"}"#) {
-            Inbound::ExtensionUiRequest(UiRequest::Editor { id, title, prefill }) => {
+        match parse(
+            r#"{"type":"extension_ui_request","sessionId":"s1","id":"u2","method":"editor","title":"Enter your response:"}"#,
+        ) {
+            Inbound::ExtensionUiRequest {
+                request: UiRequest::Editor { id, title, prefill },
+                ..
+            } => {
                 assert_eq!(id, "u2");
                 assert_eq!(title, "Enter your response:");
                 assert!(prefill.is_none());
             }
             other => panic!("expected editor, got {other:?}"),
         }
-        match parse(r#"{"type":"extension_ui_request","id":"u3","method":"confirm","title":"Sure?","message":"do it"}"#)
-        {
-            Inbound::ExtensionUiRequest(UiRequest::Confirm { id, message, .. }) => {
+        match parse(
+            r#"{"type":"extension_ui_request","sessionId":"s1","id":"u3","method":"confirm","title":"Sure?","message":"do it"}"#,
+        ) {
+            Inbound::ExtensionUiRequest {
+                request: UiRequest::Confirm { id, message, .. },
+                ..
+            } => {
                 assert_eq!(id, "u3");
                 assert_eq!(message, "do it");
             }
             other => panic!("expected confirm, got {other:?}"),
         }
         match parse(
-            r#"{"type":"extension_ui_request","id":"u4","method":"input","title":"Name","placeholder":"e.g. foo"}"#,
+            r#"{"type":"extension_ui_request","sessionId":"s1","id":"u4","method":"input","title":"Name","placeholder":"e.g. foo"}"#,
         ) {
-            Inbound::ExtensionUiRequest(UiRequest::Input { placeholder, .. }) => {
+            Inbound::ExtensionUiRequest {
+                request: UiRequest::Input { placeholder, .. },
+                ..
+            } => {
                 assert_eq!(placeholder.as_deref(), Some("e.g. foo"));
             }
             other => panic!("expected input, got {other:?}"),
         }
         match parse(
-            r#"{"type":"extension_ui_request","id":"u5","method":"notify","message":"heads up","notifyType":"warning"}"#,
+            r#"{"type":"extension_ui_request","sessionId":"s1","id":"u5","method":"notify","message":"heads up","notifyType":"warning"}"#,
         ) {
-            Inbound::ExtensionUiRequest(UiRequest::Notify { message, notify_type }) => {
+            Inbound::ExtensionUiRequest {
+                request: UiRequest::Notify { message, notify_type },
+                ..
+            } => {
                 assert_eq!(message, "heads up");
                 assert_eq!(notify_type.as_deref(), Some("warning"));
             }
             other => panic!("expected notify, got {other:?}"),
         }
-        match parse(r#"{"type":"extension_ui_request","id":"u6","method":"cancel","targetId":"u1"}"#) {
-            Inbound::ExtensionUiRequest(UiRequest::Cancel { target_id }) => assert_eq!(target_id, "u1"),
+        match parse(r#"{"type":"extension_ui_request","sessionId":"s1","id":"u6","method":"cancel","targetId":"u1"}"#) {
+            Inbound::ExtensionUiRequest {
+                request: UiRequest::Cancel { target_id },
+                ..
+            } => assert_eq!(target_id, "u1"),
             other => panic!("expected cancel, got {other:?}"),
         }
         assert!(matches!(
             parse(
-                r#"{"type":"extension_ui_request","id":"u7","method":"setWidget","widgetKey":"k","widgetLines":["x"]}"#
+                r#"{"type":"extension_ui_request","sessionId":"s1","id":"u7","method":"setWidget","widgetKey":"k","widgetLines":["x"]}"#
             ),
-            Inbound::ExtensionUiRequest(UiRequest::Ignore),
+            Inbound::ExtensionUiRequest {
+                request: UiRequest::Ignore,
+                ..
+            },
         ));
-        match parse(r#"{"type":"extension_ui_request","id":"u8","method":"multiselect","options":["a"]}"#) {
-            Inbound::ExtensionUiRequest(UiRequest::Unknown { id, method }) => {
+        match parse(
+            r#"{"type":"extension_ui_request","sessionId":"s1","id":"u8","method":"multiselect","options":["a"]}"#,
+        ) {
+            Inbound::ExtensionUiRequest {
+                request: UiRequest::Unknown { id, method },
+                ..
+            } => {
                 assert_eq!(id.as_deref(), Some("u8"));
                 assert_eq!(method, "multiselect");
             }
@@ -544,20 +794,20 @@ mod tests {
     #[test]
     fn serializes_ui_responses() {
         assert_eq!(
-            serde_json::to_value(UiResponse::value("u1", "A")).unwrap(),
-            serde_json::json!({"type": "extension_ui_response", "id": "u1", "value": "A"}),
+            serde_json::to_value(UiResponse::value("s1", "u1", "A")).unwrap(),
+            serde_json::json!({"type": "extension_ui_response", "sessionId": "s1", "id": "u1", "value": "A"}),
         );
         assert_eq!(
-            serde_json::to_value(UiResponse::confirmed("u3", true)).unwrap(),
-            serde_json::json!({"type": "extension_ui_response", "id": "u3", "confirmed": true}),
+            serde_json::to_value(UiResponse::confirmed("s1", "u3", true)).unwrap(),
+            serde_json::json!({"type": "extension_ui_response", "sessionId": "s1", "id": "u3", "confirmed": true}),
         );
         assert_eq!(
-            serde_json::to_value(UiResponse::cancelled("u1", false)).unwrap(),
-            serde_json::json!({"type": "extension_ui_response", "id": "u1", "cancelled": true}),
+            serde_json::to_value(UiResponse::cancelled("s1", "u1", false)).unwrap(),
+            serde_json::json!({"type": "extension_ui_response", "sessionId": "s1", "id": "u1", "cancelled": true}),
         );
         assert_eq!(
-            serde_json::to_value(UiResponse::cancelled("u1", true)).unwrap(),
-            serde_json::json!({"type": "extension_ui_response", "id": "u1", "cancelled": true, "timedOut": true}),
+            serde_json::to_value(UiResponse::cancelled("s1", "u1", true)).unwrap(),
+            serde_json::json!({"type": "extension_ui_response", "sessionId": "s1", "id": "u1", "cancelled": true, "timedOut": true}),
         );
     }
 }
