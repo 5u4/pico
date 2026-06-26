@@ -22,6 +22,7 @@ import { pickDefaultAvailableModel, resolveRoleSelection } from "@oh-my-pi/pi-co
 import { resolvePromptInput } from "@oh-my-pi/pi-coding-agent/system-prompt";
 import { registerProvider, reset as resetCapabilities } from "@oh-my-pi/pi-coding-agent/capability";
 import { scanSkillsFromDir, buildRuleFromMarkdown, loadFilesFromDir } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
+import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import * as path from "node:path";
 
 interface Identity {
@@ -514,7 +515,7 @@ async function handle(raw: Json): Promise<void> {
 			await runCommand(id, sessionId, type, () => hostSession.session.followUp(str(raw.message)));
 			return;
 		case "abort":
-			await runCommand(id, sessionId, type, () => hostSession.session.abort());
+			await runCommand(id, sessionId, type, () => hostSession.session.abort({ reason: USER_INTERRUPT_LABEL }));
 			return;
 		case "set_session_name":
 			await runCommand(id, sessionId, type, () => hostSession.session.setSessionName(str(raw.name)));
