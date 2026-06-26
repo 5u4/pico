@@ -34,7 +34,13 @@ pub async fn run(args: OmpArgs) -> color_eyre::Result<()> {
     cancel.cancel();
     tracker.close();
     let _ = tokio::time::timeout(Duration::from_secs(6), tracker.wait()).await;
-    result
+
+    if let Some(status) = result?
+        && !status.success()
+    {
+        std::process::exit(status.code().unwrap_or(1));
+    }
+    Ok(())
 }
 
 async fn launch(
@@ -44,7 +50,7 @@ async fn launch(
     dir: &Path,
     channel: &str,
     args: OmpArgs,
-) -> color_eyre::Result<()> {
+) -> color_eyre::Result<Option<std::process::ExitStatus>> {
     let cli_js = pico_core::omp::client::locked_omp_cli();
     if !cli_js.exists() {
         let host_dir = pico_core::omp::client::omp_host_dir();
@@ -71,7 +77,7 @@ async fn launch(
 
     let Some(thread) = thread::resolve_thread(db, root, channel, &route, args.new, args.resume.as_deref()).await?
     else {
-        return Ok(());
+        return Ok(None);
     };
 
     let session_dir = pico_shared::paths::profile_session_dir(root, &thread.profile, &thread.thread_id);
@@ -121,7 +127,7 @@ async fn launch(
         camofox_ext.as_deref(),
     );
 
-    let _status = tokio::process::Command::new("bun")
+    let status = tokio::process::Command::new("bun")
         .args(&argv)
         .envs(env)
         .stdin(Stdio::inherit())
@@ -131,7 +137,7 @@ async fn launch(
         .await
         .wrap_err("spawn omp TUI")?;
 
-    Ok(())
+    Ok(Some(status))
 }
 
 fn build_omp_argv(
