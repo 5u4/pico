@@ -431,6 +431,7 @@ fn build_notice_embed(sched: &Schedule, notice: &HomeNotice) -> serenity::Create
                 DisableReason::OriginUnreachable => "could not reach the origin thread".to_owned(),
                 DisableReason::TargetUnreachable => "could not reach the target channel".to_owned(),
                 DisableReason::ConsecutiveFailures(n) => format!("auto-disabled after {n} consecutive failures"),
+                DisableReason::MissingDefinition => "its definition files are missing".to_owned(),
             };
             embed = embed.field("Reason", cause, false);
         }
@@ -496,8 +497,6 @@ mod tests {
             trigger: Trigger::Interval {
                 every: std::time::Duration::from_secs(60),
             },
-            script: None,
-            prompt: None,
             next_run_at: ts,
             last_run_at: None,
             consecutive_failures: 0,
@@ -559,6 +558,22 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .contains("auto-disabled after 3 consecutive failures")
+        );
+    }
+
+    #[test]
+    fn disabled_missing_definition_reason_text() {
+        let notice = HomeNotice::Disabled(DisableReason::MissingDefinition);
+        let v = serde_json::to_value(build_notice_embed(&sample_schedule(), &notice)).unwrap();
+        assert_eq!(v["title"], "🛑 Schedule disabled");
+        assert_eq!(v["color"].as_u64(), Some(0xE74C3C));
+        let fields = v["fields"].as_array().unwrap();
+        let reason = fields.iter().find(|f| f["name"] == "Reason").unwrap();
+        assert!(
+            reason["value"]
+                .as_str()
+                .unwrap()
+                .contains("definition files are missing")
         );
     }
 

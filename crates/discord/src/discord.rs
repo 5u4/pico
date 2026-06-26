@@ -81,14 +81,19 @@ pub(crate) fn framework(
                     cancel: cancel.clone(),
                 };
                 match pico_core::config::load_root(&pico_shared::paths::worker_config(&root)) {
-                    Ok(root_config) => {
-                        let sched_db = db.clone();
-                        let sched_cancel = cancel.clone();
-                        let cfg = root_config.schedule();
-                        tracker.spawn(async move {
-                            pico_core::schedule::run(&sched_db, host, cfg, sched_cancel).await;
-                        });
-                    }
+                    Ok(root_config) => match pico_shared::paths::worker_root() {
+                        Ok(sched_root) => {
+                            let sched_db = db.clone();
+                            let sched_cancel = cancel.clone();
+                            let cfg = root_config.schedule();
+                            tracker.spawn(async move {
+                                pico_core::schedule::run(&sched_db, host, cfg, sched_root, sched_cancel).await;
+                            });
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %format!("{e:#}"), "resolving worker root for scheduler failed; scheduler not started");
+                        }
+                    },
                     Err(e) => {
                         tracing::warn!(error = %format!("{e:#}"), "loading worker config for scheduler failed; scheduler not started");
                     }

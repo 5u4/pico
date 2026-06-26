@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{path::Path, time::Duration};
 
 use chrono::{DateTime, Utc};
 use clap::Subcommand;
@@ -115,8 +115,8 @@ async fn build_and_create(json: &str) -> Result<serde_json::Value, String> {
     let new = input.into_new_schedule()?;
     let root = pico_shared::paths::worker_root().map_err(|e| e.to_string())?;
     let db = pico_core::db::open(&root).await.map_err(|e| e.to_string())?;
-    let sched = schedule::create(&db, new).await.map_err(|e| e.to_string())?;
-    Ok(schedule_dto(&sched))
+    let sched = schedule::create(&db, &root, new).await.map_err(|e| e.to_string())?;
+    Ok(schedule_dto(&sched, &root))
 }
 
 impl CreateInput {
@@ -188,10 +188,11 @@ async fn list(scope: Option<String>, json: bool) -> color_eyre::Result<()> {
     let scope = scope
         .or_else(|| env_var("PICO_GUILD_ID"))
         .ok_or_else(|| eyre!("missing scope: pass --scope or set PICO_GUILD_ID"))?;
-    let db = pico_core::db::open(&pico_shared::paths::worker_root()?).await?;
+    let root = pico_shared::paths::worker_root()?;
+    let db = pico_core::db::open(&root).await?;
     let schedules = schedule::list(&db, "discord", &scope).await?;
     if json {
-        let dtos: Vec<serde_json::Value> = schedules.iter().map(schedule_dto).collect();
+        let dtos: Vec<serde_json::Value> = schedules.iter().map(|sched| schedule_dto(sched, &root)).collect();
         println!("{}", serde_json::Value::Array(dtos));
     } else if schedules.is_empty() {
         println!("no schedules");
@@ -211,23 +212,25 @@ async fn list(scope: Option<String>, json: bool) -> color_eyre::Result<()> {
 }
 
 async fn show(id: &str, scope: Option<String>, json: bool) -> color_eyre::Result<()> {
-    let db = pico_core::db::open(&pico_shared::paths::worker_root()?).await?;
+    let root = pico_shared::paths::worker_root()?;
+    let db = pico_core::db::open(&root).await?;
     let sched = scoped(schedule::get(&db, id).await?, caller_scope(scope).as_deref())
         .ok_or_else(|| eyre!("no schedule with id {id}"))?;
     if json {
-        println!("{}", schedule_dto(&sched));
+        println!("{}", schedule_dto(&sched, &root));
     } else {
-        print_human(&sched);
+        print_human(&sched, &root);
     }
     Ok(())
 }
 
 async fn remove(id: &str, scope: Option<String>) -> color_eyre::Result<()> {
-    let db = pico_core::db::open(&pico_shared::paths::worker_root()?).await?;
+    let root = pico_shared::paths::worker_root()?;
+    let db = pico_core::db::open(&root).await?;
     if scoped(schedule::get(&db, id).await?, caller_scope(scope).as_deref()).is_none() {
         return Err(eyre!("no schedule with id {id}"));
     }
-    schedule::remove(&db, id).await?;
+    schedule::remove(&db, &root, id).await?;
     println!("removed schedule {id}");
     Ok(())
 }
@@ -253,7 +256,7 @@ fn scoped(sched: Option<Schedule>, scope: Option<&str>) -> Option<Schedule> {
     }
 }
 
-fn print_human(sched: &Schedule) {
+fn print_human(sched: &Schedule, root: &Path) {
     println!("id          {}", sched.id);
     println!("name        {}", sched.name);
     println!("state       {}", state_str(sched.state));
@@ -270,15 +273,19 @@ fn print_human(sched: &Schedule) {
         println!("last_run_at {}", last.to_rfc3339());
     }
     println!("failures    {}", sched.consecutive_failures);
-    if let Some(script) = &sched.script {
+    let def = schedule::read_definition(root, &sched.id, sched.state);
+    println!("script_path {}", def.script_path.display());
+    println!("prompt_path {}", def.prompt_path.display());
+    if let Some(script) = &def.script {
         println!("script      {script}");
     }
-    if let Some(prompt) = &sched.prompt {
+    if let Some(prompt) = &def.prompt {
         println!("prompt      {prompt}");
     }
 }
 
-fn schedule_dto(sched: &Schedule) -> serde_json::Value {
+fn schedule_dto(sched: &Schedule, root: &Path) -> serde_json::Value {
+    let def = schedule::read_definition(root, &sched.id, sched.state);
     serde_json::json!({
         "id": sched.id,
         "platform": sched.platform,
@@ -290,8 +297,10 @@ fn schedule_dto(sched: &Schedule) -> serde_json::Value {
         "origin": sched.origin,
         "target": sched.target,
         "trigger": trigger_dto(&sched.trigger),
-        "script": sched.script,
-        "prompt": sched.prompt,
+        "script": def.script,
+        "prompt": def.prompt,
+        "script_path": def.script_path.display().to_string(),
+        "prompt_path": def.prompt_path.display().to_string(),
         "next_run_at": sched.next_run_at.to_rfc3339(),
         "last_run_at": sched.last_run_at.map(|d| d.to_rfc3339()),
         "consecutive_failures": sched.consecutive_failures,
@@ -432,8 +441,6 @@ mod tests {
             trigger: Trigger::Interval {
                 every: Duration::from_secs(60),
             },
-            script: None,
-            prompt: Some("p".to_owned()),
             next_run_at: Utc::now(),
             last_run_at: None,
             consecutive_failures: 0,
