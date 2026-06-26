@@ -56,12 +56,12 @@ impl DiscordScheduleHost {
         self.load_config().map(|c| c.render()).unwrap_or_else(default_render)
     }
 
-    fn timezone(&self) -> &'static str {
+    fn timezone(&self) -> chrono_tz::Tz {
         match pico_core::config::load_root(&pico_shared::paths::worker_config(&self.root)) {
-            Ok(root_config) => root_config.timezone().name(),
+            Ok(root_config) => root_config.timezone(),
             Err(e) => {
                 tracing::warn!(error = %format!("{e:#}"), "loading worker config for schedule timezone failed");
-                "UTC"
+                chrono_tz::UTC
             }
         }
     }

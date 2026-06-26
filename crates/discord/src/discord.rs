@@ -1185,7 +1185,7 @@ async fn route_message(
             channel_name,
             thread_label,
             render: discord_config.render(),
-            timezone: root_config.timezone().name(),
+            timezone: root_config.timezone(),
         },
     )
     .await?;
@@ -1228,7 +1228,7 @@ pub(crate) struct TurnInputs<'a> {
     pub(crate) channel_name: Option<String>,
     pub(crate) thread_label: String,
     pub(crate) render: crate::config::Render,
-    pub(crate) timezone: &'a str,
+    pub(crate) timezone: chrono_tz::Tz,
 }
 
 #[allow(clippy::too_many_arguments)]
