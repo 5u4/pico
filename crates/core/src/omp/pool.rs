@@ -19,7 +19,7 @@ use crate::omp::{
 
 type HostSlot = Arc<tokio::sync::Mutex<Option<Arc<OmpHost>>>>;
 
-const IDLE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+pub(crate) const IDLE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
 const SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 

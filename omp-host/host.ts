@@ -15,7 +15,7 @@ import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { initializeExtensions } from "@oh-my-pi/pi-coding-agent/modes/runtime-init";
 import { theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import camofox from "./camofox-extension";
+import { makeCamofoxFactory } from "./camofox-extension";
 import { makeScheduleFactory } from "./schedule-extension";
 import { streamSimple } from "@oh-my-pi/pi-ai";
 import { pickDefaultAvailableModel, resolveRoleSelection } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
@@ -336,7 +336,7 @@ async function runCompletion(id: string, system: string, prompt: string): Promis
 
 function buildExtensions(identity: Identity): ExtensionFactory[] {
 	const factories: ExtensionFactory[] = [];
-	if (camofoxEnabled) factories.push(camofox);
+	if (camofoxEnabled) factories.push(makeCamofoxFactory(identity));
 	factories.push(makeScheduleFactory(identity));
 	return factories;
 }

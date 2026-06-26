@@ -21,6 +21,8 @@ const HEALTH_POLL: Duration = Duration::from_millis(250);
 const RETRY_COOLDOWN: Duration = Duration::from_secs(30);
 const TERM_GRACE: Duration = Duration::from_secs(5);
 const HEALTH_FAILS_BEFORE_RESPAWN: u32 = 3;
+const DAEMON_IDLE: Duration = Duration::from_secs(super::pool::IDLE_TIMEOUT.as_secs() * 2);
+const DAEMON_MAX_TABS: u32 = 30;
 
 const BIN: &str = "camofox-browser";
 const FETCH_CMD: &str = "camofox-fetch-engine";
@@ -122,16 +124,31 @@ impl CamofoxDaemon {
         }
     }
 
+    fn daemon_env(&self) -> Vec<(String, String)> {
+        vec![
+            ("CAMOFOX_PORT".to_owned(), self.port.to_string()),
+            ("CAMOFOX_ACCESS_KEY".to_owned(), self.access_key.clone()),
+            ("CAMOFOX_CRASH_REPORT_ENABLED".to_owned(), "false".to_owned()),
+            ("NODE_ENV".to_owned(), "production".to_owned()),
+            (
+                "CAMOFOX_PROFILE_DIR".to_owned(),
+                self.profile_dir.to_string_lossy().into_owned(),
+            ),
+            ("SESSION_TIMEOUT_MS".to_owned(), DAEMON_IDLE.as_millis().to_string()),
+            ("TAB_INACTIVITY_MS".to_owned(), DAEMON_IDLE.as_millis().to_string()),
+            ("BROWSER_IDLE_TIMEOUT_MS".to_owned(), DAEMON_IDLE.as_millis().to_string()),
+            ("MAX_TABS_PER_SESSION".to_owned(), DAEMON_MAX_TABS.to_string()),
+        ]
+    }
+
     fn spawn(&self) -> color_eyre::Result<Child> {
         std::fs::create_dir_all(&self.profile_dir)
             .wrap_err_with(|| format!("create camofox profile dir {}", self.profile_dir.display()))?;
         let mut cmd = ProcCommand::new(BIN);
-        cmd.env("CAMOFOX_PORT", self.port.to_string())
-            .env("CAMOFOX_ACCESS_KEY", &self.access_key)
-            .env("CAMOFOX_CRASH_REPORT_ENABLED", "false")
-            .env("NODE_ENV", "production")
-            .env("CAMOFOX_PROFILE_DIR", &self.profile_dir)
-            .stdin(Stdio::null())
+        for (k, v) in self.daemon_env() {
+            cmd.env(k, v);
+        }
+        cmd.stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
@@ -284,6 +301,25 @@ mod tests {
 
         let disabled: std::collections::HashMap<_, _> = daemon.host_env(false).into_iter().collect();
         assert_eq!(disabled["CAMOFOX_ENABLED"], "0");
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[tokio::test]
+    async fn daemon_env_extends_idle_beyond_thread_session() {
+        let tmp = std::env::temp_dir().join(format!("pico-camo-{}", ulid::Ulid::new()));
+        let cancel = CancellationToken::new();
+        let tracker = TaskTracker::new();
+        let daemon = CamofoxDaemon::new(&tmp, cancel, &tracker);
+
+        let map: std::collections::HashMap<_, _> = daemon.daemon_env().into_iter().collect();
+        let idle = DAEMON_IDLE.as_millis().to_string();
+        assert_eq!(map["SESSION_TIMEOUT_MS"], idle);
+        assert_eq!(map["TAB_INACTIVITY_MS"], idle);
+        assert_eq!(map["BROWSER_IDLE_TIMEOUT_MS"], idle);
+        assert_eq!(map["MAX_TABS_PER_SESSION"], DAEMON_MAX_TABS.to_string());
+        assert!(DAEMON_IDLE > crate::omp::pool::IDLE_TIMEOUT);
+        assert!(!map["CAMOFOX_PROFILE_DIR"].is_empty());
 
         std::fs::remove_dir_all(&tmp).ok();
     }
