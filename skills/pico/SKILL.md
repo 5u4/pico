@@ -33,7 +33,7 @@ pico has a long-term memory store, backed by Hindsight, that persists across ses
 
 ## Browser
 
-pico can drive a real camofox (Firefox/Camoufox) browser, exposed through the `camo_*` tools: open and navigate pages, snapshot the page, click, type, scroll, take screenshots, and list or close tabs. The browser is enabled per profile, via that profile's browser toggle in its `profile.toml`. Logins persist per profile across sessions. For setting up or refreshing a logged-in browser session, use the separate `browser-login` skill rather than configuring cookies by hand here.
+pico can drive a real camofox (Firefox/Camoufox) browser, exposed through the `camo_*` tools: open and navigate pages, snapshot the page, click, type, scroll, take screenshots, and list or close tabs. The browser is enabled per profile, via that profile's browser toggle in its `profile.toml`. The logged-in browser session — its cookies and logins — is shared across profiles and persists across restarts, not isolated per profile. For setting up or refreshing a logged-in browser session, use the separate `browser-login` skill rather than configuring cookies by hand here.
 
 ## Model
 
