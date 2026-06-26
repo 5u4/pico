@@ -83,6 +83,7 @@ async fn launch(
     let session_dir = pico_shared::paths::profile_session_dir(root, &thread.profile, &thread.thread_id);
     std::fs::create_dir_all(&session_dir).wrap_err_with(|| format!("create session dir {}", session_dir.display()))?;
 
+    let timezone = pico_core::config::load_root(&pico_shared::paths::worker_config(root))?.timezone();
     let context_block = prompt::runtime_context_block(&RuntimeContext {
         platform: PLATFORM,
         extra: &[],
@@ -94,6 +95,7 @@ async fn launch(
             .worktree_origin
             .as_ref()
             .map(|w| (w.base_repo.as_path(), w.default_branch.as_str())),
+        timezone,
     });
 
     let identity_path = pico_shared::paths::profile_identity(root, &thread.profile);

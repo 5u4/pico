@@ -6,6 +6,7 @@ rust-version.workspace = true
 
 [dependencies]
 chrono.workspace = true
+chrono-tz.workspace = true
 color-eyre.workspace = true
 parking_lot.workspace = true
 pico-core.workspace = true

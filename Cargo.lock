@@ -1647,6 +1647,7 @@ name = "pico-discord"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "chrono-tz",
  "color-eyre",
  "dotenvy",
  "parking_lot",

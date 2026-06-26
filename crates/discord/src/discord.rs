@@ -1185,6 +1185,7 @@ async fn route_message(
             channel_name,
             thread_label,
             render: discord_config.render(),
+            timezone: root_config.timezone(),
         },
     )
     .await?;
@@ -1227,6 +1228,7 @@ pub(crate) struct TurnInputs<'a> {
     pub(crate) channel_name: Option<String>,
     pub(crate) thread_label: String,
     pub(crate) render: crate::config::Render,
+    pub(crate) timezone: chrono_tz::Tz,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1256,6 +1258,7 @@ pub(crate) async fn drive_thread_turn(
         channel_name,
         thread_label,
         render,
+        timezone,
     } = inputs;
 
     let guild_line = pico_core::prompt::id_value(guild_id.get(), guild_name.as_deref());
@@ -1271,6 +1274,7 @@ pub(crate) async fn drive_thread_turn(
         worktree: worktree_origin
             .as_ref()
             .map(|w| (w.base_repo.as_path(), w.default_branch.as_str())),
+        timezone,
     });
     let identity = pico_core::omp::client::SessionIdentity {
         platform: "discord".to_owned(),

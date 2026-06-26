@@ -56,6 +56,16 @@ impl DiscordScheduleHost {
         self.load_config().map(|c| c.render()).unwrap_or_else(default_render)
     }
 
+    fn timezone(&self) -> chrono_tz::Tz {
+        match pico_core::config::load_root(&pico_shared::paths::worker_config(&self.root)) {
+            Ok(root_config) => root_config.timezone(),
+            Err(e) => {
+                tracing::warn!(error = %format!("{e:#}"), "loading worker config for schedule timezone failed");
+                chrono_tz::UTC
+            }
+        }
+    }
+
     fn worktrees_dir(&self) -> PathBuf {
         match pico_core::config::load_root(&pico_shared::paths::worker_config(&self.root)) {
             Ok(root_config) => root_config
@@ -148,6 +158,7 @@ impl DiscordScheduleHost {
             channel_name,
             thread_label,
             render: self.render(),
+            timezone: self.timezone(),
         };
         self.drive(inputs).await;
         FireOutcome::Delivered
@@ -247,6 +258,7 @@ impl DiscordScheduleHost {
             channel_name: channel_display_name(&self.ctx, guild_id, target_channel),
             thread_label: fresh_thread_label(&sched.name),
             render: config.render(),
+            timezone: self.timezone(),
         };
         self.drive(inputs).await;
         FireOutcome::Delivered
