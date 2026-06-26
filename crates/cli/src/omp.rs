@@ -83,9 +83,9 @@ async fn launch(
     let session_dir = pico_shared::paths::profile_session_dir(root, &thread.profile, &thread.thread_id);
     std::fs::create_dir_all(&session_dir).wrap_err_with(|| format!("create session dir {}", session_dir.display()))?;
 
-    let timezone = pico_core::config::load_root(&pico_shared::paths::worker_config(root))
-        .map(|cfg| cfg.timezone().name())
-        .unwrap_or("UTC");
+    let timezone = pico_core::config::load_root(&pico_shared::paths::worker_config(root))?
+        .timezone()
+        .name();
     let context_block = prompt::runtime_context_block(&RuntimeContext {
         platform: PLATFORM,
         extra: &[],
