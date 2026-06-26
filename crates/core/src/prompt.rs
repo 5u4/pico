@@ -78,14 +78,6 @@ pub fn wrap_discord_message(user_id: u64, display_name: &str, sent_at: &str, con
     )
 }
 
-pub fn wrap_cli_message(user: &str, sent_at: &str, content: &str) -> String {
-    format!(
-        "<cli-message user=\"{}\" sent_at=\"{}\" />\n{content}",
-        escape_attr(user),
-        escape_attr(sent_at)
-    )
-}
-
 pub fn escape_text(value: &str) -> String {
     value.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
