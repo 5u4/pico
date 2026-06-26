@@ -161,7 +161,7 @@ export function makeCamofoxFactory(identity) {
     pi.registerTool({
       name: "camo_list_tabs",
       label: "Camo List Tabs",
-      description: "List the open browser tabs for this profile (shared across the profile's threads).",
+      description: "List the open browser tabs for this thread (each thread sees only its own tabs).",
       parameters: z.object({}),
       async execute(_id, _p, signal) {
         const r = await call("GET", `/tabs?${q()}`, undefined, signal);
