@@ -86,6 +86,18 @@ pub fn camofox_profile_dir(root: &Path) -> PathBuf {
     camofox_dir(root).join("profiles")
 }
 
+pub fn schedules_dir(root: &Path) -> PathBuf {
+    root.join("schedules")
+}
+
+pub fn schedule_dir(root: &Path, id: &str) -> PathBuf {
+    schedules_dir(root).join(id)
+}
+
+pub fn triggered_schedule_dir(root: &Path, id: &str) -> PathBuf {
+    schedules_dir(root).join("triggered").join(id)
+}
+
 pub fn expand_home(raw: &str) -> PathBuf {
     if raw == "~"
         && let Some(home) = std::env::home_dir()
