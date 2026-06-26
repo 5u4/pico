@@ -88,3 +88,55 @@ async fn camofox_opens_a_tab_and_snapshots() {
     tracker.wait().await;
     std::fs::remove_dir_all(&root).ok();
 }
+
+#[tokio::test]
+#[ignore = "live: needs the built pico image (pinned camofox-browser + camofox-fetch-engine + Xvfb + GTK/Firefox libs); fetches the engine if absent"]
+async fn camofox_groups_tabs_by_session_key() {
+    let root = temp_root();
+    let cancel = CancellationToken::new();
+    let tracker = TaskTracker::new();
+    let daemon = CamofoxDaemon::new(&root, cancel.clone(), &tracker);
+
+    pico_core::omp::camofox::ensure_engine(cancel.clone()).await;
+    daemon.ensure_started().await;
+
+    let env: HashMap<String, String> = daemon.host_env(true).into_iter().collect();
+    let base = env["CAMOFOX_BASE_URL"].clone();
+    let key = env["CAMOFOX_ACCESS_KEY"].clone();
+
+    let (status_a, created_a) = http(
+        &base,
+        &key,
+        "POST",
+        "/tabs",
+        Some(r#"{"userId":"default","sessionKey":"threadA","url":"https://example.com"}"#),
+    )
+    .await;
+    assert_eq!(status_a, 200, "POST /tabs threadA should be 200; body: {created_a}");
+
+    let (status_b, created_b) = http(
+        &base,
+        &key,
+        "POST",
+        "/tabs",
+        Some(r#"{"userId":"default","sessionKey":"threadB","url":"https://example.com"}"#),
+    )
+    .await;
+    assert_eq!(status_b, 200, "POST /tabs threadB should be 200; body: {created_b}");
+
+    let (status, listing) = http(&base, &key, "GET", "/tabs?userId=default", None).await;
+    assert_eq!(status, 200, "GET /tabs should be 200; body: {listing}");
+    assert!(
+        listing.contains(r#""listItemId":"threadA""#),
+        "listing missing threadA group; body: {listing}"
+    );
+    assert!(
+        listing.contains(r#""listItemId":"threadB""#),
+        "listing missing threadB group; body: {listing}"
+    );
+
+    cancel.cancel();
+    tracker.close();
+    tracker.wait().await;
+    std::fs::remove_dir_all(&root).ok();
+}
