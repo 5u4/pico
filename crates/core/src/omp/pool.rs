@@ -113,6 +113,7 @@ impl OmpPool {
         }
         if guard.is_some() {
             self.sessions.lock().retain(|_, handle| handle.profile != profile);
+            tracing::warn!(profile = %profile, "omp host was dead; respawned and reset this profile's sessions");
         }
         let config = profile_host_config(&self.host_config, &self.root, profile);
         let host = OmpHost::spawn(&config, &self.cancel, &self.tracker).await?;
@@ -136,6 +137,7 @@ impl OmpPool {
         }
 
         let (client, events) = host.open_session(thread_id, config).await?;
+        tracing::debug!(thread_id, profile = %config.profile, session_id = %client.session_id(), "opened omp session");
         let handle = Arc::new(ThreadHandle {
             inner: tokio::sync::Mutex::new(ThreadSession { client, events }),
             last_active: AtomicU64::new(now_millis()),
@@ -191,13 +193,13 @@ impl OmpPool {
     async fn evict_idle(&self) {
         let now = now_millis();
         let cutoff = IDLE_TIMEOUT.as_millis() as u64;
-        let evicted: Vec<Arc<ThreadHandle>> = {
+        let evicted: Vec<(String, Arc<ThreadHandle>)> = {
             let mut map = self.sessions.lock();
             let mut drained = Vec::new();
-            map.retain(|_, handle| {
+            map.retain(|thread_id, handle| {
                 let idle = now.saturating_sub(handle.last_active.load(Ordering::Relaxed)) > cutoff;
                 if idle && Arc::strong_count(handle) == 1 {
-                    drained.push(Arc::clone(handle));
+                    drained.push((thread_id.clone(), Arc::clone(handle)));
                     false
                 } else {
                     true
@@ -205,9 +207,12 @@ impl OmpPool {
             });
             drained
         };
-        for handle in evicted {
-            if let Err(e) = handle.close().await {
-                tracing::warn!(error = %format!("{e:#}"), "closing an idle session failed");
+        for (thread_id, handle) in evicted {
+            match handle.close().await {
+                Ok(()) => tracing::debug!(thread_id = thread_id.as_str(), "evicted idle omp session"),
+                Err(e) => {
+                    tracing::warn!(error = %format!("{e:#}"), thread_id = thread_id.as_str(), "closing an idle session failed")
+                }
             }
         }
     }

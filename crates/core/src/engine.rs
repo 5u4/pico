@@ -24,7 +24,7 @@ const SETTLE_GRACE: Duration = Duration::from_secs(1);
 const ACTIVITY_THROTTLE: Duration = Duration::from_secs(1);
 const SUBAGENT_THROTTLE: Duration = Duration::from_secs(2);
 
-#[derive(PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum TurnOutcome {
     Live,
     Dead,
@@ -214,6 +214,7 @@ pub async fn drive_turn<S: Surface>(
                 }
             }
             Some(OmpEvent::Error(e)) => {
+                tracing::error!(error = %e, "omp reported a turn error");
                 activity.flush().await;
                 subagents.flush_all(true).await;
                 flush_final(surface, &mut activity, &mut reply, &mut held, title_seed).await;
@@ -222,6 +223,7 @@ pub async fn drive_turn<S: Surface>(
             }
             Some(OmpEvent::AgentStart | OmpEvent::Message(AssistantMessageEvent::Other)) => {}
             None => {
+                tracing::error!("omp host channel closed mid-turn; session is dead");
                 activity.flush().await;
                 subagents.flush_all(true).await;
                 flush_final(surface, &mut activity, &mut reply, &mut held, title_seed).await;

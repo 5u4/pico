@@ -385,7 +385,11 @@ async fn run_modal(
                     .await;
                 ModalStep::Answered(text)
             }
-            Ok(None) | Err(_) => ModalStep::Closed,
+            Ok(None) => ModalStep::Closed,
+            Err(e) => {
+                tracing::warn!(error = %format!("{e:#}"), "modal failed");
+                ModalStep::Closed
+            }
         },
         next = collect(ctx, message_id, author, None, cancel, Some(&mut *rx)) => match next {
             Collected::Interaction(i) => ModalStep::Reclick(i),
@@ -414,7 +418,7 @@ async fn notify(
     match channel.send_message(ctx, msg).await {
         Ok(_) => true,
         Err(e) => {
-            tracing::warn!(error = %e, "ui notify send failed");
+            tracing::warn!(error = %format!("{e:#}"), "ui notify send failed");
             false
         }
     }
@@ -472,7 +476,7 @@ async fn post(
     match channel.send_message(ctx, msg).await {
         Ok(message) => Some(message),
         Err(e) => {
-            tracing::warn!(error = %e, "ui prompt send failed");
+            tracing::warn!(error = %format!("{e:#}"), "ui prompt send failed");
             None
         }
     }
@@ -485,7 +489,7 @@ async fn ack_update(ctx: &serenity::Context, interaction: &serenity::ComponentIn
             .components(vec![]),
     );
     if let Err(e) = interaction.create_response(ctx, response).await {
-        tracing::warn!(error = %e, "ui interaction update failed");
+        tracing::warn!(error = %format!("{e:#}"), "ui interaction update failed");
     }
 }
 
@@ -499,7 +503,7 @@ async fn finalize(
         .content(content.to_owned())
         .components(vec![]);
     if let Err(e) = channel.edit_message(ctx, message_id, edit).await {
-        tracing::warn!(error = %e, "ui carrier finalize failed");
+        tracing::warn!(error = %format!("{e:#}"), "ui carrier finalize failed");
     }
 }
 

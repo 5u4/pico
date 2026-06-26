@@ -45,7 +45,13 @@ pub struct TurnSpawn {
     pub result: color_eyre::Result<TurnOutcome>,
 }
 
+#[tracing::instrument(
+    level = "info",
+    skip_all,
+    fields(thread_id = %p.thread_id, profile = %p.profile, session_id = tracing::field::Empty)
+)]
 pub async fn run_turn<S: Surface>(p: RunTurn<'_, S>) -> color_eyre::Result<TurnSpawn> {
+    let started = std::time::Instant::now();
     let session_dir = pico_shared::paths::profile_session_dir(p.root, p.profile, p.thread_id);
     std::fs::create_dir_all(&session_dir).wrap_err_with(|| format!("create session dir {}", session_dir.display()))?;
     let identity_path = pico_shared::paths::profile_identity(p.root, p.profile);
@@ -81,6 +87,7 @@ pub async fn run_turn<S: Surface>(p: RunTurn<'_, S>) -> color_eyre::Result<TurnS
     let mut title_seed: Option<String> = None;
     let result = {
         let mut session = handle.lock().await;
+        tracing::Span::current().record("session_id", session.client.session_id());
         let req = crate::engine::TurnRequest {
             conversation: p.conversation,
             prompt: p.wrapped,
@@ -94,6 +101,14 @@ pub async fn run_turn<S: Surface>(p: RunTurn<'_, S>) -> color_eyre::Result<TurnS
         };
         crate::engine::drive_turn(p.surface, &mut session, req, rt, &mut title_seed).await
     };
+    match &result {
+        Ok(outcome) => {
+            tracing::info!(outcome = ?outcome, elapsed = ?started.elapsed(), "turn finished");
+        }
+        Err(e) => {
+            tracing::warn!(error = %format!("{e:#}"), elapsed = ?started.elapsed(), "turn failed");
+        }
+    }
     Ok(TurnSpawn {
         handle,
         title_seed,

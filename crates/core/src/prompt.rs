@@ -20,7 +20,7 @@ pub fn assemble_append(
                 body.push_str(&soul);
             }
             Err(e) => {
-                tracing::warn!(path = %identity.display(), error = %e, "reading identity.md failed; using delta only")
+                tracing::warn!(path = %identity.display(), error = %format!("{e:#}"), "reading identity.md failed; using delta only")
             }
         }
     }

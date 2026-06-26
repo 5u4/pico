@@ -406,6 +406,39 @@ fn route(sessions: &Sessions, session_id: &str, event: OmpEvent) {
     }
 }
 
+fn frame_tag(frame: &Inbound) -> &'static str {
+    match frame {
+        Inbound::Ready => "ready",
+        Inbound::Response(_) => "response",
+        Inbound::AgentStart { .. } => "agent_start",
+        Inbound::AgentEnd { .. } => "agent_end",
+        Inbound::TurnEnd { .. } => "turn_end",
+        Inbound::MessageUpdate { .. } => "message_update",
+        Inbound::ToolExecutionStart { .. } => "tool_execution_start",
+        Inbound::ToolExecutionUpdate { .. } => "tool_execution_update",
+        Inbound::ToolExecutionEnd { .. } => "tool_execution_end",
+        Inbound::ExtensionUiRequest { .. } => "extension_ui_request",
+        Inbound::Error { .. } => "error",
+        Inbound::Unknown => "unknown",
+    }
+}
+
+fn frame_session_id(frame: &Inbound) -> Option<&str> {
+    match frame {
+        Inbound::AgentStart { session_id }
+        | Inbound::AgentEnd { session_id }
+        | Inbound::TurnEnd { session_id }
+        | Inbound::MessageUpdate { session_id, .. }
+        | Inbound::ToolExecutionStart { session_id, .. }
+        | Inbound::ToolExecutionUpdate { session_id, .. }
+        | Inbound::ToolExecutionEnd { session_id, .. }
+        | Inbound::ExtensionUiRequest { session_id, .. }
+        | Inbound::Error { session_id, .. } => Some(session_id.as_str()),
+        Inbound::Response(resp) if !resp.session_id.is_empty() => Some(resp.session_id.as_str()),
+        Inbound::Response(_) | Inbound::Ready | Inbound::Unknown => None,
+    }
+}
+
 async fn read_loop(
     stdout: ChildStdout,
     pending: Pending,
@@ -428,7 +461,7 @@ async fn read_loop(
             Ok(0) => break,
             Ok(_) => {}
             Err(e) => {
-                tracing::warn!(error = %e, "omp host stdout read error");
+                tracing::warn!(error = %format!("{e:#}"), "omp host stdout read error");
                 break;
             }
         }
@@ -439,11 +472,20 @@ async fn read_loop(
         let frame: Inbound = match serde_json::from_str(trimmed) {
             Ok(frame) => frame,
             Err(e) => {
-                tracing::warn!(error = %e, bytes = trimmed.len(), "omp host: undecodable frame");
+                tracing::warn!(error = %format!("{e:#}"), bytes = trimmed.len(), "omp host: undecodable frame");
                 tracing::debug!(frame = %trimmed, "omp host: undecodable frame contents");
                 continue;
             }
         };
+
+        if tracing::enabled!(tracing::Level::TRACE) {
+            match frame_session_id(&frame) {
+                Some(sid) => {
+                    tracing::trace!(session_id = %sid, frame = frame_tag(&frame), "omp frame")
+                }
+                None => tracing::trace!(frame = frame_tag(&frame), "omp frame"),
+            }
+        }
 
         match frame {
             Inbound::Ready => {
@@ -484,7 +526,25 @@ async fn read_loop(
                 route(&sessions, &session_id, OmpEvent::UiRequest(request))
             }
             Inbound::Error { session_id, message } => route(&sessions, &session_id, OmpEvent::Error(message)),
-            Inbound::Unknown => {}
+            Inbound::Unknown => {
+                #[derive(serde::Deserialize)]
+                struct RawType {
+                    #[serde(rename = "type")]
+                    kind: String,
+                    #[serde(default, rename = "sessionId")]
+                    session_id: Option<String>,
+                }
+                match serde_json::from_str::<RawType>(trimmed) {
+                    Ok(RawType {
+                        kind,
+                        session_id: Some(sid),
+                    }) => {
+                        tracing::debug!(raw_type = %kind, session_id = %sid, "omp frame: unrecognized type")
+                    }
+                    Ok(RawType { kind, .. }) => tracing::debug!(raw_type = %kind, "omp frame: unrecognized type"),
+                    Err(_) => tracing::debug!("omp frame: unrecognized type"),
+                }
+            }
         }
     }
 

@@ -38,7 +38,7 @@ pub fn parse_approvers(ids: &[String]) -> Vec<serenity::UserId> {
         .filter_map(|id| match id.parse::<u64>() {
             Ok(n) => Some(serenity::UserId::new(n)),
             Err(e) => {
-                tracing::warn!(%id, error = %e, "skipping unparseable approver id");
+                tracing::warn!(%id, error = %format!("{e:#}"), "skipping unparseable approver id");
                 None
             }
         })
@@ -213,7 +213,7 @@ async fn ack_update(ctx: &serenity::Context, interaction: &serenity::ComponentIn
             .components(vec![]),
     );
     if let Err(e) = interaction.create_response(ctx, response).await {
-        tracing::warn!(error = %e, "approval interaction update failed");
+        tracing::warn!(error = %format!("{e:#}"), "approval interaction update failed");
     }
 }
 
@@ -227,7 +227,7 @@ async fn finalize(
         .content(content.to_owned())
         .components(vec![]);
     if let Err(e) = channel.edit_message(ctx, message_id, edit).await {
-        tracing::warn!(error = %e, "approval prompt finalize failed");
+        tracing::warn!(error = %format!("{e:#}"), "approval prompt finalize failed");
     }
 }
 
