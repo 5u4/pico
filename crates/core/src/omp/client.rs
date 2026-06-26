@@ -18,7 +18,9 @@ use tokio::{
 };
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
-use crate::omp::protocol::{Command, Identity, Inbound, OmpEvent, RequestId, RpcResponse, UiResponse};
+use crate::omp::protocol::{
+    Command, Identity, Inbound, OmpEvent, RequestId, RpcResponse, UiResponse, message_start_event,
+};
 
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -419,6 +421,7 @@ fn frame_tag(frame: &Inbound) -> &'static str {
         Inbound::ToolExecutionEnd { .. } => "tool_execution_end",
         Inbound::ExtensionUiRequest { .. } => "extension_ui_request",
         Inbound::Error { .. } => "error",
+        Inbound::MessageStart { .. } => "message_start",
         Inbound::Unknown => "unknown",
     }
 }
@@ -433,6 +436,7 @@ fn frame_session_id(frame: &Inbound) -> Option<&str> {
         | Inbound::ToolExecutionUpdate { session_id, .. }
         | Inbound::ToolExecutionEnd { session_id, .. }
         | Inbound::ExtensionUiRequest { session_id, .. }
+        | Inbound::MessageStart { session_id, .. }
         | Inbound::Error { session_id, .. } => Some(session_id.as_str()),
         Inbound::Response(resp) if !resp.session_id.is_empty() => Some(resp.session_id.as_str()),
         Inbound::Response(_) | Inbound::Ready | Inbound::Unknown => None,
@@ -526,6 +530,11 @@ async fn read_loop(
                 route(&sessions, &session_id, OmpEvent::UiRequest(request))
             }
             Inbound::Error { session_id, message } => route(&sessions, &session_id, OmpEvent::Error(message)),
+            Inbound::MessageStart { session_id, message } => {
+                if let Some(event) = message_start_event(&message) {
+                    route(&sessions, &session_id, event);
+                }
+            }
             Inbound::Unknown => {
                 #[derive(serde::Deserialize)]
                 struct RawType {

@@ -127,6 +127,7 @@ pub enum OmpEvent {
     UiRequest(UiRequest),
     AgentEnd,
     TurnEnd,
+    CustomMessage { custom_type: String },
     Error(String),
 }
 
@@ -174,6 +175,15 @@ pub struct ToolCallUpdate {
     pub tool_call_id: String,
     pub tool_name: String,
     pub partial_result: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MessageStartInfo {
+    #[serde(default)]
+    pub role: Option<String>,
+    #[serde(default)]
+    pub custom_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -382,8 +392,21 @@ pub(crate) enum Inbound {
         session_id: String,
         message: String,
     },
+    MessageStart {
+        session_id: String,
+        message: MessageStartInfo,
+    },
     #[serde(other)]
     Unknown,
+}
+
+pub(crate) fn message_start_event(info: &MessageStartInfo) -> Option<OmpEvent> {
+    if info.role.as_deref() != Some("custom") {
+        return None;
+    }
+    info.custom_type
+        .clone()
+        .map(|custom_type| OmpEvent::CustomMessage { custom_type })
 }
 
 #[cfg(test)]
@@ -687,6 +710,44 @@ mod tests {
                 assert_eq!(message, "AgentBusyError");
             }
             other => panic!("expected error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decodes_custom_message_start_frame() {
+        match parse(
+            r#"{"type":"message_start","sessionId":"s1","message":{"role":"custom","customType":"autolearn-nudge"}}"#,
+        ) {
+            Inbound::MessageStart { session_id, message } => {
+                assert_eq!(session_id, "s1");
+                match message_start_event(&message) {
+                    Some(OmpEvent::CustomMessage { custom_type }) => {
+                        assert_eq!(custom_type, "autolearn-nudge");
+                    }
+                    other => panic!("expected custom message event, got {other:?}"),
+                }
+            }
+            other => panic!("expected message_start, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ignores_non_custom_message_start() {
+        match parse(r#"{"type":"message_start","sessionId":"s1","message":{"role":"user"}}"#) {
+            Inbound::MessageStart { message, .. } => {
+                assert!(message_start_event(&message).is_none());
+            }
+            other => panic!("expected message_start, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ignores_custom_message_start_without_type() {
+        match parse(r#"{"type":"message_start","sessionId":"s1","message":{"role":"custom"}}"#) {
+            Inbound::MessageStart { message, .. } => {
+                assert!(message_start_event(&message).is_none());
+            }
+            other => panic!("expected message_start, got {other:?}"),
         }
     }
 

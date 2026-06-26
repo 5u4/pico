@@ -56,6 +56,8 @@ pub async fn drive_turn<S: Surface>(
     let (interrupt, streaming, _cancel_guard) = rt.cancels.register(req.conversation);
     let mut aborted = false;
     let mut held: Option<String> = None;
+    let mut answer_delivered = false;
+    let mut suppress_text = false;
     let mut settling = false;
     let mut explicit_runs_pending: usize = 1;
     let mut awaiting_deferred = false;
@@ -75,7 +77,7 @@ pub async fn drive_turn<S: Surface>(
             () = req.cancel.cancelled() => {
                 activity.flush().await;
                 subagents.flush_all(false).await;
-                flush_final(surface, &mut activity, &mut reply, &mut held, title_seed).await;
+                flush_final(surface, &mut activity, &mut reply, &mut held, title_seed, answer_delivered).await;
                 surface.say("worker is restarting; resend your message to continue").await;
                 return Ok(TurnOutcome::Live);
             }
@@ -114,7 +116,7 @@ pub async fn drive_turn<S: Surface>(
                     tracing::warn!(timeout = ?STALL_TIMEOUT, "turn made no progress; resetting wedged OMP session");
                     activity.flush().await;
                     subagents.flush_all(true).await;
-                    flush_final(surface, &mut activity, &mut reply, &mut held, title_seed).await;
+                    flush_final(surface, &mut activity, &mut reply, &mut held, title_seed, answer_delivered).await;
                     surface
                         .say("the turn stalled with no progress and was reset; resend your message to continue")
                         .await;
@@ -127,26 +129,32 @@ pub async fn drive_turn<S: Surface>(
         }
         match event {
             Some(OmpEvent::Message(AssistantMessageEvent::TextDelta { delta })) => {
-                reply.push_str(&delta);
+                if !suppress_text {
+                    reply.push_str(&delta);
+                }
             }
             Some(OmpEvent::Message(AssistantMessageEvent::TextEnd { content })) => {
-                let seg = if content.is_empty() {
-                    std::mem::take(&mut reply)
+                if suppress_text {
+                    reply.clear();
                 } else {
-                    content
-                };
-                reply.clear();
-                hold_segment(surface, &mut activity, &mut held, title_seed, seg).await;
+                    let seg = if content.is_empty() {
+                        std::mem::take(&mut reply)
+                    } else {
+                        content
+                    };
+                    reply.clear();
+                    hold_segment(surface, &mut activity, &mut held, title_seed, answer_delivered, seg).await;
+                }
             }
             Some(OmpEvent::Message(AssistantMessageEvent::ThinkingEnd { content })) => {
-                if req.surface_thinking {
+                if req.surface_thinking && !suppress_text {
                     activity.thinking(&content).await;
                 }
             }
             Some(OmpEvent::ToolStart(tool)) => {
                 if !reply.trim().is_empty() {
                     let seg = std::mem::take(&mut reply);
-                    hold_segment(surface, &mut activity, &mut held, title_seed, seg).await;
+                    hold_segment(surface, &mut activity, &mut held, title_seed, answer_delivered, seg).await;
                 }
                 if let Some(prev) = held.take() {
                     commit_text(surface, &mut activity, &prev, false, true).await;
@@ -180,7 +188,7 @@ pub async fn drive_turn<S: Surface>(
                 match disposition {
                     UiDisposition::Cancelled => {
                         subagents.flush_all(false).await;
-                        flush_final(surface, &mut activity, &mut reply, &mut held, title_seed).await;
+                        flush_final(surface, &mut activity, &mut reply, &mut held, title_seed, answer_delivered).await;
                         surface
                             .say("worker restarted, so the pending question was discarded; resend your message to continue")
                             .await;
@@ -196,11 +204,13 @@ pub async fn drive_turn<S: Surface>(
             Some(OmpEvent::TurnEnd) => {
                 if !reply.trim().is_empty() {
                     let seg = std::mem::take(&mut reply);
-                    hold_segment(surface, &mut activity, &mut held, title_seed, seg).await;
+                    hold_segment(surface, &mut activity, &mut held, title_seed, answer_delivered, seg).await;
                 }
             }
             Some(OmpEvent::AgentEnd) => {
-                flush_final(surface, &mut activity, &mut reply, &mut held, title_seed).await;
+                flush_final(surface, &mut activity, &mut reply, &mut held, title_seed, answer_delivered).await;
+                answer_delivered = true;
+                suppress_text = false;
                 if explicit_runs_pending > 0 {
                     explicit_runs_pending -= 1;
                 } else {
@@ -217,16 +227,21 @@ pub async fn drive_turn<S: Surface>(
                 tracing::error!(error = %e, "omp reported a turn error");
                 activity.flush().await;
                 subagents.flush_all(true).await;
-                flush_final(surface, &mut activity, &mut reply, &mut held, title_seed).await;
+                flush_final(surface, &mut activity, &mut reply, &mut held, title_seed, answer_delivered).await;
                 surface.say(&format!("OMP error: {e}")).await;
                 return Ok(TurnOutcome::Live);
+            }
+            Some(OmpEvent::CustomMessage { custom_type }) => {
+                if answer_delivered && custom_type == "autolearn-nudge" {
+                    suppress_text = true;
+                }
             }
             Some(OmpEvent::AgentStart | OmpEvent::Message(AssistantMessageEvent::Other)) => {}
             None => {
                 tracing::error!("omp host channel closed mid-turn; session is dead");
                 activity.flush().await;
                 subagents.flush_all(true).await;
-                flush_final(surface, &mut activity, &mut reply, &mut held, title_seed).await;
+                flush_final(surface, &mut activity, &mut reply, &mut held, title_seed, answer_delivered).await;
                 surface
                     .say("the OMP session ended unexpectedly; send another message to restart it")
                     .await;
@@ -237,7 +252,7 @@ pub async fn drive_turn<S: Surface>(
     activity.flush().await;
     subagents.settle_backgrounded();
     subagents.flush_all(false).await;
-    flush_final(surface, &mut activity, &mut reply, &mut held, title_seed).await;
+    flush_final(surface, &mut activity, &mut reply, &mut held, title_seed, answer_delivered).await;
     Ok(TurnOutcome::Live)
 }
 
@@ -333,6 +348,7 @@ async fn hold_segment<S: Surface>(
     activity: &mut Activity<'_, S>,
     held: &mut Option<String>,
     title_seed: &mut Option<String>,
+    title_locked: bool,
     seg: String,
 ) {
     if seg.trim().is_empty() {
@@ -341,7 +357,9 @@ async fn hold_segment<S: Surface>(
     if let Some(prev) = held.take() {
         commit_text(surface, activity, &prev, false, true).await;
     }
-    *title_seed = Some(seg.clone());
+    if !title_locked {
+        *title_seed = Some(seg.clone());
+    }
     *held = Some(seg);
 }
 
@@ -351,10 +369,11 @@ async fn flush_final<S: Surface>(
     reply: &mut String,
     held: &mut Option<String>,
     title_seed: &mut Option<String>,
+    title_locked: bool,
 ) {
     if !reply.trim().is_empty() {
         let seg = std::mem::take(reply);
-        hold_segment(surface, activity, held, title_seed, seg).await;
+        hold_segment(surface, activity, held, title_seed, title_locked, seg).await;
     }
     if let Some(text) = held.take() {
         commit_text(surface, activity, &text, true, false).await;
@@ -716,9 +735,9 @@ mod tests {
         let mut held = None;
         let mut reply = String::new();
         let mut title_seed = None;
-        hold_segment(&surface, &mut activity, &mut held, &mut title_seed, "first".to_owned()).await;
-        hold_segment(&surface, &mut activity, &mut held, &mut title_seed, "second".to_owned()).await;
-        flush_final(&surface, &mut activity, &mut reply, &mut held, &mut title_seed).await;
+        hold_segment(&surface, &mut activity, &mut held, &mut title_seed, false, "first".to_owned()).await;
+        hold_segment(&surface, &mut activity, &mut held, &mut title_seed, false, "second".to_owned()).await;
+        flush_final(&surface, &mut activity, &mut reply, &mut held, &mut title_seed, false).await;
         let posts = surface.posts.lock().unwrap();
         assert_eq!(posts.len(), 2);
         assert_eq!(posts[0].0, "first");
@@ -740,12 +759,13 @@ mod tests {
             &mut activity,
             &mut held,
             &mut title_seed,
+            false,
             "the substantive answer".to_owned(),
         )
         .await;
         let prev = held.take().unwrap();
         commit_text(&surface, &mut activity, &prev, false, true).await;
-        flush_final(&surface, &mut activity, &mut reply, &mut held, &mut title_seed).await;
+        flush_final(&surface, &mut activity, &mut reply, &mut held, &mut title_seed, false).await;
         assert_eq!(title_seed.as_deref(), Some("the substantive answer"));
     }
 
@@ -756,7 +776,7 @@ mod tests {
         let mut held = Some("x".repeat(4000));
         let mut reply = String::new();
         let mut title_seed = None;
-        flush_final(&surface, &mut activity, &mut reply, &mut held, &mut title_seed).await;
+        flush_final(&surface, &mut activity, &mut reply, &mut held, &mut title_seed, false).await;
         let posts = surface.posts.lock().unwrap();
         assert_eq!(posts.len(), 1);
         assert_eq!(posts[0].0.chars().count(), 4000);
@@ -770,8 +790,41 @@ mod tests {
         let mut held = Some("   ".to_owned());
         let mut reply = String::new();
         let mut title_seed = None;
-        flush_final(&surface, &mut activity, &mut reply, &mut held, &mut title_seed).await;
+        flush_final(&surface, &mut activity, &mut reply, &mut held, &mut title_seed, false).await;
         assert!(surface.posts.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn locked_title_seed_survives_a_post_answer_segment() {
+        let surface = FakeSurface::default();
+        let mut activity = Activity::new(&surface);
+        let mut held = None;
+        let mut reply = String::new();
+        let mut title_seed = None;
+        hold_segment(
+            &surface,
+            &mut activity,
+            &mut held,
+            &mut title_seed,
+            false,
+            "the real answer".to_owned(),
+        )
+        .await;
+        flush_final(&surface, &mut activity, &mut reply, &mut held, &mut title_seed, false).await;
+        hold_segment(
+            &surface,
+            &mut activity,
+            &mut held,
+            &mut title_seed,
+            true,
+            "autolearn reflection".to_owned(),
+        )
+        .await;
+        flush_final(&surface, &mut activity, &mut reply, &mut held, &mut title_seed, true).await;
+        assert_eq!(title_seed.as_deref(), Some("the real answer"));
+        let posts = surface.posts.lock().unwrap();
+        assert_eq!(posts[0].0, "the real answer");
+        assert_eq!(posts.last().unwrap().0, "autolearn reflection");
     }
 
     #[tokio::test]
