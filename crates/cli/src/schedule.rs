@@ -116,7 +116,7 @@ async fn build_and_create(json: &str) -> Result<serde_json::Value, String> {
     let root = pico_shared::paths::worker_root().map_err(|e| e.to_string())?;
     let db = pico_core::db::open(&root).await.map_err(|e| e.to_string())?;
     let sched = schedule::create(&db, &root, new).await.map_err(|e| e.to_string())?;
-    Ok(schedule_dto(&sched, &root))
+    schedule_dto(&sched, &root).await.map_err(|e| e.to_string())
 }
 
 impl CreateInput {
@@ -192,7 +192,10 @@ async fn list(scope: Option<String>, json: bool) -> color_eyre::Result<()> {
     let db = pico_core::db::open(&root).await?;
     let schedules = schedule::list(&db, "discord", &scope).await?;
     if json {
-        let dtos: Vec<serde_json::Value> = schedules.iter().map(|sched| schedule_dto(sched, &root)).collect();
+        let mut dtos = Vec::with_capacity(schedules.len());
+        for sched in &schedules {
+            dtos.push(schedule_dto(sched, &root).await?);
+        }
         println!("{}", serde_json::Value::Array(dtos));
     } else if schedules.is_empty() {
         println!("no schedules");
@@ -217,9 +220,9 @@ async fn show(id: &str, scope: Option<String>, json: bool) -> color_eyre::Result
     let sched = scoped(schedule::get(&db, id).await?, caller_scope(scope).as_deref())
         .ok_or_else(|| eyre!("no schedule with id {id}"))?;
     if json {
-        println!("{}", schedule_dto(&sched, &root));
+        println!("{}", schedule_dto(&sched, &root).await?);
     } else {
-        print_human(&sched, &root);
+        print_human(&sched, &root).await?;
     }
     Ok(())
 }
@@ -256,7 +259,7 @@ fn scoped(sched: Option<Schedule>, scope: Option<&str>) -> Option<Schedule> {
     }
 }
 
-fn print_human(sched: &Schedule, root: &Path) {
+async fn print_human(sched: &Schedule, root: &Path) -> color_eyre::Result<()> {
     println!("id          {}", sched.id);
     println!("name        {}", sched.name);
     println!("state       {}", state_str(sched.state));
@@ -273,7 +276,7 @@ fn print_human(sched: &Schedule, root: &Path) {
         println!("last_run_at {}", last.to_rfc3339());
     }
     println!("failures    {}", sched.consecutive_failures);
-    let def = schedule::read_definition(root, &sched.id, sched.state);
+    let def = schedule::read_definition(root, &sched.id, sched.state).await?;
     println!("script_path {}", def.script_path.display());
     println!("prompt_path {}", def.prompt_path.display());
     if let Some(script) = &def.script {
@@ -282,11 +285,12 @@ fn print_human(sched: &Schedule, root: &Path) {
     if let Some(prompt) = &def.prompt {
         println!("prompt      {prompt}");
     }
+    Ok(())
 }
 
-fn schedule_dto(sched: &Schedule, root: &Path) -> serde_json::Value {
-    let def = schedule::read_definition(root, &sched.id, sched.state);
-    serde_json::json!({
+async fn schedule_dto(sched: &Schedule, root: &Path) -> color_eyre::Result<serde_json::Value> {
+    let def = schedule::read_definition(root, &sched.id, sched.state).await?;
+    Ok(serde_json::json!({
         "id": sched.id,
         "platform": sched.platform,
         "scope": sched.scope,
@@ -305,7 +309,7 @@ fn schedule_dto(sched: &Schedule, root: &Path) -> serde_json::Value {
         "last_run_at": sched.last_run_at.map(|d| d.to_rfc3339()),
         "consecutive_failures": sched.consecutive_failures,
         "state": state_str(sched.state),
-    })
+    }))
 }
 
 fn trigger_dto(trigger: &Trigger) -> serde_json::Value {

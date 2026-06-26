@@ -1,6 +1,6 @@
 use std::{
     collections::HashSet,
-    fs,
+    fs, io,
     path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -193,7 +193,15 @@ pub struct Definition {
     pub prompt_path: PathBuf,
 }
 
-pub fn read_definition(root: &Path, id: &str, state: State) -> Definition {
+async fn read_part(path: &Path) -> io::Result<Option<String>> {
+    match tokio::fs::read_to_string(path).await {
+        Ok(content) => Ok(Some(content)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+pub async fn read_definition(root: &Path, id: &str, state: State) -> io::Result<Definition> {
     let primary = match state {
         State::Triggered => triggered_schedule_dir(root, id),
         _ => schedule_dir(root, id),
@@ -202,22 +210,24 @@ pub fn read_definition(root: &Path, id: &str, state: State) -> Definition {
         State::Triggered => schedule_dir(root, id),
         _ => triggered_schedule_dir(root, id),
     };
-    let has_parts = |dir: &Path| dir.join(SCRIPT_FILE).exists() || dir.join(PROMPT_FILE).exists();
-    let dir = if has_parts(&primary) || !has_parts(&alternate) {
-        primary
-    } else {
-        alternate
-    };
-    let script_path = dir.join(SCRIPT_FILE);
-    let prompt_path = dir.join(PROMPT_FILE);
-    let script = fs::read_to_string(&script_path).ok();
-    let prompt = fs::read_to_string(&prompt_path).ok();
-    Definition {
+    let mut dir = primary;
+    let mut script = read_part(&dir.join(SCRIPT_FILE)).await?;
+    let mut prompt = read_part(&dir.join(PROMPT_FILE)).await?;
+    if script.is_none() && prompt.is_none() {
+        let alt_script = read_part(&alternate.join(SCRIPT_FILE)).await?;
+        let alt_prompt = read_part(&alternate.join(PROMPT_FILE)).await?;
+        if alt_script.is_some() || alt_prompt.is_some() {
+            dir = alternate;
+            script = alt_script;
+            prompt = alt_prompt;
+        }
+    }
+    Ok(Definition {
         script,
         prompt,
-        script_path,
-        prompt_path,
-    }
+        script_path: dir.join(SCRIPT_FILE),
+        prompt_path: dir.join(PROMPT_FILE),
+    })
 }
 
 const SELECT_LIST: &str = "SELECT id, platform, scope, name, created_by, created_at, mode, origin, \
@@ -555,7 +565,13 @@ pub async fn fire_one<H: ScheduleHost>(
     }
     tracing::info!("schedule fire start");
 
-    let def = read_definition(root, &sched.id, sched.state);
+    let def = match read_definition(root, &sched.id, sched.state).await {
+        Ok(def) => def,
+        Err(e) => {
+            tracing::warn!(schedule_id = %sched.id, error = %format!("{e:#}"), "reading schedule definition failed");
+            return record_transient(db, host, root, sched, now).await;
+        }
+    };
     if def.script.is_none() && def.prompt.is_none() {
         tracing::info!(reason = ?DisableReason::MissingDefinition, "disabling schedule");
         disable(db, &sched.id).await?;
@@ -1365,7 +1381,7 @@ mod tests {
         assert!(prompt_dir.join(PROMPT_FILE).exists());
         assert!(!prompt_dir.join(SCRIPT_FILE).exists(), "script-less job writes no script file");
 
-        let def = read_definition(&dir, &sched.id, sched.state);
+        let def = read_definition(&dir, &sched.id, sched.state).await.unwrap();
         assert_eq!(def.script.as_deref(), Some("echo hi"));
         assert_eq!(def.prompt.as_deref(), Some("hello prompt"));
         assert_eq!(def.script_path, job_dir.join(SCRIPT_FILE));
@@ -1414,6 +1430,35 @@ mod tests {
             assert_eq!(calls.notified[0], HomeNotice::Disabled(DisableReason::MissingDefinition));
         }
         assert_eq!(get(&db, &sched.id).await.unwrap().unwrap().state, State::Disabled);
+        cleanup(db, dir).await;
+    }
+
+    #[tokio::test]
+    async fn fire_one_unreadable_definition_is_transient_not_disabled() {
+        let (db, dir) = temp_db("unreadable-def").await;
+        let sched = create(&db, &dir, new_interval(None, Some("echo hi"), 3600))
+            .await
+            .unwrap();
+        let script_path = schedule_dir(&dir, &sched.id).join(SCRIPT_FILE);
+        fs::remove_file(&script_path).unwrap();
+        fs::create_dir(&script_path).unwrap();
+
+        let host = FakeHost::new();
+        fire_one(&db, &host, &cfg(), &dir, &sched, sched.next_run_at)
+            .await
+            .unwrap();
+        {
+            let calls = host.calls.lock();
+            assert!(calls.fired.is_empty());
+            assert!(calls.notified.is_empty(), "a transient read error must not notify");
+        }
+        let after = get(&db, &sched.id).await.unwrap().unwrap();
+        assert_eq!(
+            after.state,
+            State::Active,
+            "a transient read error must not permanently disable"
+        );
+        assert_eq!(after.consecutive_failures, 1);
         cleanup(db, dir).await;
     }
 
