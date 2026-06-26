@@ -23,6 +23,7 @@ enum Command {
 #[tokio::main]
 async fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
+    let _log_guard = pico_shared::logging::init_file_only(&pico_shared::paths::worker_root()?.join("logs"), "cli")?;
     let cli = Cli::parse();
     match cli.command {
         Command::Omp(args) => omp::run(args).await,

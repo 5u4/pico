@@ -173,7 +173,7 @@ impl Supervisor {
         match std::fs::remove_file(&self.socket_path) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => tracing::warn!(error = %e, "failed to remove control socket"),
+            Err(e) => tracing::warn!(error = %format!("{e:#}"), "failed to remove control socket"),
         }
     }
 
@@ -215,6 +215,7 @@ impl Supervisor {
         if pending.as_ref().is_some_and(|(expected, ..)| expected == token) {
             let (_, tx, report) = pending.take().expect("pending_ready checked non-empty");
             let _ = tx.send(());
+            tracing::info!("worker reported ready");
             report
         } else {
             tracing::debug!("ignoring ready ping with unknown token");
@@ -236,6 +237,7 @@ impl Supervisor {
 
         let meta = self.inspect(&bin).await;
         let desc = meta.version.clone().unwrap_or_else(|| path.display().to_string());
+        tracing::info!(path = %path.display(), desc = %desc, "deploy starting");
 
         let previous = match self.slots.current_target() {
             Ok(p) => p,
@@ -257,6 +259,7 @@ impl Supervisor {
         match self.spawn_and_validate(&bin, &meta, report_fresh).await {
             Ok(proc) => {
                 let pid = proc.pid;
+                tracing::info!(desc = %desc, ?pid, "deploy succeeded");
                 *self.worker.lock().await = Some(proc);
                 let note = match self.slots.promote(&bin) {
                     Ok(()) => String::new(),
@@ -333,6 +336,7 @@ impl Supervisor {
 
         let meta = self.inspect(&prev).await;
         let desc = meta.version.clone().unwrap_or_else(|| prev.display().to_string());
+        tracing::info!(binary = %prev.display(), desc = %desc, "rollback starting");
 
         if let Some(old) = self.worker.lock().await.take() {
             self.kill_worker(old).await;
@@ -347,6 +351,7 @@ impl Supervisor {
                     };
                 }
                 self.record(&desc, meta.build.as_deref(), "ok");
+                tracing::info!(desc = %desc, "rollback succeeded");
                 Response::Ok {
                     detail: format!("rolled back to {desc}"),
                 }
@@ -454,14 +459,17 @@ impl Supervisor {
         self.pending_ready.lock().expect("pending_ready poisoned").take();
 
         match outcome {
-            Ok(()) => Ok(WorkerProc {
-                child,
-                pid,
-                bin: bin.to_path_buf(),
-                version: meta.version.clone(),
-                build: meta.build.clone(),
-                started_at: Instant::now(),
-            }),
+            Ok(()) => {
+                tracing::info!(?pid, binary = %bin.display(), "worker spawned and validated");
+                Ok(WorkerProc {
+                    child,
+                    pid,
+                    bin: bin.to_path_buf(),
+                    version: meta.version.clone(),
+                    build: meta.build.clone(),
+                    started_at: Instant::now(),
+                })
+            }
             Err(e) => {
                 let _ = child.start_kill();
                 let _ = child.wait().await;
@@ -481,8 +489,12 @@ impl Supervisor {
         tokio::select! {
             _ = proc.child.wait() => {}
             () = tokio::time::sleep(self.config.health_timeout()) => {
-                let _ = proc.child.start_kill();
-                let _ = proc.child.wait().await;
+                if let Err(e) = proc.child.start_kill() {
+                    tracing::warn!(error = %format!("{e:#}"), "force-kill of unresponsive worker failed");
+                }
+                if let Err(e) = proc.child.wait().await {
+                    tracing::warn!(error = %format!("{e:#}"), "waiting on force-killed worker failed");
+                }
             }
         }
     }

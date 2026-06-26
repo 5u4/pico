@@ -432,13 +432,13 @@ pub async fn run<H: ScheduleHost + 'static>(db: &SqlitePool, host: H, cfg: Sched
                     let id = sched.id.clone();
                     tracker.spawn(async move {
                         if let Err(e) = fire_one(&db, host.as_ref(), &cfg, &sched, moment).await {
-                            tracing::warn!(schedule_id = %sched.id, error = ?e, "scheduled fire failed");
+                            tracing::warn!(schedule_id = %sched.id, error = %format!("{e:#}"), "scheduled fire failed");
                         }
                         in_flight.lock().remove(&id);
                     });
                 }
             }
-            Err(e) => tracing::warn!(error = ?e, "scheduler due query failed"),
+            Err(e) => tracing::warn!(error = %format!("{e:#}"), "scheduler due query failed"),
         }
 
         let after = now();
@@ -456,6 +456,7 @@ pub async fn run<H: ScheduleHost + 'static>(db: &SqlitePool, host: H, cfg: Sched
     tracker.wait().await;
 }
 
+#[tracing::instrument(level = "info", skip_all, fields(schedule_id = %sched.id, name = %sched.name, trigger = ?sched.trigger))]
 pub async fn fire_one<H: ScheduleHost>(
     db: &SqlitePool,
     host: &H,
@@ -465,40 +466,50 @@ pub async fn fire_one<H: ScheduleHost>(
 ) -> color_eyre::Result<()> {
     match missed_gate(sched, now, cfg.grace) {
         Disposition::MissedOneshot => {
+            tracing::info!("missed oneshot schedule");
             host.notify_home(sched, &HomeNotice::Missed { due: sched.next_run_at })
                 .await;
             finish_oneshot(db, &sched.id, None).await?;
             return Ok(());
         }
         Disposition::SkipStale => {
+            tracing::info!("skipping stale schedule run");
             advance_or_finish(db, sched, now).await?;
             return Ok(());
         }
         Disposition::Fire => {}
     }
+    tracing::info!("schedule fire start");
 
     let cwd = match host.resolve_cwd(sched).await {
         Ok(Some(cwd)) => cwd,
         Ok(None) => {
+            tracing::info!(reason = ?DisableReason::TargetUnresolvable, "disabling schedule");
             disable(db, &sched.id).await?;
             host.notify_home(sched, &HomeNotice::Disabled(DisableReason::TargetUnresolvable))
                 .await;
             return Ok(());
         }
         Err(e) => {
-            tracing::warn!(schedule_id = %sched.id, error = ?e, "resolving scheduled cwd failed");
+            tracing::warn!(schedule_id = %sched.id, error = %format!("{e:#}"), "resolving scheduled cwd failed");
             return record_transient(db, host, sched, now).await;
         }
     };
 
     match gate::run_script(sched.script.as_deref(), &cwd, cfg.script_timeout).await {
-        gate::Gate::Skip => advance_or_finish(db, sched, now).await?,
+        gate::Gate::Skip => {
+            tracing::debug!("schedule gate skip");
+            advance_or_finish(db, sched, now).await?
+        }
         gate::Gate::Failure { reason, stderr_tail } => {
             host.notify_home(sched, &HomeNotice::ScriptFailed { reason, stderr_tail })
                 .await;
             record_transient(db, host, sched, now).await?;
         }
-        gate::Gate::Proceed { context } => proceed(db, host, sched, now, context).await?,
+        gate::Gate::Proceed { context } => {
+            tracing::debug!("schedule gate proceed");
+            proceed(db, host, sched, now, context).await?
+        }
     }
     Ok(())
 }
@@ -518,9 +529,12 @@ async fn proceed<H: ScheduleHost>(
             prompt_body,
             context.as_deref(),
         );
-        match host.fire(sched, &wrapped).await {
+        let outcome = host.fire(sched, &wrapped).await;
+        tracing::info!(outcome = ?outcome, "schedule fire outcome");
+        match outcome {
             FireOutcome::Delivered => advance_or_finish(db, sched, now).await?,
             FireOutcome::TargetGone => {
+                tracing::info!(reason = ?DisableReason::OriginUnreachable, "disabling schedule");
                 disable(db, &sched.id).await?;
                 host.notify_home(sched, &HomeNotice::Disabled(DisableReason::OriginUnreachable))
                     .await;
@@ -528,9 +542,12 @@ async fn proceed<H: ScheduleHost>(
             FireOutcome::Transient => record_transient(db, host, sched, now).await?,
         }
     } else if let Some(text) = context.as_deref().filter(|c| !c.trim().is_empty()) {
-        match host.post_raw(sched, text).await {
+        let outcome = host.post_raw(sched, text).await;
+        tracing::info!(outcome = ?outcome, "schedule fire outcome");
+        match outcome {
             FireOutcome::Delivered => advance_or_finish(db, sched, now).await?,
             FireOutcome::TargetGone => {
+                tracing::info!(reason = ?DisableReason::TargetUnreachable, "disabling schedule");
                 disable(db, &sched.id).await?;
                 host.notify_home(sched, &HomeNotice::Disabled(DisableReason::TargetUnreachable))
                     .await;
@@ -547,7 +564,11 @@ async fn advance_or_finish(db: &SqlitePool, sched: &Schedule, now: DateTime<Utc>
     match &sched.trigger {
         Trigger::Oneshot { .. } => finish_oneshot(db, &sched.id, Some(now)).await,
         trigger => match next_after(trigger, now) {
-            Some(next) => advance_recurring(db, &sched.id, now, trunc_secs(next)).await,
+            Some(next) => {
+                let next_run_at = trunc_secs(next);
+                tracing::debug!(next_run_at = %next_run_at, "advancing schedule next run");
+                advance_recurring(db, &sched.id, now, next_run_at).await
+            }
             None => disable(db, &sched.id).await,
         },
     }
@@ -630,7 +651,7 @@ async fn sleep_target(
         Ok(Some(next)) => next.min(capped),
         Ok(None) => capped,
         Err(e) => {
-            tracing::warn!(error = ?e, "scheduler nearest-next query failed");
+            tracing::warn!(error = %format!("{e:#}"), "scheduler nearest-next query failed");
             capped
         }
     }
@@ -686,9 +707,12 @@ fn parse_row(row: ScheduleRow) -> Option<Schedule> {
 
 fn keep_parsed(row: ScheduleRow) -> Option<Schedule> {
     let id = row.id.clone();
+    let name = row.name.clone();
+    let platform = row.platform.clone();
+    let trigger = row.trigger_kind.clone();
     let parsed = parse_row(row);
     if parsed.is_none() {
-        tracing::warn!(schedule_id = %id, "skipping unparsable schedule row");
+        tracing::warn!(schedule_id = %id, %name, %platform, %trigger, "skipping unparsable schedule row");
     }
     parsed
 }

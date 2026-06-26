@@ -29,6 +29,7 @@ services:
     # else the published port can't reach it: Docker DNATs host 127.0.0.1 -> bridge IP.
     environment:
       VNC_BIND: "0.0.0.0"
+      # RUST_LOG: "pico_core=trace"   # stdout stays info; a target directive ADDS to the file (floor is debug) — e.g. to capture the omp frame stream
     volumes:
       - ${HOME}/.pico:/home/pico/.pico
       - ${HOME}/.omp:/home/pico/.omp

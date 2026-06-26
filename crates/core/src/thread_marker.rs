@@ -23,21 +23,21 @@ pub async fn load(db: &SqlitePool, platform: &str, thread_id: &str) -> Option<Th
     let row = match fetch(db, platform, thread_id).await {
         Ok(row) => row?,
         Err(e) => {
-            tracing::warn!(%thread_id, error = %format!("{e:#}"), "thread marker unreadable; re-resolving from binding");
+            tracing::warn!(%thread_id, %platform, error = %format!("{e:#}"), "thread marker unreadable; re-resolving from binding");
             return None;
         }
     };
     let base = match pico_shared::paths::pico_home() {
         Ok(base) => base,
         Err(e) => {
-            tracing::warn!(%thread_id, error = %format!("{e:#}"), "pico_home invalid; cannot resolve thread marker");
+            tracing::warn!(%thread_id, %platform, error = %format!("{e:#}"), "pico_home invalid; cannot resolve thread marker");
             return None;
         }
     };
     match parse(row, &base) {
         Some(marker) => Some(marker),
         None => {
-            tracing::warn!(%thread_id, "thread marker invalid; re-resolving from binding");
+            tracing::warn!(%thread_id, %platform, "thread marker invalid; re-resolving from binding");
             None
         }
     }

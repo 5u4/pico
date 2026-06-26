@@ -103,6 +103,7 @@ pub async fn ensure_at(path: &Path, thread_id: &str, base_repo: &Path, default_b
         .await
         .wrap_err("git worktree add")?;
     }
+    tracing::debug!(thread_id, "created worktree");
     Ok(())
 }
 
@@ -205,6 +206,7 @@ pub async fn remove(base_repo: &Path, worktree: &Path, thread_id: &str) -> color
             .await
             .wrap_err("git branch -D")?;
     }
+    tracing::debug!(thread_id, "removed worktree");
     Ok(())
 }
 

@@ -180,11 +180,10 @@ fn schedule_state_label(state: pico_core::schedule::State) -> &'static str {
 
 #[poise::command(slash_command, rename = "cancel")]
 async fn cancel_turn(ctx: Context<'_>) -> Result<(), Error> {
-    if ctx
-        .data()
-        .cancels
-        .request(&ConversationId::new("discord", &ctx.channel_id().to_string()))
-    {
+    let thread_id = ctx.channel_id().to_string();
+    let accepted = ctx.data().cancels.request(&ConversationId::new("discord", &thread_id));
+    tracing::debug!(%thread_id, accepted, "cancel requested");
+    if accepted {
         ctx.say("🛑 Turn cancelled.").await?;
     } else {
         ctx.say("Nothing to cancel.").await?;
@@ -297,7 +296,9 @@ async fn deliver_busy(ctx: Context<'_>, mode: StreamingBehavior, message: String
     let wrapped = pico_core::prompt::wrap_discord_message(ctx.author().id.get(), &display_name, &sent_at, text);
 
     let conv = ConversationId::new("discord", &ctx.channel_id().to_string());
-    match ctx.data().mid_turn.deliver(&conv, &wrapped, Some(mode)) {
+    let delivered = ctx.data().mid_turn.deliver(&conv, &wrapped, Some(mode));
+    tracing::debug!(channel_id = %ctx.channel_id(), user_id = %ctx.author().id, mode = ?mode, accepted = delivered.is_some(), "busy deliver");
+    match delivered {
         Some(resolved) => {
             let (emoji, label) = busy_label(resolved);
             let echo = format!("{emoji} `{label}` · {display_name}: {text}");
@@ -504,7 +505,7 @@ async fn install_cli(build_dir: &std::path::Path, target_dir: &std::path::Path) 
     let child = match child {
         Ok(child) => child,
         Err(e) => {
-            tracing::warn!(error = %e, "spawning `cargo install` for pico CLI failed; schedule extension may not find pico");
+            tracing::warn!(error = %format!("{e:#}"), "spawning `cargo install` for pico CLI failed; schedule extension may not find pico");
             return;
         }
     };
@@ -514,7 +515,7 @@ async fn install_cli(build_dir: &std::path::Path, target_dir: &std::path::Path) 
             let stderr = String::from_utf8_lossy(&out.stderr);
             tracing::warn!(status = %out.status, %stderr, "pico CLI `cargo install` failed; schedule extension may not find pico");
         }
-        Ok(Err(e)) => tracing::warn!(error = %e, "waiting on pico CLI `cargo install` failed"),
+        Ok(Err(e)) => tracing::warn!(error = %format!("{e:#}"), "waiting on pico CLI `cargo install` failed"),
         Err(_) => tracing::warn!("pico CLI `cargo install` timed out"),
     }
 }
@@ -532,7 +533,7 @@ async fn bun_install_host(build_dir: &std::path::Path) {
     let child = match child {
         Ok(child) => child,
         Err(e) => {
-            tracing::warn!(error = %e, dir = %host_dir.display(), "spawning `bun install` for omp-host failed; keeping existing node_modules");
+            tracing::warn!(error = %format!("{e:#}"), dir = %host_dir.display(), "spawning `bun install` for omp-host failed; keeping existing node_modules");
             return;
         }
     };
@@ -543,7 +544,7 @@ async fn bun_install_host(build_dir: &std::path::Path) {
             tracing::warn!(status = %out.status, %stderr, "omp-host `bun install` failed; keeping existing node_modules");
         }
         Ok(Err(e)) => {
-            tracing::warn!(error = %e, "waiting on omp-host `bun install` failed; keeping existing node_modules")
+            tracing::warn!(error = %format!("{e:#}"), "waiting on omp-host `bun install` failed; keeping existing node_modules")
         }
         Err(_) => tracing::warn!("omp-host `bun install` timed out; keeping existing node_modules"),
     }
@@ -626,6 +627,7 @@ async fn bind_set(
         Ok(()) => {
             ctx.say(format!("bound <#{channel}> → profile `{profile}`, cwd `{cwd}`"))
                 .await?;
+            tracing::info!(channel_id = %channel, user_id = %ctx.author().id, %cwd, %profile, "binding set");
         }
         Err(e) => {
             ctx.say(format!("bind failed: {e}")).await?;
@@ -664,6 +666,7 @@ async fn bind_worktree(
                 "bound <#{channel}> → worktree profile `{profile}`, base `{base_repo}`, branch `{branch}`"
             ))
             .await?;
+            tracing::info!(channel_id = %channel, user_id = %ctx.author().id, %base_repo, %branch, %profile, "binding worktree set");
         }
         Err(e) => {
             ctx.say(format!("bind failed: {e}")).await?;
@@ -679,6 +682,7 @@ async fn bind_unset(ctx: Context<'_>) -> Result<(), Error> {
     match pico_core::bindings::unset(&data.db, "discord", &channel.to_string()).await {
         Ok(true) => {
             ctx.say(format!("unbound <#{channel}>")).await?;
+            tracing::info!(channel_id = %channel, user_id = %ctx.author().id, "binding cleared");
         }
         Ok(false) => {
             ctx.say("this channel was not bound").await?;
@@ -801,7 +805,7 @@ async fn worktree_close(ctx: Context<'_>) -> Result<(), Error> {
         .edit_thread(ctx.serenity_context(), serenity::EditThread::new().archived(true).locked(true))
         .await
     {
-        tracing::warn!(%thread_id, error = %e, "archive+lock after close failed");
+        tracing::warn!(%thread_id, error = %format!("{e:#}"), "archive+lock after close failed");
     }
     Ok(())
 }
@@ -879,6 +883,8 @@ async fn on_event(
         let camofox = Arc::clone(&data.camofox);
         let cancel = data.cancel.clone();
         let message = new_message.clone();
+        let channel_id = new_message.channel_id;
+        let user_id = new_message.author.id;
         let tracker = data.tracker.clone();
         let pending_answers = data.pending_answers.clone();
         let mid_turn = data.mid_turn.clone();
@@ -899,7 +905,7 @@ async fn on_event(
             )
             .await
             {
-                tracing::warn!(error = %format!("{e:#}"), "message turn failed");
+                tracing::warn!(%channel_id, %user_id, error = %format!("{e:#}"), "message turn failed");
             }
         });
     }
@@ -1142,7 +1148,7 @@ async fn route_message(
             (profile, cwd, worktree)
         }
     };
-    tracing::info!(%thread_id, %profile, in_thread, "driving omp turn");
+    tracing::info!(%thread_id, %profile, user_id = %message.author.id, message_id = %message.id, guild_id = %guild_id, in_thread, "driving omp turn");
 
     let guild_name = guild_id.name(&ctx.cache);
     let (channel_name, thread_label) = if in_thread {
@@ -1331,7 +1337,7 @@ async fn react_queued(ctx: &serenity::Context, message: &serenity::Message, mode
         .react(ctx, serenity::ReactionType::Unicode(emoji.to_owned()))
         .await
     {
-        tracing::warn!(error = %e, "mid-turn ack reaction failed");
+        tracing::warn!(error = %format!("{e:#}"), "mid-turn ack reaction failed");
     }
 }
 
@@ -1387,7 +1393,7 @@ impl pico_core::surface::Surface for DiscordSurface {
         match self.channel.send_message(&self.ctx, message).await {
             Ok(msg) => Some(msg.id),
             Err(e) => {
-                tracing::warn!(error = %e, "surface post failed");
+                tracing::warn!(error = %format!("{e:#}"), "surface post failed");
                 None
             }
         }
@@ -1407,7 +1413,7 @@ impl pico_core::surface::Surface for DiscordSurface {
         {
             Ok(_) => true,
             Err(e) => {
-                tracing::warn!(error = %e, "surface edit failed");
+                tracing::warn!(error = %format!("{e:#}"), "surface edit failed");
                 false
             }
         }
