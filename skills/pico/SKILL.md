@@ -49,11 +49,16 @@ pico runs under a supervisor that manages the worker process. On an update, the 
 
 ## Where settings live
 
-Configuration lives under `PICO_HOME` (default `~/.pico`):
+Configuration lives under `PICO_HOME` (default `~/.pico`), split between the worker root (`PICO_HOME/worker/`) and the supervisor root (`PICO_HOME/supervisor/`).
+
+Under `PICO_HOME/worker/`:
 
 - `worker.toml` — timezone, the worktree directory, the list of active platforms, and scheduling settings (grace period, script timeout, run cap).
 - `discord.toml` — per-guild settings (id, working directory, profile, home channel) plus top-level rendering options.
 - `profiles/<profile>/profile.toml` — the profile's model and browser toggle.
-- `supervisor.toml` — supervisor settings.
-- `pico.db` — persistent state (bindings, threads, schedules, and more).
 - `profiles/<profile>/skills` and `profiles/<profile>/rules` — that profile's added capabilities.
+- `pico.db` — persistent state (bindings, threads, schedules, and more).
+
+Under `PICO_HOME/supervisor/`:
+
+- `supervisor.toml` — supervisor settings.
