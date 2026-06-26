@@ -31,13 +31,13 @@ Run `--help`, and `<subcommand> --help`, live to see the current flags and subco
 
 ## Logs
 
-Logs are rotating files (daily, last 7 kept), not stdout:
+The full history lives in rotating files (daily, last 7 kept); `docker logs` stdout is only a thinner `info`-level slice of the worker and supervisor, and the CLI logs nowhere else:
 
 - `$PICO_HOME/worker/logs/worker.<date>.log` — the worker and turn engine; most self-debugging lives here.
 - `$PICO_HOME/supervisor/logs/supervisor.<date>.log` — deploys, rollbacks, and worker spawns.
 - `$PICO_HOME/worker/logs/cli.<date>.log` — the `pico` CLI (`pico omp`, `bind`, `schedule`).
 
-The files record down to `debug`, and the worker and supervisor ones also capture panics with a backtrace, so start by reading today's file and grepping for the thread, session, or schedule involved — pivot on whatever fields the lines actually carry. Going deeper than the default (for example, the per-frame omp event stream) takes a target `RUST_LOG` directive, but that is set at deploy time and cannot be changed from inside a running turn. What `docker logs` shows is fixed at `info`, so the rotating file is the real history.
+The files record down to `debug`, and the worker and supervisor ones also capture panics with a backtrace, so start by reading today's file and grepping for the thread, session, or schedule involved — pivot on whatever fields the lines actually carry. Going deeper than the default (for example, the per-frame omp event stream) takes a target `RUST_LOG` directive, but that is set at deploy time and cannot be changed from inside a running turn.
 
 ## Approach
 
