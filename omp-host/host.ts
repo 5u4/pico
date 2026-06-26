@@ -115,6 +115,14 @@ if (profileDir) {
 	});
 }
 
+registerProvider("skills", {
+	id: "pico-builtin",
+	displayName: "Pico Builtin",
+	description: "Skills shipped with pico, introducing its features and settings",
+	priority: 100,
+	load: async ctx => scanSkillsFromDir(ctx, { dir: path.join(import.meta.dir, "..", "skills"), providerId: "pico-builtin", level: "user" }),
+});
+
 let shared!: SharedHost;
 
 function asRecord(value: unknown): Json | undefined {
