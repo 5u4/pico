@@ -9,7 +9,7 @@ use tracing_appender::{
     rolling::{Builder, Rotation},
 };
 use tracing_error::ErrorLayer;
-use tracing_subscriber::{EnvFilter, Layer, fmt, prelude::*};
+use tracing_subscriber::{EnvFilter, Layer, filter::LevelFilter, fmt, prelude::*};
 
 const MAX_LOG_FILES: usize = 7;
 
@@ -19,11 +19,22 @@ const FILE_DEFAULT: &str = "debug";
 
 fn file_filter() -> EnvFilter {
     let mut filter = EnvFilter::new(FILE_DEFAULT);
-    if let Ok(env) = std::env::var("RUST_LOG") {
-        for directive in env.split(',').filter(|d| !d.trim().is_empty()) {
-            if let Ok(parsed) = directive.parse() {
-                filter = filter.add_directive(parsed);
+    let Ok(env) = std::env::var("RUST_LOG") else {
+        return filter;
+    };
+    for raw in env.split(',') {
+        let directive = raw.trim();
+        if directive.is_empty() {
+            continue;
+        }
+        if let Ok(level) = directive.parse::<LevelFilter>() {
+            if level > LevelFilter::DEBUG {
+                filter = filter.add_directive(level.into());
             }
+            continue;
+        }
+        if let Ok(parsed) = directive.parse() {
+            filter = filter.add_directive(parsed);
         }
     }
     filter
@@ -126,18 +137,21 @@ mod tests {
     fn panic_hook_emits_tracing_error() {
         let capture = CaptureError::default();
         let saw_error = capture.0.clone();
-        let subscriber = tracing_subscriber::registry().with(capture);
 
         let restore = std::panic::take_hook();
-        tracing::subscriber::with_default(subscriber, || {
-            install_panic_hook();
-            let _ = std::panic::catch_unwind(|| panic!("boom from a detached task"));
+        install_panic_hook();
+        let worker = std::thread::spawn(move || {
+            let subscriber = tracing_subscriber::registry().with(capture);
+            tracing::subscriber::with_default(subscriber, || {
+                let _ = std::panic::catch_unwind(|| panic!("boom from a worker thread"));
+            });
         });
+        worker.join().unwrap();
         std::panic::set_hook(restore);
 
         assert!(
             saw_error.load(Ordering::SeqCst),
-            "panic hook did not emit an ERROR-level tracing event"
+            "panic hook did not emit an ERROR-level tracing event from a worker thread"
         );
     }
 }
