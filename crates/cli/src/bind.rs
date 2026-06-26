@@ -21,10 +21,10 @@ pub struct BindArgs {
 }
 
 pub async fn run(args: BindArgs) -> color_eyre::Result<()> {
-    let dir = crate::chat::current_dir()?;
-    let channel = crate::chat::channel_id(&dir);
+    let dir = crate::thread::current_dir()?;
+    let channel = crate::thread::channel_id(&dir);
     let root = pico_shared::paths::worker_root()?;
-    let db = crate::chat::open_db(&root).await?;
+    let db = crate::thread::open_db(&root).await?;
 
     if args.show {
         return show(&db, &channel).await;

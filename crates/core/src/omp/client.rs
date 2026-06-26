@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Stdio,
     sync::{
         Arc,
@@ -78,6 +78,28 @@ fn host_entry() -> PathBuf {
         std::env::var_os(HOST_ENTRY_ENV).map(PathBuf::from),
         std::env::var_os("HOME").map(PathBuf::from),
     )
+}
+
+fn resolve_omp_host_dir(explicit: Option<PathBuf>, home: Option<PathBuf>) -> PathBuf {
+    resolve_host_entry(explicit, home)
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_default()
+}
+
+pub fn omp_host_dir() -> PathBuf {
+    resolve_omp_host_dir(
+        std::env::var_os(HOST_ENTRY_ENV).map(PathBuf::from),
+        std::env::var_os("HOME").map(PathBuf::from),
+    )
+}
+
+fn resolve_locked_omp_cli(host_dir: &Path) -> PathBuf {
+    host_dir.join("node_modules/@oh-my-pi/pi-coding-agent/dist/cli.js")
+}
+
+pub fn locked_omp_cli() -> PathBuf {
+    resolve_locked_omp_cli(&omp_host_dir())
 }
 
 fn build_command(host: &HostConfig) -> ProcCommand {
@@ -504,6 +526,30 @@ mod tests {
         assert_eq!(
             resolve_host_entry(None, Some(PathBuf::from("/home/u"))),
             PathBuf::from("/home/u/.pico/agent/omp-host/host.ts"),
+        );
+    }
+
+    #[test]
+    fn resolve_omp_host_dir_strips_host_entry_filename() {
+        assert_eq!(
+            resolve_omp_host_dir(Some(PathBuf::from("/a/b/omp-host/host.ts")), Some(PathBuf::from("/home/u"))),
+            PathBuf::from("/a/b/omp-host"),
+        );
+    }
+
+    #[test]
+    fn resolve_omp_host_dir_defaults_under_home() {
+        assert_eq!(
+            resolve_omp_host_dir(None, Some(PathBuf::from("/home/u"))),
+            PathBuf::from("/home/u/.pico/agent/omp-host"),
+        );
+    }
+
+    #[test]
+    fn resolve_locked_omp_cli_appends_node_modules_path() {
+        assert_eq!(
+            resolve_locked_omp_cli(&PathBuf::from("/a/b/omp-host")),
+            PathBuf::from("/a/b/omp-host/node_modules/@oh-my-pi/pi-coding-agent/dist/cli.js"),
         );
     }
 
