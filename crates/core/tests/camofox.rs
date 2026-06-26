@@ -46,9 +46,21 @@ async fn http(base: &str, key: &str, method: &str, path: &str, body: Option<&str
     (status, body)
 }
 
+async fn snapshot_until_content(base: &str, key: &str, tab_id: &str) -> String {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let (status, body) = http(base, key, "GET", &format!("/tabs/{tab_id}/snapshot?userId=default"), None).await;
+        assert_eq!(status, 200, "snapshot should be 200; body: {body}");
+        if body.contains("Example Domain") || std::time::Instant::now() >= deadline {
+            return body;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+}
+
 #[tokio::test]
 #[ignore = "live: needs the built pico image (pinned camofox-browser + camofox-fetch-engine + Xvfb + GTK/Firefox libs); fetches the engine if absent"]
-async fn camofox_opens_a_tab_and_snapshots() {
+async fn camofox_daemon_serves_snapshots_and_session_groups() {
     let root = temp_root();
     let cancel = CancellationToken::new();
     let tracker = TaskTracker::new();
@@ -69,50 +81,18 @@ async fn camofox_opens_a_tab_and_snapshots() {
         &key,
         "POST",
         "/tabs",
-        Some(r#"{"userId":"default","sessionKey":"e2e","url":"https://example.com"}"#),
+        Some(r#"{"userId":"default","sessionKey":"threadA","url":"https://example.com"}"#),
     )
     .await;
-    assert_eq!(status, 200, "POST /tabs should be 200; body: {created}");
+    assert_eq!(status, 200, "POST /tabs threadA should be 200; body: {created}");
     let tab_id = created
         .split_once("\"tabId\":\"")
         .and_then(|(_, rest)| rest.split_once('"'))
         .map(|(id, _)| id.to_owned())
         .unwrap_or_else(|| panic!("no tabId in create response: {created}"));
 
-    let (status, snapshot) = http(&base, &key, "GET", &format!("/tabs/{tab_id}/snapshot?userId=default"), None).await;
-    assert_eq!(status, 200, "snapshot should be 200; body: {snapshot}");
+    let snapshot = snapshot_until_content(&base, &key, &tab_id).await;
     assert!(snapshot.contains("Example Domain"), "snapshot missing page content: {snapshot}");
-
-    cancel.cancel();
-    tracker.close();
-    tracker.wait().await;
-    std::fs::remove_dir_all(&root).ok();
-}
-
-#[tokio::test]
-#[ignore = "live: needs the built pico image (pinned camofox-browser + camofox-fetch-engine + Xvfb + GTK/Firefox libs); fetches the engine if absent"]
-async fn camofox_groups_tabs_by_session_key() {
-    let root = temp_root();
-    let cancel = CancellationToken::new();
-    let tracker = TaskTracker::new();
-    let daemon = CamofoxDaemon::new(&root, cancel.clone(), &tracker);
-
-    pico_core::omp::camofox::ensure_engine(cancel.clone()).await;
-    daemon.ensure_started().await;
-
-    let env: HashMap<String, String> = daemon.host_env(true).into_iter().collect();
-    let base = env["CAMOFOX_BASE_URL"].clone();
-    let key = env["CAMOFOX_ACCESS_KEY"].clone();
-
-    let (status_a, created_a) = http(
-        &base,
-        &key,
-        "POST",
-        "/tabs",
-        Some(r#"{"userId":"default","sessionKey":"threadA","url":"https://example.com"}"#),
-    )
-    .await;
-    assert_eq!(status_a, 200, "POST /tabs threadA should be 200; body: {created_a}");
 
     let (status_b, created_b) = http(
         &base,
