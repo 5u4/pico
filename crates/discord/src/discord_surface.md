@@ -27,5 +27,5 @@ Users drive these from Discord; mention them when relevant:
 - `/busy steer|follow_up|queue` — while a turn is running: inject a message into it, queue a follow-up, or queue a fresh prompt for after it ends.
 - `/cancel` — cancel the turn currently running in this thread.
 - `/update` — hot-swap the worker to the latest build (supervisor deploy).
-- `/dev-deploy` — developer deploy of the current worktree build.
+- `/dev-deploy` — build and deploy the worker from this thread's working directory.
 - `/ping` — liveness check.

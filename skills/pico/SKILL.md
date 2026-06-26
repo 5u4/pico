@@ -1,6 +1,6 @@
 ---
 name: pico
-description: pico's own feature and settings guide. Use when the user asks what pico is or what it can do, how to configure or customize pico, how profiles / worktrees / scheduling / long-term memory / the camofox browser / model selection / deployment work, or where a particular setting lives.
+description: pico's own features and settings guide. Use when the user asks what pico is or what it can do, how to configure or customize pico, how profiles / worktrees / scheduling / long-term memory / the camofox browser / model selection / deployment work, or where a particular setting lives.
 ---
 
 pico is a personal AI assistant. Under the hood it is an omp (Oh My Pi) agent: the same harness, persona, and tools, reachable two ways — as a bot over Discord, and through a command-line interface. Every Discord thread and every CLI session is one ongoing omp session: a single continuous conversation that keeps its own history, working directory, and state for as long as it lives. This guide describes what pico can do and where its settings live, so you can answer questions about pico itself accurately.
