@@ -349,6 +349,7 @@ async fn context(ctx: Context<'_>) -> Result<(), Error> {
             .await?;
         return Ok(());
     };
+    ctx.defer().await?;
     match handle.client().context().await {
         Ok(Some(text)) => {
             let inner = pico_core::render::truncate(&pico_core::render::defang_mentions(&text), MSG_CONTENT_CAP - 8);
@@ -391,6 +392,7 @@ async fn shake(
         ShakeMode::Elide => "elide",
         ShakeMode::Images => "images",
     };
+    ctx.defer().await?;
     let outcome = {
         let mut session = handle.lock().await;
         let result = session.client.shake(mode_str).await;
