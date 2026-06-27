@@ -29,6 +29,7 @@ pub struct ThreadSession {
 }
 
 pub struct ThreadHandle {
+    client: OmpSessionHandle,
     inner: tokio::sync::Mutex<ThreadSession>,
     last_active: AtomicU64,
     profile: String,
@@ -42,6 +43,10 @@ impl ThreadHandle {
 
     pub fn profile(&self) -> &str {
         &self.profile
+    }
+
+    pub fn client(&self) -> &OmpSessionHandle {
+        &self.client
     }
 
     async fn close(&self) -> color_eyre::Result<()> {
@@ -121,6 +126,10 @@ impl OmpPool {
         Ok(host)
     }
 
+    pub fn get_existing(&self, thread_id: &str) -> Option<Arc<ThreadHandle>> {
+        self.sessions.lock().get(thread_id).cloned()
+    }
+
     pub async fn get_or_spawn(&self, thread_id: &str, config: &SessionConfig) -> color_eyre::Result<Arc<ThreadHandle>> {
         if let Some(handle) = self.sessions.lock().get(thread_id)
             && handle.profile == config.profile
@@ -139,6 +148,7 @@ impl OmpPool {
         let (client, events) = host.open_session(thread_id, config).await?;
         tracing::debug!(thread_id, profile = %config.profile, session_id = %client.session_id(), "opened omp session");
         let handle = Arc::new(ThreadHandle {
+            client: client.clone(),
             inner: tokio::sync::Mutex::new(ThreadSession { client, events }),
             last_active: AtomicU64::new(now_millis()),
             profile: config.profile.clone(),

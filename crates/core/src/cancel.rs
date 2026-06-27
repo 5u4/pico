@@ -31,6 +31,10 @@ impl CancelRegistry {
         true
     }
 
+    pub fn is_active(&self, conversation: &ConversationId) -> bool {
+        self.inner.lock().contains_key(conversation)
+    }
+
     pub fn register(&self, conversation: &ConversationId) -> (CancellationToken, Arc<AtomicBool>, CancelGuard) {
         let token = CancellationToken::new();
         let streaming = Arc::new(AtomicBool::new(true));

@@ -26,6 +26,8 @@ const READY_TIMEOUT: Duration = Duration::from_secs(30);
 
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 
+const COMPACT_TIMEOUT: Duration = Duration::from_secs(300);
+
 const HOST_ENTRY_ENV: &str = "PICO_OMP_HOST";
 
 const HOST_BIN_ENV: &str = "PICO_OMP_BIN";
@@ -66,6 +68,7 @@ pub struct OmpHost {
     alive: Arc<AtomicBool>,
 }
 
+#[derive(Clone)]
 pub struct OmpSessionHandle {
     host: Arc<OmpHost>,
     session_id: String,
@@ -220,7 +223,12 @@ impl OmpHost {
         Ok((handle, event_rx))
     }
 
-    async fn send_and_await(&self, id: &RequestId, cmd: &Command<'_>) -> color_eyre::Result<RpcResponse> {
+    async fn send_and_await(
+        &self,
+        id: &RequestId,
+        cmd: &Command<'_>,
+        timeout: Duration,
+    ) -> color_eyre::Result<RpcResponse> {
         let (tx, rx) = oneshot::channel();
         self.pending.lock().insert(id.clone(), tx);
         tracing::debug!(command = cmd.kind(), %id, "sending omp host command");
@@ -234,18 +242,18 @@ impl OmpHost {
             return Err(e).wrap_err("write omp host command");
         }
 
-        match tokio::time::timeout(RESPONSE_TIMEOUT, rx).await {
+        match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(resp)) => Ok(resp),
             Ok(Err(_)) => Err(eyre!("omp host exited before responding to `{id}`")),
             Err(_) => {
                 self.pending.lock().remove(id);
-                Err(eyre!("omp host did not respond to `{id}` within {RESPONSE_TIMEOUT:?}"))
+                Err(eyre!("omp host did not respond to `{id}` within {timeout:?}"))
             }
         }
     }
 
     async fn dispatch(&self, id: &RequestId, cmd: &Command<'_>) -> color_eyre::Result<()> {
-        let resp = self.send_and_await(id, cmd).await?;
+        let resp = self.send_and_await(id, cmd, RESPONSE_TIMEOUT).await?;
         if resp.success {
             Ok(())
         } else {
@@ -267,6 +275,7 @@ impl OmpHost {
                     system,
                     prompt,
                 },
+                RESPONSE_TIMEOUT,
             )
             .await?;
         Ok(if resp.success { resp.result } else { None })
@@ -396,6 +405,67 @@ impl OmpSessionHandle {
             .await;
         self.host.sessions.lock().remove(&self.session_id);
         result
+    }
+
+    pub async fn context(&self) -> color_eyre::Result<Option<String>> {
+        let id = RequestId::new();
+        let resp = self
+            .host
+            .send_and_await(
+                &id,
+                &Command::Context {
+                    id: &id,
+                    session_id: &self.session_id,
+                },
+                RESPONSE_TIMEOUT,
+            )
+            .await?;
+        session_result(resp)
+    }
+
+    pub async fn compact(&self, focus: Option<&str>) -> color_eyre::Result<Option<String>> {
+        let id = RequestId::new();
+        let resp = self
+            .host
+            .send_and_await(
+                &id,
+                &Command::Compact {
+                    id: &id,
+                    session_id: &self.session_id,
+                    focus,
+                },
+                COMPACT_TIMEOUT,
+            )
+            .await?;
+        session_result(resp)
+    }
+
+    pub async fn shake(&self, mode: &str) -> color_eyre::Result<Option<String>> {
+        let id = RequestId::new();
+        let resp = self
+            .host
+            .send_and_await(
+                &id,
+                &Command::Shake {
+                    id: &id,
+                    session_id: &self.session_id,
+                    mode,
+                },
+                RESPONSE_TIMEOUT,
+            )
+            .await?;
+        session_result(resp)
+    }
+}
+
+fn session_result(resp: RpcResponse) -> color_eyre::Result<Option<String>> {
+    if resp.success {
+        Ok(resp.result)
+    } else {
+        let detail = resp
+            .error
+            .unwrap_or_else(|| format!("omp host `{}` failed without a message", resp.command));
+        Err(eyre!(detail))
     }
 }
 

@@ -23,6 +23,8 @@ import { resolvePromptInput } from "@oh-my-pi/pi-coding-agent/system-prompt";
 import { registerProvider, reset as resetCapabilities } from "@oh-my-pi/pi-coding-agent/capability";
 import { scanSkillsFromDir, buildRuleFromMarkdown, loadFilesFromDir } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
 import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { buildContextReportText } from "@oh-my-pi/pi-coding-agent/slash-commands/helpers/context-report";
+import { formatShakeSummary } from "@oh-my-pi/pi-coding-agent/session/shake-types";
 import * as path from "node:path";
 
 interface Identity {
@@ -149,6 +151,10 @@ function emit(frame: object): void {
 
 function respond(id: string, sessionId: string, command: string, success: boolean, error?: string): void {
 	emit({ type: "response", id, sessionId, command, success, ...(error ? { error } : {}) });
+}
+
+function respondWithResult(id: string, sessionId: string, command: string, result: string): void {
+	emit({ type: "response", id, sessionId, command, success: true, result });
 }
 
 function emitError(sessionId: string, message: string): void {
@@ -531,6 +537,50 @@ async function handle(raw: Json): Promise<void> {
 				return;
 			}
 			await runCommand(id, sessionId, type, () => hostSession.session.setModel(model));
+			return;
+		}
+		case "context": {
+			try {
+				const text = buildContextReportText({ session: hostSession.session } as any);
+				respondWithResult(id, sessionId, type, text);
+			} catch (e) {
+				const m = errorMessage(e);
+				emitError(sessionId, m);
+				respond(id, sessionId, type, false, m);
+			}
+			return;
+		}
+		case "compact": {
+			const focus = raw.focus ? str(raw.focus) : undefined;
+			void (async () => {
+				const before = hostSession.session.getContextUsage?.()?.tokens;
+				try {
+					await hostSession.session.compact(focus, undefined);
+				} catch (e) {
+					const m = errorMessage(e);
+					emitError(sessionId, m);
+					respond(id, sessionId, type, false, m);
+					return;
+				}
+				const after = hostSession.session.getContextUsage?.()?.tokens;
+				const text =
+					before != null && after != null
+						? `Compaction complete. Tokens: ${before} -> ${after} (saved ${before - after}).`
+						: "Compaction complete.";
+				respondWithResult(id, sessionId, type, text);
+			})();
+			return;
+		}
+		case "shake": {
+			const mode = str(raw.mode) || "elide";
+			try {
+				const result = await hostSession.session.shake(mode as any);
+				respondWithResult(id, sessionId, type, formatShakeSummary(result));
+			} catch (e) {
+				const m = errorMessage(e);
+				emitError(sessionId, m);
+				respond(id, sessionId, type, false, m);
+			}
 			return;
 		}
 		case "new_session":
