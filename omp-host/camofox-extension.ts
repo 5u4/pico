@@ -47,9 +47,12 @@ export function makeCamofoxFactory(identity) {
       name: "camo_open",
       label: "Camo Open",
       description:
-        "Open a new tab in the anti-detection (Camoufox/Firefox) browser at a URL and return its tabId. " +
-        "Prefer this over the native browser or read tool for sites that block bots — Cloudflare, Google, " +
-        "login-walled, or anti-scraping pages.",
+        "Open a new tab in the anti-detection (Camoufox/Firefox) browser at a URL; returns its tabId. " +
+        "Use the camo browser for sites that block bots or need a real logged-in session — Cloudflare, " +
+        "Google, login-walled, anti-scraping, or JS-heavy pages; for static readable content prefer the " +
+        "read tool. Workflow: open -> camo_snapshot to read structure and get clickable refs -> " +
+        "camo_click/camo_type -> camo_screenshot only when appearance matters. Tabs are per-thread; the " +
+        "logged-in session persists across restarts.",
       parameters: z.object({ url: z.string().describe("Absolute URL to open") }),
       async execute(_id, p, signal) {
         const r = await call("POST", "/tabs", { userId: USER_ID, sessionKey: SESSION_KEY, url: p.url }, signal);
@@ -62,7 +65,8 @@ export function makeCamofoxFactory(identity) {
       label: "Camo Navigate",
       description:
         "Navigate an existing tab to a URL, or run a search macro (@google_search, @youtube_search, " +
-        "@wikipedia_search, @reddit_search, @amazon_search, ...). Provide url, or macro + query.",
+        "@wikipedia_search, @reddit_search, @amazon_search, ...). Provide url, or macro + query. " +
+        "Refs reset on navigation — re-snapshot before using old refs.",
       parameters: z.object({
         tabId: z.string(),
         url: z.string().optional().describe("Absolute URL"),
@@ -84,8 +88,10 @@ export function makeCamofoxFactory(identity) {
       name: "camo_snapshot",
       label: "Camo Snapshot",
       description:
-        "Get a tab's accessibility tree with stable element refs (e1, e2, ...) to use in camo_click / " +
-        "camo_type. Refs reset on navigation — re-snapshot after navigating.",
+        "Read a tab's accessibility tree (structured text) with stable refs (e1, e2, ...) for camo_click / " +
+        "camo_type. Default to this for page content and state — the cheap, structured way to read a page; " +
+        "use camo_screenshot only when visual appearance matters, never for text. Refs reset on " +
+        "navigation — re-snapshot after navigating.",
       parameters: z.object({ tabId: z.string() }),
       async execute(_id, p, signal) {
         const r = await call("GET", `/tabs/${p.tabId}/snapshot?${q()}`, undefined, signal);
@@ -184,7 +190,12 @@ export function makeCamofoxFactory(identity) {
     pi.registerTool({
       name: "camo_screenshot",
       label: "Camo Screenshot",
-      description: "Capture a PNG screenshot of a tab so you can see the rendered page.",
+      description:
+        "Capture a PNG of the tab's actual rendered appearance. Prefer camo_snapshot for reading " +
+        "text/structure (far cheaper in tokens); screenshot only when layout, styling, charts, a CAPTCHA, " +
+        "or other visuals matter — and read any text from camo_snapshot instead. fullPage stitches the " +
+        "whole page but the model downsizes large images: costs more and blurs small text, so avoid unless " +
+        "you truly need it.",
       parameters: z.object({
         tabId: z.string(),
         fullPage: z.boolean().optional().default(false),
