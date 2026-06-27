@@ -79,7 +79,7 @@ pub fn worker_db(root: &Path) -> PathBuf {
 }
 
 pub fn camofox_dir(root: &Path) -> PathBuf {
-    root.join("camofox")
+    root.join("extensions").join("camofox")
 }
 
 pub fn camofox_profile_dir(root: &Path) -> PathBuf {

@@ -117,7 +117,7 @@ async fn launch(
 
     let camofox_ext = profile_config
         .browser_enabled
-        .then(|| pico_core::omp::client::omp_host_dir().join("camofox-extension.ts"));
+        .then(|| pico_core::omp::client::omp_host_dir().join("extensions/camofox.ts"));
 
     let argv = build_omp_argv(
         &cli_js,
@@ -187,7 +187,7 @@ mod tests {
             true,
             Path::new("/sessions/t/append.md"),
             Some("anthropic/claude"),
-            Some(Path::new("/host/camofox-extension.ts")),
+            Some(Path::new("/host/extensions/camofox.ts")),
         );
         assert_eq!(
             argv,
@@ -203,7 +203,7 @@ mod tests {
                 "--model",
                 "anthropic/claude",
                 "-e",
-                "/host/camofox-extension.ts",
+                "/host/extensions/camofox.ts",
             ]
         );
     }
