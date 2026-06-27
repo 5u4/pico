@@ -232,7 +232,12 @@ pub async fn drive_turn<S: Surface>(
                 return Ok(TurnOutcome::Live);
             }
             Some(OmpEvent::CustomMessage { custom_type }) => {
-                if answer_delivered && custom_type == "autolearn-nudge" {
+                if aborted_capture_turn(aborted, &custom_type) {
+                    suppress_text = true;
+                    if let Err(e) = session.client.abort().await {
+                        tracing::warn!(error = %format!("{e:#}"), "aborting autolearn capture turn after /cancel failed");
+                    }
+                } else if answer_delivered && custom_type == "autolearn-nudge" {
                     suppress_text = true;
                 }
             }
@@ -274,6 +279,10 @@ async fn forward_next_pending(
         StreamingBehavior::Steer => client.steer(&text).await?,
     }
     Ok(true)
+}
+
+fn aborted_capture_turn(aborted: bool, custom_type: &str) -> bool {
+    aborted && custom_type == "autolearn-nudge"
 }
 
 enum UiDisposition {
@@ -882,5 +891,12 @@ mod tests {
         };
         assert_eq!(ui_request_id(&notify), None);
         assert_eq!(ui_request_id(&UiRequest::Ignore), None);
+    }
+
+    #[test]
+    fn only_aborted_autolearn_nudge_kills_the_capture_turn() {
+        assert!(aborted_capture_turn(true, "autolearn-nudge"));
+        assert!(!aborted_capture_turn(false, "autolearn-nudge"));
+        assert!(!aborted_capture_turn(true, "other"));
     }
 }
