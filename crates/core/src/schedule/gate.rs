@@ -9,6 +9,13 @@ pub(super) enum Gate {
     Failure { reason: String, stderr_tail: String },
 }
 
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(super) struct RunCapture {
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+    pub exit: Option<i32>,
+}
+
 #[derive(serde::Deserialize)]
 struct GateJson {
     #[serde(default)]
@@ -21,9 +28,9 @@ const STDERR_TAIL_LIMIT: usize = 600;
 
 const CAPTURE_LIMIT: usize = 256 * 1024;
 
-pub(super) async fn run_script(script: Option<&str>, cwd: &Path, timeout: Duration) -> Gate {
+pub(super) async fn run_script(script: Option<&str>, cwd: &Path, timeout: Duration) -> (Gate, RunCapture) {
     let Some(script) = script else {
-        return Gate::Proceed { context: None };
+        return (Gate::Proceed { context: None }, RunCapture::default());
     };
     let mut command = tokio::process::Command::new("bash");
     command
@@ -37,10 +44,13 @@ pub(super) async fn run_script(script: Option<&str>, cwd: &Path, timeout: Durati
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(e) => {
-            return Gate::Failure {
-                reason: format!("failed to spawn script: {e}"),
-                stderr_tail: String::new(),
-            };
+            return (
+                Gate::Failure {
+                    reason: format!("failed to spawn script: {e}"),
+                    stderr_tail: String::new(),
+                },
+                RunCapture::default(),
+            );
         }
     };
     let stdout = child.stdout.take();
@@ -52,33 +62,50 @@ pub(super) async fn run_script(script: Option<&str>, cwd: &Path, timeout: Durati
     let (stdout_bytes, stderr_bytes, status) = match collected {
         Ok(joined) => joined,
         Err(_) => {
-            return Gate::Failure {
-                reason: format!("script timed out after {}s", timeout.as_secs()),
-                stderr_tail: String::new(),
-            };
+            return (
+                Gate::Failure {
+                    reason: format!("script timed out after {}s", timeout.as_secs()),
+                    stderr_tail: String::new(),
+                },
+                RunCapture::default(),
+            );
         }
     };
     let status = match status {
         Ok(status) => status,
         Err(e) => {
-            return Gate::Failure {
-                reason: format!("script i/o error: {e}"),
-                stderr_tail: String::new(),
-            };
+            return (
+                Gate::Failure {
+                    reason: format!("script i/o error: {e}"),
+                    stderr_tail: String::new(),
+                },
+                RunCapture {
+                    stdout: stdout_bytes,
+                    stderr: stderr_bytes,
+                    exit: None,
+                },
+            );
         }
     };
+    let exit = status.code();
     let stderr_tail = tail(&String::from_utf8_lossy(&stderr_bytes));
-    if !status.success() {
-        let code = status
-            .code()
-            .map(|c| c.to_string())
-            .unwrap_or_else(|| "signal".to_owned());
-        return Gate::Failure {
+    let gate = if status.success() {
+        classify(&String::from_utf8_lossy(&stdout_bytes), stderr_tail)
+    } else {
+        let code = exit.map(|c| c.to_string()).unwrap_or_else(|| "signal".to_owned());
+        Gate::Failure {
             reason: format!("script exited with status {code}"),
             stderr_tail,
-        };
-    }
-    classify(&String::from_utf8_lossy(&stdout_bytes), stderr_tail)
+        }
+    };
+    (
+        gate,
+        RunCapture {
+            stdout: stdout_bytes,
+            stderr: stderr_bytes,
+            exit,
+        },
+    )
 }
 
 async fn drain_capped<R: tokio::io::AsyncRead + Unpin>(reader: Option<R>) -> Vec<u8> {
@@ -141,25 +168,26 @@ mod tests {
 
     #[tokio::test]
     async fn no_script_proceeds_without_context() {
-        let gate = run_script(None, &cwd(), Duration::from_secs(5)).await;
+        let (gate, capture) = run_script(None, &cwd(), Duration::from_secs(5)).await;
         assert_eq!(gate, Gate::Proceed { context: None });
+        assert_eq!(capture, RunCapture::default());
     }
 
     #[tokio::test]
     async fn empty_stdout_skips() {
-        let gate = run_script(Some("true"), &cwd(), Duration::from_secs(5)).await;
+        let (gate, _) = run_script(Some("true"), &cwd(), Duration::from_secs(5)).await;
         assert_eq!(gate, Gate::Skip);
     }
 
     #[tokio::test]
     async fn skip_true_json_skips() {
-        let gate = run_script(Some("echo '{\"skip\":true}'"), &cwd(), Duration::from_secs(5)).await;
+        let (gate, _) = run_script(Some("echo '{\"skip\":true}'"), &cwd(), Duration::from_secs(5)).await;
         assert_eq!(gate, Gate::Skip);
     }
 
     #[tokio::test]
     async fn skip_false_with_context_proceeds() {
-        let gate = run_script(
+        let (gate, _) = run_script(
             Some("echo '{\"skip\":false,\"context\":\"hello\"}'"),
             &cwd(),
             Duration::from_secs(5),
@@ -175,13 +203,13 @@ mod tests {
 
     #[tokio::test]
     async fn skip_false_without_context_proceeds_empty() {
-        let gate = run_script(Some("echo '{\"skip\":false}'"), &cwd(), Duration::from_secs(5)).await;
+        let (gate, _) = run_script(Some("echo '{\"skip\":false}'"), &cwd(), Duration::from_secs(5)).await;
         assert_eq!(gate, Gate::Proceed { context: None });
     }
 
     #[tokio::test]
     async fn nonzero_exit_fails_with_stderr_tail() {
-        let gate = run_script(Some("echo oops 1>&2; exit 3"), &cwd(), Duration::from_secs(5)).await;
+        let (gate, capture) = run_script(Some("echo oops 1>&2; exit 3"), &cwd(), Duration::from_secs(5)).await;
         match gate {
             Gate::Failure { reason, stderr_tail } => {
                 assert!(reason.contains("status 3"), "reason: {reason}");
@@ -189,17 +217,19 @@ mod tests {
             }
             other => panic!("expected failure, got {other:?}"),
         }
+        assert_eq!(capture.exit, Some(3));
+        assert!(String::from_utf8_lossy(&capture.stderr).contains("oops"));
     }
 
     #[tokio::test]
     async fn exit_zero_non_json_fails() {
-        let gate = run_script(Some("echo not-json-at-all"), &cwd(), Duration::from_secs(5)).await;
+        let (gate, _) = run_script(Some("echo not-json-at-all"), &cwd(), Duration::from_secs(5)).await;
         assert!(matches!(gate, Gate::Failure { .. }), "got {gate:?}");
     }
 
     #[tokio::test]
     async fn timeout_fails() {
-        let gate = run_script(Some("sleep 5"), &cwd(), Duration::from_millis(150)).await;
+        let (gate, _) = run_script(Some("sleep 5"), &cwd(), Duration::from_millis(150)).await;
         match gate {
             Gate::Failure { reason, .. } => assert!(reason.contains("timed out"), "reason: {reason}"),
             other => panic!("expected timeout failure, got {other:?}"),
@@ -208,7 +238,8 @@ mod tests {
 
     #[tokio::test]
     async fn oversized_stdout_is_bounded_and_completes() {
-        let gate = run_script(Some("head -c 1000000 /dev/zero | tr '\\0' 'a'"), &cwd(), Duration::from_secs(5)).await;
+        let (gate, _) =
+            run_script(Some("head -c 1000000 /dev/zero | tr '\\0' 'a'"), &cwd(), Duration::from_secs(5)).await;
         match gate {
             Gate::Failure { reason, .. } => assert!(
                 reason.contains("not valid gate json"),
@@ -216,5 +247,13 @@ mod tests {
             ),
             other => panic!("expected classify failure, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn capture_returns_stdout_and_zero_exit() {
+        let (gate, capture) = run_script(Some("echo '{\"skip\":true}'"), &cwd(), Duration::from_secs(5)).await;
+        assert_eq!(gate, Gate::Skip);
+        assert!(String::from_utf8_lossy(&capture.stdout).contains("skip"));
+        assert_eq!(capture.exit, Some(0));
     }
 }

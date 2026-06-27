@@ -86,16 +86,29 @@ pub fn camofox_profile_dir(root: &Path) -> PathBuf {
     camofox_dir(root).join("profiles")
 }
 
+pub const SCHEDULE_STATES: [&str; 3] = ["active", "disabled", "triggered"];
+
 pub fn schedules_dir(root: &Path) -> PathBuf {
     root.join("schedules")
 }
 
-pub fn schedule_dir(root: &Path, id: &str) -> PathBuf {
-    schedules_dir(root).join(id)
+pub fn schedule_state_dir(root: &Path, state: &str) -> PathBuf {
+    schedules_dir(root).join(state)
 }
 
-pub fn triggered_schedule_dir(root: &Path, id: &str) -> PathBuf {
-    schedules_dir(root).join("triggered").join(id)
+pub fn schedule_dir(root: &Path, state: &str, id: &str) -> PathBuf {
+    schedule_state_dir(root, state).join(id)
+}
+
+pub fn schedule_runs_dir(root: &Path, state: &str, id: &str) -> PathBuf {
+    schedule_dir(root, state, id).join("runs")
+}
+
+pub fn find_schedule_dir(root: &Path, id: &str) -> Option<(&'static str, PathBuf)> {
+    SCHEDULE_STATES.into_iter().find_map(|state| {
+        let dir = schedule_dir(root, state, id);
+        dir.is_dir().then_some((state, dir))
+    })
 }
 
 pub fn expand_home(raw: &str) -> PathBuf {
@@ -167,5 +180,30 @@ mod tests {
         let base = Path::new("/home/pico/.pico");
         assert!(from_portable("../outside", base).is_none());
         assert!(from_portable("worker/../../escape", base).is_none());
+    }
+
+    #[test]
+    fn schedule_paths_compose_state_layout() {
+        let root = Path::new("/r");
+        assert_eq!(schedules_dir(root), Path::new("/r/schedules"));
+        assert_eq!(schedule_state_dir(root, "active"), Path::new("/r/schedules/active"));
+        assert_eq!(schedule_dir(root, "disabled", "id1"), Path::new("/r/schedules/disabled/id1"));
+        assert_eq!(
+            schedule_runs_dir(root, "triggered", "id1"),
+            Path::new("/r/schedules/triggered/id1/runs")
+        );
+    }
+
+    #[test]
+    fn find_schedule_dir_locates_across_states() {
+        let root = std::env::temp_dir().join(format!("pico-paths-find-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        let id = "20260101000000-x";
+        std::fs::create_dir_all(schedule_dir(&root, "disabled", id)).unwrap();
+        let (state, dir) = find_schedule_dir(&root, id).unwrap();
+        assert_eq!(state, "disabled");
+        assert_eq!(dir, schedule_dir(&root, "disabled", id));
+        assert!(find_schedule_dir(&root, "missing").is_none());
+        std::fs::remove_dir_all(&root).ok();
     }
 }

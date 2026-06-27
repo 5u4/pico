@@ -8,8 +8,8 @@ use std::{
 
 use chrono::{DateTime, SecondsFormat, TimeDelta, Utc};
 use color_eyre::eyre::{WrapErr, eyre};
-use pico_shared::paths::{schedule_dir, triggered_schedule_dir};
-use sqlx::SqlitePool;
+use pico_shared::paths::{find_schedule_dir, schedule_dir, schedule_state_dir};
+use serde::{Deserialize, Serialize};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::{config::ScheduleConfig, prompt};
@@ -18,6 +18,14 @@ mod gate;
 
 pub const SCRIPT_FILE: &str = "script.sh";
 pub const PROMPT_FILE: &str = "prompt.md";
+const DEFINITION_FILE: &str = "schedule.toml";
+const STATE_FILE: &str = "state.json";
+const RUNS_DIR: &str = "runs";
+const STDOUT_FILE: &str = "stdout";
+const STDERR_FILE: &str = "stderr";
+const META_FILE: &str = "meta.json";
+
+const ALL_STATES: [State; 3] = [State::Active, State::Disabled, State::Triggered];
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Schedule {
@@ -193,6 +201,229 @@ pub struct Definition {
     pub prompt_path: PathBuf,
 }
 
+#[derive(Serialize, Deserialize)]
+struct DefinitionToml {
+    name: String,
+    created_by: String,
+    created_at: String,
+    mode: String,
+    platform: String,
+    scope: String,
+    origin: String,
+    target: String,
+    trigger: TriggerToml,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+enum TriggerToml {
+    Oneshot { at: String },
+    Cron { expr: String, tz: String },
+    Interval { every_secs: u64 },
+}
+
+#[derive(Serialize, Deserialize, Default)]
+struct RuntimeState {
+    #[serde(default)]
+    next_run_at: Option<String>,
+    #[serde(default)]
+    last_run_at: Option<String>,
+    #[serde(default)]
+    consecutive_failures: i64,
+}
+
+#[derive(Serialize)]
+struct RunMeta {
+    fired_at: String,
+    trigger: String,
+    gate: String,
+    outcome: String,
+    exit: Option<i32>,
+    prompt: Option<String>,
+}
+
+fn trigger_to_toml(trigger: &Trigger) -> TriggerToml {
+    match trigger {
+        Trigger::Oneshot { at } => TriggerToml::Oneshot { at: store_ts(*at) },
+        Trigger::Cron { expr, tz } => TriggerToml::Cron {
+            expr: expr.clone(),
+            tz: tz.name().to_owned(),
+        },
+        Trigger::Interval { every } => TriggerToml::Interval {
+            every_secs: every.as_secs(),
+        },
+    }
+}
+
+fn trigger_from_toml(trigger: TriggerToml) -> Option<Trigger> {
+    match trigger {
+        TriggerToml::Oneshot { at } => Some(Trigger::Oneshot { at: parse_ts(&at)? }),
+        TriggerToml::Cron { expr, tz } => Some(Trigger::Cron {
+            expr,
+            tz: tz.parse().ok()?,
+        }),
+        TriggerToml::Interval { every_secs } => Some(Trigger::Interval {
+            every: Duration::from_secs(every_secs),
+        }),
+    }
+}
+
+fn slugify(name: &str) -> String {
+    let mut out = String::new();
+    for ch in name.trim().chars() {
+        let mapped = if ch.is_whitespace() { '-' } else { ch };
+        if mapped == '/' || mapped == '\\' || mapped == ':' || mapped == '\0' || mapped.is_control() {
+            continue;
+        }
+        if mapped == '-' && out.ends_with('-') {
+            continue;
+        }
+        out.push(if mapped.is_ascii_uppercase() {
+            mapped.to_ascii_lowercase()
+        } else {
+            mapped
+        });
+    }
+    let truncated: String = out.chars().take(64).collect();
+    let slug = truncated.trim_matches(|c| c == '-' || c == '.').to_owned();
+    if slug.is_empty() { "job".to_owned() } else { slug }
+}
+
+fn stamp(dt: DateTime<Utc>, tz: Option<chrono_tz::Tz>) -> String {
+    match tz {
+        Some(tz) => dt.with_timezone(&tz).format("%Y%m%d%H%M%S").to_string(),
+        None => dt.with_timezone(&chrono::Local).format("%Y%m%d%H%M%S").to_string(),
+    }
+}
+
+fn allocate_id(root: &Path, stamp: &str, slug: &str) -> String {
+    let base = format!("{stamp}-{slug}");
+    if find_schedule_dir(root, &base).is_none() {
+        return base;
+    }
+    let mut n = 2;
+    loop {
+        let candidate = format!("{base}-{n}");
+        if find_schedule_dir(root, &candidate).is_none() {
+            return candidate;
+        }
+        n += 1;
+    }
+}
+
+fn write_definition(
+    dir: &Path,
+    new: &NewSchedule,
+    created_at: DateTime<Utc>,
+    next_run_at: DateTime<Utc>,
+) -> color_eyre::Result<()> {
+    fs::create_dir_all(dir).wrap_err("creating schedule directory")?;
+    let def = DefinitionToml {
+        name: new.name.clone(),
+        created_by: new.created_by.clone(),
+        created_at: store_ts(created_at),
+        mode: new.mode.as_str().to_owned(),
+        platform: new.platform.clone(),
+        scope: new.scope.clone(),
+        origin: new.origin.clone(),
+        target: new.target.clone(),
+        trigger: trigger_to_toml(&new.trigger),
+    };
+    let serialized = toml::to_string(&def).wrap_err("serializing schedule.toml")?;
+    fs::write(dir.join(DEFINITION_FILE), serialized).wrap_err("writing schedule.toml")?;
+    if let Some(script) = &new.script {
+        fs::write(dir.join(SCRIPT_FILE), script).wrap_err("writing schedule script")?;
+    }
+    if let Some(prompt) = &new.prompt {
+        fs::write(dir.join(PROMPT_FILE), prompt).wrap_err("writing schedule prompt")?;
+    }
+    write_state(
+        dir,
+        &RuntimeState {
+            next_run_at: Some(store_ts(next_run_at)),
+            last_run_at: None,
+            consecutive_failures: 0,
+        },
+    )?;
+    Ok(())
+}
+
+fn write_state(dir: &Path, state: &RuntimeState) -> color_eyre::Result<()> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let serialized = serde_json::to_string_pretty(state).wrap_err("serializing state.json")?;
+    let unique = format!(".state.json.{}.{}.tmp", std::process::id(), SEQ.fetch_add(1, Ordering::Relaxed));
+    let tmp = dir.join(unique);
+    fs::write(&tmp, serialized).wrap_err("writing state.json")?;
+    fs::rename(&tmp, dir.join(STATE_FILE)).wrap_err("publishing state.json")?;
+    Ok(())
+}
+
+fn read_state(dir: &Path) -> Option<RuntimeState> {
+    let raw = fs::read_to_string(dir.join(STATE_FILE)).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+fn load_schedule(dir: &Path, state: State) -> Option<Schedule> {
+    let id = dir.file_name()?.to_str()?.to_owned();
+    let raw = fs::read_to_string(dir.join(DEFINITION_FILE)).ok()?;
+    let def: DefinitionToml = toml::from_str(&raw).ok()?;
+    let mode = Mode::parse(&def.mode)?;
+    let created_at = parse_ts(&def.created_at)?;
+    let trigger = trigger_from_toml(def.trigger)?;
+    let runtime = read_state(dir);
+    let last_run_at = runtime
+        .as_ref()
+        .and_then(|r| r.last_run_at.as_deref())
+        .and_then(parse_ts);
+    let consecutive_failures = runtime.as_ref().map(|r| r.consecutive_failures).unwrap_or(0);
+    let next_run_at = runtime
+        .as_ref()
+        .and_then(|r| r.next_run_at.as_deref())
+        .and_then(parse_ts)
+        .or_else(|| next_after(&trigger, created_at).map(trunc_secs))?;
+    let trigger = match trigger {
+        Trigger::Oneshot { .. } => Trigger::Oneshot { at: next_run_at },
+        other => other,
+    };
+    Some(Schedule {
+        id,
+        platform: def.platform,
+        scope: def.scope,
+        name: def.name,
+        created_by: def.created_by,
+        created_at,
+        mode,
+        origin: def.origin,
+        target: def.target,
+        trigger,
+        next_run_at,
+        last_run_at,
+        consecutive_failures,
+        state,
+    })
+}
+
+fn scan_state(root: &Path, state: State) -> Vec<Schedule> {
+    let dir = schedule_state_dir(root, state.as_str());
+    let entries = match fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(_) => return Vec::new(),
+    };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        match load_schedule(&path, state) {
+            Some(sched) => out.push(sched),
+            None => tracing::warn!(dir = %path.display(), "skipping unparsable schedule folder"),
+        }
+    }
+    out
+}
+
 async fn read_part(path: &Path) -> io::Result<Option<String>> {
     match tokio::fs::read_to_string(path).await {
         Ok(content) => Ok(Some(content)),
@@ -201,121 +432,34 @@ async fn read_part(path: &Path) -> io::Result<Option<String>> {
     }
 }
 
-pub async fn read_definition(root: &Path, id: &str, state: State) -> io::Result<Definition> {
-    let primary = match state {
-        State::Triggered => triggered_schedule_dir(root, id),
-        _ => schedule_dir(root, id),
-    };
-    let alternate = match state {
-        State::Triggered => schedule_dir(root, id),
-        _ => triggered_schedule_dir(root, id),
-    };
-    let mut dir = primary;
-    let mut script = read_part(&dir.join(SCRIPT_FILE)).await?;
-    let mut prompt = read_part(&dir.join(PROMPT_FILE)).await?;
-    if script.is_none() && prompt.is_none() {
-        let alt_script = read_part(&alternate.join(SCRIPT_FILE)).await?;
-        let alt_prompt = read_part(&alternate.join(PROMPT_FILE)).await?;
-        if alt_script.is_some() || alt_prompt.is_some() {
-            dir = alternate;
-            script = alt_script;
-            prompt = alt_prompt;
-        }
+fn move_to(root: &Path, from: &Path, id: &str, state: State) -> color_eyre::Result<PathBuf> {
+    let target = schedule_dir(root, state.as_str(), id);
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent).wrap_err("creating schedule state directory")?;
     }
-    Ok(Definition {
-        script,
-        prompt,
-        script_path: dir.join(SCRIPT_FILE),
-        prompt_path: dir.join(PROMPT_FILE),
-    })
+    fs::rename(from, &target).wrap_err("moving schedule directory")?;
+    Ok(target)
 }
 
-const SELECT_LIST: &str = "SELECT id, platform, scope, name, created_by, created_at, mode, origin, \
-     target, trigger_kind, cron_expr, tz, interval_secs, next_run_at, last_run_at, \
-     consecutive_failures, state FROM schedules WHERE platform = ? AND scope = ? ORDER BY created_at";
-
-const SELECT_BY_ID: &str = "SELECT id, platform, scope, name, created_by, created_at, mode, origin, \
-     target, trigger_kind, cron_expr, tz, interval_secs, next_run_at, last_run_at, \
-     consecutive_failures, state FROM schedules WHERE id = ?";
-
-const SELECT_DUE: &str = "SELECT id, platform, scope, name, created_by, created_at, mode, origin, \
-     target, trigger_kind, cron_expr, tz, interval_secs, next_run_at, last_run_at, \
-     consecutive_failures, state FROM schedules WHERE state = 'active' AND next_run_at <= ? \
-     ORDER BY next_run_at";
-
-#[derive(sqlx::FromRow)]
-struct ScheduleRow {
-    id: String,
-    platform: String,
-    scope: String,
-    name: String,
-    created_by: String,
-    created_at: String,
-    mode: String,
-    origin: String,
-    target: String,
-    trigger_kind: String,
-    cron_expr: Option<String>,
-    tz: Option<String>,
-    interval_secs: Option<i64>,
-    next_run_at: String,
-    last_run_at: Option<String>,
-    consecutive_failures: i64,
-    state: String,
-}
-
-fn write_definition_dir(dir: &Path, script: Option<&str>, prompt: Option<&str>) -> color_eyre::Result<()> {
-    fs::create_dir_all(dir).wrap_err("creating schedule directory")?;
-    if let Some(script) = script {
-        fs::write(dir.join(SCRIPT_FILE), script).wrap_err("writing schedule script")?;
-    }
-    if let Some(prompt) = prompt {
-        fs::write(dir.join(PROMPT_FILE), prompt).wrap_err("writing schedule prompt")?;
-    }
-    Ok(())
-}
-
-pub async fn create(db: &SqlitePool, root: &Path, new: NewSchedule) -> color_eyre::Result<Schedule> {
+pub async fn create(root: &Path, new: NewSchedule, tz: Option<chrono_tz::Tz>) -> color_eyre::Result<Schedule> {
     validate(&new)?;
     let created_at = now();
     let next_run_at =
         trunc_secs(next_after(&new.trigger, created_at).ok_or_else(|| eyre!("trigger has no upcoming occurrence"))?);
-    let id = ulid::Ulid::new().to_string();
-    let dir = schedule_dir(root, &id);
-    let (trigger_kind, cron_expr, tz, interval_secs) = trigger_columns(&new.trigger);
-    let prepared = write_definition_dir(&dir, new.script.as_deref(), new.prompt.as_deref());
-    let stored = match prepared {
-        Ok(()) => sqlx::query(
-            "INSERT INTO schedules (\
-             id, platform, scope, name, created_by, created_at, mode, origin, target, \
-             trigger_kind, cron_expr, tz, interval_secs, next_run_at, \
-             last_run_at, consecutive_failures, state) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, 'active')",
-        )
-        .bind(&id)
-        .bind(&new.platform)
-        .bind(&new.scope)
-        .bind(&new.name)
-        .bind(&new.created_by)
-        .bind(store_ts(created_at))
-        .bind(new.mode.as_str())
-        .bind(&new.origin)
-        .bind(&new.target)
-        .bind(trigger_kind)
-        .bind(&cron_expr)
-        .bind(&tz)
-        .bind(interval_secs)
-        .bind(store_ts(next_run_at))
-        .execute(db)
-        .await
-        .wrap_err("inserting schedule")
-        .map(|_| ()),
-        Err(e) => Err(e),
-    };
-    if stored.is_err() {
-        fs::remove_dir_all(&dir).ok();
+    let id = allocate_id(root, &stamp(created_at, tz), &slugify(&new.name));
+    let staging = schedule_state_dir(root, ".staging").join(format!("{id}.{}", std::process::id()));
+    fs::remove_dir_all(&staging).ok();
+    let dir = schedule_dir(root, State::Active.as_str(), &id);
+    let published = write_definition(&staging, &new, created_at, next_run_at).and_then(|()| {
+        if let Some(parent) = dir.parent() {
+            fs::create_dir_all(parent).wrap_err("creating active schedule directory")?;
+        }
+        fs::rename(&staging, &dir).wrap_err("publishing schedule directory")
+    });
+    if let Err(e) = published {
+        fs::remove_dir_all(&staging).ok();
+        return Err(e);
     }
-    stored?;
     let trigger = match new.trigger {
         Trigger::Oneshot { .. } => Trigger::Oneshot { at: next_run_at },
         other => other,
@@ -338,160 +482,211 @@ pub async fn create(db: &SqlitePool, root: &Path, new: NewSchedule) -> color_eyr
     })
 }
 
-pub async fn list(db: &SqlitePool, platform: &str, scope: &str) -> color_eyre::Result<Vec<Schedule>> {
-    let rows: Vec<ScheduleRow> = sqlx::query_as(SELECT_LIST)
-        .bind(platform)
-        .bind(scope)
-        .fetch_all(db)
-        .await
-        .wrap_err("listing schedules")?;
-    Ok(rows.into_iter().filter_map(keep_parsed).collect())
-}
-
-pub async fn get(db: &SqlitePool, id: &str) -> color_eyre::Result<Option<Schedule>> {
-    let row: Option<ScheduleRow> = sqlx::query_as(SELECT_BY_ID)
-        .bind(id)
-        .fetch_optional(db)
-        .await
-        .wrap_err("loading schedule")?;
-    Ok(row.and_then(parse_row))
-}
-
-pub async fn remove(db: &SqlitePool, root: &Path, id: &str) -> color_eyre::Result<bool> {
-    let result = sqlx::query("DELETE FROM schedules WHERE id = ?")
-        .bind(id)
-        .execute(db)
-        .await
-        .wrap_err("removing schedule")?;
-    fs::remove_dir_all(schedule_dir(root, id)).ok();
-    fs::remove_dir_all(triggered_schedule_dir(root, id)).ok();
-    Ok(result.rows_affected() > 0)
-}
-
-pub async fn set_state(db: &SqlitePool, id: &str, state: State) -> color_eyre::Result<bool> {
-    let result = sqlx::query("UPDATE schedules SET state = ? WHERE id = ?")
-        .bind(state.as_str())
-        .bind(id)
-        .execute(db)
-        .await
-        .wrap_err("updating schedule state")?;
-    Ok(result.rows_affected() > 0)
-}
-
-pub async fn due(db: &SqlitePool, now: DateTime<Utc>) -> color_eyre::Result<Vec<Schedule>> {
-    let rows: Vec<ScheduleRow> = sqlx::query_as(SELECT_DUE)
-        .bind(store_ts(now))
-        .fetch_all(db)
-        .await
-        .wrap_err("loading due schedules")?;
-    Ok(rows.into_iter().filter_map(keep_parsed).collect())
-}
-
-pub async fn nearest_next(db: &SqlitePool) -> color_eyre::Result<Option<DateTime<Utc>>> {
-    let value: Option<String> = sqlx::query_scalar("SELECT MIN(next_run_at) FROM schedules WHERE state = 'active'")
-        .fetch_one(db)
-        .await
-        .wrap_err("computing nearest schedule")?;
-    Ok(value.and_then(|raw| parse_ts(&raw)))
-}
-
-async fn nearest_active(db: &SqlitePool, exclude: &HashSet<String>) -> color_eyre::Result<Option<DateTime<Utc>>> {
-    let rows: Vec<(String, String)> = sqlx::query_as("SELECT id, next_run_at FROM schedules WHERE state = 'active'")
-        .fetch_all(db)
-        .await
-        .wrap_err("computing nearest active schedule")?;
-    Ok(rows
+pub async fn list(root: &Path, platform: &str, scope: &str) -> color_eyre::Result<Vec<Schedule>> {
+    let mut all: Vec<Schedule> = ALL_STATES
         .into_iter()
-        .filter(|(id, _)| !exclude.contains(id))
-        .filter_map(|(_, ts)| parse_ts(&ts))
-        .min())
+        .flat_map(|state| scan_state(root, state))
+        .filter(|sched| sched.platform == platform && sched.scope == scope)
+        .collect();
+    all.sort_by(|a, b| a.created_at.cmp(&b.created_at).then_with(|| a.id.cmp(&b.id)));
+    Ok(all)
 }
 
-pub async fn advance_recurring(
-    db: &SqlitePool,
+pub async fn get(root: &Path, id: &str) -> color_eyre::Result<Option<Schedule>> {
+    Ok(find_schedule_dir(root, id)
+        .and_then(|(state, dir)| State::parse(state).and_then(|state| load_schedule(&dir, state))))
+}
+
+pub async fn remove(root: &Path, id: &str) -> color_eyre::Result<bool> {
+    match find_schedule_dir(root, id) {
+        Some((_, dir)) => {
+            fs::remove_dir_all(&dir).wrap_err("removing schedule directory")?;
+            Ok(true)
+        }
+        None => Ok(false),
+    }
+}
+
+pub async fn set_state(root: &Path, id: &str, state: State) -> color_eyre::Result<bool> {
+    let Some((current, dir)) = find_schedule_dir(root, id) else {
+        return Ok(false);
+    };
+    if current != state.as_str() {
+        move_to(root, &dir, id, state)?;
+    }
+    Ok(true)
+}
+
+pub async fn read_definition(root: &Path, id: &str) -> io::Result<Definition> {
+    let dir = match find_schedule_dir(root, id) {
+        Some((_, dir)) => dir,
+        None => return Err(io::Error::new(io::ErrorKind::NotFound, format!("no schedule {id}"))),
+    };
+    let script = read_part(&dir.join(SCRIPT_FILE)).await?;
+    let prompt = read_part(&dir.join(PROMPT_FILE)).await?;
+    Ok(Definition {
+        script,
+        prompt,
+        script_path: dir.join(SCRIPT_FILE),
+        prompt_path: dir.join(PROMPT_FILE),
+    })
+}
+
+pub async fn due(root: &Path, now: DateTime<Utc>) -> color_eyre::Result<Vec<Schedule>> {
+    let mut rows: Vec<Schedule> = scan_state(root, State::Active)
+        .into_iter()
+        .filter(|sched| sched.next_run_at <= now)
+        .collect();
+    rows.sort_by_key(|sched| sched.next_run_at);
+    Ok(rows)
+}
+
+fn nearest_active(root: &Path, exclude: &HashSet<String>) -> Option<DateTime<Utc>> {
+    scan_state(root, State::Active)
+        .into_iter()
+        .filter(|sched| !exclude.contains(&sched.id))
+        .map(|sched| sched.next_run_at)
+        .min()
+}
+
+fn update_state(root: &Path, id: &str, edit: impl FnOnce(&mut RuntimeState)) -> color_eyre::Result<()> {
+    let Some((_, dir)) = find_schedule_dir(root, id) else {
+        return Ok(());
+    };
+    let mut state = read_state(&dir).unwrap_or_default();
+    edit(&mut state);
+    write_state(&dir, &state)
+}
+
+async fn advance_recurring(
+    root: &Path,
     id: &str,
     last_run_at: DateTime<Utc>,
     next_run_at: DateTime<Utc>,
 ) -> color_eyre::Result<()> {
-    sqlx::query("UPDATE schedules SET last_run_at = ?, next_run_at = ?, consecutive_failures = 0 WHERE id = ?")
-        .bind(store_ts(last_run_at))
-        .bind(store_ts(next_run_at))
-        .bind(id)
-        .execute(db)
-        .await
-        .wrap_err("advancing recurring schedule")?;
-    Ok(())
-}
-
-pub async fn finish_oneshot(
-    db: &SqlitePool,
-    root: &Path,
-    id: &str,
-    last_run_at: Option<DateTime<Utc>>,
-) -> color_eyre::Result<()> {
-    sqlx::query("UPDATE schedules SET state = 'triggered', last_run_at = COALESCE(?, last_run_at) WHERE id = ?")
-        .bind(last_run_at.map(store_ts))
-        .bind(id)
-        .execute(db)
-        .await
-        .wrap_err("finishing oneshot schedule")?;
-    let archived = triggered_schedule_dir(root, id);
-    if let Some(parent) = archived.parent() {
-        fs::create_dir_all(parent).ok();
-    }
-    fs::rename(schedule_dir(root, id), archived).ok();
-    Ok(())
-}
-
-pub async fn record_failure(db: &SqlitePool, id: &str) -> color_eyre::Result<i64> {
-    let value: Option<i64> = sqlx::query_scalar(
-        "UPDATE schedules SET consecutive_failures = consecutive_failures + 1 WHERE id = ? \
-         RETURNING consecutive_failures",
-    )
-    .bind(id)
-    .fetch_optional(db)
-    .await
-    .wrap_err("recording schedule failure")?;
-    Ok(value.unwrap_or(0))
-}
-
-pub async fn disable(db: &SqlitePool, id: &str) -> color_eyre::Result<()> {
-    sqlx::query("UPDATE schedules SET state = 'disabled' WHERE id = ?")
-        .bind(id)
-        .execute(db)
-        .await
-        .wrap_err("disabling schedule")?;
-    Ok(())
+    update_state(root, id, |state| {
+        state.last_run_at = Some(store_ts(last_run_at));
+        state.next_run_at = Some(store_ts(next_run_at));
+        state.consecutive_failures = 0;
+    })
 }
 
 async fn set_next_run(
-    db: &SqlitePool,
+    root: &Path,
     id: &str,
     last_run_at: DateTime<Utc>,
     next_run_at: DateTime<Utc>,
 ) -> color_eyre::Result<()> {
-    sqlx::query("UPDATE schedules SET last_run_at = ?, next_run_at = ? WHERE id = ?")
-        .bind(store_ts(last_run_at))
-        .bind(store_ts(next_run_at))
-        .bind(id)
-        .execute(db)
-        .await
-        .wrap_err("rescheduling schedule after failure")?;
+    update_state(root, id, |state| {
+        state.last_run_at = Some(store_ts(last_run_at));
+        state.next_run_at = Some(store_ts(next_run_at));
+    })
+}
+
+async fn record_failure(root: &Path, id: &str) -> color_eyre::Result<i64> {
+    let Some((_, dir)) = find_schedule_dir(root, id) else {
+        return Ok(0);
+    };
+    let mut state = read_state(&dir).unwrap_or_default();
+    state.consecutive_failures += 1;
+    let count = state.consecutive_failures;
+    write_state(&dir, &state)?;
+    Ok(count)
+}
+
+async fn disable(root: &Path, id: &str) -> color_eyre::Result<()> {
+    if let Some((current, dir)) = find_schedule_dir(root, id)
+        && current != State::Disabled.as_str()
+    {
+        move_to(root, &dir, id, State::Disabled)?;
+    }
     Ok(())
+}
+
+async fn finish_oneshot(root: &Path, id: &str, last_run_at: Option<DateTime<Utc>>) -> color_eyre::Result<()> {
+    if let Some((current, dir)) = find_schedule_dir(root, id) {
+        if let Some(last) = last_run_at {
+            let mut state = read_state(&dir).unwrap_or_default();
+            state.last_run_at = Some(store_ts(last));
+            if let Err(e) = write_state(&dir, &state) {
+                tracing::warn!(schedule_id = %id, error = %format!("{e:#}"), "persisting oneshot last_run_at failed");
+            }
+        }
+        if current != State::Triggered.as_str() {
+            move_to(root, &dir, id, State::Triggered)?;
+        }
+    }
+    Ok(())
+}
+
+fn create_run_dir(root: &Path, id: &str, fired_at: DateTime<Utc>, tz: Option<chrono_tz::Tz>) -> Option<PathBuf> {
+    let (_, dir) = find_schedule_dir(root, id)?;
+    let run = dir.join(RUNS_DIR).join(stamp(fired_at, tz));
+    fs::create_dir_all(&run).ok()?;
+    Some(run)
+}
+
+fn write_capture(run_dir: &Path, capture: &gate::RunCapture) {
+    if !capture.stdout.is_empty() {
+        fs::write(run_dir.join(STDOUT_FILE), &capture.stdout).ok();
+    }
+    if !capture.stderr.is_empty() {
+        fs::write(run_dir.join(STDERR_FILE), &capture.stderr).ok();
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_meta(
+    run_dir: Option<&Path>,
+    sched: &Schedule,
+    fired_at: DateTime<Utc>,
+    gate: &str,
+    outcome: &str,
+    exit: Option<i32>,
+    prompt: Option<&str>,
+) {
+    let Some(dir) = run_dir else {
+        return;
+    };
+    let meta = RunMeta {
+        fired_at: store_ts(fired_at),
+        trigger: sched.trigger.describe(),
+        gate: gate.to_owned(),
+        outcome: outcome.to_owned(),
+        exit,
+        prompt: prompt.map(str::to_owned),
+    };
+    if let Ok(serialized) = serde_json::to_string_pretty(&meta) {
+        fs::write(dir.join(META_FILE), serialized).ok();
+    }
+}
+
+fn prune_runs(root: &Path, id: &str, keep: usize) {
+    let Some((_, dir)) = find_schedule_dir(root, id) else {
+        return;
+    };
+    let runs = dir.join(RUNS_DIR);
+    let mut dirs: Vec<PathBuf> = match fs::read_dir(&runs) {
+        Ok(entries) => entries
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.is_dir())
+            .collect(),
+        Err(_) => return,
+    };
+    dirs.sort();
+    if dirs.len() > keep {
+        for old in &dirs[..dirs.len() - keep] {
+            fs::remove_dir_all(old).ok();
+        }
+    }
 }
 
 const MAX_CONSECUTIVE_FAILURES: i64 = 3;
 const MIN_IDLE: Duration = Duration::from_secs(1);
 const TRANSIENT_RETRY_BACKOFF: Duration = Duration::from_secs(300);
 
-pub async fn run<H: ScheduleHost + 'static>(
-    db: &SqlitePool,
-    host: H,
-    cfg: ScheduleConfig,
-    root: PathBuf,
-    cancel: CancellationToken,
-) {
-    let db = db.clone();
+pub async fn run<H: ScheduleHost + 'static>(host: H, cfg: ScheduleConfig, root: PathBuf, cancel: CancellationToken) {
     let host = Arc::new(host);
     let root = Arc::new(root);
     let tracker = TaskTracker::new();
@@ -502,31 +697,30 @@ pub async fn run<H: ScheduleHost + 'static>(
             break;
         }
         let moment = now();
-        match due(&db, moment).await {
+        match due(root.as_path(), moment).await {
             Ok(rows) => {
                 for sched in rows {
                     if !in_flight.lock().insert(sched.id.clone()) {
                         continue;
                     }
-                    let db = db.clone();
                     let host = Arc::clone(&host);
                     let in_flight = Arc::clone(&in_flight);
                     let id = sched.id.clone();
                     let root = Arc::clone(&root);
                     tracker.spawn(async move {
-                        if let Err(e) = fire_one(&db, host.as_ref(), &cfg, root.as_path(), &sched, moment).await {
+                        if let Err(e) = fire_one(host.as_ref(), &cfg, root.as_path(), &sched, moment).await {
                             tracing::warn!(schedule_id = %sched.id, error = %format!("{e:#}"), "scheduled fire failed");
                         }
                         in_flight.lock().remove(&id);
                     });
                 }
             }
-            Err(e) => tracing::warn!(error = %format!("{e:#}"), "scheduler due query failed"),
+            Err(e) => tracing::warn!(error = %format!("{e:#}"), "scheduler due scan failed"),
         }
 
         let after = now();
         let snapshot = in_flight.lock().clone();
-        let target = sleep_target(&db, after, cfg.cap, &snapshot).await;
+        let target = sleep_target(root.as_path(), after, cfg.cap, &snapshot);
         let wait = (target - after).to_std().unwrap_or(Duration::ZERO);
         let wait = if wait.is_zero() { MIN_IDLE } else { wait };
         tokio::select! {
@@ -539,9 +733,30 @@ pub async fn run<H: ScheduleHost + 'static>(
     tracker.wait().await;
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Next {
+    AdvanceOrFinish,
+    Disable(DisableReasonKind),
+    Transient,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DisableReasonKind {
+    OriginUnreachable,
+    TargetUnreachable,
+}
+
+impl DisableReasonKind {
+    fn reason(self) -> DisableReason {
+        match self {
+            DisableReasonKind::OriginUnreachable => DisableReason::OriginUnreachable,
+            DisableReasonKind::TargetUnreachable => DisableReason::TargetUnreachable,
+        }
+    }
+}
+
 #[tracing::instrument(level = "info", skip_all, fields(schedule_id = %sched.id, name = %sched.name, trigger = ?sched.trigger))]
 pub async fn fire_one<H: ScheduleHost>(
-    db: &SqlitePool,
     host: &H,
     cfg: &ScheduleConfig,
     root: &Path,
@@ -553,28 +768,28 @@ pub async fn fire_one<H: ScheduleHost>(
             tracing::info!("missed oneshot schedule");
             host.notify_home(sched, &HomeNotice::Missed { due: sched.next_run_at })
                 .await;
-            finish_oneshot(db, root, &sched.id, None).await?;
+            finish_oneshot(root, &sched.id, None).await?;
             return Ok(());
         }
         Disposition::SkipStale => {
             tracing::info!("skipping stale schedule run");
-            advance_or_finish(db, root, sched, now).await?;
+            advance_or_finish(root, sched, now).await?;
             return Ok(());
         }
         Disposition::Fire => {}
     }
     tracing::info!("schedule fire start");
 
-    let def = match read_definition(root, &sched.id, sched.state).await {
+    let def = match read_definition(root, &sched.id).await {
         Ok(def) => def,
         Err(e) => {
             tracing::warn!(schedule_id = %sched.id, error = %format!("{e:#}"), "reading schedule definition failed");
-            return record_transient(db, host, root, sched, now).await;
+            return record_transient(host, root, sched, now).await;
         }
     };
     if def.script.is_none() && def.prompt.is_none() {
         tracing::info!(reason = ?DisableReason::MissingDefinition, "disabling schedule");
-        disable(db, &sched.id).await?;
+        disable(root, &sched.id).await?;
         host.notify_home(sched, &HomeNotice::Disabled(DisableReason::MissingDefinition))
             .await;
         return Ok(());
@@ -584,44 +799,73 @@ pub async fn fire_one<H: ScheduleHost>(
         Ok(Some(cwd)) => cwd,
         Ok(None) => {
             tracing::info!(reason = ?DisableReason::TargetUnresolvable, "disabling schedule");
-            disable(db, &sched.id).await?;
+            disable(root, &sched.id).await?;
             host.notify_home(sched, &HomeNotice::Disabled(DisableReason::TargetUnresolvable))
                 .await;
             return Ok(());
         }
         Err(e) => {
             tracing::warn!(schedule_id = %sched.id, error = %format!("{e:#}"), "resolving scheduled cwd failed");
-            return record_transient(db, host, root, sched, now).await;
+            return record_transient(host, root, sched, now).await;
         }
     };
 
-    match gate::run_script(def.script.as_deref(), &cwd, cfg.script_timeout).await {
+    let (gate, capture) = gate::run_script(def.script.as_deref(), &cwd, cfg.script_timeout).await;
+    let run_dir = create_run_dir(root, &sched.id, now, cfg.timezone);
+    if let Some(run_dir) = &run_dir {
+        write_capture(run_dir, &capture);
+    }
+
+    match gate {
         gate::Gate::Skip => {
             tracing::debug!("schedule gate skip");
-            advance_or_finish(db, root, sched, now).await?
+            write_meta(run_dir.as_deref(), sched, now, "skip", "skipped", capture.exit, None);
+            advance_or_finish(root, sched, now).await?;
         }
         gate::Gate::Failure { reason, stderr_tail } => {
+            write_meta(run_dir.as_deref(), sched, now, "failure", "script_failed", capture.exit, None);
             host.notify_home(sched, &HomeNotice::ScriptFailed { reason, stderr_tail })
                 .await;
-            record_transient(db, host, root, sched, now).await?;
+            record_transient(host, root, sched, now).await?;
         }
         gate::Gate::Proceed { context } => {
             tracing::debug!("schedule gate proceed");
-            proceed(db, host, root, sched, now, def.prompt, context).await?
+            let (next, outcome, prompt_sent) = fire_and_classify(host, sched, now, def.prompt, context).await;
+            tracing::info!(outcome = %outcome, "schedule fire outcome");
+            write_meta(
+                run_dir.as_deref(),
+                sched,
+                now,
+                "proceed",
+                outcome,
+                capture.exit,
+                prompt_sent.as_deref(),
+            );
+            match next {
+                Next::AdvanceOrFinish => advance_or_finish(root, sched, now).await?,
+                Next::Disable(kind) => {
+                    tracing::info!(reason = ?kind.reason(), "disabling schedule");
+                    disable(root, &sched.id).await?;
+                    host.notify_home(sched, &HomeNotice::Disabled(kind.reason())).await;
+                }
+                Next::Transient => record_transient(host, root, sched, now).await?,
+            }
         }
+    }
+
+    if run_dir.is_some() {
+        prune_runs(root, &sched.id, cfg.run_history);
     }
     Ok(())
 }
 
-async fn proceed<H: ScheduleHost>(
-    db: &SqlitePool,
+async fn fire_and_classify<H: ScheduleHost>(
     host: &H,
-    root: &Path,
     sched: &Schedule,
     now: DateTime<Utc>,
     prompt: Option<String>,
     context: Option<String>,
-) -> color_eyre::Result<()> {
+) -> (Next, &'static str, Option<String>) {
     if let Some(prompt_body) = &prompt {
         let wrapped = prompt::wrap_scheduled_job(
             &sched.name,
@@ -630,89 +874,65 @@ async fn proceed<H: ScheduleHost>(
             prompt_body,
             context.as_deref(),
         );
-        let outcome = host.fire(sched, &wrapped).await;
-        tracing::info!(outcome = ?outcome, "schedule fire outcome");
-        match outcome {
-            FireOutcome::Delivered => advance_or_finish(db, root, sched, now).await?,
-            FireOutcome::TargetGone => {
-                tracing::info!(reason = ?DisableReason::OriginUnreachable, "disabling schedule");
-                disable(db, &sched.id).await?;
-                host.notify_home(sched, &HomeNotice::Disabled(DisableReason::OriginUnreachable))
-                    .await;
-            }
-            FireOutcome::Transient => record_transient(db, host, root, sched, now).await?,
-        }
+        let next = match host.fire(sched, &wrapped).await {
+            FireOutcome::Delivered => (Next::AdvanceOrFinish, "delivered"),
+            FireOutcome::TargetGone => (Next::Disable(DisableReasonKind::OriginUnreachable), "target_gone"),
+            FireOutcome::Transient => (Next::Transient, "transient"),
+        };
+        (next.0, next.1, Some(wrapped))
     } else if let Some(text) = context.as_deref().filter(|c| !c.trim().is_empty()) {
-        let outcome = host.post_raw(sched, text).await;
-        tracing::info!(outcome = ?outcome, "schedule fire outcome");
-        match outcome {
-            FireOutcome::Delivered => advance_or_finish(db, root, sched, now).await?,
-            FireOutcome::TargetGone => {
-                tracing::info!(reason = ?DisableReason::TargetUnreachable, "disabling schedule");
-                disable(db, &sched.id).await?;
-                host.notify_home(sched, &HomeNotice::Disabled(DisableReason::TargetUnreachable))
-                    .await;
-            }
-            FireOutcome::Transient => record_transient(db, host, root, sched, now).await?,
-        }
+        let next = match host.post_raw(sched, text).await {
+            FireOutcome::Delivered => (Next::AdvanceOrFinish, "delivered"),
+            FireOutcome::TargetGone => (Next::Disable(DisableReasonKind::TargetUnreachable), "target_gone"),
+            FireOutcome::Transient => (Next::Transient, "transient"),
+        };
+        (next.0, next.1, Some(text.to_owned()))
     } else {
-        advance_or_finish(db, root, sched, now).await?;
+        (Next::AdvanceOrFinish, "noop", None)
     }
-    Ok(())
 }
 
-async fn advance_or_finish(
-    db: &SqlitePool,
-    root: &Path,
-    sched: &Schedule,
-    now: DateTime<Utc>,
-) -> color_eyre::Result<()> {
+async fn advance_or_finish(root: &Path, sched: &Schedule, now: DateTime<Utc>) -> color_eyre::Result<()> {
     match &sched.trigger {
-        Trigger::Oneshot { .. } => finish_oneshot(db, root, &sched.id, Some(now)).await,
+        Trigger::Oneshot { .. } => finish_oneshot(root, &sched.id, Some(now)).await,
         trigger => match next_after(trigger, now) {
             Some(next) => {
                 let next_run_at = trunc_secs(next);
                 tracing::debug!(next_run_at = %next_run_at, "advancing schedule next run");
-                advance_recurring(db, &sched.id, now, next_run_at).await
+                advance_recurring(root, &sched.id, now, next_run_at).await
             }
-            None => disable(db, &sched.id).await,
+            None => disable(root, &sched.id).await,
         },
     }
 }
 
-async fn advance_after_failure(
-    db: &SqlitePool,
-    root: &Path,
-    sched: &Schedule,
-    now: DateTime<Utc>,
-) -> color_eyre::Result<()> {
+async fn advance_after_failure(root: &Path, sched: &Schedule, now: DateTime<Utc>) -> color_eyre::Result<()> {
     match &sched.trigger {
-        Trigger::Oneshot { .. } => finish_oneshot(db, root, &sched.id, Some(now)).await,
+        Trigger::Oneshot { .. } => finish_oneshot(root, &sched.id, Some(now)).await,
         trigger => match next_after(trigger, now) {
-            Some(next) => set_next_run(db, &sched.id, now, trunc_secs(next)).await,
-            None => disable(db, &sched.id).await,
+            Some(next) => set_next_run(root, &sched.id, now, trunc_secs(next)).await,
+            None => disable(root, &sched.id).await,
         },
     }
 }
 
 async fn record_transient<H: ScheduleHost>(
-    db: &SqlitePool,
     host: &H,
     root: &Path,
     sched: &Schedule,
     now: DateTime<Utc>,
 ) -> color_eyre::Result<()> {
-    let failures = record_failure(db, &sched.id).await?;
+    let failures = record_failure(root, &sched.id).await?;
     if failures >= MAX_CONSECUTIVE_FAILURES {
-        disable(db, &sched.id).await?;
+        disable(root, &sched.id).await?;
         host.notify_home(sched, &HomeNotice::Disabled(DisableReason::ConsecutiveFailures(failures)))
             .await;
     } else {
         match &sched.trigger {
             Trigger::Oneshot { .. } => {
-                set_next_run(db, &sched.id, now, trunc_secs(now + to_delta(TRANSIENT_RETRY_BACKOFF))).await?;
+                set_next_run(root, &sched.id, now, trunc_secs(now + to_delta(TRANSIENT_RETRY_BACKOFF))).await?;
             }
-            _ => advance_after_failure(db, root, sched, now).await?,
+            _ => advance_after_failure(root, sched, now).await?,
         }
     }
     Ok(())
@@ -752,79 +972,12 @@ fn missed_gate(sched: &Schedule, now: DateTime<Utc>, grace: Duration) -> Disposi
     }
 }
 
-async fn sleep_target(
-    db: &SqlitePool,
-    moment: DateTime<Utc>,
-    cap: Duration,
-    in_flight: &HashSet<String>,
-) -> DateTime<Utc> {
+fn sleep_target(root: &Path, moment: DateTime<Utc>, cap: Duration, in_flight: &HashSet<String>) -> DateTime<Utc> {
     let capped = moment + to_delta(cap);
-    match nearest_active(db, in_flight).await {
-        Ok(Some(next)) => next.min(capped),
-        Ok(None) => capped,
-        Err(e) => {
-            tracing::warn!(error = %format!("{e:#}"), "scheduler nearest-next query failed");
-            capped
-        }
+    match nearest_active(root, in_flight) {
+        Some(next) => next.min(capped),
+        None => capped,
     }
-}
-
-fn trigger_columns(trigger: &Trigger) -> (&'static str, Option<String>, Option<String>, Option<i64>) {
-    match trigger {
-        Trigger::Oneshot { .. } => ("oneshot", None, None, None),
-        Trigger::Cron { expr, tz } => ("cron", Some(expr.clone()), Some(tz.name().to_owned()), None),
-        Trigger::Interval { every } => ("interval", None, None, Some(every.as_secs() as i64)),
-    }
-}
-
-fn parse_row(row: ScheduleRow) -> Option<Schedule> {
-    let mode = Mode::parse(&row.mode)?;
-    let state = State::parse(&row.state)?;
-    let created_at = parse_ts(&row.created_at)?;
-    let next_run_at = parse_ts(&row.next_run_at)?;
-    let last_run_at = match row.last_run_at {
-        Some(value) => Some(parse_ts(&value)?),
-        None => None,
-    };
-    let trigger = match row.trigger_kind.as_str() {
-        "oneshot" => Trigger::Oneshot { at: next_run_at },
-        "cron" => Trigger::Cron {
-            expr: row.cron_expr?,
-            tz: row.tz?.parse().ok()?,
-        },
-        "interval" => Trigger::Interval {
-            every: Duration::from_secs(u64::try_from(row.interval_secs?).ok()?),
-        },
-        _ => return None,
-    };
-    Some(Schedule {
-        id: row.id,
-        platform: row.platform,
-        scope: row.scope,
-        name: row.name,
-        created_by: row.created_by,
-        created_at,
-        mode,
-        origin: row.origin,
-        target: row.target,
-        trigger,
-        next_run_at,
-        last_run_at,
-        consecutive_failures: row.consecutive_failures,
-        state,
-    })
-}
-
-fn keep_parsed(row: ScheduleRow) -> Option<Schedule> {
-    let id = row.id.clone();
-    let name = row.name.clone();
-    let platform = row.platform.clone();
-    let trigger = row.trigger_kind.clone();
-    let parsed = parse_row(row);
-    if parsed.is_none() {
-        tracing::warn!(schedule_id = %id, %name, %platform, %trigger, "skipping unparsable schedule row");
-    }
-    parsed
 }
 
 fn parse_cron(expr: &str) -> color_eyre::Result<cron::Schedule> {
@@ -863,34 +1016,15 @@ fn now() -> DateTime<Utc> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicU64, Ordering};
-
     use super::*;
-
-    fn temp_dir(tag: &str) -> PathBuf {
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("pico-schedule-{tag}-{}-{seq}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
-    }
-
-    async fn temp_db(tag: &str) -> (SqlitePool, PathBuf) {
-        let dir = temp_dir(tag);
-        let pool = crate::db::open(&dir).await.unwrap();
-        (pool, dir)
-    }
-
-    async fn cleanup(db: SqlitePool, dir: PathBuf) {
-        db.close().await;
-        std::fs::remove_dir_all(&dir).ok();
-    }
 
     fn cfg() -> ScheduleConfig {
         ScheduleConfig {
             grace: Duration::from_secs(7200),
             script_timeout: Duration::from_secs(5),
             cap: Duration::from_secs(60),
+            timezone: Some(chrono_tz::UTC),
+            run_history: 20,
         }
     }
 
@@ -935,6 +1069,13 @@ mod tests {
             consecutive_failures: 0,
             state: State::Active,
         }
+    }
+
+    fn backdate(root: &Path, id: &str, to: DateTime<Utc>) {
+        let (_, dir) = find_schedule_dir(root, id).unwrap();
+        let mut state = read_state(&dir).unwrap_or_default();
+        state.next_run_at = Some(store_ts(to));
+        write_state(&dir, &state).unwrap();
     }
 
     #[derive(Default)]
@@ -982,34 +1123,23 @@ mod tests {
     }
 
     #[test]
-    fn next_after_interval_adds_duration() {
-        let base = DateTime::from_timestamp(1_700_000_000, 0).unwrap();
-        let next = next_after(
-            &Trigger::Interval {
-                every: Duration::from_secs(5400),
-            },
-            base,
-        )
-        .unwrap();
-        assert_eq!(next, base + TimeDelta::seconds(5400));
+    fn slugify_keeps_cjk_and_sanitizes() {
+        assert_eq!(slugify("Walk the Dog"), "walk-the-dog");
+        assert_eq!(slugify("遛狗 提醒"), "遛狗-提醒");
+        assert_eq!(slugify("  ///  "), "job");
+        assert_eq!(slugify("a//b:c"), "abc");
+        assert_eq!(slugify("..hidden.."), "hidden");
+        assert_eq!(slugify("a   b"), "a-b");
     }
 
     #[test]
-    fn next_after_oneshot_returns_at() {
-        let at = DateTime::from_timestamp(1_800_000_000, 0).unwrap();
-        let base = DateTime::from_timestamp(1_700_000_000, 0).unwrap();
-        assert_eq!(next_after(&Trigger::Oneshot { at }, base).unwrap(), at);
-    }
-
-    #[test]
-    fn next_after_cron_daily_nine_am_utc() {
-        let trigger = Trigger::Cron {
-            expr: "0 9 * * *".to_owned(),
-            tz: chrono_tz::UTC,
-        };
-        let after = parse_ts("2026-06-24T10:00:00Z").unwrap();
-        let next = next_after(&trigger, after).unwrap();
-        assert_eq!(store_ts(next), "2026-06-25T09:00:00Z");
+    fn allocate_id_appends_on_collision() {
+        let root = tempfile::tempdir().unwrap();
+        let r = root.path();
+        fs::create_dir_all(schedule_dir(r, "active", "20260101000000-x")).unwrap();
+        assert_eq!(allocate_id(r, "20260101000000", "x"), "20260101000000-x-2");
+        fs::create_dir_all(schedule_dir(r, "disabled", "20260101000000-x-2")).unwrap();
+        assert_eq!(allocate_id(r, "20260101000000", "x"), "20260101000000-x-3");
     }
 
     #[test]
@@ -1021,44 +1151,21 @@ mod tests {
             };
             next_after(&trigger, parse_ts("2026-06-24T12:00:00Z").unwrap()).unwrap()
         };
-        let sunday = "2026-06-28T00:00:00Z";
-        let monday = "2026-06-29T00:00:00Z";
-        assert_eq!(store_ts(cron_next("0 0 * * 1")), sunday, "zslayton numeric dow 1 = Sunday");
-        assert_eq!(store_ts(cron_next("0 0 * * 2")), monday, "zslayton numeric dow 2 = Monday");
-        assert_eq!(store_ts(cron_next("0 0 * * SUN")), sunday, "name SUN = Sunday");
-        assert_eq!(store_ts(cron_next("0 0 * * MON")), monday, "name MON = Monday");
+        assert_eq!(store_ts(cron_next("0 0 * * 1")), "2026-06-28T00:00:00Z");
+        assert_eq!(store_ts(cron_next("0 0 * * SUN")), "2026-06-28T00:00:00Z");
+        assert_eq!(store_ts(cron_next("0 0 * * MON")), "2026-06-29T00:00:00Z");
     }
 
     #[test]
-    fn validate_rejects_neither_script_nor_prompt() {
+    fn validate_guards() {
         let mut new = new_interval(None, None, 120);
         new.script = None;
         new.prompt = None;
         assert!(validate(&new).is_err());
-    }
-
-    #[test]
-    fn validate_rejects_sub_minute_interval() {
         assert!(validate(&new_interval(Some("p"), None, 59)).is_err());
         assert!(validate(&new_interval(Some("p"), None, 60)).is_ok());
-    }
-
-    #[test]
-    fn validate_rejects_past_oneshot() {
         let past = DateTime::from_timestamp(1_000_000_000, 0).unwrap();
         assert!(validate(&new_oneshot(Some("p"), None, past)).is_err());
-        let future = now() + TimeDelta::seconds(3600);
-        assert!(validate(&new_oneshot(Some("p"), None, future)).is_ok());
-    }
-
-    #[test]
-    fn validate_rejects_unparseable_cron() {
-        let mut new = new_interval(Some("p"), None, 120);
-        new.trigger = Trigger::Cron {
-            expr: "not a cron".to_owned(),
-            tz: chrono_tz::UTC,
-        };
-        assert!(validate(&new).is_err());
     }
 
     #[test]
@@ -1095,171 +1202,335 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn crud_round_trip_and_state_transitions() {
-        let (db, dir) = temp_db("crud").await;
-        let created = create(&db, &dir, new_interval(Some("hello"), None, 120)).await.unwrap();
+    async fn create_writes_definition_and_state_files() {
+        let root = tempfile::tempdir().unwrap();
+        let r = root.path();
+        let created = create(
+            r,
+            new_interval(Some("hello prompt"), Some("echo hi"), 3600),
+            Some(chrono_tz::UTC),
+        )
+        .await
+        .unwrap();
+        let dir = schedule_dir(r, "active", &created.id);
+        assert!(dir.join(DEFINITION_FILE).exists());
+        assert!(dir.join(STATE_FILE).exists());
+        assert_eq!(fs::read_to_string(dir.join(SCRIPT_FILE)).unwrap(), "echo hi");
+        assert_eq!(fs::read_to_string(dir.join(PROMPT_FILE)).unwrap(), "hello prompt");
 
-        let loaded = get(&db, &created.id).await.unwrap().unwrap();
-        assert_eq!(loaded, created);
-
-        let listed = list(&db, "discord", "guild-1").await.unwrap();
-        assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].id, created.id);
-
-        assert!(set_state(&db, &created.id, State::Disabled).await.unwrap());
-        assert_eq!(get(&db, &created.id).await.unwrap().unwrap().state, State::Disabled);
-        set_state(&db, &created.id, State::Active).await.unwrap();
-
-        assert_eq!(record_failure(&db, &created.id).await.unwrap(), 1);
-        assert_eq!(record_failure(&db, &created.id).await.unwrap(), 2);
-        assert_eq!(record_failure(&db, &created.id).await.unwrap(), 3);
-        disable(&db, &created.id).await.unwrap();
-        assert_eq!(get(&db, &created.id).await.unwrap().unwrap().state, State::Disabled);
-
-        let next = created.next_run_at + TimeDelta::seconds(120);
-        advance_recurring(&db, &created.id, created.next_run_at, next)
+        let prompt_only = create(r, new_interval(Some("just prompt"), None, 3600), Some(chrono_tz::UTC))
             .await
             .unwrap();
-        let advanced = get(&db, &created.id).await.unwrap().unwrap();
+        let prompt_dir = schedule_dir(r, "active", &prompt_only.id);
+        assert!(prompt_dir.join(PROMPT_FILE).exists());
+        assert!(!prompt_dir.join(SCRIPT_FILE).exists());
+
+        let def = read_definition(r, &created.id).await.unwrap();
+        assert_eq!(def.script.as_deref(), Some("echo hi"));
+        assert_eq!(def.prompt.as_deref(), Some("hello prompt"));
+    }
+
+    #[tokio::test]
+    async fn crud_round_trip_and_state_transitions_move_folders() {
+        let root = tempfile::tempdir().unwrap();
+        let r = root.path();
+        let created = create(r, new_interval(Some("hello"), None, 120), Some(chrono_tz::UTC))
+            .await
+            .unwrap();
+
+        assert_eq!(get(r, &created.id).await.unwrap().unwrap(), created);
+        let listed = list(r, "discord", "guild-1").await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert!(list(r, "discord", "other").await.unwrap().is_empty());
+
+        assert!(set_state(r, &created.id, State::Disabled).await.unwrap());
+        assert!(!schedule_dir(r, "active", &created.id).exists());
+        assert!(schedule_dir(r, "disabled", &created.id).exists());
+        assert_eq!(get(r, &created.id).await.unwrap().unwrap().state, State::Disabled);
+        set_state(r, &created.id, State::Active).await.unwrap();
+
+        assert_eq!(record_failure(r, &created.id).await.unwrap(), 1);
+        assert_eq!(record_failure(r, &created.id).await.unwrap(), 2);
+        let next = created.next_run_at + TimeDelta::seconds(120);
+        advance_recurring(r, &created.id, created.next_run_at, next)
+            .await
+            .unwrap();
+        let advanced = get(r, &created.id).await.unwrap().unwrap();
         assert_eq!(advanced.consecutive_failures, 0);
         assert_eq!(advanced.next_run_at, next);
 
-        assert!(remove(&db, &dir, &created.id).await.unwrap());
-        assert!(get(&db, &created.id).await.unwrap().is_none());
-        cleanup(db, dir).await;
+        assert!(remove(r, &created.id).await.unwrap());
+        assert!(get(r, &created.id).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn missing_state_recomputes_next_run() {
+        let root = tempfile::tempdir().unwrap();
+        let r = root.path();
+        let created = create(r, new_interval(Some("p"), None, 3600), Some(chrono_tz::UTC))
+            .await
+            .unwrap();
+        fs::remove_file(schedule_dir(r, "active", &created.id).join(STATE_FILE)).unwrap();
+        let reloaded = get(r, &created.id).await.unwrap().unwrap();
+        assert_eq!(reloaded.next_run_at, created.next_run_at);
+        assert_eq!(reloaded.consecutive_failures, 0);
+        assert!(reloaded.last_run_at.is_none());
     }
 
     #[tokio::test]
     async fn fire_one_routes_prompt_to_fire_and_advances() {
-        let (db, dir) = temp_db("fire-prompt").await;
-        let sched = create(&db, &dir, new_interval(Some("do the thing"), None, 3600))
+        let root = tempfile::tempdir().unwrap();
+        let r = root.path();
+        let sched = create(r, new_interval(Some("do the thing"), None, 3600), Some(chrono_tz::UTC))
             .await
             .unwrap();
         let host = FakeHost::new();
-        fire_one(&db, &host, &cfg(), &dir, &sched, sched.next_run_at)
-            .await
-            .unwrap();
+        fire_one(&host, &cfg(), r, &sched, sched.next_run_at).await.unwrap();
         {
             let calls = host.calls.lock();
             assert_eq!(calls.fired.len(), 1);
             assert!(calls.fired[0].contains("do the thing"));
             assert!(calls.posted.is_empty());
         }
-        let reloaded = get(&db, &sched.id).await.unwrap().unwrap();
+        let reloaded = get(r, &sched.id).await.unwrap().unwrap();
         assert!(reloaded.next_run_at > sched.next_run_at);
         assert_eq!(reloaded.state, State::Active);
-        cleanup(db, dir).await;
     }
 
     #[tokio::test]
     async fn fire_one_routes_script_context_to_post_raw() {
-        let (db, dir) = temp_db("fire-postraw").await;
+        let root = tempfile::tempdir().unwrap();
+        let r = root.path();
         let script = "echo '{\"skip\":false,\"context\":\"digest body\"}'";
-        let sched = create(&db, &dir, new_interval(None, Some(script), 3600)).await.unwrap();
-        let host = FakeHost::new();
-        fire_one(&db, &host, &cfg(), &dir, &sched, sched.next_run_at)
+        let sched = create(r, new_interval(None, Some(script), 3600), Some(chrono_tz::UTC))
             .await
             .unwrap();
-        {
-            let calls = host.calls.lock();
-            assert_eq!(calls.posted, vec!["digest body".to_owned()]);
-            assert!(calls.fired.is_empty());
+        let host = FakeHost::new();
+        fire_one(&host, &cfg(), r, &sched, sched.next_run_at).await.unwrap();
+        let calls = host.calls.lock();
+        assert_eq!(calls.posted, vec!["digest body".to_owned()]);
+        assert!(calls.fired.is_empty());
+    }
+
+    #[tokio::test]
+    async fn fire_one_writes_run_log() {
+        let root = tempfile::tempdir().unwrap();
+        let r = root.path();
+        let script = "echo out; echo '{\"skip\":false,\"context\":\"c\"}'";
+        let sched = create(r, new_interval(None, Some(script), 3600), Some(chrono_tz::UTC))
+            .await
+            .unwrap();
+        let host = FakeHost::new();
+        fire_one(&host, &cfg(), r, &sched, sched.next_run_at).await.unwrap();
+        let runs = schedule_dir(r, "active", &sched.id).join(RUNS_DIR);
+        let entries: Vec<PathBuf> = fs::read_dir(&runs).unwrap().flatten().map(|e| e.path()).collect();
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].join(META_FILE).exists());
+        assert!(entries[0].join(STDOUT_FILE).exists());
+    }
+
+    #[test]
+    fn prune_runs_keeps_newest() {
+        let root = tempfile::tempdir().unwrap();
+        let r = root.path();
+        let id = "20260101000000-x";
+        let runs = schedule_dir(r, "active", id).join(RUNS_DIR);
+        for stamp in ["20260101000001", "20260101000002", "20260101000003"] {
+            fs::create_dir_all(runs.join(stamp)).unwrap();
         }
-        cleanup(db, dir).await;
+        prune_runs(r, id, 2);
+        let mut kept: Vec<String> = fs::read_dir(&runs)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        kept.sort();
+        assert_eq!(kept, vec!["20260101000002", "20260101000003"]);
     }
 
     #[tokio::test]
     async fn fire_one_failure_notifies_home_and_records_failure() {
-        let (db, dir) = temp_db("fire-fail").await;
-        let sched = create(&db, &dir, new_interval(Some("p"), Some("exit 2"), 3600))
+        let root = tempfile::tempdir().unwrap();
+        let r = root.path();
+        let sched = create(r, new_interval(Some("p"), Some("exit 2"), 3600), Some(chrono_tz::UTC))
             .await
             .unwrap();
         let host = FakeHost::new();
-        fire_one(&db, &host, &cfg(), &dir, &sched, sched.next_run_at)
-            .await
-            .unwrap();
-        {
-            let calls = host.calls.lock();
-            assert!(calls.fired.is_empty(), "failure must not invoke the llm");
-            assert_eq!(calls.notified.len(), 1);
-        }
-        let reloaded = get(&db, &sched.id).await.unwrap().unwrap();
-        assert_eq!(reloaded.consecutive_failures, 1);
-        assert_eq!(reloaded.state, State::Active);
-        assert!(reloaded.next_run_at > sched.next_run_at);
-        cleanup(db, dir).await;
-    }
-
-    #[tokio::test]
-    async fn fire_one_oneshot_fires_then_triggers() {
-        let (db, dir) = temp_db("fire-oneshot").await;
-        let at = now() + TimeDelta::seconds(3600);
-        let sched = create(&db, &dir, new_oneshot(Some("ping"), None, at)).await.unwrap();
-        let host = FakeHost::new();
-        fire_one(&db, &host, &cfg(), &dir, &sched, sched.next_run_at)
-            .await
-            .unwrap();
-        assert_eq!(host.calls.lock().fired.len(), 1);
-        let reloaded = get(&db, &sched.id).await.unwrap().unwrap();
-        assert_eq!(reloaded.state, State::Triggered);
-        assert!(reloaded.last_run_at.is_some());
-        cleanup(db, dir).await;
-    }
-
-    #[tokio::test]
-    async fn fire_one_oneshot_missed_beyond_grace_notifies_and_consumes() {
-        let (db, dir) = temp_db("fire-missed").await;
-        let at = now() + TimeDelta::seconds(3600);
-        let sched = create(&db, &dir, new_oneshot(Some("ping"), None, at)).await.unwrap();
-        let host = FakeHost::new();
-        let late = sched.next_run_at + TimeDelta::seconds(3 * 3600);
-        fire_one(&db, &host, &cfg(), &dir, &sched, late).await.unwrap();
+        fire_one(&host, &cfg(), r, &sched, sched.next_run_at).await.unwrap();
         {
             let calls = host.calls.lock();
             assert!(calls.fired.is_empty());
             assert_eq!(calls.notified.len(), 1);
+        }
+        let reloaded = get(r, &sched.id).await.unwrap().unwrap();
+        assert_eq!(reloaded.consecutive_failures, 1);
+        assert_eq!(reloaded.state, State::Active);
+        assert!(reloaded.next_run_at > sched.next_run_at);
+    }
+
+    #[tokio::test]
+    async fn fire_one_oneshot_fires_then_moves_to_triggered() {
+        let root = tempfile::tempdir().unwrap();
+        let r = root.path();
+        let at = now() + TimeDelta::seconds(3600);
+        let sched = create(r, new_oneshot(Some("ping"), None, at), Some(chrono_tz::UTC))
+            .await
+            .unwrap();
+        assert!(schedule_dir(r, "active", &sched.id).exists());
+        let host = FakeHost::new();
+        fire_one(&host, &cfg(), r, &sched, sched.next_run_at).await.unwrap();
+        assert_eq!(host.calls.lock().fired.len(), 1);
+        assert!(!schedule_dir(r, "active", &sched.id).exists());
+        assert!(schedule_dir(r, "triggered", &sched.id).join(PROMPT_FILE).exists());
+        let reloaded = get(r, &sched.id).await.unwrap().unwrap();
+        assert_eq!(reloaded.state, State::Triggered);
+        assert!(reloaded.last_run_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn fire_one_oneshot_missed_beyond_grace_notifies_and_consumes() {
+        let root = tempfile::tempdir().unwrap();
+        let r = root.path();
+        let at = now() + TimeDelta::seconds(3600);
+        let sched = create(r, new_oneshot(Some("ping"), None, at), Some(chrono_tz::UTC))
+            .await
+            .unwrap();
+        let host = FakeHost::new();
+        let late = sched.next_run_at + TimeDelta::seconds(3 * 3600);
+        fire_one(&host, &cfg(), r, &sched, late).await.unwrap();
+        {
+            let calls = host.calls.lock();
+            assert!(calls.fired.is_empty());
             assert!(matches!(calls.notified[0], HomeNotice::Missed { .. }));
         }
-        assert_eq!(get(&db, &sched.id).await.unwrap().unwrap().state, State::Triggered);
-        cleanup(db, dir).await;
+        assert_eq!(get(r, &sched.id).await.unwrap().unwrap().state, State::Triggered);
     }
 
     #[tokio::test]
     async fn fire_one_recurring_stale_skips_and_advances() {
-        let (db, dir) = temp_db("fire-stale").await;
-        let sched = create(&db, &dir, new_interval(Some("p"), None, 3600)).await.unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let r = root.path();
+        let sched = create(r, new_interval(Some("p"), None, 3600), Some(chrono_tz::UTC))
+            .await
+            .unwrap();
         let host = FakeHost::new();
         let stale = sched.next_run_at + TimeDelta::seconds(7200);
-        fire_one(&db, &host, &cfg(), &dir, &sched, stale).await.unwrap();
-        assert!(host.calls.lock().fired.is_empty(), "stale recurring must not fire");
-        let reloaded = get(&db, &sched.id).await.unwrap().unwrap();
+        fire_one(&host, &cfg(), r, &sched, stale).await.unwrap();
+        assert!(host.calls.lock().fired.is_empty());
+        let reloaded = get(r, &sched.id).await.unwrap().unwrap();
         assert!(reloaded.next_run_at > sched.next_run_at);
         assert_eq!(reloaded.state, State::Active);
-        cleanup(db, dir).await;
+    }
+
+    #[tokio::test]
+    async fn fire_one_transient_records_failure_and_disables_on_third() {
+        let root = tempfile::tempdir().unwrap();
+        let r = root.path();
+        let created = create(r, new_interval(Some("p"), None, 3600), Some(chrono_tz::UTC))
+            .await
+            .unwrap();
+        let mut host = FakeHost::new();
+        host.fire_outcome = FireOutcome::Transient;
+
+        let mut sched = created.clone();
+        for expected in 1..=2 {
+            fire_one(&host, &cfg(), r, &sched, sched.next_run_at).await.unwrap();
+            let reloaded = get(r, &sched.id).await.unwrap().unwrap();
+            assert_eq!(reloaded.consecutive_failures, expected);
+            assert_eq!(reloaded.state, State::Active);
+            assert!(reloaded.next_run_at > sched.next_run_at);
+            sched = reloaded;
+        }
+        fire_one(&host, &cfg(), r, &sched, sched.next_run_at).await.unwrap();
+        let reloaded = get(r, &sched.id).await.unwrap().unwrap();
+        assert_eq!(reloaded.consecutive_failures, 3);
+        assert_eq!(reloaded.state, State::Disabled);
+        let calls = host.calls.lock();
+        assert_eq!(calls.fired.len(), 3);
+        assert_eq!(calls.notified.len(), 1);
+        assert!(matches!(
+            calls.notified[0],
+            HomeNotice::Disabled(DisableReason::ConsecutiveFailures(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn fire_one_oneshot_transient_retries_and_is_not_consumed() {
+        let root = tempfile::tempdir().unwrap();
+        let r = root.path();
+        let at = now() + TimeDelta::seconds(3600);
+        let created = create(r, new_oneshot(Some("ping"), None, at), Some(chrono_tz::UTC))
+            .await
+            .unwrap();
+        let mut host = FakeHost::new();
+        host.fire_outcome = FireOutcome::Transient;
+        let mut sched = created.clone();
+        for expected in 1..=2 {
+            fire_one(&host, &cfg(), r, &sched, sched.next_run_at).await.unwrap();
+            let reloaded = get(r, &sched.id).await.unwrap().unwrap();
+            assert_eq!(reloaded.consecutive_failures, expected);
+            assert_eq!(reloaded.state, State::Active);
+            assert!(reloaded.next_run_at > sched.next_run_at);
+            sched = reloaded;
+        }
+        fire_one(&host, &cfg(), r, &sched, sched.next_run_at).await.unwrap();
+        assert_eq!(get(r, &sched.id).await.unwrap().unwrap().state, State::Disabled);
+    }
+
+    #[tokio::test]
+    async fn fire_one_missing_definition_disables_and_notifies() {
+        let root = tempfile::tempdir().unwrap();
+        let r = root.path();
+        let sched = create(r, new_interval(Some("p"), None, 3600), Some(chrono_tz::UTC))
+            .await
+            .unwrap();
+        fs::remove_file(schedule_dir(r, "active", &sched.id).join(PROMPT_FILE)).unwrap();
+        let host = FakeHost::new();
+        fire_one(&host, &cfg(), r, &sched, sched.next_run_at).await.unwrap();
+        {
+            let calls = host.calls.lock();
+            assert!(calls.fired.is_empty());
+            assert_eq!(calls.notified[0], HomeNotice::Disabled(DisableReason::MissingDefinition));
+        }
+        assert_eq!(get(r, &sched.id).await.unwrap().unwrap().state, State::Disabled);
+    }
+
+    #[tokio::test]
+    async fn fire_one_reads_edited_script_at_fire_time() {
+        let root = tempfile::tempdir().unwrap();
+        let r = root.path();
+        let sched = create(
+            r,
+            new_interval(None, Some("echo '{\"skip\":true}'"), 3600),
+            Some(chrono_tz::UTC),
+        )
+        .await
+        .unwrap();
+        let script_path = schedule_dir(r, "active", &sched.id).join(SCRIPT_FILE);
+        fs::write(&script_path, "echo '{\"skip\":false,\"context\":\"edited body\"}'").unwrap();
+        let host = FakeHost::new();
+        fire_one(&host, &cfg(), r, &sched, sched.next_run_at).await.unwrap();
+        assert_eq!(host.calls.lock().posted, vec!["edited body".to_owned()]);
     }
 
     #[tokio::test]
     async fn run_boot_sweep_fires_due_schedule_then_advances() {
-        let (db, dir) = temp_db("run-boot").await;
-        let sched = create(&db, &dir, new_interval(Some("tick"), None, 3600)).await.unwrap();
-        let past = store_ts(now() - TimeDelta::seconds(5));
-        sqlx::query("UPDATE schedules SET next_run_at = ? WHERE id = ?")
-            .bind(&past)
-            .bind(&sched.id)
-            .execute(&db)
+        let root = tempfile::tempdir().unwrap();
+        let r = root.path().to_path_buf();
+        let sched = create(&r, new_interval(Some("tick"), None, 3600), Some(chrono_tz::UTC))
             .await
             .unwrap();
+        let past = now() - TimeDelta::seconds(5);
+        backdate(&r, &sched.id, past);
 
         let host = FakeHost::new();
         let calls = Arc::clone(&host.calls);
         let cancel = CancellationToken::new();
         let driver = {
-            let db = db.clone();
             let cancel = cancel.clone();
-            let root = dir.clone();
-            tokio::spawn(async move { run(&db, host, cfg(), root, cancel).await })
+            let root = r.clone();
+            tokio::spawn(async move { run(host, cfg(), root, cancel).await })
         };
-
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while calls.lock().fired.is_empty() && std::time::Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -1267,219 +1538,9 @@ mod tests {
         cancel.cancel();
         driver.await.unwrap();
 
-        assert_eq!(calls.lock().fired.len(), 1, "boot sweep fires the due schedule once");
-        let reloaded = get(&db, &sched.id).await.unwrap().unwrap();
-        assert!(
-            reloaded.next_run_at > parse_ts(&past).unwrap(),
-            "schedule advanced past its due time"
-        );
+        assert_eq!(calls.lock().fired.len(), 1);
+        let reloaded = get(&r, &sched.id).await.unwrap().unwrap();
+        assert!(reloaded.next_run_at > past);
         assert_eq!(reloaded.state, State::Active);
-        cleanup(db, dir).await;
-    }
-
-    #[tokio::test]
-    async fn fire_one_transient_records_failure_and_disables_on_third() {
-        let (db, dir) = temp_db("fire-transient").await;
-        let created = create(&db, &dir, new_interval(Some("p"), None, 3600)).await.unwrap();
-        let mut host = FakeHost::new();
-        host.fire_outcome = FireOutcome::Transient;
-
-        let mut sched = created.clone();
-        for expected in 1..=2 {
-            fire_one(&db, &host, &cfg(), &dir, &sched, sched.next_run_at)
-                .await
-                .unwrap();
-            let reloaded = get(&db, &sched.id).await.unwrap().unwrap();
-            assert_eq!(reloaded.consecutive_failures, expected);
-            assert_eq!(
-                reloaded.state,
-                State::Active,
-                "transient blip must not disable before the limit"
-            );
-            assert!(
-                reloaded.next_run_at > sched.next_run_at,
-                "transient advances to the next period"
-            );
-            sched = reloaded;
-        }
-
-        fire_one(&db, &host, &cfg(), &dir, &sched, sched.next_run_at)
-            .await
-            .unwrap();
-        let reloaded = get(&db, &sched.id).await.unwrap().unwrap();
-        assert_eq!(reloaded.consecutive_failures, 3);
-        assert_eq!(reloaded.state, State::Disabled, "third consecutive transient failure disables");
-        {
-            let calls = host.calls.lock();
-            assert_eq!(calls.fired.len(), 3, "every attempt fired");
-            assert_eq!(
-                calls.notified.len(),
-                1,
-                "transient fires emit no per-failure spam, only the disable notice"
-            );
-            assert!(
-                matches!(calls.notified[0], HomeNotice::Disabled(DisableReason::ConsecutiveFailures(_))),
-                "the single notice is the auto-disable notice"
-            );
-        }
-        cleanup(db, dir).await;
-    }
-
-    #[tokio::test]
-    async fn fire_one_oneshot_transient_retries_and_is_not_consumed() {
-        let (db, dir) = temp_db("fire-oneshot-transient").await;
-        let at = now() + TimeDelta::seconds(3600);
-        let created = create(&db, &dir, new_oneshot(Some("ping"), None, at)).await.unwrap();
-        let mut host = FakeHost::new();
-        host.fire_outcome = FireOutcome::Transient;
-
-        let mut sched = created.clone();
-        for expected in 1..=2 {
-            fire_one(&db, &host, &cfg(), &dir, &sched, sched.next_run_at)
-                .await
-                .unwrap();
-            let reloaded = get(&db, &sched.id).await.unwrap().unwrap();
-            assert_eq!(reloaded.consecutive_failures, expected);
-            assert_eq!(
-                reloaded.state,
-                State::Active,
-                "a transient oneshot retries and is never consumed as Triggered"
-            );
-            assert!(
-                reloaded.next_run_at > sched.next_run_at,
-                "a transient oneshot backs off for a later retry"
-            );
-            sched = reloaded;
-        }
-
-        fire_one(&db, &host, &cfg(), &dir, &sched, sched.next_run_at)
-            .await
-            .unwrap();
-        let reloaded = get(&db, &sched.id).await.unwrap().unwrap();
-        assert_eq!(
-            reloaded.state,
-            State::Disabled,
-            "the third consecutive transient failure disables the oneshot, never silently Triggered"
-        );
-        cleanup(db, dir).await;
-    }
-
-    #[tokio::test]
-    async fn create_writes_definition_files() {
-        let (db, dir) = temp_db("create-files").await;
-        let sched = create(&db, &dir, new_interval(Some("hello prompt"), Some("echo hi"), 3600))
-            .await
-            .unwrap();
-        let job_dir = schedule_dir(&dir, &sched.id);
-        assert_eq!(fs::read_to_string(job_dir.join(SCRIPT_FILE)).unwrap(), "echo hi");
-        assert_eq!(fs::read_to_string(job_dir.join(PROMPT_FILE)).unwrap(), "hello prompt");
-
-        let prompt_only = create(&db, &dir, new_interval(Some("just prompt"), None, 3600))
-            .await
-            .unwrap();
-        let prompt_dir = schedule_dir(&dir, &prompt_only.id);
-        assert!(prompt_dir.join(PROMPT_FILE).exists());
-        assert!(!prompt_dir.join(SCRIPT_FILE).exists(), "script-less job writes no script file");
-
-        let def = read_definition(&dir, &sched.id, sched.state).await.unwrap();
-        assert_eq!(def.script.as_deref(), Some("echo hi"));
-        assert_eq!(def.prompt.as_deref(), Some("hello prompt"));
-        assert_eq!(def.script_path, job_dir.join(SCRIPT_FILE));
-        assert_eq!(def.prompt_path, job_dir.join(PROMPT_FILE));
-        cleanup(db, dir).await;
-    }
-
-    #[tokio::test]
-    async fn fire_one_oneshot_archives_definition_dir() {
-        let (db, dir) = temp_db("oneshot-archive").await;
-        let at = now() + TimeDelta::seconds(3600);
-        let sched = create(&db, &dir, new_oneshot(Some("ping"), None, at)).await.unwrap();
-        let active = schedule_dir(&dir, &sched.id);
-        let archived = triggered_schedule_dir(&dir, &sched.id);
-        assert!(active.exists());
-        assert!(!archived.exists());
-
-        let host = FakeHost::new();
-        fire_one(&db, &host, &cfg(), &dir, &sched, sched.next_run_at)
-            .await
-            .unwrap();
-        assert!(!active.exists(), "fired oneshot vacates its active dir");
-        assert!(
-            archived.join(PROMPT_FILE).exists(),
-            "definition is archived under the triggered location"
-        );
-        assert_eq!(get(&db, &sched.id).await.unwrap().unwrap().state, State::Triggered);
-        cleanup(db, dir).await;
-    }
-
-    #[tokio::test]
-    async fn fire_one_missing_definition_disables_and_notifies() {
-        let (db, dir) = temp_db("missing-def").await;
-        let sched = create(&db, &dir, new_interval(Some("p"), None, 3600)).await.unwrap();
-        fs::remove_dir_all(schedule_dir(&dir, &sched.id)).unwrap();
-
-        let host = FakeHost::new();
-        fire_one(&db, &host, &cfg(), &dir, &sched, sched.next_run_at)
-            .await
-            .unwrap();
-        {
-            let calls = host.calls.lock();
-            assert!(calls.fired.is_empty());
-            assert!(calls.posted.is_empty());
-            assert_eq!(calls.notified.len(), 1, "a vanished definition yields exactly one notice");
-            assert_eq!(calls.notified[0], HomeNotice::Disabled(DisableReason::MissingDefinition));
-        }
-        assert_eq!(get(&db, &sched.id).await.unwrap().unwrap().state, State::Disabled);
-        cleanup(db, dir).await;
-    }
-
-    #[tokio::test]
-    async fn fire_one_unreadable_definition_is_transient_not_disabled() {
-        let (db, dir) = temp_db("unreadable-def").await;
-        let sched = create(&db, &dir, new_interval(None, Some("echo hi"), 3600))
-            .await
-            .unwrap();
-        let script_path = schedule_dir(&dir, &sched.id).join(SCRIPT_FILE);
-        fs::remove_file(&script_path).unwrap();
-        fs::create_dir(&script_path).unwrap();
-
-        let host = FakeHost::new();
-        fire_one(&db, &host, &cfg(), &dir, &sched, sched.next_run_at)
-            .await
-            .unwrap();
-        {
-            let calls = host.calls.lock();
-            assert!(calls.fired.is_empty());
-            assert!(calls.notified.is_empty(), "a transient read error must not notify");
-        }
-        let after = get(&db, &sched.id).await.unwrap().unwrap();
-        assert_eq!(
-            after.state,
-            State::Active,
-            "a transient read error must not permanently disable"
-        );
-        assert_eq!(after.consecutive_failures, 1);
-        cleanup(db, dir).await;
-    }
-
-    #[tokio::test]
-    async fn fire_one_reads_edited_script_at_fire_time() {
-        let (db, dir) = temp_db("edit-script").await;
-        let sched = create(&db, &dir, new_interval(None, Some("echo '{\"skip\":true}'"), 3600))
-            .await
-            .unwrap();
-        let script_path = schedule_dir(&dir, &sched.id).join(SCRIPT_FILE);
-        fs::write(&script_path, "echo '{\"skip\":false,\"context\":\"edited body\"}'").unwrap();
-
-        let host = FakeHost::new();
-        fire_one(&db, &host, &cfg(), &dir, &sched, sched.next_run_at)
-            .await
-            .unwrap();
-        assert_eq!(
-            host.calls.lock().posted,
-            vec!["edited body".to_owned()],
-            "the on-disk edit drives the fire, proving content is read at fire time"
-        );
-        cleanup(db, dir).await;
     }
 }
