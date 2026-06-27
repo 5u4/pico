@@ -84,6 +84,20 @@ pub(crate) enum Command<'a> {
         system: &'a str,
         prompt: &'a str,
     },
+    Context {
+        id: &'a RequestId,
+        session_id: &'a str,
+    },
+    Compact {
+        id: &'a RequestId,
+        session_id: &'a str,
+        focus: Option<&'a str>,
+    },
+    Shake {
+        id: &'a RequestId,
+        session_id: &'a str,
+        mode: &'a str,
+    },
 }
 
 impl Command<'_> {
@@ -99,6 +113,9 @@ impl Command<'_> {
             Command::SetModel { .. } => "set_model",
             Command::SetSessionName { .. } => "set_session_name",
             Command::Completion { .. } => "completion",
+            Command::Context { .. } => "context",
+            Command::Compact { .. } => "compact",
+            Command::Shake { .. } => "shake",
         }
     }
 }
@@ -483,6 +500,46 @@ mod tests {
                 "system": "You output one short title.",
                 "prompt": "Write the thread title now.",
             }),
+        );
+    }
+
+    #[test]
+    fn serializes_session_maintenance_commands() {
+        let id = RequestId("req_2".to_owned());
+        assert_eq!(
+            serde_json::to_value(Command::Context {
+                id: &id,
+                session_id: "t1",
+            })
+            .unwrap(),
+            serde_json::json!({"type": "context", "id": "req_2", "sessionId": "t1"}),
+        );
+        assert_eq!(
+            serde_json::to_value(Command::Compact {
+                id: &id,
+                session_id: "t1",
+                focus: None,
+            })
+            .unwrap(),
+            serde_json::json!({"type": "compact", "id": "req_2", "sessionId": "t1", "focus": null}),
+        );
+        assert_eq!(
+            serde_json::to_value(Command::Compact {
+                id: &id,
+                session_id: "t1",
+                focus: Some("auth flow"),
+            })
+            .unwrap(),
+            serde_json::json!({"type": "compact", "id": "req_2", "sessionId": "t1", "focus": "auth flow"}),
+        );
+        assert_eq!(
+            serde_json::to_value(Command::Shake {
+                id: &id,
+                session_id: "t1",
+                mode: "elide",
+            })
+            .unwrap(),
+            serde_json::json!({"type": "shake", "id": "req_2", "sessionId": "t1", "mode": "elide"}),
         );
     }
 

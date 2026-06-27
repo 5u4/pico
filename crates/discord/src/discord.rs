@@ -53,6 +53,9 @@ pub(crate) fn framework(
                 cancel_turn(),
                 busy(),
                 schedule_command(),
+                context(),
+                compact(),
+                shake(),
             ],
             event_handler: |ctx, event, framework, data| Box::pin(on_event(ctx, event, framework.bot_id, data)),
             command_check: Some(|ctx| Box::pin(command_in_registered_guild(ctx))),
@@ -330,6 +333,140 @@ fn busy_label(mode: StreamingBehavior) -> (&'static str, &'static str) {
         StreamingBehavior::FollowUp => (REACT_FOLLOW_UP, "follow_up"),
         StreamingBehavior::Queue => (REACT_QUEUE, "queue"),
     }
+}
+
+#[derive(poise::ChoiceParameter)]
+enum ShakeMode {
+    Elide,
+    Images,
+}
+
+#[poise::command(slash_command)]
+async fn context(ctx: Context<'_>) -> Result<(), Error> {
+    let thread_id = ctx.channel_id().to_string();
+    let Some(handle) = ctx.data().pool.get_existing(&thread_id) else {
+        ctx.say("No active session in this thread yet — send a message first.")
+            .await?;
+        return Ok(());
+    };
+    ctx.defer().await?;
+    match handle.client().context().await {
+        Ok(Some(text)) => {
+            let inner = pico_core::render::truncate(&pico_core::render::defang_mentions(&text), MSG_CONTENT_CAP - 8);
+            ctx.say(format!("```\n{inner}\n```")).await?;
+        }
+        Ok(None) => {
+            ctx.say("Session returned no context info.").await?;
+        }
+        Err(e) => {
+            ctx.say(pico_core::render::truncate(
+                &pico_core::render::defang_mentions(&format!("❌ {e}")),
+                MSG_CONTENT_CAP,
+            ))
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+#[poise::command(slash_command)]
+async fn shake(
+    ctx: Context<'_>,
+    #[description = "What to drop: elide (tool results + large blocks) or images"] mode: Option<ShakeMode>,
+) -> Result<(), Error> {
+    let thread_id = ctx.channel_id().to_string();
+    let Some(handle) = ctx.data().pool.get_existing(&thread_id) else {
+        ctx.say("No active session in this thread yet — send a message first.")
+            .await?;
+        return Ok(());
+    };
+    if ctx
+        .data()
+        .cancels
+        .is_active(&ConversationId::new("discord", &thread_id))
+    {
+        ctx.say("A turn is running in this thread — /cancel it first.").await?;
+        return Ok(());
+    }
+    let mode_str = match mode.unwrap_or(ShakeMode::Elide) {
+        ShakeMode::Elide => "elide",
+        ShakeMode::Images => "images",
+    };
+    ctx.defer().await?;
+    let outcome = {
+        let mut session = handle.lock().await;
+        let result = session.client.shake(mode_str).await;
+        while session.events.try_recv().is_ok() {}
+        result
+    };
+    match outcome {
+        Ok(Some(text)) => {
+            ctx.say(pico_core::render::truncate(
+                &pico_core::render::defang_mentions(&text),
+                MSG_CONTENT_CAP,
+            ))
+            .await?;
+        }
+        Ok(None) => {
+            ctx.say("✅ Context shaken.").await?;
+        }
+        Err(e) => {
+            ctx.say(pico_core::render::truncate(
+                &pico_core::render::defang_mentions(&format!("❌ {e}")),
+                MSG_CONTENT_CAP,
+            ))
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+#[poise::command(slash_command)]
+async fn compact(
+    ctx: Context<'_>,
+    #[description = "Optional focus to preserve while compacting"] focus: Option<String>,
+) -> Result<(), Error> {
+    let thread_id = ctx.channel_id().to_string();
+    let Some(handle) = ctx.data().pool.get_existing(&thread_id) else {
+        ctx.say("No active session in this thread yet — send a message first.")
+            .await?;
+        return Ok(());
+    };
+    if ctx
+        .data()
+        .cancels
+        .is_active(&ConversationId::new("discord", &thread_id))
+    {
+        ctx.say("A turn is running in this thread — /cancel it first.").await?;
+        return Ok(());
+    }
+    ctx.defer().await?;
+    let outcome = {
+        let mut session = handle.lock().await;
+        let result = session.client.compact(focus.as_deref()).await;
+        while session.events.try_recv().is_ok() {}
+        result
+    };
+    match outcome {
+        Ok(Some(text)) => {
+            ctx.say(pico_core::render::truncate(
+                &pico_core::render::defang_mentions(&text),
+                MSG_CONTENT_CAP,
+            ))
+            .await?;
+        }
+        Ok(None) => {
+            ctx.say("✅ Context compacted.").await?;
+        }
+        Err(e) => {
+            ctx.say(pico_core::render::truncate(
+                &pico_core::render::defang_mentions(&format!("❌ {e}")),
+                MSG_CONTENT_CAP,
+            ))
+            .await?;
+        }
+    }
+    Ok(())
 }
 
 #[poise::command(slash_command, rename = "dev-deploy")]

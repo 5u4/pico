@@ -593,3 +593,48 @@ async fn rebinding_a_thread_to_a_new_profile_replaces_the_session() {
 
     cancel.cancel();
 }
+
+#[tokio::test]
+#[ignore]
+async fn context_shake_compact_roundtrip() {
+    let cwd = TempDir::new("pico-omp-cwd");
+    let cancel = CancellationToken::new();
+    let tracker = TaskTracker::new();
+    let (_host, client, _events) = open_session("maintenance", &cwd, &cancel, &tracker).await;
+    client
+        .set_model("github-copilot", "gpt-4o-mini")
+        .await
+        .expect("set_model to a known model");
+
+    let context = client
+        .context()
+        .await
+        .expect("context round-trips")
+        .expect("context returns text");
+    assert!(
+        context.to_lowercase().contains("tokens"),
+        "context report should mention tokens: {context:?}"
+    );
+
+    let shake = client
+        .shake("elide")
+        .await
+        .expect("shake round-trips")
+        .expect("shake returns a summary");
+    assert!(!shake.trim().is_empty(), "shake summary should be non-empty");
+
+    match client.compact(None).await {
+        Ok(text) => assert!(text.is_some(), "compact success must carry a summary"),
+        Err(e) => {
+            let msg = e.to_string();
+            assert!(!msg.is_empty(), "compact failure must carry a message: {e:#}");
+            assert!(
+                !msg.contains("unknown command"),
+                "compact must be wired through the host: {e:#}"
+            );
+        }
+    }
+
+    client.close().await.expect("close");
+    cancel.cancel();
+}
