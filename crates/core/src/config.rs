@@ -89,6 +89,8 @@ pub struct ScheduleConfig {
     pub grace: Duration,
     pub script_timeout: Duration,
     pub cap: Duration,
+    pub timezone: Option<chrono_tz::Tz>,
+    pub run_history: usize,
 }
 
 #[derive(Deserialize, Default)]
@@ -119,6 +121,8 @@ struct RawSchedule {
     script_timeout_secs: Option<u64>,
     #[serde(default)]
     cap_secs: Option<u64>,
+    #[serde(default)]
+    run_history: Option<usize>,
 }
 
 pub fn load_root(config_path: &Path) -> color_eyre::Result<RootConfig> {
@@ -136,6 +140,7 @@ pub fn load_root(config_path: &Path) -> color_eyre::Result<RootConfig> {
         }
         None => None,
     };
+    let timezone_configured = raw.timezone.is_some();
     let timezone = match raw.timezone {
         Some(name) => name.parse::<chrono_tz::Tz>().map_err(|_| {
             color_eyre::eyre::eyre!("invalid timezone {name:?} (expected an IANA name like \"America/Vancouver\")")
@@ -147,6 +152,8 @@ pub fn load_root(config_path: &Path) -> color_eyre::Result<RootConfig> {
         grace: Duration::from_secs(raw_schedule.grace_secs.unwrap_or(7200)),
         script_timeout: Duration::from_secs(raw_schedule.script_timeout_secs.unwrap_or(60)),
         cap: Duration::from_secs(raw_schedule.cap_secs.unwrap_or(60)),
+        timezone: timezone_configured.then_some(timezone),
+        run_history: raw_schedule.run_history.unwrap_or(20),
     };
     Ok(RootConfig {
         worktrees_dir,
@@ -343,17 +350,25 @@ mod tests {
     fn load_root_reads_schedule_overrides_and_defaults() {
         let dir = temp_dir("rootschedule");
         let path = dir.join("worker.toml");
-        std::fs::write(&path, "[schedule]\ngrace_secs = 600\nscript_timeout_secs = 30\ncap_secs = 15\n").unwrap();
+        std::fs::write(
+            &path,
+            "timezone = \"America/Vancouver\"\n[schedule]\ngrace_secs = 600\nscript_timeout_secs = 30\ncap_secs = 15\nrun_history = 5\n",
+        )
+        .unwrap();
         let sched = super::load_root(&path).unwrap().schedule();
         assert_eq!(sched.grace, std::time::Duration::from_secs(600));
         assert_eq!(sched.script_timeout, std::time::Duration::from_secs(30));
         assert_eq!(sched.cap, std::time::Duration::from_secs(15));
+        assert_eq!(sched.run_history, 5);
+        assert_eq!(sched.timezone, Some(chrono_tz::America::Vancouver));
 
-        std::fs::write(&path, "timezone = \"UTC\"\n").unwrap();
+        std::fs::write(&path, "[worktree]\ndir = \"/srv/wt\"\n").unwrap();
         let defaults = super::load_root(&path).unwrap().schedule();
         assert_eq!(defaults.grace, std::time::Duration::from_secs(7200));
         assert_eq!(defaults.script_timeout, std::time::Duration::from_secs(60));
         assert_eq!(defaults.cap, std::time::Duration::from_secs(60));
+        assert_eq!(defaults.run_history, 20);
+        assert_eq!(defaults.timezone, None);
         std::fs::remove_dir_all(&dir).ok();
     }
 }

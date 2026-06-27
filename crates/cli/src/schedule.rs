@@ -114,8 +114,11 @@ async fn build_and_create(json: &str) -> Result<serde_json::Value, String> {
     let input: CreateInput = serde_json::from_str(json).map_err(|e| format!("invalid json: {e}"))?;
     let new = input.into_new_schedule()?;
     let root = pico_shared::paths::worker_root().map_err(|e| e.to_string())?;
-    let db = pico_core::db::open(&root).await.map_err(|e| e.to_string())?;
-    let sched = schedule::create(&db, &root, new).await.map_err(|e| e.to_string())?;
+    let tz = pico_core::config::load_root(&pico_shared::paths::worker_config(&root))
+        .map_err(|e| e.to_string())?
+        .schedule()
+        .timezone;
+    let sched = schedule::create(&root, new, tz).await.map_err(|e| e.to_string())?;
     schedule_dto(&sched, &root).await.map_err(|e| e.to_string())
 }
 
@@ -189,8 +192,7 @@ async fn list(scope: Option<String>, json: bool) -> color_eyre::Result<()> {
         .or_else(|| env_var("PICO_GUILD_ID"))
         .ok_or_else(|| eyre!("missing scope: pass --scope or set PICO_GUILD_ID"))?;
     let root = pico_shared::paths::worker_root()?;
-    let db = pico_core::db::open(&root).await?;
-    let schedules = schedule::list(&db, "discord", &scope).await?;
+    let schedules = schedule::list(&root, "discord", &scope).await?;
     if json {
         let mut dtos = Vec::with_capacity(schedules.len());
         for sched in &schedules {
@@ -216,8 +218,7 @@ async fn list(scope: Option<String>, json: bool) -> color_eyre::Result<()> {
 
 async fn show(id: &str, scope: Option<String>, json: bool) -> color_eyre::Result<()> {
     let root = pico_shared::paths::worker_root()?;
-    let db = pico_core::db::open(&root).await?;
-    let sched = scoped(schedule::get(&db, id).await?, caller_scope(scope).as_deref())
+    let sched = scoped(schedule::get(&root, id).await?, caller_scope(scope).as_deref())
         .ok_or_else(|| eyre!("no schedule with id {id}"))?;
     if json {
         println!("{}", schedule_dto(&sched, &root).await?);
@@ -229,21 +230,20 @@ async fn show(id: &str, scope: Option<String>, json: bool) -> color_eyre::Result
 
 async fn remove(id: &str, scope: Option<String>) -> color_eyre::Result<()> {
     let root = pico_shared::paths::worker_root()?;
-    let db = pico_core::db::open(&root).await?;
-    if scoped(schedule::get(&db, id).await?, caller_scope(scope).as_deref()).is_none() {
+    if scoped(schedule::get(&root, id).await?, caller_scope(scope).as_deref()).is_none() {
         return Err(eyre!("no schedule with id {id}"));
     }
-    schedule::remove(&db, &root, id).await?;
+    schedule::remove(&root, id).await?;
     println!("removed schedule {id}");
     Ok(())
 }
 
 async fn apply_state(id: &str, scope: Option<String>, state: State, label: &str) -> color_eyre::Result<()> {
-    let db = pico_core::db::open(&pico_shared::paths::worker_root()?).await?;
-    if scoped(schedule::get(&db, id).await?, caller_scope(scope).as_deref()).is_none() {
+    let root = pico_shared::paths::worker_root()?;
+    if scoped(schedule::get(&root, id).await?, caller_scope(scope).as_deref()).is_none() {
         return Err(eyre!("no schedule with id {id}"));
     }
-    schedule::set_state(&db, id, state).await?;
+    schedule::set_state(&root, id, state).await?;
     println!("{label} schedule {id}");
     Ok(())
 }
@@ -276,7 +276,7 @@ async fn print_human(sched: &Schedule, root: &Path) -> color_eyre::Result<()> {
         println!("last_run_at {}", last.to_rfc3339());
     }
     println!("failures    {}", sched.consecutive_failures);
-    let def = schedule::read_definition(root, &sched.id, sched.state).await?;
+    let def = schedule::read_definition(root, &sched.id).await?;
     println!("script_path {}", def.script_path.display());
     println!("prompt_path {}", def.prompt_path.display());
     if let Some(script) = &def.script {
@@ -289,7 +289,7 @@ async fn print_human(sched: &Schedule, root: &Path) -> color_eyre::Result<()> {
 }
 
 async fn schedule_dto(sched: &Schedule, root: &Path) -> color_eyre::Result<serde_json::Value> {
-    let def = schedule::read_definition(root, &sched.id, sched.state).await?;
+    let def = schedule::read_definition(root, &sched.id).await?;
     Ok(serde_json::json!({
         "id": sched.id,
         "platform": sched.platform,

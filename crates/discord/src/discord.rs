@@ -83,11 +83,10 @@ pub(crate) fn framework(
                 match pico_core::config::load_root(&pico_shared::paths::worker_config(&root)) {
                     Ok(root_config) => match pico_shared::paths::worker_root() {
                         Ok(sched_root) => {
-                            let sched_db = db.clone();
                             let sched_cancel = cancel.clone();
                             let cfg = root_config.schedule();
                             tracker.spawn(async move {
-                                pico_core::schedule::run(&sched_db, host, cfg, sched_root, sched_cancel).await;
+                                pico_core::schedule::run(host, cfg, sched_root, sched_cancel).await;
                             });
                         }
                         Err(e) => {
@@ -148,7 +147,7 @@ async fn schedule_command(ctx: Context<'_>) -> Result<(), Error> {
         ctx.say("Schedules only exist inside a configured server.").await?;
         return Ok(());
     };
-    let schedules = match pico_core::schedule::list(&ctx.data().db, "discord", &guild_id.to_string()).await {
+    let schedules = match pico_core::schedule::list(&ctx.data().root, "discord", &guild_id.to_string()).await {
         Ok(schedules) => schedules,
         Err(e) => {
             ctx.say(format!("error reading schedules: {e}")).await?;
