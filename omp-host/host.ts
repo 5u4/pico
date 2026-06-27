@@ -15,8 +15,8 @@ import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { initializeExtensions } from "@oh-my-pi/pi-coding-agent/modes/runtime-init";
 import { theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import { makeCamofoxFactory } from "./camofox-extension";
-import { makeScheduleFactory } from "./schedule-extension";
+import { makeCamofoxFactory } from "./extensions/camofox";
+import { makeScheduleFactory } from "./extensions/schedule";
 import { streamSimple } from "@oh-my-pi/pi-ai";
 import { pickDefaultAvailableModel, resolveRoleSelection } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { resolvePromptInput } from "@oh-my-pi/pi-coding-agent/system-prompt";
