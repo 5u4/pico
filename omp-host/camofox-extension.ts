@@ -50,7 +50,7 @@ export function makeCamofoxFactory(identity) {
         "Open a new tab in the anti-detection (Camoufox/Firefox) browser at a URL; returns its tabId. " +
         "Use the camo browser for sites that block bots or need a real logged-in session — Cloudflare, " +
         "Google, login-walled, anti-scraping, or JS-heavy pages; for static readable content prefer the " +
-        "read tool. Workflow: open -> camo_snapshot to read structure and get clickable refs -> " +
+        "read tool. Workflow: camo_open -> camo_snapshot to read structure and get clickable refs -> " +
         "camo_click/camo_type -> camo_screenshot only when appearance matters. Tabs are per-thread; the " +
         "logged-in session persists across restarts.",
       parameters: z.object({ url: z.string().describe("Absolute URL to open") }),
