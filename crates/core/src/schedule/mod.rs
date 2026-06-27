@@ -349,8 +349,11 @@ fn write_definition(
 }
 
 fn write_state(dir: &Path, state: &RuntimeState) -> color_eyre::Result<()> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
     let serialized = serde_json::to_string_pretty(state).wrap_err("serializing state.json")?;
-    let tmp = dir.join(".state.json.tmp");
+    let unique = format!(".state.json.{}.{}.tmp", std::process::id(), SEQ.fetch_add(1, Ordering::Relaxed));
+    let tmp = dir.join(unique);
     fs::write(&tmp, serialized).wrap_err("writing state.json")?;
     fs::rename(&tmp, dir.join(STATE_FILE)).wrap_err("publishing state.json")?;
     Ok(())
@@ -605,7 +608,9 @@ async fn finish_oneshot(root: &Path, id: &str, last_run_at: Option<DateTime<Utc>
         if let Some(last) = last_run_at {
             let mut state = read_state(&dir).unwrap_or_default();
             state.last_run_at = Some(store_ts(last));
-            write_state(&dir, &state).ok();
+            if let Err(e) = write_state(&dir, &state) {
+                tracing::warn!(schedule_id = %id, error = %format!("{e:#}"), "persisting oneshot last_run_at failed");
+            }
         }
         if current != State::Triggered.as_str() {
             move_to(root, &dir, id, State::Triggered)?;
