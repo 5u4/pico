@@ -5,8 +5,9 @@ use std::{
 
 use color_eyre::eyre::eyre;
 use pico_core::{
+    bindings::{Route, resolve_route},
     cancel::CancelRegistry,
-    config::StreamingBehavior,
+    config::{Render, StreamingBehavior},
     mid_turn::MidTurnQueue,
     omp::{camofox::CamofoxDaemon, pool::OmpPool},
     schedule::{DisableReason, FireOutcome, HomeNotice, Mode, Schedule, ScheduleHost},
@@ -16,18 +17,13 @@ use pico_core::{
 use poise::serenity_prelude as serenity;
 use tokio_util::sync::CancellationToken;
 
-use crate::{
-    config::Render,
-    discord::{Route, TurnInputs, channel_display_name, drive_thread_turn, resolve_route},
-};
+use crate::discord::{TurnInputs, channel_display_name, drive_thread_turn};
 
 const UNKNOWN_CHANNEL: isize = 10003;
 
 const MISSING_ACCESS: isize = 50001;
 
 const MISSING_PERMISSIONS: isize = 50013;
-
-const POST_CAP: usize = 1900;
 
 pub(crate) struct DiscordScheduleHost {
     pub(crate) ctx: serenity::Context,
@@ -96,14 +92,14 @@ impl DiscordScheduleHost {
         let Some(origin) = parse_channel(&sched.origin) else {
             return FireOutcome::TargetGone;
         };
-        let Some(marker) = pico_core::thread_marker::load(&self.db, "discord", &sched.origin)
+        let Some(marker) = pico_core::thread_marker::load(&self.db, crate::consts::PLATFORM, &sched.origin)
             .await
             .filter(|m| m.closed_at.is_none())
         else {
             return FireOutcome::TargetGone;
         };
 
-        let conversation = ConversationId::new("discord", &sched.origin);
+        let conversation = ConversationId::new(crate::consts::PLATFORM, &sched.origin);
         if self
             .mid_turn
             .deliver(&conversation, wrapped, Some(StreamingBehavior::Queue))
@@ -174,14 +170,14 @@ impl DiscordScheduleHost {
         let Some(guild_default) = config.guild(&sched.scope) else {
             return FireOutcome::Transient;
         };
-        let binding = match pico_core::bindings::get(&self.db, "discord", &sched.target).await {
+        let binding = match pico_core::bindings::get(&self.db, crate::consts::PLATFORM, &sched.target).await {
             Ok(binding) => binding,
             Err(e) => {
                 tracing::warn!(error = %format!("{e:#}"), schedule_id = %sched.id, "resolving fresh target binding failed");
                 return FireOutcome::Transient;
             }
         };
-        let route = resolve_route(guild_default, binding.as_ref());
+        let route = resolve_route(binding.as_ref(), &guild_default.profile, &guild_default.cwd);
 
         let thread = match self.create_thread(target_channel, &sched.name).await {
             Ok(thread) => thread,
@@ -205,6 +201,7 @@ impl DiscordScheduleHost {
                 let worktrees_dir = self.worktrees_dir();
                 match pico_core::worktree::ensure(
                     &worktrees_dir,
+                    crate::consts::PLATFORM,
                     &sched.target,
                     &thread_id,
                     &base_repo,
@@ -230,7 +227,7 @@ impl DiscordScheduleHost {
 
         pico_core::thread_marker::save(
             &self.db,
-            "discord",
+            crate::consts::PLATFORM,
             &thread_id,
             &ThreadMarker {
                 profile: profile.clone(),
@@ -292,7 +289,7 @@ impl DiscordScheduleHost {
 impl ScheduleHost for DiscordScheduleHost {
     async fn resolve_cwd(&self, sched: &Schedule) -> color_eyre::Result<Option<PathBuf>> {
         match sched.mode {
-            Mode::Continue => Ok(pico_core::thread_marker::load(&self.db, "discord", &sched.origin)
+            Mode::Continue => Ok(pico_core::thread_marker::load(&self.db, crate::consts::PLATFORM, &sched.origin)
                 .await
                 .filter(|m| m.closed_at.is_none())
                 .map(|m| m.cwd)),
@@ -303,8 +300,8 @@ impl ScheduleHost for DiscordScheduleHost {
                 let Some(guild_default) = config.guild(&sched.scope) else {
                     return Ok(None);
                 };
-                let binding = pico_core::bindings::get(&self.db, "discord", &sched.target).await?;
-                let cwd = match resolve_route(guild_default, binding.as_ref()) {
+                let binding = pico_core::bindings::get(&self.db, crate::consts::PLATFORM, &sched.target).await?;
+                let cwd = match resolve_route(binding.as_ref(), &guild_default.profile, &guild_default.cwd) {
                     Route::Regular { cwd, .. } => cwd,
                     Route::Worktree { base_repo, .. } => base_repo,
                 };
@@ -321,7 +318,8 @@ impl ScheduleHost for DiscordScheduleHost {
     }
 
     async fn post_raw(&self, sched: &Schedule, text: &str) -> FireOutcome {
-        let body = pico_core::render::truncate(&pico_core::render::defang_mentions(text), POST_CAP);
+        let body =
+            pico_core::render::truncate(&pico_core::render::defang_mentions(text), crate::consts::MSG_CONTENT_CAP);
         match sched.mode {
             Mode::Continue => {
                 let Some(origin) = parse_channel(&sched.origin) else {

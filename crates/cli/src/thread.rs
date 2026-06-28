@@ -12,7 +12,6 @@ use pico_core::{
 };
 
 pub(crate) const PLATFORM: &str = "cli";
-pub(crate) const DEFAULT_PROFILE: &str = "default";
 const SHORT_ID_LEN: usize = 8;
 
 pub(crate) fn current_dir() -> color_eyre::Result<PathBuf> {
@@ -102,7 +101,7 @@ async fn pick(root: &Path, entries: &[thread_marker::ThreadEntry]) -> color_eyre
 fn entry_label(root: &Path, entry: &thread_marker::ThreadEntry) -> String {
     let short = short_id(&entry.thread_id);
     let kind = if entry.worktree.is_some() { " [worktree]" } else { "" };
-    let session_dir = pico_shared::paths::profile_session_dir(root, &entry.profile, &entry.thread_id);
+    let session_dir = pico_shared::paths::profile_session_dir(root, &entry.profile, PLATFORM, &entry.thread_id);
     match jsonl_title(&session_dir) {
         Some(title) => format!("{title}  [{short}]  ({}){kind}", entry.profile),
         None => format!("{short}  ({}){kind}", entry.profile),
@@ -124,7 +123,7 @@ async fn new_thread(db: &sqlx::SqlitePool, root: &Path, channel: &str, route: &R
             default_branch,
         } => {
             let worktrees_dir = worktrees_dir(root);
-            let path = worktree::ensure(&worktrees_dir, channel, &thread_id, base_repo, default_branch)
+            let path = worktree::ensure(&worktrees_dir, PLATFORM, channel, &thread_id, base_repo, default_branch)
                 .await
                 .wrap_err("worktree setup failed")?;
             (
@@ -198,7 +197,7 @@ fn worktrees_dir(root: &Path) -> PathBuf {
 }
 
 fn thread_label(root: &Path, profile: &str, thread_id: &str) -> String {
-    let session_dir = pico_shared::paths::profile_session_dir(root, profile, thread_id);
+    let session_dir = pico_shared::paths::profile_session_dir(root, profile, PLATFORM, thread_id);
     jsonl_title(&session_dir).unwrap_or_else(|| short_id(thread_id))
 }
 

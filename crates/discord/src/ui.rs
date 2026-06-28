@@ -4,7 +4,6 @@ use pico_core::{omp::protocol::UiRequest, render};
 use poise::serenity_prelude as serenity;
 use tokio_util::sync::CancellationToken;
 
-const MSG_CONTENT_CAP: usize = 1900;
 const OPTION_LABEL_CAP: usize = 100;
 const MODAL_TITLE_CAP: usize = 45;
 const MODAL_LABEL_CAP: usize = 45;
@@ -508,7 +507,7 @@ async fn finalize(
 }
 
 fn clamp_content(text: &str) -> String {
-    render::truncate(&render::defang_mentions(text), MSG_CONTENT_CAP)
+    render::truncate(&render::defang_mentions(text), crate::consts::MSG_CONTENT_CAP)
 }
 
 fn select_prompt_text(title: &str, options: &[String]) -> String {
@@ -545,7 +544,7 @@ fn select_components(options: &[String]) -> Vec<serenity::CreateActionRow> {
 }
 
 fn resolved_line(title: &str, choice: Option<&str>) -> String {
-    let title = render::truncate(title, MSG_CONTENT_CAP - 300);
+    let title = render::truncate(title, crate::consts::MSG_CONTENT_CAP - 300);
     let body = match choice {
         Some(choice) => format!("✅ {title}  → {}", render::truncate(choice, ANSWER_PREVIEW_CAP)),
         None => format!("⊘ {title}  · cancelled"),
@@ -590,9 +589,13 @@ mod tests {
 
     #[test]
     fn clamp_content_defangs_before_capping() {
-        let raw = "@everyone ".repeat(MSG_CONTENT_CAP);
+        let raw = "@everyone ".repeat(crate::consts::MSG_CONTENT_CAP);
         let out = clamp_content(&raw);
-        assert!(out.chars().count() <= MSG_CONTENT_CAP, "over cap: {}", out.chars().count());
+        assert!(
+            out.chars().count() <= crate::consts::MSG_CONTENT_CAP,
+            "over cap: {}",
+            out.chars().count()
+        );
         assert!(!out.contains("@everyone"), "mentions not defanged");
     }
 

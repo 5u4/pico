@@ -31,18 +31,22 @@ fn safe_component(channel_id: &str) -> String {
     }
 }
 
-pub fn worktree_path(worktrees_dir: &Path, channel_id: &str, thread_id: &str) -> PathBuf {
-    worktrees_dir.join(safe_component(channel_id)).join(thread_id)
+pub fn worktree_path(worktrees_dir: &Path, platform: &str, channel_id: &str, thread_id: &str) -> PathBuf {
+    worktrees_dir
+        .join(platform)
+        .join(safe_component(channel_id))
+        .join(thread_id)
 }
 
 pub async fn ensure(
     worktrees_dir: &Path,
+    platform: &str,
     channel_id: &str,
     thread_id: &str,
     base_repo: &Path,
     default_branch: &str,
 ) -> color_eyre::Result<PathBuf> {
-    let path = worktree_path(worktrees_dir, channel_id, thread_id);
+    let path = worktree_path(worktrees_dir, platform, channel_id, thread_id);
     ensure_at(&path, thread_id, base_repo, default_branch).await?;
     Ok(path)
 }
@@ -312,12 +316,12 @@ mod tests {
     #[test]
     fn worktree_path_keeps_path_channel_under_worktrees_dir() {
         let wt = Path::new("/srv/worktrees");
-        let numeric = super::worktree_path(wt, "111111111111111111", "abc");
-        assert_eq!(numeric, wt.join("111111111111111111").join("abc"));
+        let numeric = super::worktree_path(wt, "discord", "111111111111111111", "abc");
+        assert_eq!(numeric, wt.join("discord").join("111111111111111111").join("abc"));
 
-        let abs = super::worktree_path(wt, "/home/sen/project", "abc");
+        let abs = super::worktree_path(wt, "discord", "/home/sen/project", "abc");
         assert!(abs.starts_with(wt), "absolute channel escaped worktrees_dir: {}", abs.display());
-        assert_eq!(abs, wt.join("home_sen_project").join("abc"));
+        assert_eq!(abs, wt.join("discord").join("home_sen_project").join("abc"));
     }
 
     #[tokio::test]
@@ -326,17 +330,37 @@ mod tests {
         let base = base_repo_with_origin(&root);
         let wt_dir = root.join("worktrees");
 
-        let path = super::ensure(&wt_dir, "111111111111111111", "222222222222222222", &base, "origin/main")
-            .await
-            .unwrap();
+        let path = super::ensure(
+            &wt_dir,
+            "discord",
+            "111111111111111111",
+            "222222222222222222",
+            &base,
+            "origin/main",
+        )
+        .await
+        .unwrap();
 
-        assert_eq!(path, wt_dir.join("111111111111111111").join("222222222222222222"));
+        assert_eq!(
+            path,
+            wt_dir
+                .join("discord")
+                .join("111111111111111111")
+                .join("222222222222222222")
+        );
         assert!(path.join(".git").exists(), "worktree .git missing");
         assert!(path.join("seed.txt").exists(), "fork did not check out main");
 
-        let again = super::ensure(&wt_dir, "111111111111111111", "222222222222222222", &base, "origin/main")
-            .await
-            .unwrap();
+        let again = super::ensure(
+            &wt_dir,
+            "discord",
+            "111111111111111111",
+            "222222222222222222",
+            &base,
+            "origin/main",
+        )
+        .await
+        .unwrap();
         assert_eq!(again, path);
 
         std::fs::remove_dir_all(&root).ok();
@@ -348,10 +372,10 @@ mod tests {
         let base = base_repo_with_origin(&root);
         let wt_dir = root.join("worktrees");
 
-        let a = super::ensure(&wt_dir, "111111111111111111", "222222222222222222", &base, "main")
+        let a = super::ensure(&wt_dir, "discord", "111111111111111111", "222222222222222222", &base, "main")
             .await
             .unwrap();
-        let b = super::ensure(&wt_dir, "111111111111111111", "333333333333333333", &base, "main")
+        let b = super::ensure(&wt_dir, "discord", "111111111111111111", "333333333333333333", &base, "main")
             .await
             .unwrap();
         assert_ne!(a, b);
@@ -386,7 +410,9 @@ mod tests {
         let channel = "111111111111111111";
         let thread = "222222222222222222";
 
-        let path = super::ensure(&wt_dir, channel, thread, &base, "main").await.unwrap();
+        let path = super::ensure(&wt_dir, "discord", channel, thread, &base, "main")
+            .await
+            .unwrap();
         std::fs::write(path.join("work.txt"), "wip").unwrap();
         git(&path, &["config", "user.email", "test@pico"]);
         git(&path, &["config", "user.name", "pico test"]);
@@ -394,7 +420,9 @@ mod tests {
         git(&path, &["commit", "-m", "wip"]);
         std::fs::remove_dir_all(&path).unwrap();
 
-        let again = super::ensure(&wt_dir, channel, thread, &base, "main").await.unwrap();
+        let again = super::ensure(&wt_dir, "discord", channel, thread, &base, "main")
+            .await
+            .unwrap();
         assert_eq!(again, path);
         assert!(again.join("work.txt").exists(), "reattach lost the branch's commit");
 
@@ -406,7 +434,7 @@ mod tests {
         let root = temp_dir("offline");
         let base = local_repo(&root);
         let wt_dir = root.join("worktrees");
-        let path = super::ensure(&wt_dir, "111111111111111111", "222222222222222222", &base, "main")
+        let path = super::ensure(&wt_dir, "discord", "111111111111111111", "222222222222222222", &base, "main")
             .await
             .unwrap();
         assert!(path.join("seed.txt").exists());
@@ -468,7 +496,9 @@ mod tests {
         let base = local_repo(&root);
         let wt_dir = root.join("worktrees");
         let (channel, thread) = ("111111111111111111", "222222222222222222");
-        let path = super::ensure(&wt_dir, channel, thread, &base, "main").await.unwrap();
+        let path = super::ensure(&wt_dir, "discord", channel, thread, &base, "main")
+            .await
+            .unwrap();
 
         let loss = super::close_would_lose(&base, &path, thread).await.unwrap();
         assert!(!loss.dirty);
@@ -483,7 +513,9 @@ mod tests {
         let base = local_repo(&root);
         let wt_dir = root.join("worktrees");
         let (channel, thread) = ("111111111111111111", "222222222222222222");
-        let path = super::ensure(&wt_dir, channel, thread, &base, "main").await.unwrap();
+        let path = super::ensure(&wt_dir, "discord", channel, thread, &base, "main")
+            .await
+            .unwrap();
         std::fs::write(path.join("scratch.txt"), "wip").unwrap();
 
         let loss = super::close_would_lose(&base, &path, thread).await.unwrap();
@@ -498,7 +530,9 @@ mod tests {
         let base = local_repo(&root);
         let wt_dir = root.join("worktrees");
         let (channel, thread) = ("111111111111111111", "222222222222222222");
-        let path = super::ensure(&wt_dir, channel, thread, &base, "main").await.unwrap();
+        let path = super::ensure(&wt_dir, "discord", channel, thread, &base, "main")
+            .await
+            .unwrap();
         std::fs::write(path.join("work.txt"), "wip").unwrap();
         git(&path, &["config", "user.email", "test@pico"]);
         git(&path, &["config", "user.name", "pico test"]);
@@ -518,7 +552,7 @@ mod tests {
         let base = base_repo_with_origin(&root);
         let wt_dir = root.join("worktrees");
         let (channel, thread) = ("111111111111111111", "222222222222222222");
-        let path = super::ensure(&wt_dir, channel, thread, &base, "origin/main")
+        let path = super::ensure(&wt_dir, "discord", channel, thread, &base, "origin/main")
             .await
             .unwrap();
         std::fs::write(path.join("work.txt"), "wip").unwrap();
@@ -541,7 +575,9 @@ mod tests {
         let base = local_repo(&root);
         let wt_dir = root.join("worktrees");
         let (channel, thread) = ("111111111111111111", "222222222222222222");
-        let path = super::ensure(&wt_dir, channel, thread, &base, "main").await.unwrap();
+        let path = super::ensure(&wt_dir, "discord", channel, thread, &base, "main")
+            .await
+            .unwrap();
         std::fs::write(path.join("work.txt"), "wip").unwrap();
         git(&path, &["config", "user.email", "test@pico"]);
         git(&path, &["config", "user.name", "pico test"]);
@@ -561,7 +597,9 @@ mod tests {
         let base = local_repo(&root);
         let wt_dir = root.join("worktrees");
         let (channel, thread) = ("111111111111111111", "222222222222222222");
-        let path = super::ensure(&wt_dir, channel, thread, &base, "main").await.unwrap();
+        let path = super::ensure(&wt_dir, "discord", channel, thread, &base, "main")
+            .await
+            .unwrap();
         git(&base, &["symbolic-ref", "HEAD", "refs/heads/does-not-exist"]);
 
         let loss = super::close_would_lose(&base, &path, thread).await.unwrap();
@@ -576,7 +614,9 @@ mod tests {
         let base = local_repo(&root);
         let wt_dir = root.join("worktrees");
         let (channel, thread) = ("111111111111111111", "222222222222222222");
-        let path = super::ensure(&wt_dir, channel, thread, &base, "main").await.unwrap();
+        let path = super::ensure(&wt_dir, "discord", channel, thread, &base, "main")
+            .await
+            .unwrap();
         assert!(path.join(".git").exists());
 
         super::remove(&base, &path, thread).await.unwrap();

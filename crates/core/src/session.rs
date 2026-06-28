@@ -52,7 +52,7 @@ pub struct TurnSpawn {
 )]
 pub async fn run_turn<S: Surface>(p: RunTurn<'_, S>) -> color_eyre::Result<TurnSpawn> {
     let started = std::time::Instant::now();
-    let session_dir = pico_shared::paths::profile_session_dir(p.root, p.profile, p.thread_id);
+    let session_dir = pico_shared::paths::profile_session_dir(p.root, p.profile, &p.identity.platform, p.thread_id);
     std::fs::create_dir_all(&session_dir).wrap_err_with(|| format!("create session dir {}", session_dir.display()))?;
     let identity_path = pico_shared::paths::profile_identity(p.root, p.profile);
     let append_dest = session_dir.join("append.md");

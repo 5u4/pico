@@ -5,7 +5,6 @@ use poise::serenity_prelude as serenity;
 use sqlx::SqlitePool;
 use tokio_util::sync::CancellationToken;
 
-const MSG_CONTENT_CAP: usize = 1900;
 const APPROVE_ID: &str = "approval:approve";
 const DENY_ID: &str = "approval:deny";
 
@@ -199,11 +198,11 @@ fn prompt_content(subject: &Subject<'_>) -> String {
 
 fn resolved_line(subject: &Subject<'_>, outcome: &str) -> String {
     let title = pico_core::render::defang_mentions(subject.title);
-    pico_core::render::truncate(&format!("🔐 **{title}**\n{outcome}"), MSG_CONTENT_CAP)
+    pico_core::render::truncate(&format!("🔐 **{title}**\n{outcome}"), crate::consts::MSG_CONTENT_CAP)
 }
 
 fn clamp(text: &str) -> String {
-    pico_core::render::truncate(&pico_core::render::defang_mentions(text), MSG_CONTENT_CAP)
+    pico_core::render::truncate(&pico_core::render::defang_mentions(text), crate::consts::MSG_CONTENT_CAP)
 }
 
 async fn ack_update(ctx: &serenity::Context, interaction: &serenity::ComponentInteraction, content: &str) {

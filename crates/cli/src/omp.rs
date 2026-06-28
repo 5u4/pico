@@ -9,7 +9,7 @@ use pico_core::{
 };
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
-use crate::thread::{self, DEFAULT_PROFILE, PLATFORM, Route};
+use crate::thread::{self, PLATFORM, Route};
 
 #[derive(Args)]
 pub struct OmpArgs {
@@ -63,13 +63,16 @@ async fn launch(
     let route = match bindings::get(db, PLATFORM, channel).await? {
         Some(binding) => thread::route_from_binding(binding),
         None => {
-            bindings::set_regular(db, PLATFORM, channel, DEFAULT_PROFILE, dir).await?;
-            println!("No binding for this folder — auto-bound profile '{DEFAULT_PROFILE}' (regular, cwd = {channel}).");
+            bindings::set_regular(db, PLATFORM, channel, pico_shared::paths::DEFAULT_PROFILE, dir).await?;
+            println!(
+                "No binding for this folder — auto-bound profile '{}' (regular, cwd = {channel}).",
+                pico_shared::paths::DEFAULT_PROFILE
+            );
             println!(
                 "Run `pico bind --worktree <base_repo> [--branch <ref>] [--profile <name>]` for worktree isolation."
             );
             Route::Regular {
-                profile: DEFAULT_PROFILE.to_owned(),
+                profile: pico_shared::paths::DEFAULT_PROFILE.to_owned(),
                 cwd: dir.to_path_buf(),
             }
         }
@@ -80,7 +83,7 @@ async fn launch(
         return Ok(None);
     };
 
-    let session_dir = pico_shared::paths::profile_session_dir(root, &thread.profile, &thread.thread_id);
+    let session_dir = pico_shared::paths::profile_session_dir(root, &thread.profile, PLATFORM, &thread.thread_id);
     std::fs::create_dir_all(&session_dir).wrap_err_with(|| format!("create session dir {}", session_dir.display()))?;
 
     let timezone = pico_core::config::load_root(&pico_shared::paths::worker_config(root))?.timezone();

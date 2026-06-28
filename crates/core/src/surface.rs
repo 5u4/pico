@@ -19,16 +19,17 @@ pub trait Surface: Send + Sync {
         false
     }
 
-    fn tool_activity_line(&self, _call: &ToolCall) -> Option<String> {
-        None
+    fn tool_activity_line(&self, call: &ToolCall) -> Option<String> {
+        Some(crate::activity::tool_activity_line(&crate::activity::ToolCallStart::from(call)))
     }
 
-    fn thinking_line(&self, _content: &str) -> Option<String> {
-        None
+    fn thinking_line(&self, content: &str) -> Option<String> {
+        let line = crate::activity::thinking_line(content);
+        (!line.is_empty()).then_some(line)
     }
 
-    fn failure_line(&self, current: &str, _error: Option<&str>) -> String {
-        current.to_owned()
+    fn failure_line(&self, current: &str, error: Option<&str>) -> String {
+        crate::activity::failure_line(current, error)
     }
 
     async fn say(&self, text: &str) {
