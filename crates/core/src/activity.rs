@@ -1,8 +1,9 @@
-use pico_core::{
+use serde::Deserialize;
+
+use crate::{
     omp::protocol::ToolCall,
     render::{first_line, truncate},
 };
-use serde::Deserialize;
 
 #[derive(Debug, Clone)]
 pub(crate) enum ToolCallStart<'a> {
@@ -444,7 +445,7 @@ mod tests {
     use super::*;
 
     fn line(name: &str, args: serde_json::Value) -> String {
-        let call = pico_core::omp::protocol::ToolCall {
+        let call = crate::omp::protocol::ToolCall {
             tool_call_id: "id".to_owned(),
             tool_name: name.to_owned(),
             args,

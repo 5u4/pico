@@ -1,8 +1,8 @@
 use std::{sync::Arc, time::Duration};
 
-use color_eyre::eyre::{WrapErr, bail, eyre};
+use color_eyre::eyre::WrapErr;
 use pico_core::{
-    bindings::{Binding, BindingKind},
+    bindings::BindingKind,
     cancel::CancelRegistry,
     config::StreamingBehavior,
     mid_turn::MidTurnQueue,
@@ -12,8 +12,6 @@ use pico_core::{
 use pico_shared::proto;
 use poise::serenity_prelude as serenity;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
-
-use crate::config::GuildDefault;
 
 pub(crate) struct Data {
     root: Arc<std::path::PathBuf>,
@@ -150,13 +148,14 @@ async fn schedule_command(ctx: Context<'_>) -> Result<(), Error> {
         ctx.say("Schedules only exist inside a configured server.").await?;
         return Ok(());
     };
-    let schedules = match pico_core::schedule::list(&ctx.data().root, "discord", &guild_id.to_string()).await {
-        Ok(schedules) => schedules,
-        Err(e) => {
-            ctx.say(format!("error reading schedules: {e}")).await?;
-            return Ok(());
-        }
-    };
+    let schedules =
+        match pico_core::schedule::list(&ctx.data().root, crate::consts::PLATFORM, &guild_id.to_string()).await {
+            Ok(schedules) => schedules,
+            Err(e) => {
+                ctx.say(format!("error reading schedules: {e}")).await?;
+                return Ok(());
+            }
+        };
     if schedules.is_empty() {
         ctx.say("No schedules for this server.").await?;
         return Ok(());
@@ -172,7 +171,7 @@ async fn schedule_command(ctx: Context<'_>) -> Result<(), Error> {
             s.next_run_at.to_rfc3339()
         ));
     }
-    let body = pico_core::render::truncate(&pico_core::render::defang_mentions(&body), MSG_CONTENT_CAP);
+    let body = pico_core::render::truncate(&pico_core::render::defang_mentions(&body), crate::consts::MSG_CONTENT_CAP);
     ctx.say(body).await?;
     Ok(())
 }
@@ -188,7 +187,10 @@ fn schedule_state_label(state: pico_core::schedule::State) -> &'static str {
 #[poise::command(slash_command, rename = "cancel")]
 async fn cancel_turn(ctx: Context<'_>) -> Result<(), Error> {
     let thread_id = ctx.channel_id().to_string();
-    let accepted = ctx.data().cancels.request(&ConversationId::new("discord", &thread_id));
+    let accepted = ctx
+        .data()
+        .cancels
+        .request(&ConversationId::new(crate::consts::PLATFORM, &thread_id));
     tracing::debug!(%thread_id, accepted, "cancel requested");
     if accepted {
         ctx.say("🛑 Turn cancelled.").await?;
@@ -231,7 +233,6 @@ async fn busy_queue(
     deliver_busy(ctx, StreamingBehavior::Queue, message).await
 }
 
-const MSG_CONTENT_CAP: usize = 1900;
 const REPLY_BUDGET: usize = 1800;
 
 fn render_reply(text: &str, as_reply: bool, silent: bool) -> Vec<(String, pico_core::surface::PostOpts)> {
@@ -302,7 +303,7 @@ async fn deliver_busy(ctx: Context<'_>, mode: StreamingBehavior, message: String
         .unwrap_or_else(|| ctx.author().name.clone());
     let wrapped = pico_core::prompt::wrap_discord_message(ctx.author().id.get(), &display_name, &sent_at, text);
 
-    let conv = ConversationId::new("discord", &ctx.channel_id().to_string());
+    let conv = ConversationId::new(crate::consts::PLATFORM, &ctx.channel_id().to_string());
     let delivered = ctx.data().mid_turn.deliver(&conv, &wrapped, Some(mode));
     tracing::debug!(channel_id = %ctx.channel_id(), user_id = %ctx.author().id, mode = ?mode, accepted = delivered.is_some(), "busy deliver");
     match delivered {
@@ -311,7 +312,7 @@ async fn deliver_busy(ctx: Context<'_>, mode: StreamingBehavior, message: String
             let echo = format!("{emoji} `{label}` · {display_name}: {text}");
             ctx.say(pico_core::render::truncate(
                 &pico_core::render::defang_mentions(&echo),
-                MSG_CONTENT_CAP,
+                crate::consts::MSG_CONTENT_CAP,
             ))
             .await?;
         }
@@ -352,7 +353,10 @@ async fn context(ctx: Context<'_>) -> Result<(), Error> {
     ctx.defer().await?;
     match handle.client().context().await {
         Ok(Some(text)) => {
-            let inner = pico_core::render::truncate(&pico_core::render::defang_mentions(&text), MSG_CONTENT_CAP - 8);
+            let inner = pico_core::render::truncate(
+                &pico_core::render::defang_mentions(&text),
+                crate::consts::MSG_CONTENT_CAP - 8,
+            );
             ctx.say(format!("```\n{inner}\n```")).await?;
         }
         Ok(None) => {
@@ -361,7 +365,7 @@ async fn context(ctx: Context<'_>) -> Result<(), Error> {
         Err(e) => {
             ctx.say(pico_core::render::truncate(
                 &pico_core::render::defang_mentions(&format!("❌ {e}")),
-                MSG_CONTENT_CAP,
+                crate::consts::MSG_CONTENT_CAP,
             ))
             .await?;
         }
@@ -383,7 +387,7 @@ async fn shake(
     if ctx
         .data()
         .cancels
-        .is_active(&ConversationId::new("discord", &thread_id))
+        .is_active(&ConversationId::new(crate::consts::PLATFORM, &thread_id))
     {
         ctx.say("A turn is running in this thread — /cancel it first.").await?;
         return Ok(());
@@ -403,7 +407,7 @@ async fn shake(
         Ok(Some(text)) => {
             ctx.say(pico_core::render::truncate(
                 &pico_core::render::defang_mentions(&text),
-                MSG_CONTENT_CAP,
+                crate::consts::MSG_CONTENT_CAP,
             ))
             .await?;
         }
@@ -413,7 +417,7 @@ async fn shake(
         Err(e) => {
             ctx.say(pico_core::render::truncate(
                 &pico_core::render::defang_mentions(&format!("❌ {e}")),
-                MSG_CONTENT_CAP,
+                crate::consts::MSG_CONTENT_CAP,
             ))
             .await?;
         }
@@ -435,7 +439,7 @@ async fn compact(
     if ctx
         .data()
         .cancels
-        .is_active(&ConversationId::new("discord", &thread_id))
+        .is_active(&ConversationId::new(crate::consts::PLATFORM, &thread_id))
     {
         ctx.say("A turn is running in this thread — /cancel it first.").await?;
         return Ok(());
@@ -451,7 +455,7 @@ async fn compact(
         Ok(Some(text)) => {
             ctx.say(pico_core::render::truncate(
                 &pico_core::render::defang_mentions(&text),
-                MSG_CONTENT_CAP,
+                crate::consts::MSG_CONTENT_CAP,
             ))
             .await?;
         }
@@ -461,7 +465,7 @@ async fn compact(
         Err(e) => {
             ctx.say(pico_core::render::truncate(
                 &pico_core::render::defang_mentions(&format!("❌ {e}")),
-                MSG_CONTENT_CAP,
+                crate::consts::MSG_CONTENT_CAP,
             ))
             .await?;
         }
@@ -472,7 +476,7 @@ async fn compact(
 #[poise::command(slash_command, rename = "dev-deploy")]
 async fn dev_deploy(ctx: Context<'_>) -> Result<(), Error> {
     let thread_id = ctx.channel_id().to_string();
-    let Some(marker) = pico_core::thread_marker::load(&ctx.data().db, "discord", &thread_id).await else {
+    let Some(marker) = pico_core::thread_marker::load(&ctx.data().db, crate::consts::PLATFORM, &thread_id).await else {
         ctx.say("❌ this thread has no working dir yet — send it a message first, then retry.")
             .await?;
         return Ok(());
@@ -502,30 +506,11 @@ async fn update(ctx: Context<'_>) -> Result<(), Error> {
     };
     ctx.say(format!("⬇️ updating `{}` to origin/main…", repo.display()))
         .await?;
-    if let Err(e) = update_repo(&repo).await {
+    if let Err(e) = pico_core::deploy::update_repo(&repo).await {
         ctx.say(format!("❌ update failed: {e:#}")).await?;
         return Ok(());
     }
     build_and_deploy(ctx, repo, "latest origin/main").await
-}
-
-async fn request_deploy(
-    socket: &std::path::Path,
-    path: std::path::PathBuf,
-    report_to: Option<String>,
-) -> color_eyre::Result<proto::Response> {
-    let stream = tokio::time::timeout(Duration::from_secs(5), tokio::net::UnixStream::connect(socket))
-        .await
-        .map_err(|_| eyre!("connecting to supervisor timed out"))?
-        .wrap_err("connect to supervisor socket")?;
-    let (read_half, mut write_half) = stream.into_split();
-    proto::write_frame(&mut write_half, &proto::Request::Deploy { path, report_to }).await?;
-    let mut reader = tokio::io::BufReader::new(read_half);
-    tokio::time::timeout(Duration::from_secs(180), proto::read_frame::<proto::Response, _>(&mut reader))
-        .await
-        .map_err(|_| eyre!("deploy did not complete within 180s"))?
-        .wrap_err("read deploy response")?
-        .ok_or_else(|| eyre!("supervisor closed the connection without replying"))
 }
 
 pub(crate) async fn post_deploy_report(http: &Arc<serenity::Http>, report: proto::DeployReport) {
@@ -552,7 +537,7 @@ async fn build_and_deploy(ctx: Context<'_>, build_dir: std::path::PathBuf, what:
     ))
     .await?;
     let report_to = ctx.channel_id().get().to_string();
-    let bin = match build_worker(&build_dir).await {
+    let bin = match pico_core::deploy::build_worker(&build_dir).await {
         Ok(bin) => bin,
         Err(e) => {
             ctx.channel_id()
@@ -561,7 +546,7 @@ async fn build_and_deploy(ctx: Context<'_>, build_dir: std::path::PathBuf, what:
             return Ok(());
         }
     };
-    match request_deploy(&socket, bin, Some(report_to)).await {
+    match pico_core::deploy::request_deploy(&socket, bin, Some(report_to)).await {
         Ok(proto::Response::Ok { detail }) => {
             tracing::info!(%detail, "deploy ok; outcome relayed to channel");
         }
@@ -581,155 +566,6 @@ async fn build_and_deploy(ctx: Context<'_>, build_dir: std::path::PathBuf, what:
                 .await?;
         }
     }
-    Ok(())
-}
-
-static DEPLOY_BUILD_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-const BUILD_TIMEOUT: Duration = Duration::from_secs(30 * 60);
-
-async fn build_worker(build_dir: &std::path::Path) -> color_eyre::Result<std::path::PathBuf> {
-    let target_dir = pico_shared::paths::pico_build_target_dir()?;
-    let _build = DEPLOY_BUILD_LOCK.lock().await;
-    let child = tokio::process::Command::new("cargo")
-        .args(["build", "--release", "-p", "pico-worker", "--target-dir"])
-        .arg(&target_dir)
-        .current_dir(build_dir)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .wrap_err("spawn cargo build")?;
-    let out = match tokio::time::timeout(BUILD_TIMEOUT, child.wait_with_output()).await {
-        Ok(res) => res.wrap_err("wait for cargo build")?,
-        Err(_) => bail!("cargo build timed out after {}s", BUILD_TIMEOUT.as_secs()),
-    };
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        let tail: String = stderr
-            .chars()
-            .rev()
-            .take(1500)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect();
-        bail!("cargo build failed ({}):\n{tail}", out.status);
-    }
-    install_cli(build_dir, &target_dir).await;
-    bun_install_host(build_dir).await;
-    snapshot(&target_dir).await
-}
-
-async fn install_cli(build_dir: &std::path::Path, target_dir: &std::path::Path) {
-    let root = match pico_shared::paths::local_install_root() {
-        Ok(root) => root,
-        Err(e) => {
-            tracing::warn!(error = %format!("{e:#}"), "cannot resolve local install root; skipping pico CLI install");
-            return;
-        }
-    };
-    let child = tokio::process::Command::new("cargo")
-        .args(["install", "--locked", "--path"])
-        .arg(build_dir.join("crates").join("cli"))
-        .arg("--root")
-        .arg(&root)
-        .arg("--target-dir")
-        .arg(target_dir)
-        .arg("--force")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
-        .spawn();
-    let child = match child {
-        Ok(child) => child,
-        Err(e) => {
-            tracing::warn!(error = %format!("{e:#}"), "spawning `cargo install` for pico CLI failed; schedule extension may not find pico");
-            return;
-        }
-    };
-    match tokio::time::timeout(BUILD_TIMEOUT, child.wait_with_output()).await {
-        Ok(Ok(out)) if out.status.success() => tracing::info!("pico CLI install ok"),
-        Ok(Ok(out)) => {
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            tracing::warn!(status = %out.status, %stderr, "pico CLI `cargo install` failed; schedule extension may not find pico");
-        }
-        Ok(Err(e)) => tracing::warn!(error = %format!("{e:#}"), "waiting on pico CLI `cargo install` failed"),
-        Err(_) => tracing::warn!("pico CLI `cargo install` timed out"),
-    }
-}
-
-async fn bun_install_host(build_dir: &std::path::Path) {
-    let host_dir = build_dir.join("omp-host");
-    let child = tokio::process::Command::new("bun")
-        .arg("install")
-        .current_dir(&host_dir)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
-        .spawn();
-    let child = match child {
-        Ok(child) => child,
-        Err(e) => {
-            tracing::warn!(error = %format!("{e:#}"), dir = %host_dir.display(), "spawning `bun install` for omp-host failed; keeping existing node_modules");
-            return;
-        }
-    };
-    match tokio::time::timeout(BUILD_TIMEOUT, child.wait_with_output()).await {
-        Ok(Ok(out)) if out.status.success() => tracing::info!("omp-host `bun install` ok"),
-        Ok(Ok(out)) => {
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            tracing::warn!(status = %out.status, %stderr, "omp-host `bun install` failed; keeping existing node_modules");
-        }
-        Ok(Err(e)) => {
-            tracing::warn!(error = %format!("{e:#}"), "waiting on omp-host `bun install` failed; keeping existing node_modules")
-        }
-        Err(_) => tracing::warn!("omp-host `bun install` timed out; keeping existing node_modules"),
-    }
-}
-
-async fn snapshot(target_dir: &std::path::Path) -> color_eyre::Result<std::path::PathBuf> {
-    let staging = target_dir.with_file_name("pico-deploy-staging");
-    prune_staging(&staging).await;
-    let id = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)?
-        .as_nanos();
-    let dir = staging.join(id.to_string());
-    tokio::fs::create_dir_all(&dir).await?;
-    let dest = dir.join("pico-worker");
-    tokio::fs::copy(target_dir.join("release").join("pico-worker"), &dest)
-        .await
-        .wrap_err("snapshot built worker")?;
-    Ok(dest)
-}
-
-async fn prune_staging(staging: &std::path::Path) {
-    let Ok(mut entries) = tokio::fs::read_dir(staging).await else {
-        return;
-    };
-    let cutoff = std::time::SystemTime::now() - Duration::from_secs(3600);
-    while let Ok(Some(entry)) = entries.next_entry().await {
-        let stale = entry
-            .metadata()
-            .await
-            .ok()
-            .and_then(|m| m.modified().ok())
-            .is_some_and(|m| m < cutoff);
-        if stale {
-            let _ = tokio::fs::remove_dir_all(entry.path()).await;
-        }
-    }
-}
-
-async fn update_repo(repo: &std::path::Path) -> color_eyre::Result<()> {
-    if !repo.join(".git").exists() {
-        bail!("{} is not a git checkout", repo.display());
-    }
-    pico_core::worktree::run_git(repo, ["fetch", "origin"], Duration::from_secs(120)).await?;
-    pico_core::worktree::run_git(repo, ["reset", "--hard", "origin/main"], Duration::from_secs(30)).await?;
     Ok(())
 }
 
@@ -758,7 +594,7 @@ async fn bind_set(
     }
     match pico_core::bindings::set_regular(
         &data.db,
-        "discord",
+        crate::consts::PLATFORM,
         &channel.to_string(),
         &profile,
         std::path::Path::new(&cwd),
@@ -799,8 +635,15 @@ async fn bind_worktree(
         ctx.say(format!("not a usable worktree base: {e}")).await?;
         return Ok(());
     }
-    match pico_core::bindings::set_worktree(&data.db, "discord", &channel.to_string(), &profile, &base_path, &branch)
-        .await
+    match pico_core::bindings::set_worktree(
+        &data.db,
+        crate::consts::PLATFORM,
+        &channel.to_string(),
+        &profile,
+        &base_path,
+        &branch,
+    )
+    .await
     {
         Ok(()) => {
             ctx.say(format!(
@@ -820,7 +663,7 @@ async fn bind_worktree(
 async fn bind_unset(ctx: Context<'_>) -> Result<(), Error> {
     let data = ctx.data();
     let channel = bindable_channel(ctx).await?;
-    match pico_core::bindings::unset(&data.db, "discord", &channel.to_string()).await {
+    match pico_core::bindings::unset(&data.db, crate::consts::PLATFORM, &channel.to_string()).await {
         Ok(true) => {
             ctx.say(format!("unbound <#{channel}>")).await?;
             tracing::info!(channel_id = %channel, user_id = %ctx.author().id, "binding cleared");
@@ -839,7 +682,7 @@ async fn bind_unset(ctx: Context<'_>) -> Result<(), Error> {
 async fn bind_show(ctx: Context<'_>) -> Result<(), Error> {
     let data = ctx.data();
     let channel = bindable_channel(ctx).await?;
-    let reply = match pico_core::bindings::get(&data.db, "discord", &channel.to_string()).await {
+    let reply = match pico_core::bindings::get(&data.db, crate::consts::PLATFORM, &channel.to_string()).await {
         Ok(Some(b)) => match &b.kind {
             BindingKind::Regular { cwd } => {
                 format!("<#{channel}> → profile `{}`, cwd `{}`", b.profile, cwd.display())
@@ -887,7 +730,7 @@ async fn worktree_close(ctx: Context<'_>) -> Result<(), Error> {
     let thread_id = ctx.channel_id().to_string();
     ctx.defer_ephemeral().await?;
 
-    let marker = match pico_core::thread_marker::load(&data.db, "discord", &thread_id).await {
+    let marker = match pico_core::thread_marker::load(&data.db, crate::consts::PLATFORM, &thread_id).await {
         Some(marker) if marker.worktree.is_some() => marker,
         _ => {
             ctx.say("❌ not a worktree thread; nothing to close.").await?;
@@ -926,7 +769,9 @@ async fn worktree_close(ctx: Context<'_>) -> Result<(), Error> {
     }
 
     let closed_at = serenity::Timestamp::now().to_string();
-    if let Err(e) = pico_core::thread_marker::tombstone(&data.db, "discord", &thread_id, marker, closed_at).await {
+    if let Err(e) =
+        pico_core::thread_marker::tombstone(&data.db, crate::consts::PLATFORM, &thread_id, marker, closed_at).await
+    {
         ctx.say(format!(
             "❌ worktree removed, but writing the closed marker failed: {e} — retry to finish."
         ))
@@ -1053,41 +898,6 @@ async fn on_event(
     Ok(())
 }
 
-pub(crate) enum Route {
-    Regular {
-        profile: String,
-        cwd: std::path::PathBuf,
-    },
-    Worktree {
-        profile: String,
-        base_repo: std::path::PathBuf,
-        default_branch: String,
-    },
-}
-
-pub(crate) fn resolve_route(guild_default: &GuildDefault, binding: Option<&Binding>) -> Route {
-    match binding {
-        Some(b) => match &b.kind {
-            BindingKind::Regular { cwd } => Route::Regular {
-                profile: b.profile.clone(),
-                cwd: cwd.clone(),
-            },
-            BindingKind::Worktree {
-                base_repo,
-                default_branch,
-            } => Route::Worktree {
-                profile: b.profile.clone(),
-                base_repo: base_repo.clone(),
-                default_branch: default_branch.clone(),
-            },
-        },
-        None => Route::Regular {
-            profile: guild_default.profile.clone(),
-            cwd: guild_default.cwd.clone(),
-        },
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 async fn route_message(
     ctx: serenity::Context,
@@ -1152,17 +962,21 @@ async fn route_message(
     let wrapped = pico_core::prompt::wrap_discord_message(message.author.id.get(), &display_name, &sent_at, prompt);
 
     if in_thread
-        && let Some(mode) = mid_turn.deliver(&ConversationId::new("discord", &channel.id.to_string()), &wrapped, None)
+        && let Some(mode) = mid_turn.deliver(
+            &ConversationId::new(crate::consts::PLATFORM, &channel.id.to_string()),
+            &wrapped,
+            None,
+        )
     {
         react_queued(&ctx, &message, mode).await;
         return Ok(());
     }
 
-    let binding = pico_core::bindings::get(&db, "discord", &bound_channel.to_string()).await?;
-    let route = resolve_route(guild_default, binding.as_ref());
+    let binding = pico_core::bindings::get(&db, crate::consts::PLATFORM, &bound_channel.to_string()).await?;
+    let route = pico_core::bindings::resolve_route(binding.as_ref(), &guild_default.profile, &guild_default.cwd);
 
     if !in_thread
-        && let Route::Regular { cwd, .. } = &route
+        && let pico_core::bindings::Route::Regular { cwd, .. } = &route
         && !cwd.is_dir()
     {
         message
@@ -1191,7 +1005,9 @@ async fn route_message(
     };
     let thread_id = target.to_string();
 
-    let (profile, cwd, worktree_origin) = match pico_core::thread_marker::load(&db, "discord", &thread_id).await {
+    let (profile, cwd, worktree_origin) = match pico_core::thread_marker::load(&db, crate::consts::PLATFORM, &thread_id)
+        .await
+    {
         Some(marker) => {
             if let Some(closed_at) = &marker.closed_at {
                 target
@@ -1225,7 +1041,7 @@ async fn route_message(
         }
         None => {
             let (profile, cwd, worktree) = match route {
-                Route::Regular { profile, cwd } => {
+                pico_core::bindings::Route::Regular { profile, cwd } => {
                     if !cwd.is_dir() {
                         target
                             .say(
@@ -1240,7 +1056,7 @@ async fn route_message(
                     }
                     (profile, cwd, None)
                 }
-                Route::Worktree {
+                pico_core::bindings::Route::Worktree {
                     profile,
                     base_repo,
                     default_branch,
@@ -1251,6 +1067,7 @@ async fn route_message(
                         .unwrap_or_else(|| pico_shared::paths::default_worktrees_dir(root.as_path()));
                     match pico_core::worktree::ensure(
                         &worktrees_dir,
+                        crate::consts::PLATFORM,
                         &bound_channel.to_string(),
                         &thread_id,
                         &base_repo,
@@ -1275,7 +1092,7 @@ async fn route_message(
             };
             pico_core::thread_marker::save(
                 &db,
-                "discord",
+                crate::consts::PLATFORM,
                 &thread_id,
                 &pico_core::thread_marker::ThreadMarker {
                     profile: profile.clone(),
@@ -1363,7 +1180,7 @@ pub(crate) struct TurnInputs<'a> {
     pub(crate) bound_channel: serenity::ChannelId,
     pub(crate) channel_name: Option<String>,
     pub(crate) thread_label: String,
-    pub(crate) render: crate::config::Render,
+    pub(crate) render: pico_core::config::Render,
     pub(crate) timezone: chrono_tz::Tz,
 }
 
@@ -1401,7 +1218,7 @@ pub(crate) async fn drive_thread_turn(
     let channel_line = pico_core::prompt::id_value(bound_channel.get(), channel_name.as_deref());
     let thread_line = pico_core::prompt::id_value(target.get(), Some(&thread_label));
     let context_block = pico_core::prompt::runtime_context_block(&pico_core::prompt::RuntimeContext {
-        platform: "discord",
+        platform: crate::consts::PLATFORM,
         extra: &[("guild", guild_line)],
         channel: &channel_line,
         thread: &thread_line,
@@ -1413,13 +1230,13 @@ pub(crate) async fn drive_thread_turn(
         timezone,
     });
     let identity = pico_core::omp::client::SessionIdentity {
-        platform: "discord".to_owned(),
+        platform: crate::consts::PLATFORM.to_owned(),
         guild: guild_id.get().to_string(),
         channel: bound_channel.get().to_string(),
         thread: thread_id.clone(),
         user: author.get().to_string(),
     };
-    let conversation = ConversationId::new("discord", &thread_id);
+    let conversation = ConversationId::new(crate::consts::PLATFORM, &thread_id);
     let surface = DiscordSurface {
         ctx: ctx.clone(),
         channel: target,
@@ -1509,19 +1326,6 @@ impl pico_core::surface::Surface for DiscordSurface {
             activity_char_cap: 1800,
             activity_send_max: 1990,
         }
-    }
-
-    fn tool_activity_line(&self, call: &pico_core::omp::protocol::ToolCall) -> Option<String> {
-        Some(crate::activity::tool_activity_line(&crate::activity::ToolCallStart::from(call)))
-    }
-
-    fn thinking_line(&self, content: &str) -> Option<String> {
-        let line = crate::activity::thinking_line(content);
-        (!line.is_empty()).then_some(line)
-    }
-
-    fn failure_line(&self, current: &str, error: Option<&str>) -> String {
-        crate::activity::failure_line(current, error)
     }
 
     async fn post(&self, text: &str, opts: pico_core::surface::PostOpts) -> Option<serenity::MessageId> {
@@ -1634,8 +1438,8 @@ mod tests {
     fn binding_wins_over_guild_default() {
         let d = guild_default("default", "/default");
         let b = binding("sen", "/work");
-        match super::resolve_route(&d, Some(&b)) {
-            super::Route::Regular { profile, cwd } => {
+        match pico_core::bindings::resolve_route(Some(&b), &d.profile, &d.cwd) {
+            pico_core::bindings::Route::Regular { profile, cwd } => {
                 assert_eq!(profile, "sen");
                 assert_eq!(cwd, PathBuf::from("/work"));
             }
@@ -1646,8 +1450,8 @@ mod tests {
     #[test]
     fn unbound_channel_uses_guild_default() {
         let d = guild_default("default", "/default");
-        match super::resolve_route(&d, None) {
-            super::Route::Regular { profile, cwd } => {
+        match pico_core::bindings::resolve_route(None, &d.profile, &d.cwd) {
+            pico_core::bindings::Route::Regular { profile, cwd } => {
                 assert_eq!(profile, "default");
                 assert_eq!(cwd, PathBuf::from("/default"));
             }
@@ -1665,8 +1469,8 @@ mod tests {
                 default_branch: "trunk".to_owned(),
             },
         };
-        match super::resolve_route(&d, Some(&b)) {
-            super::Route::Worktree {
+        match pico_core::bindings::resolve_route(Some(&b), &d.profile, &d.cwd) {
+            pico_core::bindings::Route::Worktree {
                 profile,
                 base_repo,
                 default_branch,

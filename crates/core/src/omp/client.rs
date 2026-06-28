@@ -74,29 +74,33 @@ pub struct OmpSessionHandle {
     session_id: String,
 }
 
-fn resolve_host_entry(explicit: Option<PathBuf>, home: Option<PathBuf>) -> PathBuf {
-    explicit.unwrap_or_else(|| home.unwrap_or_default().join(".pico/agent/omp-host/host.ts"))
+fn resolve_host_entry(explicit: Option<PathBuf>, pico_home: Option<PathBuf>) -> PathBuf {
+    explicit.unwrap_or_else(|| pico_home.unwrap_or_default().join("agent/omp-host/host.ts"))
+}
+
+fn pico_home_base() -> Option<PathBuf> {
+    match pico_shared::paths::pico_home() {
+        Ok(path) => Some(path),
+        Err(e) => {
+            tracing::warn!(error = %format!("{e:#}"), "resolving PICO_HOME failed; omp host path falls back to .pico");
+            Some(PathBuf::from(".pico"))
+        }
+    }
 }
 
 fn host_entry() -> PathBuf {
-    resolve_host_entry(
-        std::env::var_os(HOST_ENTRY_ENV).map(PathBuf::from),
-        std::env::var_os("HOME").map(PathBuf::from),
-    )
+    resolve_host_entry(std::env::var_os(HOST_ENTRY_ENV).map(PathBuf::from), pico_home_base())
 }
 
-fn resolve_omp_host_dir(explicit: Option<PathBuf>, home: Option<PathBuf>) -> PathBuf {
-    resolve_host_entry(explicit, home)
+fn resolve_omp_host_dir(explicit: Option<PathBuf>, pico_home: Option<PathBuf>) -> PathBuf {
+    resolve_host_entry(explicit, pico_home)
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_default()
 }
 
 pub fn omp_host_dir() -> PathBuf {
-    resolve_omp_host_dir(
-        std::env::var_os(HOST_ENTRY_ENV).map(PathBuf::from),
-        std::env::var_os("HOME").map(PathBuf::from),
-    )
+    resolve_omp_host_dir(std::env::var_os(HOST_ENTRY_ENV).map(PathBuf::from), pico_home_base())
 }
 
 fn resolve_locked_omp_cli(host_dir: &Path) -> PathBuf {
@@ -661,9 +665,9 @@ mod tests {
     }
 
     #[test]
-    fn resolve_host_entry_defaults_under_home() {
+    fn resolve_host_entry_defaults_under_pico_home() {
         assert_eq!(
-            resolve_host_entry(None, Some(PathBuf::from("/home/u"))),
+            resolve_host_entry(None, Some(PathBuf::from("/home/u/.pico"))),
             PathBuf::from("/home/u/.pico/agent/omp-host/host.ts"),
         );
     }
@@ -677,9 +681,9 @@ mod tests {
     }
 
     #[test]
-    fn resolve_omp_host_dir_defaults_under_home() {
+    fn resolve_omp_host_dir_defaults_under_pico_home() {
         assert_eq!(
-            resolve_omp_host_dir(None, Some(PathBuf::from("/home/u"))),
+            resolve_omp_host_dir(None, Some(PathBuf::from("/home/u/.pico"))),
             PathBuf::from("/home/u/.pico/agent/omp-host"),
         );
     }

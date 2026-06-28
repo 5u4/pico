@@ -14,6 +14,12 @@ pub enum StreamingBehavior {
     Queue,
 }
 
+#[derive(Clone, Copy)]
+pub struct Render {
+    pub surface_thinking: bool,
+    pub streaming_behavior: StreamingBehavior,
+}
+
 pub struct ProfileConfig {
     pub model: Option<String>,
     pub browser_enabled: bool,

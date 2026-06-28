@@ -8,7 +8,7 @@ use serde::Deserialize;
 
 pub struct DiscordConfig {
     guilds: HashMap<String, GuildDefault>,
-    render: Render,
+    render: pico_core::config::Render,
 }
 
 pub struct GuildDefault {
@@ -17,18 +17,12 @@ pub struct GuildDefault {
     pub home_channel: Option<String>,
 }
 
-#[derive(Clone, Copy)]
-pub struct Render {
-    pub surface_thinking: bool,
-    pub streaming_behavior: StreamingBehavior,
-}
-
 impl DiscordConfig {
     pub fn guild(&self, guild_id: &str) -> Option<&GuildDefault> {
         self.guilds.get(guild_id)
     }
 
-    pub fn render(&self) -> Render {
+    pub fn render(&self) -> pico_core::config::Render {
         self.render
     }
 }
@@ -112,17 +106,14 @@ pub fn load(path: &Path) -> color_eyre::Result<DiscordConfig> {
         );
     }
 
-    let render = raw.render.map(Render::from).unwrap_or(Render {
-        surface_thinking: false,
-        streaming_behavior: StreamingBehavior::default(),
-    });
+    let render = raw.render.unwrap_or_default().into();
 
     Ok(DiscordConfig { guilds, render })
 }
 
-impl From<RawRender> for Render {
+impl From<RawRender> for pico_core::config::Render {
     fn from(raw: RawRender) -> Self {
-        Render {
+        pico_core::config::Render {
             surface_thinking: raw.surface_thinking,
             streaming_behavior: raw.streaming_behavior,
         }

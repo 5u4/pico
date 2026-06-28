@@ -14,7 +14,7 @@ pub struct App {
 
 impl App {
     pub async fn build(root: &Path, supervisor_socket: Option<std::path::PathBuf>) -> color_eyre::Result<App> {
-        let token = read_secret(root, "discord_bot_token")?;
+        let token = pico_shared::secret::read_secret(root, "discord_bot_token")?;
         let db = pico_core::db::open(root).await.wrap_err("opening worker database")?;
         match crate::approval::reconcile_pending_aborted(&db).await {
             Ok(0) => {}
@@ -103,16 +103,6 @@ impl App {
     }
 }
 
-fn read_secret(root: &Path, name: &str) -> color_eyre::Result<String> {
-    let path = pico_shared::paths::worker_secret(root, name);
-    let raw = std::fs::read_to_string(&path).wrap_err_with(|| format!("read secret {}", path.display()))?;
-    let value = raw.trim();
-    if value.is_empty() {
-        color_eyre::eyre::bail!("secret {} is empty", path.display());
-    }
-    Ok(value.to_owned())
-}
-
 #[cfg(test)]
 mod tests {
     use std::{
@@ -136,21 +126,21 @@ mod tests {
     fn reads_and_trims_surrounding_whitespace() {
         let root = tmp_root();
         write_secret(&root, "  abc123\n");
-        assert_eq!(super::read_secret(&root, "discord_bot_token").unwrap(), "abc123");
+        assert_eq!(pico_shared::secret::read_secret(&root, "discord_bot_token").unwrap(), "abc123");
         std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
     fn missing_secret_errors() {
         let root = tmp_root();
-        assert!(super::read_secret(&root, "discord_bot_token").is_err());
+        assert!(pico_shared::secret::read_secret(&root, "discord_bot_token").is_err());
     }
 
     #[test]
     fn whitespace_only_secret_errors() {
         let root = tmp_root();
         write_secret(&root, "   \n");
-        assert!(super::read_secret(&root, "discord_bot_token").is_err());
+        assert!(pico_shared::secret::read_secret(&root, "discord_bot_token").is_err());
         std::fs::remove_dir_all(&root).ok();
     }
 }

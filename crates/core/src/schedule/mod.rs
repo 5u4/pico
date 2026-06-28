@@ -202,6 +202,7 @@ pub struct Definition {
 }
 
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct DefinitionToml {
     name: String,
     created_by: String,
@@ -223,6 +224,7 @@ enum TriggerToml {
 }
 
 #[derive(Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 struct RuntimeState {
     #[serde(default)]
     next_run_at: Option<String>,

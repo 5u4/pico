@@ -1,7 +1,9 @@
+mod activity;
 pub mod bindings;
 pub mod cancel;
 pub mod config;
 pub mod db;
+pub mod deploy;
 pub mod engine;
 pub mod mid_turn;
 pub mod omp;

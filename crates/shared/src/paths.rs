@@ -66,8 +66,8 @@ pub fn profile_identity(root: &Path, name: &str) -> PathBuf {
     profile_dir(root, name).join("identity.md")
 }
 
-pub fn profile_session_dir(root: &Path, name: &str, thread_id: &str) -> PathBuf {
-    profile_dir(root, name).join("sessions").join(thread_id)
+pub fn profile_session_dir(root: &Path, name: &str, platform: &str, thread_id: &str) -> PathBuf {
+    profile_dir(root, name).join("sessions").join(platform).join(thread_id)
 }
 
 pub fn default_worktrees_dir(root: &Path) -> PathBuf {

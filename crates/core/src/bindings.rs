@@ -15,6 +15,41 @@ pub enum BindingKind {
 
 pub const DEFAULT_BRANCH: &str = "origin/main";
 
+pub enum Route {
+    Regular {
+        profile: String,
+        cwd: PathBuf,
+    },
+    Worktree {
+        profile: String,
+        base_repo: PathBuf,
+        default_branch: String,
+    },
+}
+
+pub fn resolve_route(binding: Option<&Binding>, fallback_profile: &str, fallback_cwd: &Path) -> Route {
+    match binding {
+        Some(b) => match &b.kind {
+            BindingKind::Regular { cwd } => Route::Regular {
+                profile: b.profile.clone(),
+                cwd: cwd.clone(),
+            },
+            BindingKind::Worktree {
+                base_repo,
+                default_branch,
+            } => Route::Worktree {
+                profile: b.profile.clone(),
+                base_repo: base_repo.clone(),
+                default_branch: default_branch.clone(),
+            },
+        },
+        None => Route::Regular {
+            profile: fallback_profile.to_owned(),
+            cwd: fallback_cwd.to_path_buf(),
+        },
+    }
+}
+
 type Row = (String, String, Option<String>, Option<String>, Option<String>);
 
 pub async fn get(db: &SqlitePool, platform: &str, channel_id: &str) -> color_eyre::Result<Option<Binding>> {

@@ -4,7 +4,6 @@ use clap::Args;
 use pico_core::bindings::{self, Binding, BindingKind, DEFAULT_BRANCH};
 
 const PLATFORM: &str = "cli";
-const DEFAULT_PROFILE: &str = "default";
 
 #[derive(Args)]
 pub struct BindArgs {
@@ -38,7 +37,9 @@ pub async fn run(args: BindArgs) -> color_eyre::Result<()> {
         return Ok(());
     }
 
-    let profile = args.profile.unwrap_or_else(|| DEFAULT_PROFILE.to_owned());
+    let profile = args
+        .profile
+        .unwrap_or_else(|| pico_shared::paths::DEFAULT_PROFILE.to_owned());
     match args.worktree {
         Some(base_repo) => {
             let branch = args.branch.unwrap_or_else(|| DEFAULT_BRANCH.to_owned());
