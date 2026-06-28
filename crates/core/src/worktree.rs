@@ -33,7 +33,7 @@ fn safe_component(channel_id: &str) -> String {
 
 pub fn worktree_path(worktrees_dir: &Path, platform: &str, channel_id: &str, thread_id: &str) -> PathBuf {
     worktrees_dir
-        .join(platform)
+        .join(safe_component(platform))
         .join(safe_component(channel_id))
         .join(thread_id)
 }

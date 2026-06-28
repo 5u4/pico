@@ -78,11 +78,18 @@ fn resolve_host_entry(explicit: Option<PathBuf>, pico_home: Option<PathBuf>) -> 
     explicit.unwrap_or_else(|| pico_home.unwrap_or_default().join("agent/omp-host/host.ts"))
 }
 
+fn pico_home_base() -> Option<PathBuf> {
+    match pico_shared::paths::pico_home() {
+        Ok(path) => Some(path),
+        Err(e) => {
+            tracing::warn!(error = %format!("{e:#}"), "resolving PICO_HOME failed; omp host path falls back to .pico");
+            Some(PathBuf::from(".pico"))
+        }
+    }
+}
+
 fn host_entry() -> PathBuf {
-    resolve_host_entry(
-        std::env::var_os(HOST_ENTRY_ENV).map(PathBuf::from),
-        pico_shared::paths::pico_home().ok(),
-    )
+    resolve_host_entry(std::env::var_os(HOST_ENTRY_ENV).map(PathBuf::from), pico_home_base())
 }
 
 fn resolve_omp_host_dir(explicit: Option<PathBuf>, pico_home: Option<PathBuf>) -> PathBuf {
@@ -93,10 +100,7 @@ fn resolve_omp_host_dir(explicit: Option<PathBuf>, pico_home: Option<PathBuf>) -
 }
 
 pub fn omp_host_dir() -> PathBuf {
-    resolve_omp_host_dir(
-        std::env::var_os(HOST_ENTRY_ENV).map(PathBuf::from),
-        pico_shared::paths::pico_home().ok(),
-    )
+    resolve_omp_host_dir(std::env::var_os(HOST_ENTRY_ENV).map(PathBuf::from), pico_home_base())
 }
 
 fn resolve_locked_omp_cli(host_dir: &Path) -> PathBuf {
