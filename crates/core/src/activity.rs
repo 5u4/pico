@@ -42,8 +42,8 @@ impl<'a> From<&'a ToolCall> for ToolCallStart<'a> {
     fn from(call: &'a ToolCall) -> Self {
         match call.tool_name.as_str() {
             "read" => Self::Read(call),
-            "search" => Self::Search(call),
-            "find" => Self::Find(call),
+            "grep" => Self::Search(call),
+            "glob" => Self::Find(call),
             "lsp" => Self::Lsp(call),
             "edit" => Self::Edit(call),
             "write" => Self::Write(call),
@@ -458,7 +458,7 @@ mod tests {
     fn tool_lines_pick_emoji_and_primary_arg() {
         use serde_json::json;
         assert_eq!(line("read", json!({ "paths": ["a.rs", "b.rs"] })), "🔍 a.rs");
-        assert_eq!(line("search", json!({ "pattern": "TODO" })), "🔍 TODO");
+        assert_eq!(line("grep", json!({ "pattern": "TODO" })), "🔍 TODO");
         assert_eq!(line("write", json!({ "path": "x.rs" })), "✏️ x.rs");
         assert_eq!(line("bash", json!({ "command": "echo hi\nrm -rf" })), "💻 echo hi");
         assert_eq!(
@@ -551,11 +551,11 @@ mod tests {
     }
 
     #[test]
-    fn search_tolerates_string_or_array_paths() {
+    fn grep_tolerates_string_or_array_paths() {
         use serde_json::json;
-        assert_eq!(line("search", json!({ "pattern": "TODO", "paths": "src" })), "🔍 TODO");
-        assert_eq!(line("search", json!({ "pattern": "TODO", "paths": ["src", "lib"] })), "🔍 TODO");
-        assert_eq!(line("find", json!({ "paths": "src/**/*.rs" })), "🔍 src/**/*.rs");
+        assert_eq!(line("grep", json!({ "pattern": "TODO", "paths": "src" })), "🔍 TODO");
+        assert_eq!(line("grep", json!({ "pattern": "TODO", "paths": ["src", "lib"] })), "🔍 TODO");
+        assert_eq!(line("glob", json!({ "paths": "src/**/*.rs" })), "🔍 src/**/*.rs");
     }
 
     #[test]
