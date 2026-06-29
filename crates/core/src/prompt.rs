@@ -126,8 +126,9 @@ pub fn wrap_discord_message(
         }
     }
     out.push_str(&format!(
-        "<discord-message user_id=\"{user_id}\" name=\"{}\" sent_at=\"{sent_at}\" />\n{content}",
-        escape_attr(display_name)
+        "<discord-message user_id=\"{user_id}\" name=\"{}\" sent_at=\"{}\" />\n{content}",
+        escape_attr(display_name),
+        escape_attr(sent_at)
     ));
     out
 }
