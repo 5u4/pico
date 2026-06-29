@@ -60,6 +60,7 @@ pub fn runtime_context_block(cx: &RuntimeContext<'_>) -> String {
             escape_text(&base_repo.display().to_string()),
             escape_text(default_branch)
         ));
+        out.push_str("worktree edits go to cwd; base_repo is a read-only reference — never edit files under it or via absolute base_repo paths\n");
     }
     out.push_str(&format!(
         "timezone: {} (render user-facing times in this timezone, not UTC)\n",
@@ -190,6 +191,7 @@ mod tests {
         assert!(block.contains("profile: default"));
         assert!(block.contains("cwd: /home/work"));
         assert!(block.contains("worktree: base_repo /home/repo, default_branch main"));
+        assert!(block.contains("base_repo is a read-only reference"));
     }
 
     #[test]
