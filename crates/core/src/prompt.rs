@@ -209,6 +209,7 @@ mod tests {
         assert!(block.contains("guild: id 1"));
         assert!(block.contains("channel: id 2"));
         assert!(!block.contains("worktree:"));
+        assert!(!block.contains("read-only reference"));
     }
 
     #[test]
