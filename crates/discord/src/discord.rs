@@ -301,7 +301,7 @@ async fn deliver_busy(ctx: Context<'_>, mode: StreamingBehavior, message: String
         .and_then(|member| member.nick.clone())
         .or_else(|| ctx.author().global_name.clone())
         .unwrap_or_else(|| ctx.author().name.clone());
-    let wrapped = pico_core::prompt::wrap_discord_message(ctx.author().id.get(), &display_name, &sent_at, text);
+    let wrapped = pico_core::prompt::wrap_discord_message(ctx.author().id.get(), &display_name, &sent_at, text, &[]);
 
     let conv = ConversationId::new(crate::consts::PLATFORM, &ctx.channel_id().to_string());
     let delivered = ctx.data().mid_turn.deliver(&conv, &wrapped, Some(mode));
@@ -913,7 +913,7 @@ async fn route_message(
     message: serenity::Message,
 ) -> color_eyre::Result<()> {
     let prompt = message.content.trim();
-    if prompt.is_empty() {
+    if prompt.is_empty() && message.referenced_message.is_none() && message.message_snapshots.is_empty() {
         return Ok(());
     }
 
@@ -959,7 +959,42 @@ async fn route_message(
     }
     let sent_at = pico_core::prompt::format_sent_at(message.timestamp.unix_timestamp(), root_config.timezone());
     let display_name = sender_display_name(&message);
-    let wrapped = pico_core::prompt::wrap_discord_message(message.author.id.get(), &display_name, &sent_at, prompt);
+    const QUOTE_CONTENT_CAP: usize = 500;
+    let mut quotes: Vec<pico_core::prompt::Quote> = Vec::new();
+    if let Some(ref_msg) = &message.referenced_message {
+        let mut body = pico_core::render::truncate(&ref_msg.content, QUOTE_CONTENT_CAP);
+        if !ref_msg.attachments.is_empty() {
+            if !body.is_empty() {
+                body.push('\n');
+            }
+            body.push_str(&format!("[{} attachment(s)]", ref_msg.attachments.len()));
+        }
+        quotes.push(pico_core::prompt::Quote {
+            kind: pico_core::prompt::QuoteKind::Reply,
+            user_id: Some(ref_msg.author.id.get()),
+            name: Some(sender_display_name(ref_msg)),
+            sent_at: pico_core::prompt::format_sent_at(ref_msg.timestamp.unix_timestamp(), root_config.timezone()),
+            content: body,
+        });
+    }
+    for snap in &message.message_snapshots {
+        let mut body = pico_core::render::truncate(&snap.content, QUOTE_CONTENT_CAP);
+        if !snap.attachments.is_empty() {
+            if !body.is_empty() {
+                body.push('\n');
+            }
+            body.push_str(&format!("[{} attachment(s)]", snap.attachments.len()));
+        }
+        quotes.push(pico_core::prompt::Quote {
+            kind: pico_core::prompt::QuoteKind::Forward,
+            user_id: None,
+            name: None,
+            sent_at: pico_core::prompt::format_sent_at(snap.timestamp.unix_timestamp(), root_config.timezone()),
+            content: body,
+        });
+    }
+    let wrapped =
+        pico_core::prompt::wrap_discord_message(message.author.id.get(), &display_name, &sent_at, prompt, &quotes);
 
     if in_thread
         && let Some(mode) = mid_turn.deliver(
@@ -991,11 +1026,16 @@ async fn route_message(
         return Ok(());
     }
 
+    let title_seed = if prompt.is_empty() {
+        quotes.first().map(|q| q.content.as_str()).unwrap_or(prompt)
+    } else {
+        prompt
+    };
     let target = if in_thread {
         channel.id
     } else {
         match bound_channel
-            .create_thread_from_message(&ctx, message.id, serenity::CreateThread::new(thread_name(prompt)))
+            .create_thread_from_message(&ctx, message.id, serenity::CreateThread::new(thread_name(title_seed)))
             .await
         {
             Ok(thread) => thread.id,
