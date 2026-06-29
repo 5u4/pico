@@ -77,11 +77,60 @@ pub fn id_value(id: u64, name: Option<&str>) -> String {
     }
 }
 
-pub fn wrap_discord_message(user_id: u64, display_name: &str, sent_at: &str, content: &str) -> String {
-    format!(
-        "<discord-message user_id=\"{user_id}\" name=\"{}\" sent_at=\"{sent_at}\" />\n{content}",
-        escape_attr(display_name)
-    )
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuoteKind {
+    Reply,
+    Forward,
+}
+
+#[derive(Debug, Clone)]
+pub struct Quote {
+    pub kind: QuoteKind,
+    pub user_id: Option<u64>,
+    pub name: Option<String>,
+    pub sent_at: String,
+    pub content: String,
+}
+
+pub fn wrap_discord_message(
+    user_id: u64,
+    display_name: &str,
+    sent_at: &str,
+    content: &str,
+    quotes: &[Quote],
+) -> String {
+    let mut out = String::new();
+    for quote in quotes {
+        match quote.kind {
+            QuoteKind::Reply => {
+                out.push_str("<discord-reply");
+                if let Some(uid) = quote.user_id {
+                    out.push_str(&format!(" user_id=\"{uid}\""));
+                }
+                if let Some(name) = &quote.name {
+                    out.push_str(&format!(" name=\"{}\"", escape_attr(name)));
+                }
+                out.push_str(&format!(
+                    " sent_at=\"{}\">\n{}\n</discord-reply>\n",
+                    escape_attr(&quote.sent_at),
+                    escape_text(&quote.content)
+                ));
+            }
+            QuoteKind::Forward => {
+                out.push_str(&format!(
+                    "<discord-forward sent_at=\"{}\">\n{}\n</discord-forward>\n",
+                    escape_attr(&quote.sent_at),
+                    escape_text(&quote.content)
+                ));
+            }
+        }
+    }
+    out.push_str(&format!(
+        "<discord-message user_id=\"{user_id}\" name=\"{}\" sent_at=\"{}\" />\n{content}",
+        escape_attr(display_name),
+        escape_attr(sent_at)
+    ));
+    out
 }
 
 pub fn escape_text(value: &str) -> String {
@@ -270,7 +319,7 @@ mod tests {
 
     #[test]
     fn wrap_discord_message_prefixes_metadata_and_keeps_content_raw() {
-        let wrapped = wrap_discord_message(42, "Victor", "2026-06-23T23:15:42-07:00", "hello <world> & co");
+        let wrapped = wrap_discord_message(42, "Victor", "2026-06-23T23:15:42-07:00", "hello <world> & co", &[]);
         assert_eq!(
             wrapped,
             "<discord-message user_id=\"42\" name=\"Victor\" sent_at=\"2026-06-23T23:15:42-07:00\" />\nhello <world> & co"
@@ -279,9 +328,93 @@ mod tests {
 
     #[test]
     fn wrap_discord_message_escapes_name_attribute_only() {
-        let wrapped = wrap_discord_message(7, "a\"<&>b", "2026-01-01T00:00:00Z", "raw <tag>");
+        let wrapped = wrap_discord_message(7, "a\"<&>b", "2026-01-01T00:00:00Z", "raw <tag>", &[]);
         assert!(wrapped.contains("name=\"a&quot;&lt;&amp;&gt;b\""));
         assert!(wrapped.ends_with("raw <tag>"), "content stays unescaped");
+    }
+
+    #[test]
+    fn wrap_discord_message_renders_reply_quote_with_user_and_name_before_message() {
+        let quote = Quote {
+            kind: QuoteKind::Reply,
+            user_id: Some(99),
+            name: Some("Alice".to_string()),
+            sent_at: "2026-06-23T20:00:00-07:00".to_string(),
+            content: "the original".to_string(),
+        };
+        let wrapped =
+            wrap_discord_message(42, "Victor", "2026-06-23T23:15:42-07:00", "hi", std::slice::from_ref(&quote));
+        assert!(wrapped.starts_with(
+            "<discord-reply user_id=\"99\" name=\"Alice\" sent_at=\"2026-06-23T20:00:00-07:00\">\nthe original\n</discord-reply>\n"
+        ));
+        let reply_at = wrapped.find("<discord-reply").expect("reply present");
+        let message_at = wrapped.find("<discord-message").expect("message present");
+        assert!(reply_at < message_at, "reply must precede the message line");
+    }
+
+    #[test]
+    fn wrap_discord_message_reply_omits_user_and_name_when_none() {
+        let quote = Quote {
+            kind: QuoteKind::Reply,
+            user_id: None,
+            name: None,
+            sent_at: "2026-06-23T20:00:00-07:00".to_string(),
+            content: "anon".to_string(),
+        };
+        let wrapped =
+            wrap_discord_message(42, "Victor", "2026-06-23T23:15:42-07:00", "hi", std::slice::from_ref(&quote));
+        assert!(wrapped.starts_with("<discord-reply sent_at=\"2026-06-23T20:00:00-07:00\">\nanon\n</discord-reply>\n"));
+        assert!(!wrapped.contains("<discord-reply user_id"));
+        assert!(!wrapped.contains("name=\"\""));
+    }
+
+    #[test]
+    fn wrap_discord_message_forward_has_no_author_attrs() {
+        let quote = Quote {
+            kind: QuoteKind::Forward,
+            user_id: Some(5),
+            name: Some("ignored".to_string()),
+            sent_at: "2026-06-23T20:00:00-07:00".to_string(),
+            content: "forwarded body".to_string(),
+        };
+        let wrapped =
+            wrap_discord_message(42, "Victor", "2026-06-23T23:15:42-07:00", "hi", std::slice::from_ref(&quote));
+        assert!(wrapped.starts_with(
+            "<discord-forward sent_at=\"2026-06-23T20:00:00-07:00\">\nforwarded body\n</discord-forward>\n"
+        ));
+        assert!(!wrapped.contains("user_id=\"5\""));
+        assert!(!wrapped.contains("ignored"));
+    }
+
+    #[test]
+    fn wrap_discord_message_escapes_quote_content_and_name() {
+        let quote = Quote {
+            kind: QuoteKind::Reply,
+            user_id: Some(1),
+            name: Some("a\"<b".to_string()),
+            sent_at: "2026-06-23T20:00:00-07:00".to_string(),
+            content: "x <tag> & y".to_string(),
+        };
+        let wrapped =
+            wrap_discord_message(42, "Victor", "2026-06-23T23:15:42-07:00", "hi", std::slice::from_ref(&quote));
+        assert!(wrapped.contains("name=\"a&quot;&lt;b\""));
+        assert!(wrapped.contains(">\nx &lt;tag&gt; &amp; y\n</discord-reply>"));
+    }
+
+    #[test]
+    fn wrap_discord_message_empty_content_with_forward_keeps_trailing_newline() {
+        let quote = Quote {
+            kind: QuoteKind::Forward,
+            user_id: None,
+            name: None,
+            sent_at: "2026-06-23T20:00:00-07:00".to_string(),
+            content: "snap".to_string(),
+        };
+        let wrapped = wrap_discord_message(42, "Victor", "2026-06-23T23:15:42-07:00", "", std::slice::from_ref(&quote));
+        assert_eq!(
+            wrapped,
+            "<discord-forward sent_at=\"2026-06-23T20:00:00-07:00\">\nsnap\n</discord-forward>\n<discord-message user_id=\"42\" name=\"Victor\" sent_at=\"2026-06-23T23:15:42-07:00\" />\n"
+        );
     }
 
     #[test]
