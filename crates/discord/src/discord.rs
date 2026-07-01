@@ -1000,15 +1000,17 @@ async fn route_message(
     let wrapped =
         pico_core::prompt::wrap_discord_message(message.author.id.get(), &display_name, &sent_at, prompt, &quotes);
 
-    if in_thread
-        && let Some(mode) = mid_turn.deliver(
-            &ConversationId::new(crate::consts::PLATFORM, &channel.id.to_string()),
-            &wrapped,
-            None,
-        )
-    {
-        react_queued(&ctx, &message, mode).await;
-        return Ok(());
+    if in_thread {
+        let conversation = ConversationId::new(crate::consts::PLATFORM, &channel.id.to_string());
+        if !prompt.is_empty() || !quotes.is_empty() {
+            if let Some(mode) = mid_turn.deliver(&conversation, &wrapped, None) {
+                react_queued(&ctx, &message, mode).await;
+                return Ok(());
+            }
+        } else if mid_turn.is_active(&conversation) {
+            react_unsupported(&ctx, &message).await;
+            return Ok(());
+        }
     }
 
     const MAX_IMAGES: usize = 8;
@@ -1028,10 +1030,7 @@ async fn route_message(
                 let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
                 let mime_type = att.content_type.clone().unwrap_or_else(|| "image/png".to_owned());
                 images.push(pico_core::omp::protocol::ImageAttachment { mime_type, data });
-                file_refs.push_str(&format!(
-                    "<file name=\"{}\"></file>\n",
-                    pico_core::prompt::escape_attr(&att.filename)
-                ));
+                file_refs.push_str(&image_file_ref(&att.filename));
             }
             Err(e) => {
                 tracing::warn!(error = %e, filename = %att.filename, "failed to download image attachment");
@@ -1044,11 +1043,7 @@ async fn route_message(
     let wrapped = if file_refs.is_empty() {
         wrapped
     } else {
-        let mut body = prompt.to_owned();
-        if !body.is_empty() {
-            body.push('\n');
-        }
-        body.push_str(file_refs.trim_end());
+        let body = compose_message_body(prompt, &file_refs);
         pico_core::prompt::wrap_discord_message(message.author.id.get(), &display_name, &sent_at, &body, &quotes)
     };
 
@@ -1357,7 +1352,26 @@ pub(crate) async fn drive_thread_turn(
 }
 
 fn is_image_attachment(att: &serenity::Attachment) -> bool {
-    att.content_type.as_deref().is_some_and(|c| c.starts_with("image/"))
+    is_image_content_type(att.content_type.as_deref())
+}
+
+fn is_image_content_type(content_type: Option<&str>) -> bool {
+    content_type.is_some_and(|c| c.starts_with("image/"))
+}
+
+fn image_file_ref(filename: &str) -> String {
+    format!("<file name=\"{}\"></file>\n", pico_core::prompt::escape_attr(filename))
+}
+
+fn compose_message_body(prompt: &str, file_refs: &str) -> String {
+    let refs = file_refs.trim_end();
+    if refs.is_empty() {
+        return prompt.to_owned();
+    }
+    if prompt.is_empty() {
+        return refs.to_owned();
+    }
+    format!("{prompt}\n{refs}")
 }
 
 fn sender_display_name(message: &serenity::Message) -> String {
@@ -1381,6 +1395,7 @@ pub(crate) fn channel_display_name(
 const REACT_FOLLOW_UP: &str = "📥";
 const REACT_STEER: &str = "↪️";
 const REACT_QUEUE: &str = "⏳";
+const REACT_UNSUPPORTED: &str = "🚫";
 
 async fn react_queued(ctx: &serenity::Context, message: &serenity::Message, mode: StreamingBehavior) {
     let emoji = match mode {
@@ -1393,6 +1408,15 @@ async fn react_queued(ctx: &serenity::Context, message: &serenity::Message, mode
         .await
     {
         tracing::warn!(error = %format!("{e:#}"), "mid-turn ack reaction failed");
+    }
+}
+
+async fn react_unsupported(ctx: &serenity::Context, message: &serenity::Message) {
+    if let Err(e) = message
+        .react(ctx, serenity::ReactionType::Unicode(REACT_UNSUPPORTED.to_owned()))
+        .await
+    {
+        tracing::warn!(error = %format!("{e:#}"), "unsupported mid-turn image reaction failed");
     }
 }
 
@@ -1627,5 +1651,31 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert!(out[0].0.contains("**Alice**"));
         assert!(!out[0].0.contains("---"));
+    }
+
+    #[test]
+    fn is_image_content_type_detects_image_prefix() {
+        assert!(super::is_image_content_type(Some("image/png")));
+        assert!(super::is_image_content_type(Some("image/")));
+        assert!(!super::is_image_content_type(Some("text/plain")));
+        assert!(!super::is_image_content_type(Some("IMAGE/PNG")));
+        assert!(!super::is_image_content_type(None));
+    }
+
+    #[test]
+    fn image_file_ref_escapes_and_appends_newline() {
+        assert_eq!(super::image_file_ref("a.png"), "<file name=\"a.png\"></file>\n");
+        assert_eq!(super::image_file_ref("Q&A.png"), "<file name=\"Q&amp;A.png\"></file>\n");
+        assert_eq!(super::image_file_ref("a\"b.png"), "<file name=\"a&quot;b.png\"></file>\n");
+        assert_eq!(super::image_file_ref("a<b>.png"), "<file name=\"a&lt;b&gt;.png\"></file>\n");
+        assert!(super::image_file_ref("plain.png").ends_with('\n'));
+    }
+
+    #[test]
+    fn compose_message_body_joins_and_trims() {
+        assert_eq!(super::compose_message_body("hi", "<file/>\n"), "hi\n<file/>");
+        assert_eq!(super::compose_message_body("", "<file/>\n"), "<file/>");
+        assert_eq!(super::compose_message_body("hi", ""), "hi");
+        assert_eq!(super::compose_message_body("hi", "   "), "hi");
     }
 }
