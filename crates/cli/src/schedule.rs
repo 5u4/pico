@@ -39,6 +39,11 @@ pub enum ScheduleCommand {
         #[arg(long)]
         scope: Option<String>,
     },
+    Trigger {
+        id: String,
+        #[arg(long)]
+        scope: Option<String>,
+    },
 }
 
 pub async fn run(cmd: ScheduleCommand) -> color_eyre::Result<()> {
@@ -52,6 +57,7 @@ pub async fn run(cmd: ScheduleCommand) -> color_eyre::Result<()> {
         ScheduleCommand::Remove { id, scope } => remove(&id, scope).await,
         ScheduleCommand::Enable { id, scope } => apply_state(&id, scope, State::Active, "enabled").await,
         ScheduleCommand::Disable { id, scope } => apply_state(&id, scope, State::Disabled, "disabled").await,
+        ScheduleCommand::Trigger { id, scope } => trigger(&id, scope).await,
     }
 }
 
@@ -236,6 +242,23 @@ async fn remove(id: &str, scope: Option<String>) -> color_eyre::Result<()> {
     schedule::remove(&root, id).await?;
     println!("removed schedule {id}");
     Ok(())
+}
+
+async fn trigger(id: &str, scope: Option<String>) -> color_eyre::Result<()> {
+    let root = pico_shared::paths::worker_root()?;
+    if scoped(schedule::get(&root, id).await?, caller_scope(scope).as_deref()).is_none() {
+        return Err(eyre!("no schedule with id {id}"));
+    }
+    match schedule::trigger(&root, id).await? {
+        schedule::TriggerOutcome::Triggered => {
+            println!("triggered schedule {id}");
+            Ok(())
+        }
+        schedule::TriggerOutcome::NotFound => Err(eyre!("no schedule with id {id}")),
+        schedule::TriggerOutcome::Inactive(state) => {
+            Err(eyre!("schedule {id} is {}; enable it before triggering", state_str(state)))
+        }
+    }
 }
 
 async fn apply_state(id: &str, scope: Option<String>, state: State, label: &str) -> color_eyre::Result<()> {

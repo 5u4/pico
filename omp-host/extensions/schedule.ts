@@ -168,5 +168,16 @@ export function makeScheduleFactory(identity) {
         return ok(await mutate("disable", p.id), { id: p.id });
       },
     });
+
+    pi.registerTool({
+      name: "schedule_trigger",
+      label: "Schedule Trigger",
+      description:
+        "Run an existing scheduled job once right now, immediately, regardless of its normal trigger time. The job's optional script gate and prompt run exactly as in a normal scheduled fire. A oneshot job is consumed (marked triggered); a recurring (cron/interval) job keeps its normal next run and only records this manual run. Only ACTIVE schedules can be triggered — enable a disabled one first.",
+      parameters: z.object({ id: z.string() }),
+      async execute(_id, p) {
+        return ok(await mutate("trigger", p.id), { id: p.id });
+      },
+    });
   };
 }
