@@ -13,7 +13,10 @@ use crate::{
     omp::{
         client::OmpSessionHandle,
         pool::ThreadSession,
-        protocol::{AssistantMessageEvent, OmpEvent, ToolCall, ToolCallEnd, ToolCallUpdate, UiRequest, UiResponse},
+        protocol::{
+            AssistantMessageEvent, ImageAttachment, OmpEvent, ToolCall, ToolCallEnd, ToolCallUpdate, UiRequest,
+            UiResponse,
+        },
     },
     render,
     surface::{ConversationId, PostOpts, Surface, UiOutcome, UiReply},
@@ -33,6 +36,7 @@ pub enum TurnOutcome {
 pub struct TurnRequest<'a> {
     pub conversation: &'a ConversationId,
     pub prompt: &'a str,
+    pub images: &'a [ImageAttachment],
     pub surface_thinking: bool,
     pub mode: StreamingBehavior,
     pub cancel: &'a CancellationToken,
@@ -51,7 +55,7 @@ pub async fn drive_turn<S: Surface>(
     title_seed: &mut Option<String>,
 ) -> color_eyre::Result<TurnOutcome> {
     let _typing = surface.typing();
-    session.client.prompt(req.prompt).await?;
+    session.client.prompt(req.prompt, req.images).await?;
     let (mut rx, _sink_guard) = rt.mid_turn.register(req.conversation, req.mode);
     let (interrupt, streaming, _cancel_guard) = rt.cancels.register(req.conversation);
     let mut aborted = false;
@@ -274,7 +278,7 @@ async fn forward_next_pending(
         return Ok(false);
     };
     match mode {
-        StreamingBehavior::Queue => client.prompt(&text).await?,
+        StreamingBehavior::Queue => client.prompt(&text, &[]).await?,
         StreamingBehavior::FollowUp => client.follow_up(&text).await?,
         StreamingBehavior::Steer => client.steer(&text).await?,
     }

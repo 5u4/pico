@@ -29,6 +29,10 @@ impl MidTurnQueue {
         Some(mode)
     }
 
+    pub fn is_active(&self, conversation: &ConversationId) -> bool {
+        self.inner.lock().contains_key(conversation)
+    }
+
     pub fn register(
         &self,
         conversation: &ConversationId,
@@ -99,5 +103,28 @@ mod tests {
         let (_rx, g) = q.register(&conv(1), StreamingBehavior::FollowUp);
         drop(g);
         assert!(q.deliver(&conv(1), "late", None).is_none());
+    }
+
+    #[test]
+    fn is_active_false_by_default() {
+        let q = MidTurnQueue::default();
+        assert!(!q.is_active(&conv(1)));
+    }
+
+    #[test]
+    fn is_active_true_while_guard_held_then_false_after_drop() {
+        let q = MidTurnQueue::default();
+        let (_rx, g) = q.register(&conv(1), StreamingBehavior::Steer);
+        assert!(q.is_active(&conv(1)));
+        drop(g);
+        assert!(!q.is_active(&conv(1)));
+    }
+
+    #[test]
+    fn is_active_is_isolated_per_conversation() {
+        let q = MidTurnQueue::default();
+        let (_rx, _g) = q.register(&conv(1), StreamingBehavior::Steer);
+        assert!(q.is_active(&conv(1)));
+        assert!(!q.is_active(&conv(2)));
     }
 }

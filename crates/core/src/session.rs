@@ -15,6 +15,7 @@ use crate::{
         camofox::CamofoxDaemon,
         client::{SessionConfig, SessionIdentity},
         pool::{OmpPool, ThreadHandle},
+        protocol::ImageAttachment,
     },
     surface::{ConversationId, Surface},
 };
@@ -29,6 +30,7 @@ pub struct RunTurn<'a, S: Surface> {
     pub context_block: &'a str,
     pub surface_rules: &'a str,
     pub wrapped: &'a str,
+    pub images: &'a [ImageAttachment],
     pub surface_thinking: bool,
     pub mode: StreamingBehavior,
     pub camofox: &'a CamofoxDaemon,
@@ -91,6 +93,7 @@ pub async fn run_turn<S: Surface>(p: RunTurn<'_, S>) -> color_eyre::Result<TurnS
         let req = crate::engine::TurnRequest {
             conversation: p.conversation,
             prompt: p.wrapped,
+            images: p.images,
             surface_thinking: p.surface_thinking,
             mode: p.mode,
             cancel: p.cancel,

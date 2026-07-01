@@ -28,6 +28,13 @@ pub(crate) struct Identity<'a> {
     pub user: &'a str,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageAttachment {
+    pub mime_type: String,
+    pub data: String,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case", rename_all_fields = "camelCase")]
 pub(crate) enum Command<'a> {
@@ -49,6 +56,7 @@ pub(crate) enum Command<'a> {
         id: &'a RequestId,
         session_id: &'a str,
         message: &'a str,
+        images: &'a [ImageAttachment],
     },
     Steer {
         id: &'a RequestId,
@@ -442,9 +450,29 @@ mod tests {
                 id: &id,
                 session_id: "t1",
                 message: "hi",
+                images: &[],
             })
             .unwrap(),
-            serde_json::json!({"type": "prompt", "id": "req_0", "sessionId": "t1", "message": "hi"}),
+            serde_json::json!({"type": "prompt", "id": "req_0", "sessionId": "t1", "message": "hi", "images": []}),
+        );
+        assert_eq!(
+            serde_json::to_value(Command::Prompt {
+                id: &id,
+                session_id: "t1",
+                message: "look",
+                images: &[ImageAttachment {
+                    mime_type: "image/png".to_owned(),
+                    data: "AAAB".to_owned(),
+                }],
+            })
+            .unwrap(),
+            serde_json::json!({
+                "type": "prompt",
+                "id": "req_0",
+                "sessionId": "t1",
+                "message": "look",
+                "images": [{"mimeType": "image/png", "data": "AAAB"}],
+            }),
         );
         assert_eq!(
             serde_json::to_value(Command::FollowUp {
