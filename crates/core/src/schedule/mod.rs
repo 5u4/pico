@@ -978,7 +978,15 @@ fn consume_trigger_marker(root: &Path, id: &str) -> bool {
     let Some((_, dir)) = find_schedule_dir(root, id) else {
         return false;
     };
-    matches!(fs::remove_file(dir.join(TRIGGER_FILE)), Ok(()))
+    match fs::remove_file(dir.join(TRIGGER_FILE)) {
+        Ok(()) => true,
+        Err(e) => {
+            if e.kind() != io::ErrorKind::NotFound {
+                tracing::warn!(schedule_id = %id, error = %e, "removing trigger marker failed");
+            }
+            false
+        }
+    }
 }
 
 async fn post_fire(root: &Path, sched: &Schedule, now: DateTime<Utc>, manual: bool) -> color_eyre::Result<()> {
@@ -987,7 +995,8 @@ async fn post_fire(root: &Path, sched: &Schedule, now: DateTime<Utc>, manual: bo
     }
     match &sched.trigger {
         Trigger::Oneshot { .. } => finish_oneshot(root, &sched.id, Some(now)).await,
-        _ => touch_last_run(root, &sched.id, now).await,
+        _ if sched.next_run_at > now => touch_last_run(root, &sched.id, now).await,
+        _ => advance_or_finish(root, sched, now).await,
     }
 }
 
@@ -1692,6 +1701,23 @@ mod tests {
         assert_eq!(after.state, State::Active);
         assert_eq!(after.next_run_at, scheduled);
         assert!(after.last_run_at.is_some());
+        assert!(!has_trigger_marker(r, &created.id));
+    }
+
+    #[tokio::test]
+    async fn trigger_then_fire_one_recurring_already_due_advances_next_run() {
+        let root = tempfile::tempdir().unwrap();
+        let r = root.path();
+        let created = create(r, new_interval(Some("p"), None, 3600), Some(chrono_tz::UTC))
+            .await
+            .unwrap();
+        backdate(r, &created.id, now() - TimeDelta::seconds(120));
+        assert_eq!(trigger(r, &created.id).await.unwrap(), TriggerOutcome::Triggered);
+        let reloaded = get(r, &created.id).await.unwrap().unwrap();
+        fire_one(&FakeHost::new(), &cfg(), r, &reloaded, now()).await.unwrap();
+        let after = get(r, &created.id).await.unwrap().unwrap();
+        assert_eq!(after.state, State::Active);
+        assert!(after.next_run_at > now());
         assert!(!has_trigger_marker(r, &created.id));
     }
 }
