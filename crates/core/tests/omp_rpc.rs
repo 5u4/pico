@@ -101,7 +101,7 @@ async fn streams_a_prompt_reply() {
     let tracker = TaskTracker::new();
     let (_host, client, mut events) = open_session("stream", &cwd, &cancel, &tracker).await;
     client
-        .prompt("Reply with exactly the word: pong")
+        .prompt("Reply with exactly the word: pong", &[])
         .await
         .expect("prompt acked");
 
@@ -154,11 +154,11 @@ async fn two_sessions_on_one_host_stay_isolated() {
     let (client_b, mut events_b) = host.open_session("mux-b", &cfg_b).await.expect("open session b");
 
     client_a
-        .prompt("Reply with exactly the word: alpha")
+        .prompt("Reply with exactly the word: alpha", &[])
         .await
         .expect("prompt a");
     client_b
-        .prompt("Reply with exactly the word: bravo")
+        .prompt("Reply with exactly the word: bravo", &[])
         .await
         .expect("prompt b");
 
@@ -211,7 +211,7 @@ async fn concurrent_get_or_spawn_same_thread_shares_one_session() {
     let mut session = handle.lock().await;
     session
         .client
-        .prompt("Reply with exactly the word: pong")
+        .prompt("Reply with exactly the word: pong", &[])
         .await
         .expect("shared session prompt");
     let reply = drain_reply(&mut session.events).await;
@@ -244,7 +244,7 @@ async fn append_system_prompt_content_reaches_the_model() {
     };
     let (client, mut events) = host.open_session("append", &config).await.expect("open session");
     client
-        .prompt("What is the secret pico codeword? Reply with only the word.")
+        .prompt("What is the secret pico codeword? Reply with only the word.", &[])
         .await
         .expect("prompt");
     let reply = drain_reply(&mut events).await;
@@ -264,7 +264,10 @@ async fn classifies_a_real_tool_call() {
     let tracker = TaskTracker::new();
     let (_host, client, mut events) = open_session("tool", &cwd, &cancel, &tracker).await;
     client
-        .prompt("Run this shell command with the bash tool and report nothing else: echo pong")
+        .prompt(
+            "Run this shell command with the bash tool and report nothing else: echo pong",
+            &[],
+        )
         .await
         .expect("prompt acked");
 
@@ -303,7 +306,8 @@ async fn task_update_carries_subagent_progress() {
     client
         .prompt(
             "Use the task tool to spawn exactly one subagent: agent type \"explore\", one task whose \
-             assignment is to reply with the single word done. Use the task tool — do not do it yourself.",
+     assignment is to reply with the single word done. Use the task tool — do not do it yourself.",
+            &[],
         )
         .await
         .expect("prompt acked");
@@ -349,7 +353,7 @@ async fn stale_ui_response_is_ignored() {
         .expect("send stale extension_ui_response");
 
     client
-        .prompt("Reply with exactly the word: pong")
+        .prompt("Reply with exactly the word: pong", &[])
         .await
         .expect("prompt acked");
 
@@ -384,7 +388,10 @@ async fn abort_ends_an_in_flight_turn() {
     let tracker = TaskTracker::new();
     let (_host, client, mut events) = open_session("abort", &cwd, &cancel, &tracker).await;
     client
-        .prompt("Use the bash tool to run exactly this command and report its output: sleep 60 && echo done")
+        .prompt(
+            "Use the bash tool to run exactly this command and report its output: sleep 60 && echo done",
+            &[],
+        )
         .await
         .expect("prompt acked");
 
@@ -465,12 +472,12 @@ async fn distinct_profiles_get_distinct_hosts() {
     let mut session_b = handle_b.lock().await;
     session_a
         .client
-        .prompt("Reply with exactly the word: alpha")
+        .prompt("Reply with exactly the word: alpha", &[])
         .await
         .expect("prompt alpha");
     session_b
         .client
-        .prompt("Reply with exactly the word: bravo")
+        .prompt("Reply with exactly the word: bravo", &[])
         .await
         .expect("prompt bravo");
     let reply_a = drain_reply(&mut session_a.events).await;
@@ -534,7 +541,7 @@ async fn same_profile_threads_share_one_host() {
     let mut session = handle_a.lock().await;
     session
         .client
-        .prompt("Reply with exactly the word: pong")
+        .prompt("Reply with exactly the word: pong", &[])
         .await
         .expect("shared-host prompt");
     let reply = drain_reply(&mut session.events).await;

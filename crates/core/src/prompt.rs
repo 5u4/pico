@@ -137,7 +137,7 @@ pub fn escape_text(value: &str) -> String {
     value.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
 
-fn escape_attr(value: &str) -> String {
+pub fn escape_attr(value: &str) -> String {
     escape_text(value).replace('"', "&quot;")
 }
 

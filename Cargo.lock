@@ -1647,6 +1647,7 @@ dependencies = [
 name = "pico-discord"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "chrono",
  "chrono-tz",
  "color-eyre",

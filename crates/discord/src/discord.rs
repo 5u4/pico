@@ -913,7 +913,11 @@ async fn route_message(
     message: serenity::Message,
 ) -> color_eyre::Result<()> {
     let prompt = message.content.trim();
-    if prompt.is_empty() && message.referenced_message.is_none() && message.message_snapshots.is_empty() {
+    if prompt.is_empty()
+        && message.referenced_message.is_none()
+        && message.message_snapshots.is_empty()
+        && !message.attachments.iter().any(is_image_attachment)
+    {
         return Ok(());
     }
 
@@ -1006,6 +1010,47 @@ async fn route_message(
         react_queued(&ctx, &message, mode).await;
         return Ok(());
     }
+
+    const MAX_IMAGES: usize = 8;
+    const MAX_IMAGE_BYTES: u32 = 25 * 1024 * 1024;
+    let mut images: Vec<pico_core::omp::protocol::ImageAttachment> = Vec::new();
+    let mut file_refs = String::new();
+    for att in &message.attachments {
+        if images.len() >= MAX_IMAGES {
+            break;
+        }
+        if !is_image_attachment(att) || att.size > MAX_IMAGE_BYTES {
+            continue;
+        }
+        match att.download().await {
+            Ok(bytes) => {
+                use base64::Engine as _;
+                let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                let mime_type = att.content_type.clone().unwrap_or_else(|| "image/png".to_owned());
+                images.push(pico_core::omp::protocol::ImageAttachment { mime_type, data });
+                file_refs.push_str(&format!(
+                    "<file name=\"{}\"></file>\n",
+                    pico_core::prompt::escape_attr(&att.filename)
+                ));
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, filename = %att.filename, "failed to download image attachment");
+            }
+        }
+    }
+    if images.is_empty() && prompt.is_empty() && quotes.is_empty() {
+        return Ok(());
+    }
+    let wrapped = if file_refs.is_empty() {
+        wrapped
+    } else {
+        let mut body = prompt.to_owned();
+        if !body.is_empty() {
+            body.push('\n');
+        }
+        body.push_str(file_refs.trim_end());
+        pico_core::prompt::wrap_discord_message(message.author.id.get(), &display_name, &sent_at, &body, &quotes)
+    };
 
     let binding = pico_core::bindings::get(&db, crate::consts::PLATFORM, &bound_channel.to_string()).await?;
     let route = pico_core::bindings::resolve_route(binding.as_ref(), &guild_default.profile, &guild_default.cwd);
@@ -1170,6 +1215,7 @@ async fn route_message(
             cwd,
             worktree_origin,
             wrapped: &wrapped,
+            images: &images,
             trigger: in_thread.then_some(message.id),
             author: message.author.id,
             guild_id,
@@ -1213,6 +1259,7 @@ pub(crate) struct TurnInputs<'a> {
     pub(crate) cwd: std::path::PathBuf,
     pub(crate) worktree_origin: Option<pico_core::thread_marker::WorktreeOrigin>,
     pub(crate) wrapped: &'a str,
+    pub(crate) images: &'a [pico_core::omp::protocol::ImageAttachment],
     pub(crate) trigger: Option<serenity::MessageId>,
     pub(crate) author: serenity::UserId,
     pub(crate) guild_id: serenity::GuildId,
@@ -1243,6 +1290,7 @@ pub(crate) async fn drive_thread_turn(
         cwd,
         worktree_origin,
         wrapped,
+        images,
         trigger,
         author,
         guild_id,
@@ -1295,6 +1343,7 @@ pub(crate) async fn drive_thread_turn(
         context_block: &context_block,
         surface_rules: include_str!("discord_surface.md"),
         wrapped,
+        images,
         surface_thinking: render.surface_thinking,
         mode: render.streaming_behavior,
         camofox,
@@ -1305,6 +1354,10 @@ pub(crate) async fn drive_thread_turn(
         thread_id: &thread_id,
     })
     .await
+}
+
+fn is_image_attachment(att: &serenity::Attachment) -> bool {
+    att.content_type.as_deref().is_some_and(|c| c.starts_with("image/"))
 }
 
 fn sender_display_name(message: &serenity::Message) -> String {

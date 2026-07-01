@@ -25,6 +25,8 @@ import { scanSkillsFromDir, buildRuleFromMarkdown, loadFilesFromDir } from "@oh-
 import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { buildContextReportText } from "@oh-my-pi/pi-coding-agent/slash-commands/helpers/context-report";
 import { formatShakeSummary } from "@oh-my-pi/pi-coding-agent/session/shake-types";
+import type { ImageContent } from "@oh-my-pi/pi-ai";
+import { resizeImage } from "@oh-my-pi/pi-coding-agent/utils/image-resize";
 import * as path from "node:path";
 
 interface Identity {
@@ -139,6 +141,30 @@ function str(value: unknown): string {
 function errorMessage(value: unknown): string {
 	if (value instanceof Error) return value.message;
 	return String(value);
+}
+
+async function buildPromptImages(raw: unknown): Promise<ImageContent[]> {
+	if (!Array.isArray(raw)) return [];
+	const images: ImageContent[] = [];
+	for (const item of raw) {
+		if (!item || typeof item !== "object") continue;
+		const record = item as Record<string, unknown>;
+		const mimeType = str(record.mimeType);
+		const data = str(record.data);
+		if (!mimeType || !data) continue;
+		try {
+			const resized = await resizeImage({ type: "image", data, mimeType });
+			images.push({ type: "image", mimeType: resized.mimeType, data: resized.data });
+		} catch {
+			images.push({ type: "image", mimeType, data });
+		}
+	}
+	return images;
+}
+
+async function deliverPrompt(session: AgentSession, message: string, rawImages: unknown): Promise<void> {
+	const images = await buildPromptImages(rawImages);
+	await session.prompt(message, images.length ? { images } : undefined);
 }
 
 function nextUiId(): string {
@@ -511,7 +537,7 @@ async function handle(raw: Json): Promise<void> {
 				return;
 			}
 			respond(id, sessionId, "prompt", true);
-			hostSession.session.prompt(str(raw.message)).catch((e: unknown) => emitError(sessionId, errorMessage(e)));
+			void deliverPrompt(hostSession.session, str(raw.message), raw.images).catch((e: unknown) => emitError(sessionId, errorMessage(e)));
 			return;
 		}
 		case "steer":

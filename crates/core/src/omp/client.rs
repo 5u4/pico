@@ -19,7 +19,7 @@ use tokio::{
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::omp::protocol::{
-    Command, Identity, Inbound, OmpEvent, RequestId, RpcResponse, UiResponse, message_start_event,
+    Command, Identity, ImageAttachment, Inbound, OmpEvent, RequestId, RpcResponse, UiResponse, message_start_event,
 };
 
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -291,7 +291,7 @@ impl OmpSessionHandle {
         &self.session_id
     }
 
-    pub async fn prompt(&self, message: &str) -> color_eyre::Result<()> {
+    pub async fn prompt(&self, message: &str, images: &[ImageAttachment]) -> color_eyre::Result<()> {
         let id = RequestId::new();
         self.host
             .dispatch(
@@ -300,6 +300,7 @@ impl OmpSessionHandle {
                     id: &id,
                     session_id: &self.session_id,
                     message,
+                    images,
                 },
             )
             .await
