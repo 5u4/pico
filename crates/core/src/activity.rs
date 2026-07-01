@@ -269,7 +269,7 @@ fn schedule_line(name: &str, args: &serde_json::Value) -> String {
     let action = name.strip_prefix("schedule_").unwrap_or(name);
     let detail = match name {
         "schedule_create" => str_arg(args, "name"),
-        "schedule_remove" | "schedule_enable" | "schedule_disable" => str_arg(args, "id"),
+        "schedule_remove" | "schedule_enable" | "schedule_disable" | "schedule_trigger" => str_arg(args, "id"),
         _ => "",
     };
     verb_line("📅", "schedule", action, detail)
@@ -548,6 +548,7 @@ mod tests {
         assert_eq!(line("schedule_remove", json!({ "id": "01ABC" })), "📅 remove 01ABC");
         assert_eq!(line("schedule_enable", json!({ "id": "01ABC" })), "📅 enable 01ABC");
         assert_eq!(line("schedule_disable", json!({ "id": "01ABC" })), "📅 disable 01ABC");
+        assert_eq!(line("schedule_trigger", json!({ "id": "01ABC" })), "📅 trigger 01ABC");
     }
 
     #[test]

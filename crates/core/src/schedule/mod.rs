@@ -8,7 +8,8 @@ use std::{
 
 use chrono::{DateTime, SecondsFormat, TimeDelta, Utc};
 use color_eyre::eyre::{WrapErr, eyre};
-use pico_shared::paths::{find_schedule_dir, schedule_dir, schedule_state_dir};
+use notify::{RecursiveMode, Watcher};
+use pico_shared::paths::{find_schedule_dir, schedule_dir, schedule_state_dir, schedules_dir};
 use serde::{Deserialize, Serialize};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
@@ -24,6 +25,7 @@ const RUNS_DIR: &str = "runs";
 const STDOUT_FILE: &str = "stdout";
 const STDERR_FILE: &str = "stderr";
 const META_FILE: &str = "meta.json";
+const TRIGGER_FILE: &str = "trigger";
 
 const ALL_STATES: [State; 3] = [State::Active, State::Disabled, State::Triggered];
 
@@ -519,6 +521,25 @@ pub async fn set_state(root: &Path, id: &str, state: State) -> color_eyre::Resul
     Ok(true)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TriggerOutcome {
+    Triggered,
+    NotFound,
+    Inactive(State),
+}
+
+pub async fn trigger(root: &Path, id: &str) -> color_eyre::Result<TriggerOutcome> {
+    let Some(sched) = get(root, id).await? else {
+        return Ok(TriggerOutcome::NotFound);
+    };
+    if sched.state != State::Active {
+        return Ok(TriggerOutcome::Inactive(sched.state));
+    }
+    let marker = schedule_dir(root, State::Active.as_str(), id).join(TRIGGER_FILE);
+    fs::write(&marker, []).wrap_err_with(|| format!("writing trigger marker for {id}"))?;
+    Ok(TriggerOutcome::Triggered)
+}
+
 pub async fn read_definition(root: &Path, id: &str) -> io::Result<Definition> {
     let dir = match find_schedule_dir(root, id) {
         Some((_, dir)) => dir,
@@ -537,10 +558,16 @@ pub async fn read_definition(root: &Path, id: &str) -> io::Result<Definition> {
 pub async fn due(root: &Path, now: DateTime<Utc>) -> color_eyre::Result<Vec<Schedule>> {
     let mut rows: Vec<Schedule> = scan_state(root, State::Active)
         .into_iter()
-        .filter(|sched| sched.next_run_at <= now)
+        .filter(|sched| sched.next_run_at <= now || has_trigger_marker(root, &sched.id))
         .collect();
     rows.sort_by_key(|sched| sched.next_run_at);
     Ok(rows)
+}
+
+fn has_trigger_marker(root: &Path, id: &str) -> bool {
+    schedule_dir(root, State::Active.as_str(), id)
+        .join(TRIGGER_FILE)
+        .exists()
 }
 
 fn nearest_active(root: &Path, exclude: &HashSet<String>) -> Option<DateTime<Utc>> {
@@ -694,6 +721,29 @@ pub async fn run<H: ScheduleHost + 'static>(host: H, cfg: ScheduleConfig, root: 
     let tracker = TaskTracker::new();
     let in_flight: Arc<parking_lot::Mutex<HashSet<String>>> = Arc::new(parking_lot::Mutex::new(HashSet::new()));
 
+    let (wake_tx, mut wake_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+    let watch_dir = schedules_dir(root.as_path());
+    let _watcher = {
+        let _ = fs::create_dir_all(&watch_dir);
+        match notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+            if res.is_ok() {
+                let _ = wake_tx.send(());
+            }
+        }) {
+            Ok(mut w) => match w.watch(&watch_dir, RecursiveMode::Recursive) {
+                Ok(()) => Some(w),
+                Err(e) => {
+                    tracing::warn!(error = %format!("{e:#}"), "scheduler filesystem watch failed; falling back to poll only");
+                    None
+                }
+            },
+            Err(e) => {
+                tracing::warn!(error = %format!("{e:#}"), "creating scheduler filesystem watcher failed; falling back to poll only");
+                None
+            }
+        }
+    };
+
     loop {
         if cancel.is_cancelled() {
             break;
@@ -728,6 +778,9 @@ pub async fn run<H: ScheduleHost + 'static>(host: H, cfg: ScheduleConfig, root: 
         tokio::select! {
             () = cancel.cancelled() => break,
             () = tokio::time::sleep(wait) => {}
+            Some(()) = wake_rx.recv() => {
+                while wake_rx.try_recv().is_ok() {}
+            }
         }
     }
 
@@ -765,20 +818,23 @@ pub async fn fire_one<H: ScheduleHost>(
     sched: &Schedule,
     now: DateTime<Utc>,
 ) -> color_eyre::Result<()> {
-    match missed_gate(sched, now, cfg.grace) {
-        Disposition::MissedOneshot => {
-            tracing::info!("missed oneshot schedule");
-            host.notify_home(sched, &HomeNotice::Missed { due: sched.next_run_at })
-                .await;
-            finish_oneshot(root, &sched.id, None).await?;
-            return Ok(());
+    let manual = consume_trigger_marker(root, &sched.id);
+    if !manual {
+        match missed_gate(sched, now, cfg.grace) {
+            Disposition::MissedOneshot => {
+                tracing::info!("missed oneshot schedule");
+                host.notify_home(sched, &HomeNotice::Missed { due: sched.next_run_at })
+                    .await;
+                finish_oneshot(root, &sched.id, None).await?;
+                return Ok(());
+            }
+            Disposition::SkipStale => {
+                tracing::info!("skipping stale schedule run");
+                advance_or_finish(root, sched, now).await?;
+                return Ok(());
+            }
+            Disposition::Fire => {}
         }
-        Disposition::SkipStale => {
-            tracing::info!("skipping stale schedule run");
-            advance_or_finish(root, sched, now).await?;
-            return Ok(());
-        }
-        Disposition::Fire => {}
     }
     tracing::info!("schedule fire start");
 
@@ -822,7 +878,7 @@ pub async fn fire_one<H: ScheduleHost>(
         gate::Gate::Skip => {
             tracing::debug!("schedule gate skip");
             write_meta(run_dir.as_deref(), sched, now, "skip", "skipped", capture.exit, None);
-            advance_or_finish(root, sched, now).await?;
+            post_fire(root, sched, now, manual).await?;
         }
         gate::Gate::Failure { reason, stderr_tail } => {
             write_meta(run_dir.as_deref(), sched, now, "failure", "script_failed", capture.exit, None);
@@ -844,7 +900,7 @@ pub async fn fire_one<H: ScheduleHost>(
                 prompt_sent.as_deref(),
             );
             match next {
-                Next::AdvanceOrFinish => advance_or_finish(root, sched, now).await?,
+                Next::AdvanceOrFinish => post_fire(root, sched, now, manual).await?,
                 Next::Disable(kind) => {
                     tracing::info!(reason = ?kind.reason(), "disabling schedule");
                     disable(root, &sched.id).await?;
@@ -916,6 +972,39 @@ async fn advance_after_failure(root: &Path, sched: &Schedule, now: DateTime<Utc>
             None => disable(root, &sched.id).await,
         },
     }
+}
+
+fn consume_trigger_marker(root: &Path, id: &str) -> bool {
+    let Some((_, dir)) = find_schedule_dir(root, id) else {
+        return false;
+    };
+    match fs::remove_file(dir.join(TRIGGER_FILE)) {
+        Ok(()) => true,
+        Err(e) => {
+            if e.kind() != io::ErrorKind::NotFound {
+                tracing::warn!(schedule_id = %id, error = %e, "removing trigger marker failed");
+            }
+            false
+        }
+    }
+}
+
+async fn post_fire(root: &Path, sched: &Schedule, now: DateTime<Utc>, manual: bool) -> color_eyre::Result<()> {
+    if !manual {
+        return advance_or_finish(root, sched, now).await;
+    }
+    match &sched.trigger {
+        Trigger::Oneshot { .. } => finish_oneshot(root, &sched.id, Some(now)).await,
+        _ if sched.next_run_at > now => touch_last_run(root, &sched.id, now).await,
+        _ => advance_or_finish(root, sched, now).await,
+    }
+}
+
+async fn touch_last_run(root: &Path, id: &str, last_run_at: DateTime<Utc>) -> color_eyre::Result<()> {
+    update_state(root, id, |state| {
+        state.last_run_at = Some(store_ts(last_run_at));
+        state.consecutive_failures = 0;
+    })
 }
 
 async fn record_transient<H: ScheduleHost>(
@@ -1544,5 +1633,91 @@ mod tests {
         let reloaded = get(&r, &sched.id).await.unwrap().unwrap();
         assert!(reloaded.next_run_at > past);
         assert_eq!(reloaded.state, State::Active);
+    }
+
+    #[tokio::test]
+    async fn trigger_marks_active_and_makes_it_due_without_touching_next_run() {
+        let root = tempfile::tempdir().unwrap();
+        let r = root.path();
+        let created = create(r, new_interval(Some("p"), None, 3600), Some(chrono_tz::UTC))
+            .await
+            .unwrap();
+        assert!(created.next_run_at > now() + TimeDelta::seconds(60));
+        assert_eq!(trigger(r, &created.id).await.unwrap(), TriggerOutcome::Triggered);
+        assert!(has_trigger_marker(r, &created.id));
+        assert_eq!(get(r, &created.id).await.unwrap().unwrap().next_run_at, created.next_run_at);
+        let due_ids: Vec<String> = due(r, now()).await.unwrap().into_iter().map(|s| s.id).collect();
+        assert!(due_ids.contains(&created.id));
+    }
+
+    #[tokio::test]
+    async fn trigger_missing_id_is_not_found() {
+        let root = tempfile::tempdir().unwrap();
+        assert_eq!(trigger(root.path(), "nope").await.unwrap(), TriggerOutcome::NotFound);
+    }
+
+    #[tokio::test]
+    async fn trigger_inactive_when_disabled_writes_no_marker() {
+        let root = tempfile::tempdir().unwrap();
+        let r = root.path();
+        let created = create(r, new_interval(Some("p"), None, 3600), Some(chrono_tz::UTC))
+            .await
+            .unwrap();
+        set_state(r, &created.id, State::Disabled).await.unwrap();
+        assert_eq!(
+            trigger(r, &created.id).await.unwrap(),
+            TriggerOutcome::Inactive(State::Disabled)
+        );
+        assert!(!has_trigger_marker(r, &created.id));
+    }
+
+    #[tokio::test]
+    async fn trigger_then_fire_one_consumes_oneshot_before_its_time() {
+        let root = tempfile::tempdir().unwrap();
+        let r = root.path();
+        let at = now() + TimeDelta::seconds(3600);
+        let created = create(r, new_oneshot(Some("ping"), None, at), Some(chrono_tz::UTC))
+            .await
+            .unwrap();
+        assert_eq!(trigger(r, &created.id).await.unwrap(), TriggerOutcome::Triggered);
+        let reloaded = get(r, &created.id).await.unwrap().unwrap();
+        fire_one(&FakeHost::new(), &cfg(), r, &reloaded, now()).await.unwrap();
+        assert_eq!(get(r, &created.id).await.unwrap().unwrap().state, State::Triggered);
+        assert!(!has_trigger_marker(r, &created.id));
+    }
+
+    #[tokio::test]
+    async fn trigger_then_fire_one_recurring_keeps_next_run_and_records_last_run() {
+        let root = tempfile::tempdir().unwrap();
+        let r = root.path();
+        let created = create(r, new_interval(Some("p"), None, 3600), Some(chrono_tz::UTC))
+            .await
+            .unwrap();
+        let scheduled = created.next_run_at;
+        assert_eq!(trigger(r, &created.id).await.unwrap(), TriggerOutcome::Triggered);
+        let reloaded = get(r, &created.id).await.unwrap().unwrap();
+        fire_one(&FakeHost::new(), &cfg(), r, &reloaded, now()).await.unwrap();
+        let after = get(r, &created.id).await.unwrap().unwrap();
+        assert_eq!(after.state, State::Active);
+        assert_eq!(after.next_run_at, scheduled);
+        assert!(after.last_run_at.is_some());
+        assert!(!has_trigger_marker(r, &created.id));
+    }
+
+    #[tokio::test]
+    async fn trigger_then_fire_one_recurring_already_due_advances_next_run() {
+        let root = tempfile::tempdir().unwrap();
+        let r = root.path();
+        let created = create(r, new_interval(Some("p"), None, 3600), Some(chrono_tz::UTC))
+            .await
+            .unwrap();
+        backdate(r, &created.id, now() - TimeDelta::seconds(120));
+        assert_eq!(trigger(r, &created.id).await.unwrap(), TriggerOutcome::Triggered);
+        let reloaded = get(r, &created.id).await.unwrap().unwrap();
+        fire_one(&FakeHost::new(), &cfg(), r, &reloaded, now()).await.unwrap();
+        let after = get(r, &created.id).await.unwrap().unwrap();
+        assert_eq!(after.state, State::Active);
+        assert!(after.next_run_at > now());
+        assert!(!has_trigger_marker(r, &created.id));
     }
 }

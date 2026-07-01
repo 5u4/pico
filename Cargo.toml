@@ -16,6 +16,7 @@ color-eyre = "0.6.5"
 cron = "0.17"
 dotenvy = "0.15"
 libc = "0.2.186"
+notify = "8"
 parking_lot = "0.12.5"
 pico-core = { path = "crates/core" }
 pico-discord = { path = "crates/discord" }
