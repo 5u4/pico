@@ -19,11 +19,10 @@ Binding is what connects a Discord channel (or a CLI session) to where pico does
 
 ## Scheduling
 
-pico can schedule autonomous jobs that run on their own, without a person prompting them. Each job has one of three trigger kinds:
+pico can schedule autonomous jobs that run on their own, without a person prompting them. Each job has one of two trigger kinds:
 
 - **oneshot** — fires once at a single future time.
 - **cron** — a standard 5-field cron expression with an IANA timezone.
-- **interval** — repeats on a fixed period, no shorter than 60 seconds.
 
 A job delivers its run in one of two modes: `continue` fires the run into the same thread/session that owns the job, while `fresh` opens a brand-new thread for each run. A job may carry an optional pre-run bash script that acts as a gate: its JSON output `{skip, context}` decides whether the model actually runs and, if it does, feeds it that context. Runs missed while pico was down are swept on startup. A job that keeps failing is auto-disabled after three strikes, and a notice is posted to the guild's home channel.
 

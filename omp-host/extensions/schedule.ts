@@ -65,7 +65,7 @@ export function makeScheduleFactory(identity) {
         "trigger.kind 'oneshot' needs `at` = a FUTURE absolute RFC3339 timestamp — resolve relative phrasing like ",
         "'in 2h' or 'tomorrow 9am' yourself from the current time in the runtime context. 'cron' needs `expr` = a ",
         "standard 5-field cron expression (minute hour day-of-month month day-of-week) plus optional `tz` (IANA ",
-        "name, default UTC). 'interval' needs `every_secs` >= 60. ",
+        "name, default UTC). ",
         "CRON DAY-OF-WEEK: write day-of-week as day NAMES (SUN, MON, TUE, WED, THU, FRI, SAT) or numbers where ",
         "1=Sunday..7=Saturday. NEVER use POSIX numbering — here 1=Sunday, not Monday. ",
         "Do NOT pass platform/guild/channel/user context: pico injects it from the session context.",
@@ -76,11 +76,10 @@ export function makeScheduleFactory(identity) {
           .enum(["continue", "fresh"])
           .describe("'continue' = this thread/session; 'fresh' = a new thread/session in the target channel"),
         trigger: z.object({
-          kind: z.enum(["oneshot", "cron", "interval"]),
+          kind: z.enum(["oneshot", "cron"]),
           at: z.string().optional().describe("oneshot: future absolute RFC3339, e.g. 2026-07-01T09:00:00-07:00"),
           expr: z.string().optional().describe("cron: standard 5-field expr, e.g. '0 9 * * MON'"),
           tz: z.string().optional().describe("cron: IANA timezone name, default UTC"),
-          every_secs: z.number().optional().describe("interval: seconds between runs, minimum 60"),
         }),
         script: z
           .string()
@@ -130,9 +129,7 @@ export function makeScheduleFactory(identity) {
               ? `oneshot ${t.at || ""}`
               : t.kind === "cron"
                 ? `cron "${t.expr || ""}" (${t.tz || "UTC"})`
-                : t.kind === "interval"
-                  ? `every ${t.every_secs}s`
-                  : t.kind || "?";
+                : t.kind || "?";
           return `• ${s.id} ${s.name} [${s.state}] ${s.mode} — ${trig} — next ${s.next_run_at}`;
         });
         return ok(lines.join("\n"), { schedules: arr });
@@ -173,7 +170,7 @@ export function makeScheduleFactory(identity) {
       name: "schedule_trigger",
       label: "Schedule Trigger",
       description:
-        "Run an existing scheduled job once right now, immediately, regardless of its normal trigger time. The job's optional script gate and prompt run exactly as in a normal scheduled fire. A oneshot job is consumed (marked triggered); a recurring (cron/interval) job keeps its normal next run and only records this manual run. Only ACTIVE schedules can be triggered — enable a disabled one first.",
+        "Run an existing scheduled job once right now, immediately, regardless of its normal trigger time. The job's optional script gate and prompt run exactly as in a normal scheduled fire. A oneshot job is consumed (marked triggered); a recurring (cron) job keeps its normal next run and only records this manual run. Only ACTIVE schedules can be triggered — enable a disabled one first.",
       parameters: z.object({ id: z.string() }),
       async execute(_id, p) {
         return ok(await mutate("trigger", p.id), { id: p.id });

@@ -64,7 +64,6 @@ pub enum State {
 pub enum Trigger {
     Oneshot { at: DateTime<Utc> },
     Cron { expr: String, tz: chrono_tz::Tz },
-    Interval { every: Duration },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -152,7 +151,6 @@ impl Trigger {
         match self {
             Trigger::Oneshot { at } => format!("oneshot at {}", store_ts(*at)),
             Trigger::Cron { expr, tz } => format!("cron \"{expr}\" ({tz})"),
-            Trigger::Interval { every } => format!("every {}s", every.as_secs()),
         }
     }
 }
@@ -167,7 +165,6 @@ pub fn next_after(trigger: &Trigger, after: DateTime<Utc>) -> Option<DateTime<Ut
                 .next()
                 .map(|dt| dt.with_timezone(&Utc))
         }
-        Trigger::Interval { every } => after.checked_add_signed(to_delta(*every)),
     }
 }
 
@@ -186,11 +183,6 @@ pub fn validate(new: &NewSchedule) -> color_eyre::Result<()> {
         }
         Trigger::Cron { expr, .. } => {
             parse_cron(expr)?;
-        }
-        Trigger::Interval { every } => {
-            if *every < Duration::from_secs(60) {
-                return Err(eyre!("interval must be at least 60 seconds"));
-            }
         }
     }
     Ok(())
@@ -222,7 +214,6 @@ struct DefinitionToml {
 enum TriggerToml {
     Oneshot { at: String },
     Cron { expr: String, tz: String },
-    Interval { every_secs: u64 },
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -253,9 +244,6 @@ fn trigger_to_toml(trigger: &Trigger) -> TriggerToml {
             expr: expr.clone(),
             tz: tz.name().to_owned(),
         },
-        Trigger::Interval { every } => TriggerToml::Interval {
-            every_secs: every.as_secs(),
-        },
     }
 }
 
@@ -265,9 +253,6 @@ fn trigger_from_toml(trigger: TriggerToml) -> Option<Trigger> {
         TriggerToml::Cron { expr, tz } => Some(Trigger::Cron {
             expr,
             tz: tz.parse().ok()?,
-        }),
-        TriggerToml::Interval { every_secs } => Some(Trigger::Interval {
-            every: Duration::from_secs(every_secs),
         }),
     }
 }
@@ -1049,13 +1034,6 @@ fn missed_gate(sched: &Schedule, now: DateTime<Utc>, grace: Duration) -> Disposi
                 Disposition::Fire
             }
         }
-        Trigger::Interval { every } => {
-            if late >= to_delta(*every) {
-                Disposition::SkipStale
-            } else {
-                Disposition::Fire
-            }
-        }
         Trigger::Cron { .. } => match next_after(&sched.trigger, sched.next_run_at) {
             Some(following) if late >= (following - sched.next_run_at) => Disposition::SkipStale,
             _ => Disposition::Fire,
@@ -1119,7 +1097,7 @@ mod tests {
         }
     }
 
-    fn new_interval(prompt: Option<&str>, script: Option<&str>, secs: u64) -> NewSchedule {
+    fn new_cron(prompt: Option<&str>, script: Option<&str>) -> NewSchedule {
         NewSchedule {
             platform: "discord".to_owned(),
             scope: "guild-1".to_owned(),
@@ -1128,8 +1106,9 @@ mod tests {
             mode: Mode::Fresh,
             origin: "thread-1".to_owned(),
             target: "channel-1".to_owned(),
-            trigger: Trigger::Interval {
-                every: Duration::from_secs(secs),
+            trigger: Trigger::Cron {
+                expr: "0 * * * *".to_owned(),
+                tz: chrono_tz::UTC,
             },
             script: script.map(str::to_owned),
             prompt: prompt.map(str::to_owned),
@@ -1139,7 +1118,7 @@ mod tests {
     fn new_oneshot(prompt: Option<&str>, script: Option<&str>, at: DateTime<Utc>) -> NewSchedule {
         NewSchedule {
             trigger: Trigger::Oneshot { at },
-            ..new_interval(prompt, script, 60)
+            ..new_cron(prompt, script)
         }
     }
 
@@ -1249,33 +1228,19 @@ mod tests {
 
     #[test]
     fn validate_guards() {
-        let mut new = new_interval(None, None, 120);
+        let mut new = new_cron(None, None);
         new.script = None;
         new.prompt = None;
         assert!(validate(&new).is_err());
-        assert!(validate(&new_interval(Some("p"), None, 59)).is_err());
-        assert!(validate(&new_interval(Some("p"), None, 60)).is_ok());
+        assert!(validate(&new_cron(Some("p"), None)).is_ok());
+        let mut bad_cron = new_cron(Some("p"), None);
+        bad_cron.trigger = Trigger::Cron {
+            expr: "not a cron".to_owned(),
+            tz: chrono_tz::UTC,
+        };
+        assert!(validate(&bad_cron).is_err());
         let past = DateTime::from_timestamp(1_000_000_000, 0).unwrap();
         assert!(validate(&new_oneshot(Some("p"), None, past)).is_err());
-    }
-
-    #[test]
-    fn missed_gate_interval_period_relative() {
-        let base = now();
-        let sched = sample_schedule(
-            Trigger::Interval {
-                every: Duration::from_secs(3600),
-            },
-            base,
-        );
-        assert_eq!(
-            missed_gate(&sched, base + TimeDelta::seconds(1800), Duration::from_secs(7200)),
-            Disposition::Fire
-        );
-        assert_eq!(
-            missed_gate(&sched, base + TimeDelta::seconds(5400), Duration::from_secs(7200)),
-            Disposition::SkipStale
-        );
     }
 
     #[test]
@@ -1296,20 +1261,16 @@ mod tests {
     async fn create_writes_definition_and_state_files() {
         let root = tempfile::tempdir().unwrap();
         let r = root.path();
-        let created = create(
-            r,
-            new_interval(Some("hello prompt"), Some("echo hi"), 3600),
-            Some(chrono_tz::UTC),
-        )
-        .await
-        .unwrap();
+        let created = create(r, new_cron(Some("hello prompt"), Some("echo hi")), Some(chrono_tz::UTC))
+            .await
+            .unwrap();
         let dir = schedule_dir(r, "active", &created.id);
         assert!(dir.join(DEFINITION_FILE).exists());
         assert!(dir.join(STATE_FILE).exists());
         assert_eq!(fs::read_to_string(dir.join(SCRIPT_FILE)).unwrap(), "echo hi");
         assert_eq!(fs::read_to_string(dir.join(PROMPT_FILE)).unwrap(), "hello prompt");
 
-        let prompt_only = create(r, new_interval(Some("just prompt"), None, 3600), Some(chrono_tz::UTC))
+        let prompt_only = create(r, new_cron(Some("just prompt"), None), Some(chrono_tz::UTC))
             .await
             .unwrap();
         let prompt_dir = schedule_dir(r, "active", &prompt_only.id);
@@ -1325,7 +1286,7 @@ mod tests {
     async fn crud_round_trip_and_state_transitions_move_folders() {
         let root = tempfile::tempdir().unwrap();
         let r = root.path();
-        let created = create(r, new_interval(Some("hello"), None, 120), Some(chrono_tz::UTC))
+        let created = create(r, new_cron(Some("hello"), None), Some(chrono_tz::UTC))
             .await
             .unwrap();
 
@@ -1358,7 +1319,7 @@ mod tests {
     async fn missing_state_recomputes_next_run() {
         let root = tempfile::tempdir().unwrap();
         let r = root.path();
-        let created = create(r, new_interval(Some("p"), None, 3600), Some(chrono_tz::UTC))
+        let created = create(r, new_cron(Some("p"), None), Some(chrono_tz::UTC))
             .await
             .unwrap();
         fs::remove_file(schedule_dir(r, "active", &created.id).join(STATE_FILE)).unwrap();
@@ -1372,7 +1333,7 @@ mod tests {
     async fn fire_one_routes_prompt_to_fire_and_advances() {
         let root = tempfile::tempdir().unwrap();
         let r = root.path();
-        let sched = create(r, new_interval(Some("do the thing"), None, 3600), Some(chrono_tz::UTC))
+        let sched = create(r, new_cron(Some("do the thing"), None), Some(chrono_tz::UTC))
             .await
             .unwrap();
         let host = FakeHost::new();
@@ -1393,7 +1354,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let r = root.path();
         let script = "echo '{\"skip\":false,\"context\":\"digest body\"}'";
-        let sched = create(r, new_interval(None, Some(script), 3600), Some(chrono_tz::UTC))
+        let sched = create(r, new_cron(None, Some(script)), Some(chrono_tz::UTC))
             .await
             .unwrap();
         let host = FakeHost::new();
@@ -1408,7 +1369,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let r = root.path();
         let script = "echo out; echo '{\"skip\":false,\"context\":\"c\"}'";
-        let sched = create(r, new_interval(None, Some(script), 3600), Some(chrono_tz::UTC))
+        let sched = create(r, new_cron(None, Some(script)), Some(chrono_tz::UTC))
             .await
             .unwrap();
         let host = FakeHost::new();
@@ -1443,7 +1404,7 @@ mod tests {
     async fn fire_one_failure_notifies_home_and_records_failure() {
         let root = tempfile::tempdir().unwrap();
         let r = root.path();
-        let sched = create(r, new_interval(Some("p"), Some("exit 2"), 3600), Some(chrono_tz::UTC))
+        let sched = create(r, new_cron(Some("p"), Some("exit 2")), Some(chrono_tz::UTC))
             .await
             .unwrap();
         let host = FakeHost::new();
@@ -1501,7 +1462,7 @@ mod tests {
     async fn fire_one_recurring_stale_skips_and_advances() {
         let root = tempfile::tempdir().unwrap();
         let r = root.path();
-        let sched = create(r, new_interval(Some("p"), None, 3600), Some(chrono_tz::UTC))
+        let sched = create(r, new_cron(Some("p"), None), Some(chrono_tz::UTC))
             .await
             .unwrap();
         let host = FakeHost::new();
@@ -1517,7 +1478,7 @@ mod tests {
     async fn fire_one_transient_records_failure_and_disables_on_third() {
         let root = tempfile::tempdir().unwrap();
         let r = root.path();
-        let created = create(r, new_interval(Some("p"), None, 3600), Some(chrono_tz::UTC))
+        let created = create(r, new_cron(Some("p"), None), Some(chrono_tz::UTC))
             .await
             .unwrap();
         let mut host = FakeHost::new();
@@ -1572,7 +1533,7 @@ mod tests {
     async fn fire_one_missing_definition_disables_and_notifies() {
         let root = tempfile::tempdir().unwrap();
         let r = root.path();
-        let sched = create(r, new_interval(Some("p"), None, 3600), Some(chrono_tz::UTC))
+        let sched = create(r, new_cron(Some("p"), None), Some(chrono_tz::UTC))
             .await
             .unwrap();
         fs::remove_file(schedule_dir(r, "active", &sched.id).join(PROMPT_FILE)).unwrap();
@@ -1590,13 +1551,9 @@ mod tests {
     async fn fire_one_reads_edited_script_at_fire_time() {
         let root = tempfile::tempdir().unwrap();
         let r = root.path();
-        let sched = create(
-            r,
-            new_interval(None, Some("echo '{\"skip\":true}'"), 3600),
-            Some(chrono_tz::UTC),
-        )
-        .await
-        .unwrap();
+        let sched = create(r, new_cron(None, Some("echo '{\"skip\":true}'")), Some(chrono_tz::UTC))
+            .await
+            .unwrap();
         let script_path = schedule_dir(r, "active", &sched.id).join(SCRIPT_FILE);
         fs::write(&script_path, "echo '{\"skip\":false,\"context\":\"edited body\"}'").unwrap();
         let host = FakeHost::new();
@@ -1608,7 +1565,7 @@ mod tests {
     async fn run_boot_sweep_fires_due_schedule_then_advances() {
         let root = tempfile::tempdir().unwrap();
         let r = root.path().to_path_buf();
-        let sched = create(&r, new_interval(Some("tick"), None, 3600), Some(chrono_tz::UTC))
+        let sched = create(&r, new_cron(Some("tick"), None), Some(chrono_tz::UTC))
             .await
             .unwrap();
         let past = now() - TimeDelta::seconds(5);
@@ -1639,10 +1596,10 @@ mod tests {
     async fn trigger_marks_active_and_makes_it_due_without_touching_next_run() {
         let root = tempfile::tempdir().unwrap();
         let r = root.path();
-        let created = create(r, new_interval(Some("p"), None, 3600), Some(chrono_tz::UTC))
+        let created = create(r, new_cron(Some("p"), None), Some(chrono_tz::UTC))
             .await
             .unwrap();
-        assert!(created.next_run_at > now() + TimeDelta::seconds(60));
+        assert!(created.next_run_at > now());
         assert_eq!(trigger(r, &created.id).await.unwrap(), TriggerOutcome::Triggered);
         assert!(has_trigger_marker(r, &created.id));
         assert_eq!(get(r, &created.id).await.unwrap().unwrap().next_run_at, created.next_run_at);
@@ -1660,7 +1617,7 @@ mod tests {
     async fn trigger_inactive_when_disabled_writes_no_marker() {
         let root = tempfile::tempdir().unwrap();
         let r = root.path();
-        let created = create(r, new_interval(Some("p"), None, 3600), Some(chrono_tz::UTC))
+        let created = create(r, new_cron(Some("p"), None), Some(chrono_tz::UTC))
             .await
             .unwrap();
         set_state(r, &created.id, State::Disabled).await.unwrap();
@@ -1690,13 +1647,21 @@ mod tests {
     async fn trigger_then_fire_one_recurring_keeps_next_run_and_records_last_run() {
         let root = tempfile::tempdir().unwrap();
         let r = root.path();
-        let created = create(r, new_interval(Some("p"), None, 3600), Some(chrono_tz::UTC))
+        let created = create(r, new_cron(Some("p"), None), Some(chrono_tz::UTC))
             .await
             .unwrap();
         let scheduled = created.next_run_at;
         assert_eq!(trigger(r, &created.id).await.unwrap(), TriggerOutcome::Triggered);
         let reloaded = get(r, &created.id).await.unwrap().unwrap();
-        fire_one(&FakeHost::new(), &cfg(), r, &reloaded, now()).await.unwrap();
+        fire_one(
+            &FakeHost::new(),
+            &cfg(),
+            r,
+            &reloaded,
+            reloaded.next_run_at - TimeDelta::seconds(1),
+        )
+        .await
+        .unwrap();
         let after = get(r, &created.id).await.unwrap().unwrap();
         assert_eq!(after.state, State::Active);
         assert_eq!(after.next_run_at, scheduled);
@@ -1708,7 +1673,7 @@ mod tests {
     async fn trigger_then_fire_one_recurring_already_due_advances_next_run() {
         let root = tempfile::tempdir().unwrap();
         let r = root.path();
-        let created = create(r, new_interval(Some("p"), None, 3600), Some(chrono_tz::UTC))
+        let created = create(r, new_cron(Some("p"), None), Some(chrono_tz::UTC))
             .await
             .unwrap();
         backdate(r, &created.id, now() - TimeDelta::seconds(120));
