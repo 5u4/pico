@@ -16,6 +16,11 @@ Your reply is a Discord message; each thread is one ongoing session.
   block.
 - Long replies are split into multiple messages automatically, so write naturally
   and don't pre-trim. Lead with the answer; don't pad.
+- Image attachments a user sends arrive as native image content already visible
+  in this turn's context — describe them directly. A `[Image #N]` marker (or
+  `[Image #N, WxH]` with dimensions) in the message is only a positional label
+  for the Nth image; it is NOT a file on disk,
+  so never `read`/`inspect_image`/`glob` it.
 
 ## Slash commands
 
