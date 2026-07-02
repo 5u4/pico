@@ -37,6 +37,7 @@ pub(crate) enum Route {
         profile: String,
         base_repo: PathBuf,
         default_branch: String,
+        branch_prefix: String,
     },
 }
 
@@ -49,10 +50,12 @@ pub(crate) fn route_from_binding(binding: Binding) -> Route {
         BindingKind::Worktree {
             base_repo,
             default_branch,
+            branch_prefix,
         } => Route::Worktree {
             profile: binding.profile,
             base_repo,
             default_branch,
+            branch_prefix,
         },
     }
 }
@@ -121,17 +124,27 @@ async fn new_thread(db: &sqlx::SqlitePool, root: &Path, channel: &str, route: &R
             profile,
             base_repo,
             default_branch,
+            branch_prefix,
         } => {
             let worktrees_dir = worktrees_dir(root);
-            let path = worktree::ensure(&worktrees_dir, PLATFORM, channel, &thread_id, base_repo, default_branch)
-                .await
-                .wrap_err("worktree setup failed")?;
+            let path = worktree::ensure(
+                &worktrees_dir,
+                PLATFORM,
+                channel,
+                &thread_id,
+                branch_prefix,
+                base_repo,
+                default_branch,
+            )
+            .await
+            .wrap_err("worktree setup failed")?;
             (
                 profile.clone(),
                 path,
                 Some(WorktreeOrigin {
                     base_repo: base_repo.clone(),
                     default_branch: default_branch.clone(),
+                    branch_prefix: branch_prefix.clone(),
                 }),
             )
         }
@@ -167,7 +180,7 @@ async fn resume_thread(db: &sqlx::SqlitePool, root: &Path, thread_id: &str) -> c
         bail!("thread {thread_id} was closed at {closed}; start a new one");
     }
     match &marker.worktree {
-        Some(wt) => worktree::ensure_at(&marker.cwd, thread_id, &wt.base_repo, &wt.default_branch)
+        Some(wt) => worktree::ensure_at(&marker.cwd, thread_id, &wt.branch_prefix, &wt.base_repo, &wt.default_branch)
             .await
             .wrap_err("worktree setup failed")?,
         None => {

@@ -15,9 +15,18 @@ pub struct ThreadMarker {
 pub struct WorktreeOrigin {
     pub base_repo: PathBuf,
     pub default_branch: String,
+    pub branch_prefix: String,
 }
 
-type Columns = (String, String, Option<String>, Option<String>, Option<String>, Option<String>);
+type Columns = (
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
 
 pub async fn load(db: &SqlitePool, platform: &str, thread_id: &str) -> Option<ThreadMarker> {
     let row = match fetch(db, platform, thread_id).await {
@@ -45,7 +54,7 @@ pub async fn load(db: &SqlitePool, platform: &str, thread_id: &str) -> Option<Th
 
 async fn fetch(db: &SqlitePool, platform: &str, thread_id: &str) -> color_eyre::Result<Option<Columns>> {
     sqlx::query_as::<_, Columns>(
-        "SELECT profile, cwd, base_repo, default_branch, closed_at, channel_id FROM threads WHERE platform = ? AND thread_id = ?",
+        "SELECT profile, cwd, base_repo, default_branch, closed_at, channel_id, branch_prefix FROM threads WHERE platform = ? AND thread_id = ?",
     )
     .bind(platform)
     .bind(thread_id)
@@ -55,7 +64,7 @@ async fn fetch(db: &SqlitePool, platform: &str, thread_id: &str) -> color_eyre::
 }
 
 fn parse(
-    (profile, cwd, base_repo, default_branch, closed_at, channel_id): Columns,
+    (profile, cwd, base_repo, default_branch, closed_at, channel_id, branch_prefix): Columns,
     base: &std::path::Path,
 ) -> Option<ThreadMarker> {
     if !pico_shared::validate::is_valid_profile(&profile) {
@@ -67,10 +76,15 @@ fn parse(
             if !pico_shared::validate::is_valid_branch(&default_branch) {
                 return None;
             }
+            let branch_prefix = branch_prefix.unwrap_or_else(|| crate::bindings::DEFAULT_BRANCH_PREFIX.to_owned());
+            if !pico_shared::validate::is_valid_branch_prefix(&branch_prefix) {
+                return None;
+            }
             let base_repo = pico_shared::paths::from_portable(&base_repo, base)?;
             Some(WorktreeOrigin {
                 base_repo,
                 default_branch,
+                branch_prefix,
             })
         }
         (None, None) => None,
@@ -99,16 +113,18 @@ async fn write(db: &SqlitePool, platform: &str, thread_id: &str, marker: &Thread
         .as_ref()
         .map(|w| pico_shared::paths::to_portable(&w.base_repo, &base));
     let default_branch = marker.worktree.as_ref().map(|w| w.default_branch.clone());
+    let branch_prefix = marker.worktree.as_ref().map(|w| w.branch_prefix.clone());
     sqlx::query(
-        "INSERT INTO threads (platform, thread_id, profile, cwd, base_repo, default_branch, closed_at, channel_id) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
+        "INSERT INTO threads (platform, thread_id, profile, cwd, base_repo, default_branch, closed_at, channel_id, branch_prefix) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT(platform, thread_id) DO UPDATE SET \
              profile = excluded.profile, \
              cwd = excluded.cwd, \
              base_repo = excluded.base_repo, \
              default_branch = excluded.default_branch, \
              closed_at = excluded.closed_at, \
-             channel_id = excluded.channel_id",
+             channel_id = excluded.channel_id, \
+             branch_prefix = excluded.branch_prefix",
     )
     .bind(platform)
     .bind(thread_id)
@@ -118,6 +134,7 @@ async fn write(db: &SqlitePool, platform: &str, thread_id: &str, marker: &Thread
     .bind(default_branch)
     .bind(marker.closed_at.clone())
     .bind(marker.channel_id.clone())
+    .bind(branch_prefix)
     .execute(db)
     .await
     .wrap_err("writing thread marker")?;
@@ -145,7 +162,7 @@ pub struct ThreadEntry {
     pub worktree: Option<WorktreeOrigin>,
 }
 
-type OpenRow = (String, String, String, Option<String>, Option<String>);
+type OpenRow = (String, String, String, Option<String>, Option<String>, Option<String>);
 
 pub async fn list_open(db: &SqlitePool, platform: &str, channel_id: &str) -> Vec<ThreadEntry> {
     let rows = match list_open_rows(db, platform, channel_id).await {
@@ -163,8 +180,8 @@ pub async fn list_open(db: &SqlitePool, platform: &str, channel_id: &str) -> Vec
         }
     };
     rows.into_iter()
-        .filter_map(|(thread_id, profile, cwd, base_repo, default_branch)| {
-            let marker = parse((profile, cwd, base_repo, default_branch, None, None), &base)?;
+        .filter_map(|(thread_id, profile, cwd, base_repo, default_branch, branch_prefix)| {
+            let marker = parse((profile, cwd, base_repo, default_branch, None, None, branch_prefix), &base)?;
             Some(ThreadEntry {
                 thread_id,
                 profile: marker.profile,
@@ -177,7 +194,7 @@ pub async fn list_open(db: &SqlitePool, platform: &str, channel_id: &str) -> Vec
 
 async fn list_open_rows(db: &SqlitePool, platform: &str, channel_id: &str) -> color_eyre::Result<Vec<OpenRow>> {
     sqlx::query_as::<_, OpenRow>(
-        "SELECT thread_id, profile, cwd, base_repo, default_branch FROM threads \
+        "SELECT thread_id, profile, cwd, base_repo, default_branch, branch_prefix FROM threads \
          WHERE platform = ? AND channel_id = ? AND closed_at IS NULL",
     )
     .bind(platform)
@@ -299,6 +316,7 @@ mod tests {
                 worktree: Some(super::WorktreeOrigin {
                     base_repo: PathBuf::from("/repo"),
                     default_branch: "origin/main".into(),
+                    branch_prefix: "pico".into(),
                 }),
                 closed_at: Some("2026-06-17T00:00:00Z".into()),
                 channel_id: None,
@@ -340,6 +358,7 @@ mod tests {
                 worktree: Some(super::WorktreeOrigin {
                     base_repo: PathBuf::from("/repo"),
                     default_branch: "origin/main".into(),
+                    branch_prefix: "pico".into(),
                 }),
                 closed_at: None,
                 channel_id: None,
@@ -353,6 +372,7 @@ mod tests {
             .unwrap();
         assert_eq!(wt.base_repo, PathBuf::from("/repo"));
         assert_eq!(wt.default_branch, "origin/main");
+        assert_eq!(wt.branch_prefix, "pico");
         db.close().await;
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -424,6 +444,7 @@ mod tests {
                 worktree: Some(super::WorktreeOrigin {
                     base_repo: PathBuf::from("/repo"),
                     default_branch: "origin/main".into(),
+                    branch_prefix: "pico".into(),
                 }),
                 closed_at: None,
                 channel_id: None,
@@ -440,6 +461,7 @@ mod tests {
         let wt = reloaded.worktree.unwrap();
         assert_eq!(wt.base_repo, PathBuf::from("/repo"));
         assert_eq!(wt.default_branch, "origin/main");
+        assert_eq!(wt.branch_prefix, "pico");
         db.close().await;
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -474,6 +496,44 @@ mod tests {
         assert!(ids.contains("thread-a"));
         assert!(ids.contains("thread-b"));
         assert!(!ids.contains("thread-c"));
+        db.close().await;
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn branch_prefix_persists_and_defaults() {
+        let (db, dir) = test_pool("prefix").await;
+        super::save(
+            &db,
+            "discord",
+            "222222222222222222",
+            &super::ThreadMarker {
+                profile: "sen".into(),
+                cwd: PathBuf::from("/wt/c/t"),
+                worktree: Some(super::WorktreeOrigin {
+                    base_repo: PathBuf::from("/repo"),
+                    default_branch: "origin/main".into(),
+                    branch_prefix: "wt".into(),
+                }),
+                closed_at: None,
+                channel_id: None,
+            },
+        )
+        .await;
+        let wt = super::load(&db, "discord", "222222222222222222")
+            .await
+            .unwrap()
+            .worktree
+            .unwrap();
+        assert_eq!(wt.branch_prefix, "wt");
+
+        insert_raw(&db, "333333333333333333", "sen", "/wt/c/t", Some("/repo"), Some("origin/main")).await;
+        let legacy = super::load(&db, "discord", "333333333333333333")
+            .await
+            .unwrap()
+            .worktree
+            .unwrap();
+        assert_eq!(legacy.branch_prefix, "pico");
         db.close().await;
         std::fs::remove_dir_all(&dir).ok();
     }

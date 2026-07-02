@@ -620,6 +620,7 @@ async fn bind_worktree(
     #[description = "Ref to fork from (default: \"origin/main\"); a local branch like \"main\" forks offline"]
     branch: Option<String>,
     #[description = "Profile name (default: \"default\")"] profile: Option<String>,
+    #[description = "Branch prefix for forked branches (default: \"pico\")"] branch_prefix: Option<String>,
 ) -> Result<(), Error> {
     let data = ctx.data();
     let channel = bindable_channel(ctx).await?;
@@ -630,6 +631,7 @@ async fn bind_worktree(
         return Ok(());
     }
     let branch = branch.unwrap_or_else(|| pico_core::bindings::DEFAULT_BRANCH.to_owned());
+    let branch_prefix = branch_prefix.unwrap_or_else(|| pico_core::bindings::DEFAULT_BRANCH_PREFIX.to_owned());
     let base_path = pico_shared::paths::expand_home(&base_repo);
     if let Err(e) = pico_core::worktree::validate_base_repo(&base_path, &branch).await {
         ctx.say(format!("not a usable worktree base: {e}")).await?;
@@ -642,15 +644,16 @@ async fn bind_worktree(
         &profile,
         &base_path,
         &branch,
+        &branch_prefix,
     )
     .await
     {
         Ok(()) => {
             ctx.say(format!(
-                "bound <#{channel}> → worktree profile `{profile}`, base `{base_repo}`, branch `{branch}`"
+                "bound <#{channel}> → worktree profile `{profile}`, base `{base_repo}`, branch `{branch}`, prefix `{branch_prefix}`"
             ))
             .await?;
-            tracing::info!(channel_id = %channel, user_id = %ctx.author().id, %base_repo, %branch, %profile, "binding worktree set");
+            tracing::info!(channel_id = %channel, user_id = %ctx.author().id, %base_repo, %branch, %branch_prefix, %profile, "binding worktree set");
         }
         Err(e) => {
             ctx.say(format!("bind failed: {e}")).await?;
@@ -690,11 +693,13 @@ async fn bind_show(ctx: Context<'_>) -> Result<(), Error> {
             BindingKind::Worktree {
                 base_repo,
                 default_branch,
+                branch_prefix,
             } => format!(
-                "<#{channel}> → worktree profile `{}`, base `{}`, branch `{}`",
+                "<#{channel}> → worktree profile `{}`, base `{}`, branch `{}`, prefix `{}`",
                 b.profile,
                 base_repo.display(),
-                default_branch
+                default_branch,
+                branch_prefix
             ),
         },
         Ok(None) => "this channel is not bound".to_owned(),
@@ -744,9 +749,11 @@ async fn worktree_close(ctx: Context<'_>) -> Result<(), Error> {
     }
     let origin = marker.worktree.as_ref().expect("worktree origin checked above");
     let base_repo = origin.base_repo.clone();
+    let branch_prefix = origin.branch_prefix.clone();
     let worktree_path = marker.cwd.clone();
 
-    let loss = match pico_core::worktree::close_would_lose(&base_repo, &worktree_path, &thread_id).await {
+    let loss = match pico_core::worktree::close_would_lose(&base_repo, &worktree_path, &thread_id, &branch_prefix).await
+    {
         Ok(loss) => loss,
         Err(e) => {
             ctx.say(format!("❌ worktree inspection failed: {e}")).await?;
@@ -763,7 +770,7 @@ async fn worktree_close(ctx: Context<'_>) -> Result<(), Error> {
         return Ok(());
     }
 
-    if let Err(e) = pico_core::worktree::remove(&base_repo, &worktree_path, &thread_id).await {
+    if let Err(e) = pico_core::worktree::remove(&base_repo, &worktree_path, &thread_id, &branch_prefix).await {
         ctx.say(format!("❌ teardown failed: {e}")).await?;
         return Ok(());
     }
@@ -783,7 +790,7 @@ async fn worktree_close(ctx: Context<'_>) -> Result<(), Error> {
     let _ = channel
         .say(
             ctx.serenity_context(),
-            format!("✅ Worktree thread closed. Removed worktree and branch `pico/{thread_id}`. Conversation history preserved."),
+            format!("✅ Worktree thread closed. Removed worktree and branch `{branch_prefix}/{thread_id}`. Conversation history preserved."),
         )
         .await;
     let _ = ctx.say("Closed.").await;
@@ -1099,8 +1106,14 @@ async fn route_message(
                 return Ok(());
             }
             if let Some(wt) = &marker.worktree {
-                if let Err(e) =
-                    pico_core::worktree::ensure_at(&marker.cwd, &thread_id, &wt.base_repo, &wt.default_branch).await
+                if let Err(e) = pico_core::worktree::ensure_at(
+                    &marker.cwd,
+                    &thread_id,
+                    &wt.branch_prefix,
+                    &wt.base_repo,
+                    &wt.default_branch,
+                )
+                .await
                 {
                     target.say(&ctx, format!("❌ worktree setup failed: {e}")).await?;
                     return Ok(());
@@ -1140,6 +1153,7 @@ async fn route_message(
                     profile,
                     base_repo,
                     default_branch,
+                    branch_prefix,
                 } => {
                     let worktrees_dir = root_config
                         .worktrees_dir()
@@ -1150,6 +1164,7 @@ async fn route_message(
                         crate::consts::PLATFORM,
                         &bound_channel.to_string(),
                         &thread_id,
+                        &branch_prefix,
                         &base_repo,
                         &default_branch,
                     )
@@ -1161,6 +1176,7 @@ async fn route_message(
                             Some(pico_core::thread_marker::WorktreeOrigin {
                                 base_repo,
                                 default_branch,
+                                branch_prefix,
                             }),
                         ),
                         Err(e) => {
@@ -1587,6 +1603,7 @@ mod tests {
             kind: BindingKind::Worktree {
                 base_repo: PathBuf::from("/repo"),
                 default_branch: "trunk".to_owned(),
+                branch_prefix: "pico".to_owned(),
             },
         };
         match pico_core::bindings::resolve_route(Some(&b), &d.profile, &d.cwd) {
@@ -1594,10 +1611,12 @@ mod tests {
                 profile,
                 base_repo,
                 default_branch,
+                branch_prefix,
             } => {
                 assert_eq!(profile, "sen");
                 assert_eq!(base_repo, PathBuf::from("/repo"));
                 assert_eq!(default_branch, "trunk");
+                assert_eq!(branch_prefix, "pico");
             }
             _ => panic!("expected worktree route"),
         }
