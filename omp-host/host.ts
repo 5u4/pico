@@ -23,7 +23,8 @@ import { resolvePromptInput } from "@oh-my-pi/pi-coding-agent/system-prompt";
 import { registerProvider, reset as resetCapabilities } from "@oh-my-pi/pi-coding-agent/capability";
 import { scanSkillsFromDir, buildRuleFromMarkdown, loadFilesFromDir } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
 import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
-import { buildContextReportText } from "@oh-my-pi/pi-coding-agent/slash-commands/helpers/context-report";
+import { computeContextBreakdown } from "@oh-my-pi/pi-coding-agent/modes/utils/context-usage";
+import { formatNumber } from "@oh-my-pi/pi-utils";
 import { formatShakeSummary } from "@oh-my-pi/pi-coding-agent/session/shake-types";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { resizeImage } from "@oh-my-pi/pi-coding-agent/utils/image-resize";
@@ -567,7 +568,7 @@ async function handle(raw: Json): Promise<void> {
 		}
 		case "context": {
 			try {
-				const text = buildContextReportText({ session: hostSession.session } as any);
+				const text = buildDiscordContextReport(hostSession.session);
 				respondWithResult(id, sessionId, type, text);
 			} catch (e) {
 				const m = errorMessage(e);
@@ -635,6 +636,31 @@ async function* readLines(stream: ReadableStream<Uint8Array>): AsyncGenerator<st
 	}
 	const tail = buffer.trim();
 	if (tail) yield tail;
+}
+
+function buildDiscordContextReport(session: AgentSession): string {
+	const b = computeContextBreakdown(session);
+	if (b.contextWindow <= 0) {
+		return "Context usage is unavailable: no model is selected for this session.";
+	}
+	const rows: [string, number][] = [];
+	for (const category of b.categories) {
+		if (category.tokens > 0) rows.push([category.label, category.tokens]);
+	}
+	if (b.autoCompactBufferTokens > 0) rows.push(["Auto-compact", b.autoCompactBufferTokens]);
+	if (b.freeTokens > 0) rows.push(["Free", b.freeTokens]);
+	const labelWidth = Math.max(...rows.map(([label]) => label.length));
+	const tokenWidth = Math.max(...rows.map(([, tokens]) => formatNumber(tokens).length));
+	const usedPct = Math.round((b.usedTokens / b.contextWindow) * 100);
+	const lines = [
+		`Context: ${formatNumber(b.usedTokens)} / ${formatNumber(b.contextWindow)} tokens (${usedPct}% used)`,
+		"",
+	];
+	for (const [label, tokens] of rows) {
+		const rowPct = `${Math.round((tokens / b.contextWindow) * 100)}%`;
+		lines.push(`${label.padEnd(labelWidth)}  ${formatNumber(tokens).padStart(tokenWidth)}  ${rowPct.padStart(4)}`);
+	}
+	return lines.join("\n");
 }
 
 shared = await initHost(process.cwd());
