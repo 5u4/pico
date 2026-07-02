@@ -1175,7 +1175,7 @@ pub struct SchedulerHealth {
 pub fn scheduler_health(root: &Path, cap: Duration) -> SchedulerHealth {
     let heartbeat_at = read_stamp(&schedule_heartbeat(root));
     let stalled = match heartbeat_at {
-        Some(beat) => now() - beat > to_delta(cap.saturating_mul(3)),
+        Some(beat) => now() - beat > to_delta(cap.max(MIN_IDLE).saturating_mul(3)),
         None => false,
     };
     SchedulerHealth { heartbeat_at, stalled }
@@ -1903,6 +1903,9 @@ mod tests {
         let fresh = scheduler_health(r, Duration::from_secs(60));
         assert_eq!(fresh.heartbeat_at, Some(fresh_at));
         assert!(!fresh.stalled);
+
+        let zero_cap = scheduler_health(r, Duration::ZERO);
+        assert!(!zero_cap.stalled);
 
         touch_stamp(&schedule_heartbeat(r), now() - TimeDelta::seconds(600));
         let stale = scheduler_health(r, Duration::from_secs(60));
