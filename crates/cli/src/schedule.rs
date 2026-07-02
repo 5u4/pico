@@ -82,6 +82,7 @@ struct CreateInput {
     created_by: Option<String>,
     #[serde(default)]
     max_runs: Option<i64>,
+    script_timeout_secs: Option<u64>,
 }
 
 #[derive(serde::Deserialize)]
@@ -154,6 +155,7 @@ impl CreateInput {
             script: self.script,
             prompt: self.prompt,
             max_runs: self.max_runs,
+            script_timeout: self.script_timeout_secs.map(std::time::Duration::from_secs),
         })
     }
 }
@@ -300,6 +302,9 @@ async fn print_human(sched: &Schedule, root: &Path) -> color_eyre::Result<()> {
         Some(max_runs) => println!("runs        {} / {}", sched.run_count, max_runs),
         None => println!("runs        {}", sched.run_count),
     }
+    if let Some(t) = sched.script_timeout {
+        println!("script_timeout {}s", t.as_secs());
+    }
     let def = schedule::read_definition(root, &sched.id).await?;
     println!("script_path {}", def.script_path.display());
     println!("prompt_path {}", def.prompt_path.display());
@@ -335,6 +340,7 @@ async fn schedule_dto(sched: &Schedule, root: &Path) -> color_eyre::Result<serde
         "max_runs": sched.max_runs,
         "run_count": sched.run_count,
         "state": state_str(sched.state),
+        "script_timeout_secs": sched.script_timeout.map(|d| d.as_secs()),
     }))
 }
 
@@ -377,6 +383,23 @@ mod tests {
             Trigger::Oneshot { at } => assert_eq!(at.to_rfc3339(), "2030-01-01T00:00:00+00:00"),
             other => panic!("expected oneshot, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_script_timeout_override_and_defaults_to_none() {
+        let with_timeout = r#"{"name":"gate","mode":"fresh","trigger":{"kind":"cron","expr":"0 9 * * MON"},"script":"echo hi","scope":"g","origin":"o","target":"t","created_by":"u","script_timeout_secs":300}"#;
+        let new = serde_json::from_str::<CreateInput>(with_timeout)
+            .unwrap()
+            .into_new_schedule()
+            .unwrap();
+        assert_eq!(new.script_timeout, Some(std::time::Duration::from_secs(300)));
+
+        let without = r#"{"name":"gate","mode":"fresh","trigger":{"kind":"cron","expr":"0 9 * * MON"},"script":"echo hi","scope":"g","origin":"o","target":"t","created_by":"u"}"#;
+        let new = serde_json::from_str::<CreateInput>(without)
+            .unwrap()
+            .into_new_schedule()
+            .unwrap();
+        assert_eq!(new.script_timeout, None);
     }
 
     #[test]
@@ -459,6 +482,7 @@ mod tests {
             consecutive_failures: 0,
             max_runs: None,
             run_count: 0,
+            script_timeout: None,
             state: State::Active,
         }
     }
