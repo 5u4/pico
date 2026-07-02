@@ -1030,7 +1030,7 @@ async fn route_message(
                 let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
                 let mime_type = att.content_type.clone().unwrap_or_else(|| "image/png".to_owned());
                 images.push(pico_core::omp::protocol::ImageAttachment { mime_type, data });
-                file_refs.push_str(&image_file_ref(&att.filename));
+                file_refs.push_str(&image_ref(images.len(), att.width, att.height));
             }
             Err(e) => {
                 tracing::warn!(error = %e, filename = %att.filename, "failed to download image attachment");
@@ -1359,8 +1359,11 @@ fn is_image_content_type(content_type: Option<&str>) -> bool {
     content_type.is_some_and(|c| c.starts_with("image/"))
 }
 
-fn image_file_ref(filename: &str) -> String {
-    format!("<file name=\"{}\"></file>\n", pico_core::prompt::escape_attr(filename))
+fn image_ref(index: usize, width: Option<u32>, height: Option<u32>) -> String {
+    match (width, height) {
+        (Some(w), Some(h)) => format!("[Image #{index}, {w}x{h}]\n"),
+        _ => format!("[Image #{index}]\n"),
+    }
 }
 
 fn compose_message_body(prompt: &str, file_refs: &str) -> String {
@@ -1663,18 +1666,18 @@ mod tests {
     }
 
     #[test]
-    fn image_file_ref_escapes_and_appends_newline() {
-        assert_eq!(super::image_file_ref("a.png"), "<file name=\"a.png\"></file>\n");
-        assert_eq!(super::image_file_ref("Q&A.png"), "<file name=\"Q&amp;A.png\"></file>\n");
-        assert_eq!(super::image_file_ref("a\"b.png"), "<file name=\"a&quot;b.png\"></file>\n");
-        assert_eq!(super::image_file_ref("a<b>.png"), "<file name=\"a&lt;b&gt;.png\"></file>\n");
-        assert!(super::image_file_ref("plain.png").ends_with('\n'));
+    fn image_ref_formats_positional_placeholder() {
+        assert_eq!(super::image_ref(1, Some(800), Some(600)), "[Image #1, 800x600]\n");
+        assert_eq!(super::image_ref(2, None, None), "[Image #2]\n");
+        assert_eq!(super::image_ref(3, Some(800), None), "[Image #3]\n");
+        assert_eq!(super::image_ref(4, None, Some(600)), "[Image #4]\n");
+        assert!(super::image_ref(1, None, None).ends_with('\n'));
     }
 
     #[test]
     fn compose_message_body_joins_and_trims() {
-        assert_eq!(super::compose_message_body("hi", "<file/>\n"), "hi\n<file/>");
-        assert_eq!(super::compose_message_body("", "<file/>\n"), "<file/>");
+        assert_eq!(super::compose_message_body("hi", "[Image #1]\n"), "hi\n[Image #1]");
+        assert_eq!(super::compose_message_body("", "[Image #1]\n"), "[Image #1]");
         assert_eq!(super::compose_message_body("hi", ""), "hi");
         assert_eq!(super::compose_message_body("hi", "   "), "hi");
     }
