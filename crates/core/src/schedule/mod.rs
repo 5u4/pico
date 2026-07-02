@@ -198,8 +198,8 @@ pub fn validate(new: &NewSchedule) -> color_eyre::Result<()> {
             return Err(eyre!("max_runs applies only to recurring (cron) schedules"));
         }
     }
-    if new.script_timeout == Some(std::time::Duration::ZERO) {
-        return Err(eyre!("script_timeout_secs must be greater than 0"));
+    if matches!(new.script_timeout, Some(d) if d.as_secs() == 0) {
+        return Err(eyre!("script_timeout_secs must be at least 1 second"));
     }
     Ok(())
 }
@@ -382,7 +382,10 @@ fn load_schedule(dir: &Path, state: State) -> Option<Schedule> {
     let id = dir.file_name()?.to_str()?.to_owned();
     let raw = fs::read_to_string(dir.join(DEFINITION_FILE)).ok()?;
     let def: DefinitionToml = toml::from_str(&raw).ok()?;
-    let script_timeout = def.script_timeout_secs.map(std::time::Duration::from_secs);
+    let script_timeout = def
+        .script_timeout_secs
+        .filter(|secs| *secs != 0)
+        .map(std::time::Duration::from_secs);
     let mode = Mode::parse(&def.mode)?;
     let created_at = parse_ts(&def.created_at)?;
     let trigger = trigger_from_toml(def.trigger)?;
@@ -1432,6 +1435,24 @@ mod tests {
         let mut new = new_cron(Some("p"), None);
         new.script_timeout = Some(Duration::ZERO);
         assert!(validate(&new).is_err());
+        new.script_timeout = Some(Duration::from_millis(500));
+        assert!(validate(&new).is_err());
+        new.script_timeout = Some(Duration::from_secs(1));
+        assert!(validate(&new).is_ok());
+    }
+
+    #[tokio::test]
+    async fn load_treats_zero_script_timeout_as_unset() {
+        let root = tempfile::tempdir().unwrap();
+        let r = root.path();
+        let mut new = new_cron(Some("p"), None);
+        new.script_timeout = Some(Duration::from_secs(300));
+        let created = create(r, new, Some(chrono_tz::UTC)).await.unwrap();
+        let toml_path = schedule_dir(r, "active", &created.id).join(DEFINITION_FILE);
+        let toml = fs::read_to_string(&toml_path).unwrap();
+        fs::write(&toml_path, toml.replace("script_timeout_secs = 300", "script_timeout_secs = 0")).unwrap();
+        let reloaded = get(r, &created.id).await.unwrap().unwrap();
+        assert_eq!(reloaded.script_timeout, None);
     }
 
     #[tokio::test]
