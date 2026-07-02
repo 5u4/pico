@@ -119,8 +119,14 @@ impl DiscordScheduleHost {
         };
 
         if let Some(wt) = &marker.worktree
-            && let Err(e) =
-                pico_core::worktree::ensure_at(&marker.cwd, &sched.origin, &wt.base_repo, &wt.default_branch).await
+            && let Err(e) = pico_core::worktree::ensure_at(
+                &marker.cwd,
+                &sched.origin,
+                &wt.branch_prefix,
+                &wt.base_repo,
+                &wt.default_branch,
+            )
+            .await
         {
             tracing::warn!(error = %format!("{e:#}"), schedule_id = %sched.id, "scheduled worktree setup failed");
             return FireOutcome::Transient;
@@ -198,6 +204,7 @@ impl DiscordScheduleHost {
                 profile,
                 base_repo,
                 default_branch,
+                branch_prefix,
             } => {
                 let worktrees_dir = self.worktrees_dir();
                 match pico_core::worktree::ensure(
@@ -205,6 +212,7 @@ impl DiscordScheduleHost {
                     crate::consts::PLATFORM,
                     &sched.target,
                     &thread_id,
+                    &branch_prefix,
                     &base_repo,
                     &default_branch,
                 )
@@ -216,6 +224,7 @@ impl DiscordScheduleHost {
                         Some(WorktreeOrigin {
                             base_repo,
                             default_branch,
+                            branch_prefix,
                         }),
                     ),
                     Err(e) => {

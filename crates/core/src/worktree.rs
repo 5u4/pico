@@ -14,8 +14,8 @@ const GIT_TIMEOUT: Duration = Duration::from_secs(60);
 
 static CREATE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-fn branch_name(thread_id: &str) -> String {
-    format!("pico/{thread_id}")
+fn branch_name(prefix: &str, thread_id: &str) -> String {
+    format!("{prefix}/{thread_id}")
 }
 
 fn safe_component(channel_id: &str) -> String {
@@ -43,15 +43,22 @@ pub async fn ensure(
     platform: &str,
     channel_id: &str,
     thread_id: &str,
+    branch_prefix: &str,
     base_repo: &Path,
     default_branch: &str,
 ) -> color_eyre::Result<PathBuf> {
     let path = worktree_path(worktrees_dir, platform, channel_id, thread_id);
-    ensure_at(&path, thread_id, base_repo, default_branch).await?;
+    ensure_at(&path, thread_id, branch_prefix, base_repo, default_branch).await?;
     Ok(path)
 }
 
-pub async fn ensure_at(path: &Path, thread_id: &str, base_repo: &Path, default_branch: &str) -> color_eyre::Result<()> {
+pub async fn ensure_at(
+    path: &Path,
+    thread_id: &str,
+    branch_prefix: &str,
+    base_repo: &Path,
+    default_branch: &str,
+) -> color_eyre::Result<()> {
     let _guard = CREATE_LOCK.lock().await;
     if path.join(".git").exists() {
         return Ok(());
@@ -77,7 +84,7 @@ pub async fn ensure_at(path: &Path, thread_id: &str, base_repo: &Path, default_b
         tracing::warn!(error = %format!("{e:#}"), %default_branch, "git fetch origin failed; forking possibly-stale ref");
     }
 
-    let branch = branch_name(thread_id);
+    let branch = branch_name(branch_prefix, thread_id);
     if branch_exists(base_repo, &branch).await? {
         run_git(
             base_repo,
@@ -158,14 +165,19 @@ impl LossSummary {
     }
 }
 
-pub async fn close_would_lose(base_repo: &Path, worktree: &Path, thread_id: &str) -> color_eyre::Result<LossSummary> {
+pub async fn close_would_lose(
+    base_repo: &Path,
+    worktree: &Path,
+    thread_id: &str,
+    branch_prefix: &str,
+) -> color_eyre::Result<LossSummary> {
     let dirty = if worktree.join(".git").exists() {
         let out = git_output(worktree, ["status", "--porcelain"], GIT_TIMEOUT).await?;
         !String::from_utf8_lossy(&out.stdout).trim().is_empty()
     } else {
         false
     };
-    let branch = branch_name(thread_id);
+    let branch = branch_name(branch_prefix, thread_id);
     let unmerged = if branch_exists(base_repo, &branch).await? {
         let out = git_output(
             base_repo,
@@ -184,7 +196,7 @@ pub async fn close_would_lose(base_repo: &Path, worktree: &Path, thread_id: &str
     Ok(LossSummary { dirty, unmerged })
 }
 
-pub async fn remove(base_repo: &Path, worktree: &Path, thread_id: &str) -> color_eyre::Result<()> {
+pub async fn remove(base_repo: &Path, worktree: &Path, thread_id: &str, branch_prefix: &str) -> color_eyre::Result<()> {
     let _guard = CREATE_LOCK.lock().await;
     if worktree.exists() {
         run_git(
@@ -204,7 +216,7 @@ pub async fn remove(base_repo: &Path, worktree: &Path, thread_id: &str) -> color
             .await
             .wrap_err("git worktree prune")?;
     }
-    let branch = branch_name(thread_id);
+    let branch = branch_name(branch_prefix, thread_id);
     if branch_exists(base_repo, &branch).await? {
         run_git(base_repo, ["branch", "-D", &branch], GIT_TIMEOUT)
             .await
@@ -335,6 +347,7 @@ mod tests {
             "discord",
             "111111111111111111",
             "222222222222222222",
+            "pico",
             &base,
             "origin/main",
         )
@@ -356,6 +369,7 @@ mod tests {
             "discord",
             "111111111111111111",
             "222222222222222222",
+            "pico",
             &base,
             "origin/main",
         )
@@ -372,12 +386,28 @@ mod tests {
         let base = base_repo_with_origin(&root);
         let wt_dir = root.join("worktrees");
 
-        let a = super::ensure(&wt_dir, "discord", "111111111111111111", "222222222222222222", &base, "main")
-            .await
-            .unwrap();
-        let b = super::ensure(&wt_dir, "discord", "111111111111111111", "333333333333333333", &base, "main")
-            .await
-            .unwrap();
+        let a = super::ensure(
+            &wt_dir,
+            "discord",
+            "111111111111111111",
+            "222222222222222222",
+            "pico",
+            &base,
+            "main",
+        )
+        .await
+        .unwrap();
+        let b = super::ensure(
+            &wt_dir,
+            "discord",
+            "111111111111111111",
+            "333333333333333333",
+            "pico",
+            &base,
+            "main",
+        )
+        .await
+        .unwrap();
         assert_ne!(a, b);
         assert!(b.join("seed.txt").exists());
 
@@ -410,7 +440,7 @@ mod tests {
         let channel = "111111111111111111";
         let thread = "222222222222222222";
 
-        let path = super::ensure(&wt_dir, "discord", channel, thread, &base, "main")
+        let path = super::ensure(&wt_dir, "discord", channel, thread, "pico", &base, "main")
             .await
             .unwrap();
         std::fs::write(path.join("work.txt"), "wip").unwrap();
@@ -420,7 +450,7 @@ mod tests {
         git(&path, &["commit", "-m", "wip"]);
         std::fs::remove_dir_all(&path).unwrap();
 
-        let again = super::ensure(&wt_dir, "discord", channel, thread, &base, "main")
+        let again = super::ensure(&wt_dir, "discord", channel, thread, "pico", &base, "main")
             .await
             .unwrap();
         assert_eq!(again, path);
@@ -434,9 +464,17 @@ mod tests {
         let root = temp_dir("offline");
         let base = local_repo(&root);
         let wt_dir = root.join("worktrees");
-        let path = super::ensure(&wt_dir, "discord", "111111111111111111", "222222222222222222", &base, "main")
-            .await
-            .unwrap();
+        let path = super::ensure(
+            &wt_dir,
+            "discord",
+            "111111111111111111",
+            "222222222222222222",
+            "pico",
+            &base,
+            "main",
+        )
+        .await
+        .unwrap();
         assert!(path.join("seed.txt").exists());
         std::fs::remove_dir_all(&root).ok();
     }
@@ -496,11 +534,11 @@ mod tests {
         let base = local_repo(&root);
         let wt_dir = root.join("worktrees");
         let (channel, thread) = ("111111111111111111", "222222222222222222");
-        let path = super::ensure(&wt_dir, "discord", channel, thread, &base, "main")
+        let path = super::ensure(&wt_dir, "discord", channel, thread, "pico", &base, "main")
             .await
             .unwrap();
 
-        let loss = super::close_would_lose(&base, &path, thread).await.unwrap();
+        let loss = super::close_would_lose(&base, &path, thread, "pico").await.unwrap();
         assert!(!loss.dirty);
         assert_eq!(loss.unmerged, Some(0));
         assert!(!loss.needs_confirmation());
@@ -513,12 +551,12 @@ mod tests {
         let base = local_repo(&root);
         let wt_dir = root.join("worktrees");
         let (channel, thread) = ("111111111111111111", "222222222222222222");
-        let path = super::ensure(&wt_dir, "discord", channel, thread, &base, "main")
+        let path = super::ensure(&wt_dir, "discord", channel, thread, "pico", &base, "main")
             .await
             .unwrap();
         std::fs::write(path.join("scratch.txt"), "wip").unwrap();
 
-        let loss = super::close_would_lose(&base, &path, thread).await.unwrap();
+        let loss = super::close_would_lose(&base, &path, thread, "pico").await.unwrap();
         assert!(loss.dirty, "untracked file should read as dirty");
         assert!(loss.needs_confirmation());
         std::fs::remove_dir_all(&root).ok();
@@ -530,7 +568,7 @@ mod tests {
         let base = local_repo(&root);
         let wt_dir = root.join("worktrees");
         let (channel, thread) = ("111111111111111111", "222222222222222222");
-        let path = super::ensure(&wt_dir, "discord", channel, thread, &base, "main")
+        let path = super::ensure(&wt_dir, "discord", channel, thread, "pico", &base, "main")
             .await
             .unwrap();
         std::fs::write(path.join("work.txt"), "wip").unwrap();
@@ -539,7 +577,7 @@ mod tests {
         git(&path, &["add", "."]);
         git(&path, &["commit", "-m", "wip"]);
 
-        let loss = super::close_would_lose(&base, &path, thread).await.unwrap();
+        let loss = super::close_would_lose(&base, &path, thread, "pico").await.unwrap();
         assert!(!loss.dirty, "a committed tree is clean");
         assert_eq!(loss.unmerged, Some(1));
         assert!(loss.needs_confirmation());
@@ -552,7 +590,7 @@ mod tests {
         let base = base_repo_with_origin(&root);
         let wt_dir = root.join("worktrees");
         let (channel, thread) = ("111111111111111111", "222222222222222222");
-        let path = super::ensure(&wt_dir, "discord", channel, thread, &base, "origin/main")
+        let path = super::ensure(&wt_dir, "discord", channel, thread, "pico", &base, "origin/main")
             .await
             .unwrap();
         std::fs::write(path.join("work.txt"), "wip").unwrap();
@@ -560,10 +598,10 @@ mod tests {
         git(&path, &["config", "user.name", "pico test"]);
         git(&path, &["add", "."]);
         git(&path, &["commit", "-m", "wip"]);
-        let branch = super::branch_name(thread);
+        let branch = super::branch_name("pico", thread);
         git(&path, &["push", "origin", &branch]);
 
-        let loss = super::close_would_lose(&base, &path, thread).await.unwrap();
+        let loss = super::close_would_lose(&base, &path, thread, "pico").await.unwrap();
         assert_eq!(loss.unmerged, Some(0), "pushed commits must read as safe");
         assert!(!loss.needs_confirmation());
         std::fs::remove_dir_all(&root).ok();
@@ -575,7 +613,7 @@ mod tests {
         let base = local_repo(&root);
         let wt_dir = root.join("worktrees");
         let (channel, thread) = ("111111111111111111", "222222222222222222");
-        let path = super::ensure(&wt_dir, "discord", channel, thread, &base, "main")
+        let path = super::ensure(&wt_dir, "discord", channel, thread, "pico", &base, "main")
             .await
             .unwrap();
         std::fs::write(path.join("work.txt"), "wip").unwrap();
@@ -583,9 +621,9 @@ mod tests {
         git(&path, &["config", "user.name", "pico test"]);
         git(&path, &["add", "."]);
         git(&path, &["commit", "-m", "wip"]);
-        git(&base, &["merge", "--ff-only", &super::branch_name(thread)]);
+        git(&base, &["merge", "--ff-only", &super::branch_name("pico", thread)]);
 
-        let loss = super::close_would_lose(&base, &path, thread).await.unwrap();
+        let loss = super::close_would_lose(&base, &path, thread, "pico").await.unwrap();
         assert_eq!(loss.unmerged, Some(0), "commits merged into trunk are safe");
         assert!(!loss.needs_confirmation());
         std::fs::remove_dir_all(&root).ok();
@@ -597,12 +635,12 @@ mod tests {
         let base = local_repo(&root);
         let wt_dir = root.join("worktrees");
         let (channel, thread) = ("111111111111111111", "222222222222222222");
-        let path = super::ensure(&wt_dir, "discord", channel, thread, &base, "main")
+        let path = super::ensure(&wt_dir, "discord", channel, thread, "pico", &base, "main")
             .await
             .unwrap();
         git(&base, &["symbolic-ref", "HEAD", "refs/heads/does-not-exist"]);
 
-        let loss = super::close_would_lose(&base, &path, thread).await.unwrap();
+        let loss = super::close_would_lose(&base, &path, thread, "pico").await.unwrap();
         assert_eq!(loss.unmerged, None, "uncomputable count must fail closed");
         assert!(loss.needs_confirmation());
         std::fs::remove_dir_all(&root).ok();
@@ -614,19 +652,59 @@ mod tests {
         let base = local_repo(&root);
         let wt_dir = root.join("worktrees");
         let (channel, thread) = ("111111111111111111", "222222222222222222");
-        let path = super::ensure(&wt_dir, "discord", channel, thread, &base, "main")
+        let path = super::ensure(&wt_dir, "discord", channel, thread, "pico", &base, "main")
             .await
             .unwrap();
         assert!(path.join(".git").exists());
 
-        super::remove(&base, &path, thread).await.unwrap();
+        super::remove(&base, &path, thread, "pico").await.unwrap();
         assert!(!path.exists(), "worktree dir should be gone");
         assert!(
-            !super::branch_exists(&base, &super::branch_name(thread)).await.unwrap(),
+            !super::branch_exists(&base, &super::branch_name("pico", thread))
+                .await
+                .unwrap(),
             "branch should be deleted"
         );
 
-        super::remove(&base, &path, thread).await.unwrap();
+        super::remove(&base, &path, thread, "pico").await.unwrap();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn custom_prefix_creates_and_removes_only_matching_branch() {
+        let root = temp_dir("custom-prefix");
+        let base = local_repo(&root);
+        let wt_dir = root.join("worktrees");
+        let (channel, thread) = ("111111111111111111", "222222222222222222");
+        let path = super::ensure(&wt_dir, "discord", channel, thread, "wt", &base, "main")
+            .await
+            .unwrap();
+        assert!(path.join(".git").exists());
+        assert!(
+            super::branch_exists(&base, &super::branch_name("wt", thread))
+                .await
+                .unwrap(),
+            "custom-prefix branch should exist"
+        );
+
+        let loss = super::close_would_lose(&base, &path, thread, "wt").await.unwrap();
+        assert_eq!(loss.unmerged, Some(0), "matching prefix finds the branch");
+
+        super::remove(&base, &path, thread, "pico").await.unwrap();
+        assert!(
+            super::branch_exists(&base, &super::branch_name("wt", thread))
+                .await
+                .unwrap(),
+            "wrong prefix must leave the branch intact"
+        );
+
+        super::remove(&base, &path, thread, "wt").await.unwrap();
+        assert!(
+            !super::branch_exists(&base, &super::branch_name("wt", thread))
+                .await
+                .unwrap(),
+            "matching prefix deletes the branch"
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 }

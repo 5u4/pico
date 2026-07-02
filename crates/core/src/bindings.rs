@@ -9,11 +9,19 @@ pub struct Binding {
 }
 
 pub enum BindingKind {
-    Regular { cwd: PathBuf },
-    Worktree { base_repo: PathBuf, default_branch: String },
+    Regular {
+        cwd: PathBuf,
+    },
+    Worktree {
+        base_repo: PathBuf,
+        default_branch: String,
+        branch_prefix: String,
+    },
 }
 
 pub const DEFAULT_BRANCH: &str = "origin/main";
+
+pub const DEFAULT_BRANCH_PREFIX: &str = "pico";
 
 pub enum Route {
     Regular {
@@ -24,6 +32,7 @@ pub enum Route {
         profile: String,
         base_repo: PathBuf,
         default_branch: String,
+        branch_prefix: String,
     },
 }
 
@@ -37,10 +46,12 @@ pub fn resolve_route(binding: Option<&Binding>, fallback_profile: &str, fallback
             BindingKind::Worktree {
                 base_repo,
                 default_branch,
+                branch_prefix,
             } => Route::Worktree {
                 profile: b.profile.clone(),
                 base_repo: base_repo.clone(),
                 default_branch: default_branch.clone(),
+                branch_prefix: branch_prefix.clone(),
             },
         },
         None => Route::Regular {
@@ -50,11 +61,11 @@ pub fn resolve_route(binding: Option<&Binding>, fallback_profile: &str, fallback
     }
 }
 
-type Row = (String, String, Option<String>, Option<String>, Option<String>);
+type Row = (String, String, Option<String>, Option<String>, Option<String>, Option<String>);
 
 pub async fn get(db: &SqlitePool, platform: &str, channel_id: &str) -> color_eyre::Result<Option<Binding>> {
     let row: Option<Row> = sqlx::query_as(
-        "SELECT profile, kind, cwd, base_repo, default_branch FROM bindings WHERE platform = ? AND channel_id = ?",
+        "SELECT profile, kind, cwd, base_repo, default_branch, branch_prefix FROM bindings WHERE platform = ? AND channel_id = ?",
     )
     .bind(platform)
     .bind(channel_id)
@@ -68,7 +79,10 @@ pub async fn get(db: &SqlitePool, platform: &str, channel_id: &str) -> color_eyr
     Ok(parse(row, &base))
 }
 
-fn parse((profile, kind, cwd, base_repo, default_branch): Row, base: &std::path::Path) -> Option<Binding> {
+fn parse(
+    (profile, kind, cwd, base_repo, default_branch, branch_prefix): Row,
+    base: &std::path::Path,
+) -> Option<Binding> {
     if !pico_shared::validate::is_valid_profile(&profile) {
         return None;
     }
@@ -81,9 +95,14 @@ fn parse((profile, kind, cwd, base_repo, default_branch): Row, base: &std::path:
             if !pico_shared::validate::is_valid_branch(&default_branch) {
                 return None;
             }
+            let branch_prefix = branch_prefix.unwrap_or_else(|| DEFAULT_BRANCH_PREFIX.to_owned());
+            if !pico_shared::validate::is_valid_branch_prefix(&branch_prefix) {
+                return None;
+            }
             BindingKind::Worktree {
                 base_repo: pico_shared::paths::from_portable(&base_repo?, base)?,
                 default_branch,
+                branch_prefix,
             }
         }
         _ => return None,
@@ -102,7 +121,7 @@ pub async fn set_regular(
     let cwd = expand(cwd);
     validate_existing_dir("cwd", &cwd)?;
     let stored = pico_shared::paths::to_portable(&cwd, &pico_shared::paths::pico_home()?);
-    upsert(db, platform, channel_id, profile, "regular", Some(stored), None, None).await
+    upsert(db, platform, channel_id, profile, "regular", Some(stored), None, None, None).await
 }
 
 pub async fn set_worktree(
@@ -112,11 +131,13 @@ pub async fn set_worktree(
     profile: &str,
     base_repo: &Path,
     default_branch: &str,
+    branch_prefix: &str,
 ) -> color_eyre::Result<()> {
     validate_profile(profile)?;
     let base_repo = expand(base_repo);
     validate_existing_dir("base_repo", &base_repo)?;
     validate_branch(default_branch)?;
+    validate_branch_prefix(branch_prefix)?;
     let stored = pico_shared::paths::to_portable(&base_repo, &pico_shared::paths::pico_home()?);
     upsert(
         db,
@@ -127,6 +148,7 @@ pub async fn set_worktree(
         None,
         Some(stored),
         Some(default_branch.to_owned()),
+        Some(branch_prefix.to_owned()),
     )
     .await
 }
@@ -151,13 +173,15 @@ async fn upsert(
     cwd: Option<String>,
     base_repo: Option<String>,
     default_branch: Option<String>,
+    branch_prefix: Option<String>,
 ) -> color_eyre::Result<()> {
     sqlx::query(
-        "INSERT INTO bindings (platform, channel_id, profile, kind, cwd, base_repo, default_branch) \
-         VALUES (?, ?, ?, ?, ?, ?, ?) \
+        "INSERT INTO bindings (platform, channel_id, profile, kind, cwd, base_repo, default_branch, branch_prefix) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT(platform, channel_id) DO UPDATE SET \
          profile = excluded.profile, kind = excluded.kind, cwd = excluded.cwd, \
-         base_repo = excluded.base_repo, default_branch = excluded.default_branch",
+         base_repo = excluded.base_repo, default_branch = excluded.default_branch, \
+         branch_prefix = excluded.branch_prefix",
     )
     .bind(platform)
     .bind(channel_id)
@@ -166,6 +190,7 @@ async fn upsert(
     .bind(cwd)
     .bind(base_repo)
     .bind(default_branch)
+    .bind(branch_prefix)
     .execute(db)
     .await
     .wrap_err("upserting binding")?;
@@ -192,6 +217,15 @@ fn validate_branch(branch: &str) -> color_eyre::Result<()> {
     if !pico_shared::validate::is_valid_branch(branch) {
         return Err(color_eyre::eyre::eyre!(
             "invalid branch {branch:?} (no leading '-', chars [A-Za-z0-9._/-], no \"..\")"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_branch_prefix(branch_prefix: &str) -> color_eyre::Result<()> {
+    if !pico_shared::validate::is_valid_branch_prefix(branch_prefix) {
+        return Err(color_eyre::eyre::eyre!(
+            "invalid branch prefix {branch_prefix:?} (slash-separated; each part chars [A-Za-z0-9._-], no leading '-'/'.', no trailing '.'/'.lock', no empty parts, no \"..\")"
         ));
     }
     Ok(())
@@ -246,13 +280,44 @@ mod tests {
         let pool = db(&root).await;
         let repo = root.join("repo");
         std::fs::create_dir_all(&repo).unwrap();
-        set_worktree(&pool, "discord", "222", "dev", &repo, DEFAULT_BRANCH)
+        set_worktree(&pool, "discord", "222", "dev", &repo, DEFAULT_BRANCH, DEFAULT_BRANCH_PREFIX)
             .await
             .unwrap();
         let b = get(&pool, "discord", "222").await.unwrap().unwrap();
         assert_eq!(b.profile, "dev");
         assert!(
-            matches!(b.kind, BindingKind::Worktree { base_repo, default_branch } if base_repo == repo && default_branch == DEFAULT_BRANCH)
+            matches!(b.kind, BindingKind::Worktree { base_repo, default_branch, branch_prefix } if base_repo == repo && default_branch == DEFAULT_BRANCH && branch_prefix == DEFAULT_BRANCH_PREFIX)
+        );
+        pool.close().await;
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn worktree_binding_roundtrips_custom_prefix() {
+        let root = temp_dir("worktree-prefix");
+        let pool = db(&root).await;
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        set_worktree(&pool, "discord", "222", "dev", &repo, DEFAULT_BRANCH, "wt")
+            .await
+            .unwrap();
+        let b = get(&pool, "discord", "222").await.unwrap().unwrap();
+        assert!(matches!(b.kind, BindingKind::Worktree { branch_prefix, .. } if branch_prefix == "wt"));
+        pool.close().await;
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn worktree_binding_null_prefix_defaults_to_pico() {
+        let root = temp_dir("worktree-nullprefix");
+        let pool = db(&root).await;
+        sqlx::query("INSERT INTO bindings (platform, channel_id, profile, kind, base_repo) VALUES ('discord', '222', 'dev', 'worktree', '/repo')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let b = get(&pool, "discord", "222").await.unwrap().unwrap();
+        assert!(
+            matches!(b.kind, BindingKind::Worktree { branch_prefix, .. } if branch_prefix == DEFAULT_BRANCH_PREFIX)
         );
         pool.close().await;
         std::fs::remove_dir_all(&root).ok();
