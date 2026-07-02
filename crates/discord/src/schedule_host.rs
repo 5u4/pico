@@ -506,8 +506,9 @@ mod tests {
             mode: Mode::Continue,
             origin: "333".to_owned(),
             target: "444".to_owned(),
-            trigger: Trigger::Interval {
-                every: std::time::Duration::from_secs(60),
+            trigger: Trigger::Cron {
+                expr: "0 * * * *".to_owned(),
+                tz: chrono_tz::UTC,
             },
             next_run_at: ts,
             last_run_at: None,

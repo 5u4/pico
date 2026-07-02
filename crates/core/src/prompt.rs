@@ -429,13 +429,13 @@ mod tests {
     fn wrap_scheduled_job_includes_header_prompt_and_script_output() {
         let out = wrap_scheduled_job(
             "Digest",
-            "every 3600s",
+            "cron \"0 9 * * *\" (UTC)",
             "2026-06-24T09:00:00Z",
             "Summarize the day.",
             Some("3 PRs merged"),
         );
         assert!(out.starts_with(
-            "<scheduled-job name=\"Digest\" trigger=\"every 3600s\" fired_at=\"2026-06-24T09:00:00Z\" />\n"
+            "<scheduled-job name=\"Digest\" trigger=\"cron &quot;0 9 * * *&quot; (UTC)\" fired_at=\"2026-06-24T09:00:00Z\" />\n"
         ));
         assert!(out.contains("no user is present"));
         assert!(out.contains("Summarize the day."));

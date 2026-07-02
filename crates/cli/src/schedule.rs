@@ -1,4 +1,4 @@
-use std::{path::Path, time::Duration};
+use std::path::Path;
 
 use chrono::{DateTime, Utc};
 use clap::Subcommand;
@@ -100,9 +100,6 @@ enum TriggerInput {
         #[serde(default)]
         tz: Option<String>,
     },
-    Interval {
-        every_secs: u64,
-    },
 }
 
 async fn create(json: &str) {
@@ -176,9 +173,6 @@ impl TriggerInput {
                 };
                 Ok(Trigger::Cron { expr, tz })
             }
-            TriggerInput::Interval { every_secs } => Ok(Trigger::Interval {
-                every: Duration::from_secs(every_secs),
-            }),
         }
     }
 }
@@ -341,9 +335,6 @@ fn trigger_dto(trigger: &Trigger) -> serde_json::Value {
         Trigger::Cron { expr, tz } => {
             serde_json::json!({ "kind": "cron", "expr": expr, "tz": tz.name() })
         }
-        Trigger::Interval { every } => {
-            serde_json::json!({ "kind": "interval", "every_secs": every.as_secs() })
-        }
     }
 }
 
@@ -407,16 +398,6 @@ mod tests {
     }
 
     #[test]
-    fn parses_interval_input_as_every_secs() {
-        let json = r#"{"name":"poll","mode":"fresh","trigger":{"kind":"interval","every_secs":3600}}"#;
-        let input: CreateInput = serde_json::from_str(json).unwrap();
-        match input.trigger.into_trigger().unwrap() {
-            Trigger::Interval { every } => assert_eq!(every, Duration::from_secs(3600)),
-            other => panic!("expected interval, got {other:?}"),
-        }
-    }
-
-    #[test]
     fn rejects_unparsable_oneshot_timestamp() {
         let trigger = TriggerInput::Oneshot {
             at: "not-a-time".to_string(),
@@ -447,11 +428,6 @@ mod tests {
         });
         assert_eq!(cron["kind"], "cron");
         assert_eq!(cron["tz"], "America/Vancouver");
-        let interval = trigger_dto(&Trigger::Interval {
-            every: Duration::from_secs(3600),
-        });
-        assert_eq!(interval["kind"], "interval");
-        assert_eq!(interval["every_secs"], 3600);
     }
 
     fn sample_schedule(scope: &str) -> Schedule {
@@ -465,8 +441,9 @@ mod tests {
             mode: Mode::Fresh,
             origin: "o".to_owned(),
             target: "t".to_owned(),
-            trigger: Trigger::Interval {
-                every: Duration::from_secs(60),
+            trigger: Trigger::Cron {
+                expr: "0 * * * *".to_owned(),
+                tz: chrono_tz::UTC,
             },
             next_run_at: Utc::now(),
             last_run_at: None,
