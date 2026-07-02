@@ -160,15 +160,24 @@ async fn schedule_command(ctx: Context<'_>) -> Result<(), Error> {
         ctx.say("No schedules for this server.").await?;
         return Ok(());
     }
-    let mut body = String::from("📅 Schedules\n");
+    let cap = pico_core::config::load_root(&pico_shared::paths::worker_config(&ctx.data().root))
+        .map(|c| c.schedule().cap)
+        .unwrap_or(std::time::Duration::from_secs(60));
+    let health = pico_core::schedule::scheduler_health(&ctx.data().root, cap);
+    let mut body = format!("📅 Schedules\n{}\n", schedule_health_line(&health));
     for s in &schedules {
+        let runs = match s.max_runs {
+            Some(max) => format!(" — runs {}/{}", s.run_count, max),
+            None => String::new(),
+        };
         body.push_str(&format!(
-            "• `{}` {} [{}] — {} — next {}\n",
+            "• `{}` {} [{}] — {} — next {}{}\n",
             s.id,
             s.name,
             schedule_state_label(s.state),
             s.trigger.describe(),
-            s.next_run_at.to_rfc3339()
+            s.next_run_at.to_rfc3339(),
+            runs
         ));
     }
     let body = pico_core::render::truncate(&pico_core::render::defang_mentions(&body), crate::consts::MSG_CONTENT_CAP);
@@ -181,6 +190,20 @@ fn schedule_state_label(state: pico_core::schedule::State) -> &'static str {
         pico_core::schedule::State::Active => "active",
         pico_core::schedule::State::Disabled => "disabled",
         pico_core::schedule::State::Triggered => "triggered",
+    }
+}
+
+fn schedule_health_line(health: &pico_core::schedule::SchedulerHealth) -> String {
+    match health.heartbeat_at {
+        None => "scheduler: no heartbeat yet".to_owned(),
+        Some(beat) => {
+            let age = (chrono::Utc::now() - beat).num_seconds().max(0);
+            if health.stalled {
+                format!("scheduler: ⚠️ stalled (last tick {age}s ago)")
+            } else {
+                format!("scheduler: ✓ healthy (last tick {age}s ago)")
+            }
+        }
     }
 }
 

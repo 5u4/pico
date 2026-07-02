@@ -513,6 +513,8 @@ mod tests {
             next_run_at: ts,
             last_run_at: None,
             consecutive_failures: 0,
+            max_runs: None,
+            run_count: 0,
             state: State::Active,
         }
     }

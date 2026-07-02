@@ -9,7 +9,7 @@ use std::{
 use chrono::{DateTime, SecondsFormat, TimeDelta, Utc};
 use color_eyre::eyre::{WrapErr, eyre};
 use notify::{RecursiveMode, Watcher};
-use pico_shared::paths::{find_schedule_dir, schedule_dir, schedule_state_dir, schedules_dir};
+use pico_shared::paths::{find_schedule_dir, schedule_dir, schedule_heartbeat, schedule_state_dir};
 use serde::{Deserialize, Serialize};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
@@ -44,6 +44,8 @@ pub struct Schedule {
     pub next_run_at: DateTime<Utc>,
     pub last_run_at: Option<DateTime<Utc>>,
     pub consecutive_failures: i64,
+    pub max_runs: Option<i64>,
+    pub run_count: i64,
     pub state: State,
 }
 
@@ -78,6 +80,7 @@ pub struct NewSchedule {
     pub trigger: Trigger,
     pub script: Option<String>,
     pub prompt: Option<String>,
+    pub max_runs: Option<i64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -185,6 +188,14 @@ pub fn validate(new: &NewSchedule) -> color_eyre::Result<()> {
             parse_cron(expr)?;
         }
     }
+    if let Some(max_runs) = new.max_runs {
+        if max_runs <= 0 {
+            return Err(eyre!("max_runs must be positive"));
+        }
+        if matches!(new.trigger, Trigger::Oneshot { .. }) {
+            return Err(eyre!("max_runs applies only to recurring (cron) schedules"));
+        }
+    }
     Ok(())
 }
 
@@ -207,6 +218,8 @@ struct DefinitionToml {
     origin: String,
     target: String,
     trigger: TriggerToml,
+    #[serde(default)]
+    max_runs: Option<i64>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -225,6 +238,8 @@ struct RuntimeState {
     last_run_at: Option<String>,
     #[serde(default)]
     consecutive_failures: i64,
+    #[serde(default)]
+    run_count: i64,
 }
 
 #[derive(Serialize)]
@@ -317,6 +332,7 @@ fn write_definition(
         origin: new.origin.clone(),
         target: new.target.clone(),
         trigger: trigger_to_toml(&new.trigger),
+        max_runs: new.max_runs,
     };
     let serialized = toml::to_string(&def).wrap_err("serializing schedule.toml")?;
     fs::write(dir.join(DEFINITION_FILE), serialized).wrap_err("writing schedule.toml")?;
@@ -332,6 +348,7 @@ fn write_definition(
             next_run_at: Some(store_ts(next_run_at)),
             last_run_at: None,
             consecutive_failures: 0,
+            run_count: 0,
         },
     )?;
     Ok(())
@@ -366,6 +383,7 @@ fn load_schedule(dir: &Path, state: State) -> Option<Schedule> {
         .and_then(|r| r.last_run_at.as_deref())
         .and_then(parse_ts);
     let consecutive_failures = runtime.as_ref().map(|r| r.consecutive_failures).unwrap_or(0);
+    let run_count = runtime.as_ref().map(|r| r.run_count).unwrap_or(0);
     let next_run_at = runtime
         .as_ref()
         .and_then(|r| r.next_run_at.as_deref())
@@ -389,6 +407,8 @@ fn load_schedule(dir: &Path, state: State) -> Option<Schedule> {
         next_run_at,
         last_run_at,
         consecutive_failures,
+        max_runs: def.max_runs,
+        run_count,
         state,
     })
 }
@@ -467,6 +487,8 @@ pub async fn create(root: &Path, new: NewSchedule, tz: Option<chrono_tz::Tz>) ->
         next_run_at,
         last_run_at: None,
         consecutive_failures: 0,
+        max_runs: new.max_runs,
+        run_count: 0,
         state: State::Active,
     })
 }
@@ -502,6 +524,9 @@ pub async fn set_state(root: &Path, id: &str, state: State) -> color_eyre::Resul
     };
     if current != state.as_str() {
         move_to(root, &dir, id, state)?;
+        if state == State::Active {
+            update_state(root, id, |runtime| runtime.run_count = 0)?;
+        }
     }
     Ok(true)
 }
@@ -608,6 +633,17 @@ async fn record_failure(root: &Path, id: &str) -> color_eyre::Result<i64> {
     Ok(count)
 }
 
+async fn increment_run_count(root: &Path, id: &str) -> color_eyre::Result<i64> {
+    let Some((_, dir)) = find_schedule_dir(root, id) else {
+        return Ok(0);
+    };
+    let mut state = read_state(&dir).unwrap_or_default();
+    state.run_count += 1;
+    let count = state.run_count;
+    write_state(&dir, &state)?;
+    Ok(count)
+}
+
 async fn disable(root: &Path, id: &str) -> color_eyre::Result<()> {
     if let Some((current, dir)) = find_schedule_dir(root, id)
         && current != State::Disabled.as_str()
@@ -707,7 +743,7 @@ pub async fn run<H: ScheduleHost + 'static>(host: H, cfg: ScheduleConfig, root: 
     let in_flight: Arc<parking_lot::Mutex<HashSet<String>>> = Arc::new(parking_lot::Mutex::new(HashSet::new()));
 
     let (wake_tx, mut wake_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
-    let watch_dir = schedules_dir(root.as_path());
+    let watch_dir = schedule_state_dir(root.as_path(), State::Active.as_str());
     let _watcher = {
         let _ = fs::create_dir_all(&watch_dir);
         match notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
@@ -734,6 +770,7 @@ pub async fn run<H: ScheduleHost + 'static>(host: H, cfg: ScheduleConfig, root: 
             break;
         }
         let moment = now();
+        touch_stamp(&schedule_heartbeat(root.as_path()), moment);
         match due(root.as_path(), moment).await {
             Ok(rows) => {
                 for sched in rows {
@@ -863,7 +900,7 @@ pub async fn fire_one<H: ScheduleHost>(
         gate::Gate::Skip => {
             tracing::debug!("schedule gate skip");
             write_meta(run_dir.as_deref(), sched, now, "skip", "skipped", capture.exit, None);
-            post_fire(root, sched, now, manual).await?;
+            post_fire(root, sched, now, manual, false).await?;
         }
         gate::Gate::Failure { reason, stderr_tail } => {
             write_meta(run_dir.as_deref(), sched, now, "failure", "script_failed", capture.exit, None);
@@ -885,7 +922,7 @@ pub async fn fire_one<H: ScheduleHost>(
                 prompt_sent.as_deref(),
             );
             match next {
-                Next::AdvanceOrFinish => post_fire(root, sched, now, manual).await?,
+                Next::AdvanceOrFinish => post_fire(root, sched, now, manual, true).await?,
                 Next::Disable(kind) => {
                     tracing::info!(reason = ?kind.reason(), "disabling schedule");
                     disable(root, &sched.id).await?;
@@ -974,14 +1011,40 @@ fn consume_trigger_marker(root: &Path, id: &str) -> bool {
     }
 }
 
-async fn post_fire(root: &Path, sched: &Schedule, now: DateTime<Utc>, manual: bool) -> color_eyre::Result<()> {
+async fn post_fire(
+    root: &Path,
+    sched: &Schedule,
+    now: DateTime<Utc>,
+    manual: bool,
+    counted: bool,
+) -> color_eyre::Result<()> {
     if !manual {
+        if counted
+            && let Some(max_runs) = sched.max_runs
+            && let Trigger::Cron { .. } = &sched.trigger
+        {
+            return advance_or_count(root, sched, now, max_runs).await;
+        }
         return advance_or_finish(root, sched, now).await;
     }
     match &sched.trigger {
         Trigger::Oneshot { .. } => finish_oneshot(root, &sched.id, Some(now)).await,
         _ if sched.next_run_at > now => touch_last_run(root, &sched.id, now).await,
         _ => advance_or_finish(root, sched, now).await,
+    }
+}
+
+async fn advance_or_count(root: &Path, sched: &Schedule, now: DateTime<Utc>, max_runs: i64) -> color_eyre::Result<()> {
+    match next_after(&sched.trigger, now) {
+        Some(next) => {
+            let count = increment_run_count(root, &sched.id).await?;
+            if count >= max_runs {
+                finish_oneshot(root, &sched.id, Some(now)).await
+            } else {
+                advance_recurring(root, &sched.id, now, trunc_secs(next)).await
+            }
+        }
+        None => disable(root, &sched.id).await,
     }
 }
 
@@ -1083,6 +1146,41 @@ fn now() -> DateTime<Utc> {
         .unwrap_or_else(|| DateTime::from_timestamp(0, 0).expect("unix epoch is representable"))
 }
 
+fn touch_stamp(path: &Path, at: DateTime<Utc>) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp = parent.join(format!(".{}.{}.tmp", std::process::id(), seq));
+    let published = fs::write(&tmp, store_ts(at)).and_then(|()| fs::rename(&tmp, path));
+    if let Err(e) = published {
+        fs::remove_file(&tmp).ok();
+        tracing::warn!(path = %path.display(), error = %format!("{e:#}"), "writing scheduler stamp failed");
+    }
+}
+
+fn read_stamp(path: &Path) -> Option<DateTime<Utc>> {
+    let raw = fs::read_to_string(path).ok()?;
+    parse_ts(raw.trim())
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SchedulerHealth {
+    pub heartbeat_at: Option<DateTime<Utc>>,
+    pub stalled: bool,
+}
+
+pub fn scheduler_health(root: &Path, cap: Duration) -> SchedulerHealth {
+    let heartbeat_at = read_stamp(&schedule_heartbeat(root));
+    let stalled = match heartbeat_at {
+        Some(beat) => now() - beat > to_delta(cap.max(MIN_IDLE).saturating_mul(3)),
+        None => false,
+    };
+    SchedulerHealth { heartbeat_at, stalled }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1112,6 +1210,7 @@ mod tests {
             },
             script: script.map(str::to_owned),
             prompt: prompt.map(str::to_owned),
+            max_runs: None,
         }
     }
 
@@ -1137,6 +1236,8 @@ mod tests {
             next_run_at,
             last_run_at: None,
             consecutive_failures: 0,
+            max_runs: None,
+            run_count: 0,
             state: State::Active,
         }
     }
@@ -1684,5 +1785,130 @@ mod tests {
         assert_eq!(after.state, State::Active);
         assert!(after.next_run_at > now());
         assert!(!has_trigger_marker(r, &created.id));
+    }
+
+    #[tokio::test]
+    async fn cron_with_max_runs_finishes_after_counted_fires() {
+        let root = tempfile::tempdir().unwrap();
+        let r = root.path();
+        let created = create(
+            r,
+            NewSchedule {
+                max_runs: Some(2),
+                ..new_cron(Some("tick"), None)
+            },
+            Some(chrono_tz::UTC),
+        )
+        .await
+        .unwrap();
+        assert_eq!(created.max_runs, Some(2));
+        assert_eq!(created.run_count, 0);
+        let host = FakeHost::new();
+
+        fire_one(&host, &cfg(), r, &created, created.next_run_at).await.unwrap();
+        let after_first = get(r, &created.id).await.unwrap().unwrap();
+        assert_eq!(after_first.run_count, 1);
+        assert_eq!(after_first.state, State::Active);
+        assert!(after_first.next_run_at > created.next_run_at);
+
+        fire_one(&host, &cfg(), r, &after_first, after_first.next_run_at)
+            .await
+            .unwrap();
+        let after_second = get(r, &created.id).await.unwrap().unwrap();
+        assert_eq!(after_second.run_count, 2);
+        assert_eq!(after_second.state, State::Triggered);
+        assert_eq!(host.calls.lock().fired.len(), 2);
+        assert!(!schedule_dir(r, "active", &created.id).exists());
+        assert!(schedule_dir(r, "triggered", &created.id).exists());
+    }
+
+    #[tokio::test]
+    async fn max_runs_manual_trigger_does_not_count() {
+        let root = tempfile::tempdir().unwrap();
+        let r = root.path();
+        let created = create(
+            r,
+            NewSchedule {
+                max_runs: Some(1),
+                ..new_cron(Some("tick"), None)
+            },
+            Some(chrono_tz::UTC),
+        )
+        .await
+        .unwrap();
+        assert_eq!(trigger(r, &created.id).await.unwrap(), TriggerOutcome::Triggered);
+        let reloaded = get(r, &created.id).await.unwrap().unwrap();
+        fire_one(&FakeHost::new(), &cfg(), r, &reloaded, now()).await.unwrap();
+        let after = get(r, &created.id).await.unwrap().unwrap();
+        assert_eq!(after.run_count, 0);
+        assert_eq!(after.state, State::Active);
+    }
+
+    #[tokio::test]
+    async fn enable_resets_run_count() {
+        let root = tempfile::tempdir().unwrap();
+        let r = root.path();
+        let created = create(
+            r,
+            NewSchedule {
+                max_runs: Some(1),
+                ..new_cron(Some("tick"), None)
+            },
+            Some(chrono_tz::UTC),
+        )
+        .await
+        .unwrap();
+        fire_one(&FakeHost::new(), &cfg(), r, &created, created.next_run_at)
+            .await
+            .unwrap();
+        let exhausted = get(r, &created.id).await.unwrap().unwrap();
+        assert_eq!(exhausted.run_count, 1);
+        assert_eq!(exhausted.state, State::Triggered);
+
+        assert!(set_state(r, &created.id, State::Active).await.unwrap());
+        let reenabled = get(r, &created.id).await.unwrap().unwrap();
+        assert_eq!(reenabled.state, State::Active);
+        assert_eq!(reenabled.run_count, 0);
+    }
+
+    #[test]
+    fn validate_rejects_max_runs_misuse() {
+        let mut oneshot = new_oneshot(Some("p"), None, now() + TimeDelta::seconds(3600));
+        oneshot.max_runs = Some(3);
+        assert!(validate(&oneshot).is_err());
+
+        let mut nonpositive = new_cron(Some("p"), None);
+        nonpositive.max_runs = Some(0);
+        assert!(validate(&nonpositive).is_err());
+        nonpositive.max_runs = Some(-1);
+        assert!(validate(&nonpositive).is_err());
+
+        let mut valid = new_cron(Some("p"), None);
+        valid.max_runs = Some(2);
+        assert!(validate(&valid).is_ok());
+    }
+
+    #[test]
+    fn scheduler_health_reports_liveness() {
+        let root = tempfile::tempdir().unwrap();
+        let r = root.path();
+        fs::create_dir_all(pico_shared::paths::schedules_dir(r)).unwrap();
+
+        let absent = scheduler_health(r, Duration::from_secs(60));
+        assert!(absent.heartbeat_at.is_none());
+        assert!(!absent.stalled);
+
+        let fresh_at = now();
+        touch_stamp(&schedule_heartbeat(r), fresh_at);
+        let fresh = scheduler_health(r, Duration::from_secs(60));
+        assert_eq!(fresh.heartbeat_at, Some(fresh_at));
+        assert!(!fresh.stalled);
+
+        let zero_cap = scheduler_health(r, Duration::ZERO);
+        assert!(!zero_cap.stalled);
+
+        touch_stamp(&schedule_heartbeat(r), now() - TimeDelta::seconds(600));
+        let stale = scheduler_health(r, Duration::from_secs(60));
+        assert!(stale.stalled);
     }
 }

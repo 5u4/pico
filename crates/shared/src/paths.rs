@@ -104,6 +104,10 @@ pub fn schedule_runs_dir(root: &Path, state: &str, id: &str) -> PathBuf {
     schedule_dir(root, state, id).join("runs")
 }
 
+pub fn schedule_heartbeat(root: &Path) -> PathBuf {
+    schedules_dir(root).join(".heartbeat")
+}
+
 pub fn find_schedule_dir(root: &Path, id: &str) -> Option<(&'static str, PathBuf)> {
     SCHEDULE_STATES.into_iter().find_map(|state| {
         let dir = schedule_dir(root, state, id);
@@ -192,6 +196,7 @@ mod tests {
             schedule_runs_dir(root, "triggered", "id1"),
             Path::new("/r/schedules/triggered/id1/runs")
         );
+        assert_eq!(schedule_heartbeat(root), Path::new("/r/schedules/.heartbeat"));
     }
 
     #[test]
