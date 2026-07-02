@@ -99,6 +99,14 @@ export function makeScheduleFactory(identity) {
           .string()
           .optional()
           .describe("fresh mode: channel id to open new threads in (default: the current channel)"),
+        script_timeout_secs: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe(
+            "Optional: override the global script-gate timeout (seconds) for THIS schedule's pre-gate shell script only. Absent = use the global default.",
+          ),
       }),
       async execute(_id, p) {
         const payload = {
@@ -115,6 +123,7 @@ export function makeScheduleFactory(identity) {
         if (p.script !== undefined) payload.script = p.script;
         if (p.prompt !== undefined) payload.prompt = p.prompt;
         if (p.max_runs !== undefined) payload.max_runs = p.max_runs;
+        if (p.script_timeout_secs !== undefined) payload.script_timeout_secs = p.script_timeout_secs;
         const created = await createOrList(["create", "--json", JSON.stringify(payload)]);
         const id = created && created.id ? created.id : "";
         return ok(`Created schedule ${id} (${p.name})`, created || {});

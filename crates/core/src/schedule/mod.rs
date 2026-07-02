@@ -46,6 +46,7 @@ pub struct Schedule {
     pub consecutive_failures: i64,
     pub max_runs: Option<i64>,
     pub run_count: i64,
+    pub script_timeout: Option<std::time::Duration>,
     pub state: State,
 }
 
@@ -81,6 +82,7 @@ pub struct NewSchedule {
     pub script: Option<String>,
     pub prompt: Option<String>,
     pub max_runs: Option<i64>,
+    pub script_timeout: Option<std::time::Duration>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -196,6 +198,9 @@ pub fn validate(new: &NewSchedule) -> color_eyre::Result<()> {
             return Err(eyre!("max_runs applies only to recurring (cron) schedules"));
         }
     }
+    if matches!(new.script_timeout, Some(d) if d.as_secs() == 0) {
+        return Err(eyre!("script_timeout_secs must be at least 1 second"));
+    }
     Ok(())
 }
 
@@ -220,6 +225,8 @@ struct DefinitionToml {
     trigger: TriggerToml,
     #[serde(default)]
     max_runs: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    script_timeout_secs: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -333,6 +340,7 @@ fn write_definition(
         target: new.target.clone(),
         trigger: trigger_to_toml(&new.trigger),
         max_runs: new.max_runs,
+        script_timeout_secs: new.script_timeout.map(|d| d.as_secs()),
     };
     let serialized = toml::to_string(&def).wrap_err("serializing schedule.toml")?;
     fs::write(dir.join(DEFINITION_FILE), serialized).wrap_err("writing schedule.toml")?;
@@ -374,6 +382,10 @@ fn load_schedule(dir: &Path, state: State) -> Option<Schedule> {
     let id = dir.file_name()?.to_str()?.to_owned();
     let raw = fs::read_to_string(dir.join(DEFINITION_FILE)).ok()?;
     let def: DefinitionToml = toml::from_str(&raw).ok()?;
+    let script_timeout = def
+        .script_timeout_secs
+        .filter(|secs| *secs != 0)
+        .map(std::time::Duration::from_secs);
     let mode = Mode::parse(&def.mode)?;
     let created_at = parse_ts(&def.created_at)?;
     let trigger = trigger_from_toml(def.trigger)?;
@@ -409,6 +421,7 @@ fn load_schedule(dir: &Path, state: State) -> Option<Schedule> {
         consecutive_failures,
         max_runs: def.max_runs,
         run_count,
+        script_timeout,
         state,
     })
 }
@@ -489,6 +502,7 @@ pub async fn create(root: &Path, new: NewSchedule, tz: Option<chrono_tz::Tz>) ->
         consecutive_failures: 0,
         max_runs: new.max_runs,
         run_count: 0,
+        script_timeout: new.script_timeout,
         state: State::Active,
     })
 }
@@ -890,7 +904,8 @@ pub async fn fire_one<H: ScheduleHost>(
         }
     };
 
-    let (gate, capture) = gate::run_script(def.script.as_deref(), &cwd, cfg.script_timeout).await;
+    let (gate, capture) =
+        gate::run_script(def.script.as_deref(), &cwd, sched.script_timeout.unwrap_or(cfg.script_timeout)).await;
     let run_dir = create_run_dir(root, &sched.id, now, cfg.timezone);
     if let Some(run_dir) = &run_dir {
         write_capture(run_dir, &capture);
@@ -1211,6 +1226,7 @@ mod tests {
             script: script.map(str::to_owned),
             prompt: prompt.map(str::to_owned),
             max_runs: None,
+            script_timeout: None,
         }
     }
 
@@ -1238,6 +1254,7 @@ mod tests {
             consecutive_failures: 0,
             max_runs: None,
             run_count: 0,
+            script_timeout: None,
             state: State::Active,
         }
     }
@@ -1384,6 +1401,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_persists_script_timeout_override() {
+        let root = tempfile::tempdir().unwrap();
+        let r = root.path();
+        let mut new = new_cron(Some("p"), Some("echo hi"));
+        new.script_timeout = Some(Duration::from_secs(300));
+        let created = create(r, new, Some(chrono_tz::UTC)).await.unwrap();
+        assert_eq!(created.script_timeout, Some(Duration::from_secs(300)));
+        let dir = schedule_dir(r, "active", &created.id);
+        let toml = fs::read_to_string(dir.join(DEFINITION_FILE)).unwrap();
+        assert!(toml.contains("script_timeout_secs = 300"));
+        let reloaded = get(r, &created.id).await.unwrap().unwrap();
+        assert_eq!(reloaded.script_timeout, Some(Duration::from_secs(300)));
+    }
+
+    #[tokio::test]
+    async fn create_without_script_timeout_omits_key() {
+        let root = tempfile::tempdir().unwrap();
+        let r = root.path();
+        let created = create(r, new_cron(Some("p"), None), Some(chrono_tz::UTC))
+            .await
+            .unwrap();
+        assert_eq!(created.script_timeout, None);
+        let dir = schedule_dir(r, "active", &created.id);
+        let toml = fs::read_to_string(dir.join(DEFINITION_FILE)).unwrap();
+        assert!(!toml.contains("script_timeout_secs"));
+        let reloaded = get(r, &created.id).await.unwrap().unwrap();
+        assert_eq!(reloaded.script_timeout, None);
+    }
+
+    #[test]
+    fn validate_rejects_zero_script_timeout() {
+        let mut new = new_cron(Some("p"), None);
+        new.script_timeout = Some(Duration::ZERO);
+        assert!(validate(&new).is_err());
+        new.script_timeout = Some(Duration::from_millis(500));
+        assert!(validate(&new).is_err());
+        new.script_timeout = Some(Duration::from_secs(1));
+        assert!(validate(&new).is_ok());
+    }
+
+    #[tokio::test]
+    async fn load_treats_zero_script_timeout_as_unset() {
+        let root = tempfile::tempdir().unwrap();
+        let r = root.path();
+        let mut new = new_cron(Some("p"), None);
+        new.script_timeout = Some(Duration::from_secs(300));
+        let created = create(r, new, Some(chrono_tz::UTC)).await.unwrap();
+        let toml_path = schedule_dir(r, "active", &created.id).join(DEFINITION_FILE);
+        let toml = fs::read_to_string(&toml_path).unwrap();
+        fs::write(&toml_path, toml.replace("script_timeout_secs = 300", "script_timeout_secs = 0")).unwrap();
+        let reloaded = get(r, &created.id).await.unwrap().unwrap();
+        assert_eq!(reloaded.script_timeout, None);
+    }
+
+    #[tokio::test]
     async fn crud_round_trip_and_state_transitions_move_folders() {
         let root = tempfile::tempdir().unwrap();
         let r = root.path();
@@ -1519,6 +1591,26 @@ mod tests {
         assert_eq!(reloaded.consecutive_failures, 1);
         assert_eq!(reloaded.state, State::Active);
         assert!(reloaded.next_run_at > sched.next_run_at);
+    }
+
+    #[tokio::test]
+    async fn fire_one_uses_per_schedule_script_timeout_over_global() {
+        let root = tempfile::tempdir().unwrap();
+        let r = root.path();
+        let mut new = new_cron(Some("p"), Some("sleep 10"));
+        new.script_timeout = Some(Duration::from_secs(1));
+        let sched = create(r, new, Some(chrono_tz::UTC)).await.unwrap();
+        let mut config = cfg();
+        config.script_timeout = Duration::from_secs(30);
+        let host = FakeHost::new();
+        let start = std::time::Instant::now();
+        fire_one(&host, &config, r, &sched, sched.next_run_at).await.unwrap();
+        let elapsed = start.elapsed();
+        assert!(elapsed < Duration::from_secs(5));
+        let calls = host.calls.lock();
+        assert!(calls.fired.is_empty());
+        assert_eq!(calls.notified.len(), 1);
+        assert!(matches!(calls.notified[0], HomeNotice::ScriptFailed { .. }));
     }
 
     #[tokio::test]

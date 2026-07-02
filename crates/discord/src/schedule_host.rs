@@ -524,6 +524,7 @@ mod tests {
             consecutive_failures: 0,
             max_runs: None,
             run_count: 0,
+            script_timeout: None,
             state: State::Active,
         }
     }
