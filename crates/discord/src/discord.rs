@@ -156,8 +156,12 @@ async fn schedule_command(ctx: Context<'_>) -> Result<(), Error> {
                 return Ok(());
             }
         };
+    let schedules: Vec<_> = schedules
+        .into_iter()
+        .filter(|s| s.state == pico_core::schedule::State::Active)
+        .collect();
     if schedules.is_empty() {
-        ctx.say("No schedules for this server.").await?;
+        ctx.say("No active schedules for this server.").await?;
         return Ok(());
     }
     let cap = pico_core::config::load_root(&pico_shared::paths::worker_config(&ctx.data().root))
@@ -171,10 +175,9 @@ async fn schedule_command(ctx: Context<'_>) -> Result<(), Error> {
             None => String::new(),
         };
         body.push_str(&format!(
-            "• `{}` {} [{}] — {} — next {}{}\n",
+            "• `{}` {} — {} — next {}{}\n",
             s.id,
             s.name,
-            schedule_state_label(s.state),
             s.trigger.describe(),
             s.next_run_at.to_rfc3339(),
             runs
@@ -183,14 +186,6 @@ async fn schedule_command(ctx: Context<'_>) -> Result<(), Error> {
     let body = pico_core::render::truncate(&pico_core::render::defang_mentions(&body), crate::consts::MSG_CONTENT_CAP);
     ctx.say(body).await?;
     Ok(())
-}
-
-fn schedule_state_label(state: pico_core::schedule::State) -> &'static str {
-    match state {
-        pico_core::schedule::State::Active => "active",
-        pico_core::schedule::State::Disabled => "disabled",
-        pico_core::schedule::State::Triggered => "triggered",
-    }
 }
 
 fn schedule_health_line(health: &pico_core::schedule::SchedulerHealth) -> String {
