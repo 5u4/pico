@@ -68,7 +68,8 @@ export function makeScheduleFactory(identity) {
         "name, default UTC). ",
         "CRON DAY-OF-WEEK: write day-of-week as day NAMES (SUN, MON, TUE, WED, THU, FRI, SAT) or numbers where ",
         "1=Sunday..7=Saturday. NEVER use POSIX numbering — here 1=Sunday, not Monday. ",
-        "Do NOT pass platform/guild/channel/user context: pico injects it from the session context.",
+        "Do NOT pass platform/guild/channel/user context: pico injects it from the session context. ",
+        "Optionally set max_runs (cron only) to auto-finish after N fires.",
       ].join(""),
       parameters: z.object({
         name: z.string().describe("Short human-readable label for the schedule"),
@@ -86,6 +87,14 @@ export function makeScheduleFactory(identity) {
           .optional()
           .describe("Optional shell script (bash -lc); stdout JSON {skip,context} gates the model run"),
         prompt: z.string().optional().describe("Optional instruction for the model when the job fires"),
+        max_runs: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe(
+            "cron only: auto-finish the job after it fires this many times (omit = run forever). Rejected on oneshot.",
+          ),
         target_channel: z
           .string()
           .optional()
@@ -105,6 +114,7 @@ export function makeScheduleFactory(identity) {
         if (target) payload.target = target;
         if (p.script !== undefined) payload.script = p.script;
         if (p.prompt !== undefined) payload.prompt = p.prompt;
+        if (p.max_runs !== undefined) payload.max_runs = p.max_runs;
         const created = await createOrList(["create", "--json", JSON.stringify(payload)]);
         const id = created && created.id ? created.id : "";
         return ok(`Created schedule ${id} (${p.name})`, created || {});
@@ -130,7 +140,8 @@ export function makeScheduleFactory(identity) {
               : t.kind === "cron"
                 ? `cron "${t.expr || ""}" (${t.tz || "UTC"})`
                 : t.kind || "?";
-          return `• ${s.id} ${s.name} [${s.state}] ${s.mode} — ${trig} — next ${s.next_run_at}`;
+          const runs = s.max_runs != null ? ` (${s.run_count}/${s.max_runs})` : "";
+          return `• ${s.id} ${s.name} [${s.state}] ${s.mode} — ${trig} — next ${s.next_run_at}${runs}`;
         });
         return ok(lines.join("\n"), { schedules: arr });
       },

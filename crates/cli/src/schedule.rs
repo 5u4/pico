@@ -80,6 +80,8 @@ struct CreateInput {
     origin: Option<String>,
     #[serde(default)]
     created_by: Option<String>,
+    #[serde(default)]
+    max_runs: Option<i64>,
 }
 
 #[derive(serde::Deserialize)]
@@ -151,6 +153,7 @@ impl CreateInput {
             trigger,
             script: self.script,
             prompt: self.prompt,
+            max_runs: self.max_runs,
         })
     }
 }
@@ -293,6 +296,10 @@ async fn print_human(sched: &Schedule, root: &Path) -> color_eyre::Result<()> {
         println!("last_run_at {}", last.to_rfc3339());
     }
     println!("failures    {}", sched.consecutive_failures);
+    match sched.max_runs {
+        Some(max_runs) => println!("runs        {} / {}", sched.run_count, max_runs),
+        None => println!("runs        {}", sched.run_count),
+    }
     let def = schedule::read_definition(root, &sched.id).await?;
     println!("script_path {}", def.script_path.display());
     println!("prompt_path {}", def.prompt_path.display());
@@ -325,6 +332,8 @@ async fn schedule_dto(sched: &Schedule, root: &Path) -> color_eyre::Result<serde
         "next_run_at": sched.next_run_at.to_rfc3339(),
         "last_run_at": sched.last_run_at.map(|d| d.to_rfc3339()),
         "consecutive_failures": sched.consecutive_failures,
+        "max_runs": sched.max_runs,
+        "run_count": sched.run_count,
         "state": state_str(sched.state),
     }))
 }
@@ -448,6 +457,8 @@ mod tests {
             next_run_at: Utc::now(),
             last_run_at: None,
             consecutive_failures: 0,
+            max_runs: None,
+            run_count: 0,
             state: State::Active,
         }
     }
