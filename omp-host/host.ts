@@ -649,8 +649,8 @@ function buildDiscordContextReport(session: AgentSession): string {
 	}
 	if (b.autoCompactBufferTokens > 0) rows.push(["Auto-compact", b.autoCompactBufferTokens]);
 	if (b.freeTokens > 0) rows.push(["Free", b.freeTokens]);
-	const labelWidth = Math.max(...rows.map(([label]) => label.length));
-	const tokenWidth = Math.max(...rows.map(([, tokens]) => formatNumber(tokens).length));
+	const labelWidth = Math.max(0, ...rows.map(([label]) => label.length));
+	const tokenWidth = Math.max(0, ...rows.map(([, tokens]) => formatNumber(tokens).length));
 	const usedPct = Math.round((b.usedTokens / b.contextWindow) * 100);
 	const lines = [
 		`Context: ${formatNumber(b.usedTokens)} / ${formatNumber(b.contextWindow)} tokens (${usedPct}% used)`,
