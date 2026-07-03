@@ -410,7 +410,7 @@ struct ActivityHost<M> {
 
 impl<M> ActivityHost<M> {
     fn text(&self, send_max: usize) -> String {
-        let body = render::defang_mentions(&self.lines.join("\n"));
+        let body = crate::platform_render::defang_mentions(&self.lines.join("\n"));
         if body.chars().count() <= send_max {
             return body;
         }
@@ -489,7 +489,7 @@ impl<'a, S: Surface> Activity<'a, S> {
                 }
             };
         if rollover {
-            let sent = render::defang_mentions(&line);
+            let sent = crate::platform_render::defang_mentions(&line);
             let message = self.surface.post(&sent, PostOpts::SILENT).await?;
             self.hosts.push(ActivityHost {
                 message,
@@ -669,7 +669,7 @@ impl<'a, S: Surface> SubagentFeed<'a, S> {
 }
 
 fn subagent_send_text(raw: &str, send_max: usize) -> String {
-    let defanged = render::defang_mentions(raw);
+    let defanged = crate::platform_render::defang_mentions(raw);
     if defanged.chars().count() <= send_max {
         defanged
     } else {
@@ -703,6 +703,7 @@ mod tests {
 
         fn limits(&self) -> SizeLimits {
             SizeLimits {
+                message_cap: 1900,
                 activity_line_cap: 20,
                 activity_char_cap: 1800,
                 activity_send_max: 1990,

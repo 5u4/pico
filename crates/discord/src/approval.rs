@@ -197,12 +197,15 @@ fn prompt_content(subject: &Subject<'_>) -> String {
 }
 
 fn resolved_line(subject: &Subject<'_>, outcome: &str) -> String {
-    let title = pico_core::render::defang_mentions(subject.title);
-    pico_core::render::truncate(&format!("🔐 **{title}**\n{outcome}"), crate::consts::MSG_CONTENT_CAP)
+    let title = pico_core::platform_render::defang_mentions(subject.title);
+    pico_core::render::truncate(&format!("🔐 **{title}**\n{outcome}"), crate::consts::DISCORD_LIMITS.message_cap)
 }
 
 fn clamp(text: &str) -> String {
-    pico_core::render::truncate(&pico_core::render::defang_mentions(text), crate::consts::MSG_CONTENT_CAP)
+    pico_core::render::truncate(
+        &pico_core::platform_render::defang_mentions(text),
+        crate::consts::DISCORD_LIMITS.message_cap,
+    )
 }
 
 async fn ack_update(ctx: &serenity::Context, interaction: &serenity::ComponentInteraction, content: &str) {

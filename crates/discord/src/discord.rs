@@ -183,7 +183,10 @@ async fn schedule_command(ctx: Context<'_>) -> Result<(), Error> {
             runs
         ));
     }
-    let body = pico_core::render::truncate(&pico_core::render::defang_mentions(&body), crate::consts::MSG_CONTENT_CAP);
+    let body = pico_core::render::truncate(
+        &pico_core::platform_render::defang_mentions(&body),
+        crate::consts::DISCORD_LIMITS.message_cap,
+    );
     ctx.say(body).await?;
     Ok(())
 }
@@ -251,13 +254,15 @@ async fn busy_queue(
     deliver_busy(ctx, StreamingBehavior::Queue, message).await
 }
 
-const REPLY_BUDGET: usize = 1800;
+pub(crate) fn render_chunks(text: &str, budget: usize) -> Vec<String> {
+    let listed = pico_core::platform_render::tables_to_lists(text);
+    let defanged = pico_core::platform_render::defang_mentions(&listed);
+    pico_core::render::split_to_budget(&defanged, budget)
+}
 
 fn render_reply(text: &str, as_reply: bool, silent: bool) -> Vec<(String, pico_core::surface::PostOpts)> {
     use pico_core::surface::PostOpts;
-    let listed = pico_core::render::tables_to_lists(text);
-    let chunks = pico_core::render::split_to_budget(&pico_core::render::defang_mentions(&listed), REPLY_BUDGET);
-    chunks
+    render_chunks(text, crate::consts::DISCORD_LIMITS.message_cap)
         .into_iter()
         .enumerate()
         .map(|(i, chunk)| {
@@ -329,8 +334,8 @@ async fn deliver_busy(ctx: Context<'_>, mode: StreamingBehavior, message: String
             let (emoji, label) = busy_label(resolved);
             let echo = format!("{emoji} `{label}` · {display_name}: {text}");
             ctx.say(pico_core::render::truncate(
-                &pico_core::render::defang_mentions(&echo),
-                crate::consts::MSG_CONTENT_CAP,
+                &pico_core::platform_render::defang_mentions(&echo),
+                crate::consts::DISCORD_LIMITS.message_cap,
             ))
             .await?;
         }
@@ -372,8 +377,8 @@ async fn context(ctx: Context<'_>) -> Result<(), Error> {
     match handle.client().context().await {
         Ok(Some(text)) => {
             let inner = pico_core::render::truncate(
-                &pico_core::render::defang_mentions(&text),
-                crate::consts::MSG_CONTENT_CAP - 8,
+                &pico_core::platform_render::defang_mentions(&text),
+                crate::consts::DISCORD_LIMITS.message_cap - 8,
             );
             ctx.say(format!("```\n{inner}\n```")).await?;
         }
@@ -382,8 +387,8 @@ async fn context(ctx: Context<'_>) -> Result<(), Error> {
         }
         Err(e) => {
             ctx.say(pico_core::render::truncate(
-                &pico_core::render::defang_mentions(&format!("❌ {e}")),
-                crate::consts::MSG_CONTENT_CAP,
+                &pico_core::platform_render::defang_mentions(&format!("❌ {e}")),
+                crate::consts::DISCORD_LIMITS.message_cap,
             ))
             .await?;
         }
@@ -424,8 +429,8 @@ async fn shake(
     match outcome {
         Ok(Some(text)) => {
             ctx.say(pico_core::render::truncate(
-                &pico_core::render::defang_mentions(&text),
-                crate::consts::MSG_CONTENT_CAP,
+                &pico_core::platform_render::defang_mentions(&text),
+                crate::consts::DISCORD_LIMITS.message_cap,
             ))
             .await?;
         }
@@ -434,8 +439,8 @@ async fn shake(
         }
         Err(e) => {
             ctx.say(pico_core::render::truncate(
-                &pico_core::render::defang_mentions(&format!("❌ {e}")),
-                crate::consts::MSG_CONTENT_CAP,
+                &pico_core::platform_render::defang_mentions(&format!("❌ {e}")),
+                crate::consts::DISCORD_LIMITS.message_cap,
             ))
             .await?;
         }
@@ -472,8 +477,8 @@ async fn compact(
     match outcome {
         Ok(Some(text)) => {
             ctx.say(pico_core::render::truncate(
-                &pico_core::render::defang_mentions(&text),
-                crate::consts::MSG_CONTENT_CAP,
+                &pico_core::platform_render::defang_mentions(&text),
+                crate::consts::DISCORD_LIMITS.message_cap,
             ))
             .await?;
         }
@@ -482,8 +487,8 @@ async fn compact(
         }
         Err(e) => {
             ctx.say(pico_core::render::truncate(
-                &pico_core::render::defang_mentions(&format!("❌ {e}")),
-                crate::consts::MSG_CONTENT_CAP,
+                &pico_core::platform_render::defang_mentions(&format!("❌ {e}")),
+                crate::consts::DISCORD_LIMITS.message_cap,
             ))
             .await?;
         }
@@ -1475,11 +1480,7 @@ impl pico_core::surface::Surface for DiscordSurface {
     }
 
     fn limits(&self) -> pico_core::surface::SizeLimits {
-        pico_core::surface::SizeLimits {
-            activity_line_cap: 20,
-            activity_char_cap: 1800,
-            activity_send_max: 1990,
-        }
+        crate::consts::DISCORD_LIMITS
     }
 
     async fn post(&self, text: &str, opts: pico_core::surface::PostOpts) -> Option<serenity::MessageId> {
@@ -1671,7 +1672,7 @@ mod tests {
             assert_eq!(*opts, PostOpts::SILENT);
         }
         for (chunk, _) in &out {
-            assert!(chunk.chars().count() <= super::REPLY_BUDGET);
+            assert!(chunk.chars().count() <= crate::consts::DISCORD_LIMITS.message_cap);
         }
     }
 
