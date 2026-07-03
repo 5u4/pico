@@ -5,7 +5,10 @@ use color_eyre::eyre::WrapErr;
 
 #[derive(Subcommand)]
 pub enum ProfileCommand {
-    Create { name: String },
+    Create {
+        #[arg(allow_hyphen_values = true)]
+        name: String,
+    },
     List,
 }
 
@@ -41,10 +44,11 @@ fn create(root: &Path, name: &str) -> color_eyre::Result<PathBuf> {
 }
 
 fn list(root: &Path) -> color_eyre::Result<Vec<String>> {
-    let entries = match std::fs::read_dir(pico_shared::paths::profiles_dir(root)) {
+    let dir = pico_shared::paths::profiles_dir(root);
+    let entries = match std::fs::read_dir(&dir) {
         Ok(entries) => entries,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
-        Err(err) => return Err(err.into()),
+        Err(err) => return Err(err).wrap_err_with(|| format!("read profiles dir {}", dir.display())),
     };
     let mut names = Vec::new();
     for entry in entries {
