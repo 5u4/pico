@@ -2,6 +2,7 @@ use clap::{Parser, Subcommand};
 
 mod bind;
 mod omp;
+mod profile;
 mod schedule;
 mod thread;
 
@@ -18,6 +19,8 @@ enum Command {
     Bind(bind::BindArgs),
     #[command(subcommand)]
     Schedule(schedule::ScheduleCommand),
+    #[command(subcommand)]
+    Profile(profile::ProfileCommand),
 }
 
 #[tokio::main]
@@ -29,5 +32,6 @@ async fn main() -> color_eyre::Result<()> {
         Command::Omp(args) => omp::run(args).await,
         Command::Bind(args) => bind::run(args).await,
         Command::Schedule(cmd) => schedule::run(cmd).await,
+        Command::Profile(cmd) => profile::run(cmd),
     }
 }

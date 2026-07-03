@@ -54,8 +54,12 @@ pub fn discord_config(root: &Path) -> PathBuf {
     root.join("discord.toml")
 }
 
+pub fn profiles_dir(root: &Path) -> PathBuf {
+    root.join("profiles")
+}
+
 pub fn profile_dir(root: &Path, name: &str) -> PathBuf {
-    root.join("profiles").join(name)
+    profiles_dir(root).join(name)
 }
 
 pub fn profile_config(root: &Path, name: &str) -> PathBuf {

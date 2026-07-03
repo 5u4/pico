@@ -1,5 +1,6 @@
 pub fn is_valid_profile(name: &str) -> bool {
     !name.is_empty()
+        && !name.starts_with('-')
         && name
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
