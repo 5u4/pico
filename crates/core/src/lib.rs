@@ -7,6 +7,7 @@ pub mod deploy;
 pub mod engine;
 pub mod mid_turn;
 pub mod omp;
+pub mod platform_render;
 pub mod prompt;
 pub mod render;
 pub mod schedule;

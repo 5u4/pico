@@ -88,6 +88,20 @@ impl DiscordScheduleHost {
             })
     }
 
+    async fn send_chunks(&self, channel: serenity::ChannelId, sched: &Schedule, chunks: Vec<String>) -> FireOutcome {
+        for chunk in chunks {
+            match channel.say(&self.ctx, chunk).await {
+                Ok(_) => {}
+                Err(e) if is_permanent_target_error(&e) => return FireOutcome::TargetGone,
+                Err(e) => {
+                    tracing::warn!(error = %format!("{e:#}"), schedule_id = %sched.id, "scheduled raw post failed");
+                    return FireOutcome::Transient;
+                }
+            }
+        }
+        FireOutcome::Delivered
+    }
+
     async fn fire_continue(&self, sched: &Schedule, wrapped: &str) -> FireOutcome {
         let Some(origin) = parse_channel(&sched.origin) else {
             return FireOutcome::TargetGone;
@@ -329,28 +343,21 @@ impl ScheduleHost for DiscordScheduleHost {
     }
 
     async fn post_raw(&self, sched: &Schedule, text: &str) -> FireOutcome {
-        let body =
-            pico_core::render::truncate(&pico_core::render::defang_mentions(text), crate::consts::MSG_CONTENT_CAP);
-        match sched.mode {
-            Mode::Continue => {
-                let Some(origin) = parse_channel(&sched.origin) else {
-                    return FireOutcome::TargetGone;
-                };
-                match origin.say(&self.ctx, body).await {
-                    Ok(_) => FireOutcome::Delivered,
-                    Err(e) if is_permanent_target_error(&e) => FireOutcome::TargetGone,
-                    Err(e) => {
-                        tracing::warn!(error = %format!("{e:#}"), schedule_id = %sched.id, "scheduled raw post failed");
-                        FireOutcome::Transient
-                    }
-                }
-            }
+        let chunks = crate::discord::render_chunks(text, crate::consts::DISCORD_LIMITS.message_cap);
+        if chunks.is_empty() {
+            return FireOutcome::Delivered;
+        }
+        let channel = match sched.mode {
+            Mode::Continue => match parse_channel(&sched.origin) {
+                Some(origin) => origin,
+                None => return FireOutcome::TargetGone,
+            },
             Mode::Fresh => {
                 let Some(target_channel) = parse_channel(&sched.target) else {
                     return FireOutcome::TargetGone;
                 };
-                let thread = match self.create_thread(target_channel, &sched.name).await {
-                    Ok(thread) => thread,
+                match self.create_thread(target_channel, &sched.name).await {
+                    Ok(thread) => thread.id,
                     Err(e) => {
                         return if is_permanent_target_error(&e) {
                             FireOutcome::TargetGone
@@ -358,17 +365,10 @@ impl ScheduleHost for DiscordScheduleHost {
                             FireOutcome::Transient
                         };
                     }
-                };
-                match thread.id.say(&self.ctx, body).await {
-                    Ok(_) => FireOutcome::Delivered,
-                    Err(e) if is_permanent_target_error(&e) => FireOutcome::TargetGone,
-                    Err(e) => {
-                        tracing::warn!(error = %format!("{e:#}"), schedule_id = %sched.id, "scheduled raw post failed");
-                        FireOutcome::Transient
-                    }
                 }
             }
-        }
+        };
+        self.send_chunks(channel, sched, chunks).await
     }
 
     async fn notify_home(&self, sched: &Schedule, notice: &HomeNotice) {
@@ -418,7 +418,7 @@ fn build_notice_embed(sched: &Schedule, notice: &HomeNotice) -> serenity::Create
         HomeNotice::Disabled(_) => ("🛑 Schedule disabled", serenity::Colour::new(0xE74C3C)),
     };
     let description = format!("[open thread](https://discord.com/channels/{}/{})", sched.scope, sched.origin);
-    let job = pico_core::render::truncate(&pico_core::render::defang_mentions(&sched.name), 200);
+    let job = pico_core::render::truncate(&pico_core::platform_render::defang_mentions(&sched.name), 200);
     let mode = match sched.mode {
         Mode::Continue => "continue",
         Mode::Fresh => "fresh",
@@ -434,11 +434,11 @@ fn build_notice_embed(sched: &Schedule, notice: &HomeNotice) -> serenity::Create
         .field("Mode", mode, true);
     match notice {
         HomeNotice::ScriptFailed { reason, stderr_tail } => {
-            let reason = pico_core::render::truncate(&pico_core::render::defang_mentions(reason), 1000);
+            let reason = pico_core::render::truncate(&pico_core::platform_render::defang_mentions(reason), 1000);
             embed = embed.field("Reason", reason, false);
             let stderr = stderr_tail.trim();
             if !stderr.is_empty() {
-                let stderr = pico_core::render::defang_mentions(stderr).replace("```", "`\u{200b}`\u{200b}`");
+                let stderr = pico_core::platform_render::defang_mentions(stderr).replace("```", "`\u{200b}`\u{200b}`");
                 let stderr = pico_core::render::truncate(&stderr, 1000);
                 embed = embed.field("stderr", format!("```\n{stderr}\n```"), false);
             }

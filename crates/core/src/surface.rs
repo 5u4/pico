@@ -64,6 +64,7 @@ impl PostOpts {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SizeLimits {
+    pub message_cap: usize,
     pub activity_line_cap: usize,
     pub activity_char_cap: usize,
     pub activity_send_max: usize,
