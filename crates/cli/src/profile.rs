@@ -5,10 +5,7 @@ use color_eyre::eyre::WrapErr;
 
 #[derive(Subcommand)]
 pub enum ProfileCommand {
-    Create {
-        #[arg(allow_hyphen_values = true)]
-        name: String,
-    },
+    Create { name: String },
     List,
 }
 
@@ -32,7 +29,7 @@ pub fn run(cmd: ProfileCommand) -> color_eyre::Result<()> {
 fn create(root: &Path, name: &str) -> color_eyre::Result<PathBuf> {
     if !pico_shared::validate::is_valid_profile(name) {
         return Err(color_eyre::eyre::eyre!(
-            "invalid profile name {name:?} (must match ^[A-Za-z0-9_-]+$)"
+            "invalid profile name {name:?} (must match ^[A-Za-z0-9_-]+$ and not start with '-')"
         ));
     }
     let dir = pico_shared::paths::profile_dir(root, name);
@@ -86,6 +83,8 @@ mod tests {
         assert!(format!("{err:#}").contains("invalid profile name"));
         assert!(!pico_shared::paths::profile_dir(&root, "bad name").exists());
         assert!(create(&root, "").is_err());
+        assert!(create(&root, "-lead").is_err());
+        assert!(!pico_shared::paths::profile_dir(&root, "-lead").exists());
         std::fs::remove_dir_all(&root).ok();
     }
 
