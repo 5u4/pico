@@ -55,6 +55,21 @@ services:
       HINDSIGHT_API_LLM_PROVIDER: openai
       HINDSIGHT_API_LLM_BASE_URL: https://api.enterprise.githubcopilot.com
       HINDSIGHT_API_LLM_MODEL: gpt-4o-mini
+      # gpt-4o-mini's Copilot prompt cap is 64000 tokens. Reflect's mental-model
+      # refresh accumulated 70k-95k of tool results and looped forever on the
+      # resulting retried 400s (the poller rescheduled the failed task every
+      # minute). Cap reflect's accumulated context below 64000 so synthesis is
+      # forced before the prompt overflows, and cap each search_observations
+      # result so one call can't dominate. Reflect keeps its full multi-tool
+      # retrieval; only the runaway accumulation is bounded.
+      #
+      # Sonnet was tried here and rejected: hindsight's reflect loop treats the
+      # model's tool-free turn as the final answer, but Claude ends such a turn
+      # with a "let me now answer" preamble instead of the synthesis 4o-mini
+      # emits, so sonnet returned ~150-char preambles. Fixing that needs an
+      # in-container source patch that a new image would drop.
+      HINDSIGHT_API_REFLECT_MAX_CONTEXT_TOKENS: "48000"
+      HINDSIGHT_API_REFLECT_SOURCE_FACTS_MAX_TOKENS: "8000"
     ports:
       - "127.0.0.1:8888:8888"
       - "127.0.0.1:9999:9999"
