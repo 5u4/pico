@@ -55,6 +55,8 @@ services:
       HINDSIGHT_API_LLM_PROVIDER: openai
       HINDSIGHT_API_LLM_BASE_URL: https://api.enterprise.githubcopilot.com
       HINDSIGHT_API_LLM_MODEL: gpt-4o-mini
+      HINDSIGHT_API_REFLECT_MAX_CONTEXT_TOKENS: "48000"
+      HINDSIGHT_API_REFLECT_SOURCE_FACTS_MAX_TOKENS: "8000"
     ports:
       - "127.0.0.1:8888:8888"
       - "127.0.0.1:9999:9999"
