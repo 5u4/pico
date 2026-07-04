@@ -52,8 +52,6 @@ struct RawGuild {
 #[serde(deny_unknown_fields)]
 struct RawRender {
     #[serde(default)]
-    surface_thinking: bool,
-    #[serde(default)]
     streaming_behavior: StreamingBehavior,
 }
 
@@ -114,7 +112,6 @@ pub fn load(path: &Path) -> color_eyre::Result<DiscordConfig> {
 impl From<RawRender> for pico_core::config::Render {
     fn from(raw: RawRender) -> Self {
         pico_core::config::Render {
-            surface_thinking: raw.surface_thinking,
             streaming_behavior: raw.streaming_behavior,
         }
     }
@@ -248,7 +245,6 @@ mod tests {
         let dir = temp_dir("missing");
         let cfg = load(&dir.join("discord.toml")).unwrap();
         assert!(cfg.guild("123456789012345678").is_none());
-        assert!(!cfg.render().surface_thinking);
         assert_eq!(cfg.render().streaming_behavior, StreamingBehavior::Steer);
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -307,12 +303,11 @@ mod tests {
     }
 
     #[test]
-    fn reads_render_surface_thinking_and_streaming() {
+    fn reads_render_streaming() {
         let dir = temp_dir("render");
         let path = dir.join("discord.toml");
-        std::fs::write(&path, "[render]\nsurface_thinking = true\nstreaming_behavior = \"follow_up\"\n").unwrap();
+        std::fs::write(&path, "[render]\nstreaming_behavior = \"follow_up\"\n").unwrap();
         let cfg = load(&path).unwrap();
-        assert!(cfg.render().surface_thinking);
         assert_eq!(cfg.render().streaming_behavior, StreamingBehavior::FollowUp);
         std::fs::remove_dir_all(&dir).ok();
     }

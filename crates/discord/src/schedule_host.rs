@@ -397,7 +397,6 @@ impl ScheduleHost for DiscordScheduleHost {
 
 fn default_render() -> Render {
     Render {
-        surface_thinking: false,
         streaming_behavior: StreamingBehavior::default(),
     }
 }
