@@ -71,6 +71,7 @@ pub async fn drive_turn<S: Surface>(
     let mut last_stop: Option<crate::omp::protocol::AssistantStop> = None;
     let mut tools_running: usize = 0;
     let mut tool_seen = false;
+    let mut activity_shown = false;
 
     let mut reply = String::new();
     let mut activity = Activity::new(surface);
@@ -161,6 +162,7 @@ pub async fn drive_turn<S: Surface>(
             Some(OmpEvent::Message(AssistantMessageEvent::ThinkingEnd { content })) => {
                 if req.surface_thinking && !suppress_text {
                     activity.thinking(&content).await;
+                    activity_shown = true;
                 }
             }
             Some(OmpEvent::ToolStart(tool)) => {
@@ -283,13 +285,13 @@ pub async fn drive_turn<S: Surface>(
     subagents.settle_backgrounded();
     subagents.flush_all(false).await;
     committed_any |= flush_final(surface, &mut activity, &mut reply, &mut held, title_seed, answer_delivered).await;
-    if !committed_any && let Some(msg) = empty_turn_notice(last_stop.as_ref(), tool_seen) {
+    if !committed_any && let Some(msg) = empty_turn_notice(last_stop.as_ref(), tool_seen || activity_shown) {
         surface.say(&msg).await;
     }
     Ok(TurnOutcome::Live)
 }
 
-fn empty_turn_notice(stop: Option<&crate::omp::protocol::AssistantStop>, tool_seen: bool) -> Option<String> {
+fn empty_turn_notice(stop: Option<&crate::omp::protocol::AssistantStop>, showed_activity: bool) -> Option<String> {
     let stop = stop?;
     let reason = stop.stop_reason.as_deref();
     let detail = stop.stop_details_type.as_deref();
@@ -308,7 +310,7 @@ fn empty_turn_notice(stop: Option<&crate::omp::protocol::AssistantStop>, tool_se
                 .map(|m| format!(": {m}"))
                 .unwrap_or_default(),
         )),
-        (Some("stop"), _) if !tool_seen => {
+        (Some("stop"), _) if !showed_activity => {
             Some("The model produced no visible content this turn. Try again or rephrase.".to_owned())
         }
         _ => None,
