@@ -675,9 +675,5 @@ for await (const line of readLines(Bun.stdin.stream())) {
 	}
 	const record = asRecord(parsed);
 	if (!record) continue;
-	try {
-		await handle(record);
-	} catch (e) {
-		emitError(str(record.sessionId), errorMessage(e));
-	}
+	void handle(record).catch(e => emitError(str(record.sessionId), errorMessage(e)));
 }

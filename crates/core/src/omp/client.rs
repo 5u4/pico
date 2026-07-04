@@ -19,7 +19,8 @@ use tokio::{
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::omp::protocol::{
-    Command, Identity, ImageAttachment, Inbound, OmpEvent, RequestId, RpcResponse, UiResponse, message_start_event,
+    Command, Identity, ImageAttachment, Inbound, OmpEvent, RequestId, RpcResponse, UiResponse, message_end_event,
+    message_start_event,
 };
 
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -497,6 +498,7 @@ fn frame_tag(frame: &Inbound) -> &'static str {
         Inbound::ExtensionUiRequest { .. } => "extension_ui_request",
         Inbound::Error { .. } => "error",
         Inbound::MessageStart { .. } => "message_start",
+        Inbound::MessageEnd { .. } => "message_end",
         Inbound::Unknown => "unknown",
     }
 }
@@ -512,6 +514,7 @@ fn frame_session_id(frame: &Inbound) -> Option<&str> {
         | Inbound::ToolExecutionEnd { session_id, .. }
         | Inbound::ExtensionUiRequest { session_id, .. }
         | Inbound::MessageStart { session_id, .. }
+        | Inbound::MessageEnd { session_id, .. }
         | Inbound::Error { session_id, .. } => Some(session_id.as_str()),
         Inbound::Response(resp) if !resp.session_id.is_empty() => Some(resp.session_id.as_str()),
         Inbound::Response(_) | Inbound::Ready | Inbound::Unknown => None,
@@ -607,6 +610,11 @@ async fn read_loop(
             Inbound::Error { session_id, message } => route(&sessions, &session_id, OmpEvent::Error(message)),
             Inbound::MessageStart { session_id, message } => {
                 if let Some(event) = message_start_event(&message) {
+                    route(&sessions, &session_id, event);
+                }
+            }
+            Inbound::MessageEnd { session_id, message } => {
+                if let Some(event) = message.as_ref().and_then(message_end_event) {
                     route(&sessions, &session_id, event);
                 }
             }

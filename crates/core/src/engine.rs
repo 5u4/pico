@@ -22,7 +22,7 @@ use crate::{
     surface::{ConversationId, PostOpts, Surface, UiOutcome, UiReply},
 };
 
-const STALL_TIMEOUT: Duration = Duration::from_secs(3900);
+const STALL_TIMEOUT: Duration = Duration::from_secs(900);
 const SETTLE_GRACE: Duration = Duration::from_secs(1);
 const ACTIVITY_THROTTLE: Duration = Duration::from_secs(1);
 const SUBAGENT_THROTTLE: Duration = Duration::from_secs(2);
@@ -66,6 +66,10 @@ pub async fn drive_turn<S: Surface>(
     let mut explicit_runs_pending: usize = 1;
     let mut awaiting_deferred = false;
     let mut deferred: std::collections::VecDeque<String> = std::collections::VecDeque::new();
+    let mut committed_any = false;
+    let mut last_stop: Option<crate::omp::protocol::AssistantStop> = None;
+    let mut tools_running: usize = 0;
+    let mut tool_seen = false;
 
     let mut reply = String::new();
     let mut activity = Activity::new(surface);
@@ -81,7 +85,7 @@ pub async fn drive_turn<S: Surface>(
             () = req.cancel.cancelled() => {
                 activity.flush().await;
                 subagents.flush_all(false).await;
-                flush_final(surface, &mut activity, &mut reply, &mut held, title_seed, answer_delivered).await;
+                let _ = flush_final(surface, &mut activity, &mut reply, &mut held, title_seed, answer_delivered).await;
                 surface.say("worker is restarting; resend your message to continue").await;
                 return Ok(TurnOutcome::Live);
             }
@@ -117,10 +121,13 @@ pub async fn drive_turn<S: Surface>(
                     break;
                 }
                 Err(_) => {
+                    if tools_running > 0 {
+                        continue;
+                    }
                     tracing::warn!(timeout = ?STALL_TIMEOUT, "turn made no progress; resetting wedged OMP session");
                     activity.flush().await;
                     subagents.flush_all(true).await;
-                    flush_final(surface, &mut activity, &mut reply, &mut held, title_seed, answer_delivered).await;
+                    let _ = flush_final(surface, &mut activity, &mut reply, &mut held, title_seed, answer_delivered).await;
                     surface
                         .say("the turn stalled with no progress and was reset; resend your message to continue")
                         .await;
@@ -147,7 +154,8 @@ pub async fn drive_turn<S: Surface>(
                         content
                     };
                     reply.clear();
-                    hold_segment(surface, &mut activity, &mut held, title_seed, answer_delivered, seg).await;
+                    committed_any |=
+                        hold_segment(surface, &mut activity, &mut held, title_seed, answer_delivered, seg).await;
                 }
             }
             Some(OmpEvent::Message(AssistantMessageEvent::ThinkingEnd { content })) => {
@@ -156,12 +164,15 @@ pub async fn drive_turn<S: Surface>(
                 }
             }
             Some(OmpEvent::ToolStart(tool)) => {
+                tool_seen = true;
+                tools_running += 1;
                 if !reply.trim().is_empty() {
                     let seg = std::mem::take(&mut reply);
-                    hold_segment(surface, &mut activity, &mut held, title_seed, answer_delivered, seg).await;
+                    committed_any |=
+                        hold_segment(surface, &mut activity, &mut held, title_seed, answer_delivered, seg).await;
                 }
                 if let Some(prev) = held.take() {
-                    commit_text(surface, &mut activity, &prev, false, true).await;
+                    committed_any |= commit_text(surface, &mut activity, &prev, false, true).await;
                 }
                 if tool.tool_name == "task" {
                     activity.flush().await;
@@ -177,10 +188,13 @@ pub async fn drive_turn<S: Surface>(
                     subagents.update(&tool).await;
                 }
             }
-            Some(OmpEvent::ToolEnd(tool)) => match tool.tool_name.as_str() {
-                "task" => subagents.end(&tool).await,
-                _ => activity.end(&tool).await,
-            },
+            Some(OmpEvent::ToolEnd(tool)) => {
+                tools_running = tools_running.saturating_sub(1);
+                match tool.tool_name.as_str() {
+                    "task" => subagents.end(&tool).await,
+                    _ => activity.end(&tool).await,
+                }
+            }
             Some(OmpEvent::UiRequest(ui_req)) => {
                 if aborted {
                     continue;
@@ -192,7 +206,9 @@ pub async fn drive_turn<S: Surface>(
                 match disposition {
                     UiDisposition::Cancelled => {
                         subagents.flush_all(false).await;
-                        flush_final(surface, &mut activity, &mut reply, &mut held, title_seed, answer_delivered).await;
+                        let _ =
+                            flush_final(surface, &mut activity, &mut reply, &mut held, title_seed, answer_delivered)
+                                .await;
                         surface
                             .say("worker restarted, so the pending question was discarded; resend your message to continue")
                             .await;
@@ -208,11 +224,13 @@ pub async fn drive_turn<S: Surface>(
             Some(OmpEvent::TurnEnd) => {
                 if !reply.trim().is_empty() {
                     let seg = std::mem::take(&mut reply);
-                    hold_segment(surface, &mut activity, &mut held, title_seed, answer_delivered, seg).await;
+                    committed_any |=
+                        hold_segment(surface, &mut activity, &mut held, title_seed, answer_delivered, seg).await;
                 }
             }
             Some(OmpEvent::AgentEnd) => {
-                flush_final(surface, &mut activity, &mut reply, &mut held, title_seed, answer_delivered).await;
+                committed_any |=
+                    flush_final(surface, &mut activity, &mut reply, &mut held, title_seed, answer_delivered).await;
                 answer_delivered = true;
                 suppress_text = false;
                 if explicit_runs_pending > 0 {
@@ -231,7 +249,7 @@ pub async fn drive_turn<S: Surface>(
                 tracing::error!(error = %e, "omp reported a turn error");
                 activity.flush().await;
                 subagents.flush_all(true).await;
-                flush_final(surface, &mut activity, &mut reply, &mut held, title_seed, answer_delivered).await;
+                let _ = flush_final(surface, &mut activity, &mut reply, &mut held, title_seed, answer_delivered).await;
                 surface.say(&format!("OMP error: {e}")).await;
                 return Ok(TurnOutcome::Live);
             }
@@ -245,12 +263,15 @@ pub async fn drive_turn<S: Surface>(
                     suppress_text = true;
                 }
             }
+            Some(OmpEvent::MessageEnd(stop)) => {
+                last_stop = Some(stop);
+            }
             Some(OmpEvent::AgentStart | OmpEvent::Message(AssistantMessageEvent::Other)) => {}
             None => {
                 tracing::error!("omp host channel closed mid-turn; session is dead");
                 activity.flush().await;
                 subagents.flush_all(true).await;
-                flush_final(surface, &mut activity, &mut reply, &mut held, title_seed, answer_delivered).await;
+                let _ = flush_final(surface, &mut activity, &mut reply, &mut held, title_seed, answer_delivered).await;
                 surface
                     .say("the OMP session ended unexpectedly; send another message to restart it")
                     .await;
@@ -261,8 +282,37 @@ pub async fn drive_turn<S: Surface>(
     activity.flush().await;
     subagents.settle_backgrounded();
     subagents.flush_all(false).await;
-    flush_final(surface, &mut activity, &mut reply, &mut held, title_seed, answer_delivered).await;
+    committed_any |= flush_final(surface, &mut activity, &mut reply, &mut held, title_seed, answer_delivered).await;
+    if !committed_any && let Some(msg) = empty_turn_notice(last_stop.as_ref(), tool_seen) {
+        surface.say(&msg).await;
+    }
     Ok(TurnOutcome::Live)
+}
+
+fn empty_turn_notice(stop: Option<&crate::omp::protocol::AssistantStop>, tool_seen: bool) -> Option<String> {
+    let stop = stop?;
+    let reason = stop.stop_reason.as_deref();
+    let detail = stop.stop_details_type.as_deref();
+    match (reason, detail) {
+        (Some("error"), Some("sensitive")) => Some(
+            "The model declined to respond because the input was flagged as sensitive. Try rephrasing and resend."
+                .to_owned(),
+        ),
+        (Some("error"), Some("refusal")) => {
+            Some("The model refused this request. Try rephrasing and resend.".to_owned())
+        }
+        (Some("error"), _) => Some(format!(
+            "The model returned an error and produced no reply{}.",
+            stop.error_message
+                .as_deref()
+                .map(|m| format!(": {m}"))
+                .unwrap_or_default(),
+        )),
+        (Some("stop"), _) if !tool_seen => {
+            Some("The model produced no visible content this turn. Try again or rephrase.".to_owned())
+        }
+        _ => None,
+    }
 }
 
 async fn forward_next_pending(
@@ -347,13 +397,14 @@ async fn commit_text<S: Surface>(
     text: &str,
     as_reply: bool,
     silent: bool,
-) {
+) -> bool {
     if text.trim().is_empty() {
-        return;
+        return false;
     }
     activity.flush().await;
     surface.post_reply(text, as_reply, silent).await;
     activity.seal();
+    true
 }
 
 async fn hold_segment<S: Surface>(
@@ -363,17 +414,19 @@ async fn hold_segment<S: Surface>(
     title_seed: &mut Option<String>,
     title_locked: bool,
     seg: String,
-) {
+) -> bool {
     if seg.trim().is_empty() {
-        return;
+        return false;
     }
+    let mut posted = false;
     if let Some(prev) = held.take() {
-        commit_text(surface, activity, &prev, false, true).await;
+        posted |= commit_text(surface, activity, &prev, false, true).await;
     }
     if !title_locked {
         *title_seed = Some(seg.clone());
     }
     *held = Some(seg);
+    posted
 }
 
 async fn flush_final<S: Surface>(
@@ -383,14 +436,16 @@ async fn flush_final<S: Surface>(
     held: &mut Option<String>,
     title_seed: &mut Option<String>,
     title_locked: bool,
-) {
+) -> bool {
+    let mut posted = false;
     if !reply.trim().is_empty() {
         let seg = std::mem::take(reply);
-        hold_segment(surface, activity, held, title_seed, title_locked, seg).await;
+        posted |= hold_segment(surface, activity, held, title_seed, title_locked, seg).await;
     }
     if let Some(text) = held.take() {
-        commit_text(surface, activity, &text, true, false).await;
+        posted |= commit_text(surface, activity, &text, true, false).await;
     }
+    posted
 }
 
 struct Activity<'a, S: Surface> {
