@@ -38,7 +38,6 @@ pub struct TurnRequest<'a> {
     pub conversation: &'a ConversationId,
     pub prompt: &'a str,
     pub images: &'a [ImageAttachment],
-    pub surface_thinking: bool,
     pub mode: StreamingBehavior,
     pub cancel: &'a CancellationToken,
 }
@@ -160,7 +159,7 @@ pub async fn drive_turn<S: Surface>(
                 }
             }
             Some(OmpEvent::Message(AssistantMessageEvent::ThinkingEnd { content })) => {
-                if req.surface_thinking && !suppress_text {
+                if !suppress_text {
                     activity.thinking(&content).await;
                     activity_shown = true;
                 }

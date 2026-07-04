@@ -16,7 +16,6 @@ pub enum StreamingBehavior {
 
 #[derive(Clone, Copy)]
 pub struct Render {
-    pub surface_thinking: bool,
     pub streaming_behavior: StreamingBehavior,
 }
 

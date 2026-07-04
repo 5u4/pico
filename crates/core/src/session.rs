@@ -31,7 +31,6 @@ pub struct RunTurn<'a, S: Surface> {
     pub surface_rules: &'a str,
     pub wrapped: &'a str,
     pub images: &'a [ImageAttachment],
-    pub surface_thinking: bool,
     pub mode: StreamingBehavior,
     pub camofox: &'a CamofoxDaemon,
     pub mid_turn: &'a MidTurnQueue,
@@ -94,7 +93,6 @@ pub async fn run_turn<S: Surface>(p: RunTurn<'_, S>) -> color_eyre::Result<TurnS
             conversation: p.conversation,
             prompt: p.wrapped,
             images: p.images,
-            surface_thinking: p.surface_thinking,
             mode: p.mode,
             cancel: p.cancel,
         };

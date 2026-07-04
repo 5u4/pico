@@ -1378,7 +1378,6 @@ pub(crate) async fn drive_thread_turn(
         surface_rules: include_str!("discord_surface.md"),
         wrapped,
         images,
-        surface_thinking: render.surface_thinking,
         mode: render.streaming_behavior,
         camofox,
         mid_turn,
