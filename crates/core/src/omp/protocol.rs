@@ -154,6 +154,14 @@ pub enum OmpEvent {
     TurnEnd,
     CustomMessage { custom_type: String },
     Error(String),
+    MessageEnd(AssistantStop),
+}
+
+#[derive(Debug, Clone)]
+pub struct AssistantStop {
+    pub stop_reason: Option<String>,
+    pub stop_details_type: Option<String>,
+    pub error_message: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -209,6 +217,26 @@ pub(crate) struct MessageStartInfo {
     pub role: Option<String>,
     #[serde(default)]
     pub custom_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MessageEndInfo {
+    #[serde(default)]
+    pub role: Option<String>,
+    #[serde(default)]
+    pub stop_reason: Option<String>,
+    #[serde(default)]
+    pub stop_details: Option<StopDetails>,
+    #[serde(default)]
+    pub error_message: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct StopDetails {
+    #[serde(default, rename = "type")]
+    pub kind: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -421,6 +449,11 @@ pub(crate) enum Inbound {
         session_id: String,
         message: MessageStartInfo,
     },
+    MessageEnd {
+        session_id: String,
+        #[serde(default)]
+        message: Option<MessageEndInfo>,
+    },
     #[serde(other)]
     Unknown,
 }
@@ -432,6 +465,17 @@ pub(crate) fn message_start_event(info: &MessageStartInfo) -> Option<OmpEvent> {
     info.custom_type
         .clone()
         .map(|custom_type| OmpEvent::CustomMessage { custom_type })
+}
+
+pub(crate) fn message_end_event(info: &MessageEndInfo) -> Option<OmpEvent> {
+    if info.role.as_deref() != Some("assistant") {
+        return None;
+    }
+    Some(OmpEvent::MessageEnd(AssistantStop {
+        stop_reason: info.stop_reason.clone(),
+        stop_details_type: info.stop_details.as_ref().and_then(|d| d.kind.clone()),
+        error_message: info.error_message.clone(),
+    }))
 }
 
 #[cfg(test)]
@@ -833,6 +877,42 @@ mod tests {
                 assert!(message_start_event(&message).is_none());
             }
             other => panic!("expected message_start, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decodes_message_end_frame() {
+        match parse(
+            r#"{"type":"message_end","sessionId":"s1","message":{"role":"assistant","stopReason":"error","stopDetails":{"type":"sensitive"},"errorMessage":"flagged"}}"#,
+        ) {
+            Inbound::MessageEnd { session_id, message } => {
+                assert_eq!(session_id, "s1");
+                let info = message.expect("message present");
+                assert_eq!(info.role.as_deref(), Some("assistant"));
+                assert_eq!(info.stop_reason.as_deref(), Some("error"));
+                assert_eq!(info.stop_details.as_ref().and_then(|d| d.kind.as_deref()), Some("sensitive"));
+                assert_eq!(info.error_message.as_deref(), Some("flagged"));
+                match message_end_event(&info) {
+                    Some(OmpEvent::MessageEnd(stop)) => {
+                        assert_eq!(stop.stop_reason.as_deref(), Some("error"));
+                        assert_eq!(stop.stop_details_type.as_deref(), Some("sensitive"));
+                        assert_eq!(stop.error_message.as_deref(), Some("flagged"));
+                    }
+                    other => panic!("expected message end event, got {other:?}"),
+                }
+            }
+            other => panic!("expected message_end, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ignores_non_assistant_message_end() {
+        match parse(r#"{"type":"message_end","sessionId":"s1","message":{"role":"user"}}"#) {
+            Inbound::MessageEnd { message, .. } => {
+                let info = message.expect("message present");
+                assert!(message_end_event(&info).is_none());
+            }
+            other => panic!("expected message_end, got {other:?}"),
         }
     }
 
