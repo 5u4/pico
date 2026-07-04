@@ -23,6 +23,7 @@ use crate::{
 };
 
 const STALL_TIMEOUT: Duration = Duration::from_secs(900);
+const TOOL_STALL_TIMEOUT: Duration = Duration::from_secs(3600);
 const SETTLE_GRACE: Duration = Duration::from_secs(1);
 const ACTIVITY_THROTTLE: Duration = Duration::from_secs(1);
 const SUBAGENT_THROTTLE: Duration = Duration::from_secs(2);
@@ -78,6 +79,8 @@ pub async fn drive_turn<S: Surface>(
     loop {
         let idle_wait = if settling && !awaiting_deferred {
             SETTLE_GRACE
+        } else if tools_running > 0 {
+            TOOL_STALL_TIMEOUT
         } else {
             STALL_TIMEOUT
         };
@@ -121,10 +124,7 @@ pub async fn drive_turn<S: Surface>(
                     break;
                 }
                 Err(_) => {
-                    if tools_running > 0 {
-                        continue;
-                    }
-                    tracing::warn!(timeout = ?STALL_TIMEOUT, "turn made no progress; resetting wedged OMP session");
+                    tracing::warn!(timeout = ?idle_wait, "turn made no progress; resetting wedged OMP session");
                     activity.flush().await;
                     subagents.flush_all(true).await;
                     let _ = flush_final(surface, &mut activity, &mut reply, &mut held, title_seed, answer_delivered).await;
