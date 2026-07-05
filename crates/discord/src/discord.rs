@@ -367,13 +367,15 @@ enum ShakeMode {
 
 #[poise::command(slash_command)]
 async fn context(ctx: Context<'_>) -> Result<(), Error> {
-    let thread_id = ctx.channel_id().to_string();
-    let Some(handle) = ctx.data().pool.get_existing(&thread_id) else {
-        ctx.say("No active session in this thread yet — send a message first.")
-            .await?;
-        return Ok(());
-    };
     ctx.defer().await?;
+    let handle = match resume_thread_session(&ctx).await? {
+        Some(h) => h,
+        None => {
+            ctx.say("No active session in this thread yet — send a message first.")
+                .await?;
+            return Ok(());
+        }
+    };
     match handle.client().context().await {
         Ok(Some(text)) => {
             let inner = pico_core::render::truncate(
@@ -402,11 +404,6 @@ async fn shake(
     #[description = "What to drop: elide (tool results + large blocks) or images"] mode: Option<ShakeMode>,
 ) -> Result<(), Error> {
     let thread_id = ctx.channel_id().to_string();
-    let Some(handle) = ctx.data().pool.get_existing(&thread_id) else {
-        ctx.say("No active session in this thread yet — send a message first.")
-            .await?;
-        return Ok(());
-    };
     if ctx
         .data()
         .cancels
@@ -415,11 +412,19 @@ async fn shake(
         ctx.say("A turn is running in this thread — /cancel it first.").await?;
         return Ok(());
     }
+    ctx.defer().await?;
+    let handle = match resume_thread_session(&ctx).await? {
+        Some(h) => h,
+        None => {
+            ctx.say("No active session in this thread yet — send a message first.")
+                .await?;
+            return Ok(());
+        }
+    };
     let mode_str = match mode.unwrap_or(ShakeMode::Elide) {
         ShakeMode::Elide => "elide",
         ShakeMode::Images => "images",
     };
-    ctx.defer().await?;
     let outcome = {
         let mut session = handle.lock().await;
         let result = session.client.shake(mode_str).await;
@@ -454,11 +459,6 @@ async fn compact(
     #[description = "Optional focus to preserve while compacting"] focus: Option<String>,
 ) -> Result<(), Error> {
     let thread_id = ctx.channel_id().to_string();
-    let Some(handle) = ctx.data().pool.get_existing(&thread_id) else {
-        ctx.say("No active session in this thread yet — send a message first.")
-            .await?;
-        return Ok(());
-    };
     if ctx
         .data()
         .cancels
@@ -468,6 +468,14 @@ async fn compact(
         return Ok(());
     }
     ctx.defer().await?;
+    let handle = match resume_thread_session(&ctx).await? {
+        Some(h) => h,
+        None => {
+            ctx.say("No active session in this thread yet — send a message first.")
+                .await?;
+            return Ok(());
+        }
+    };
     let outcome = {
         let mut session = handle.lock().await;
         let result = session.client.compact(focus.as_deref()).await;
@@ -494,6 +502,63 @@ async fn compact(
         }
     }
     Ok(())
+}
+
+async fn resume_thread_session(
+    ctx: &Context<'_>,
+) -> Result<Option<std::sync::Arc<pico_core::omp::pool::ThreadHandle>>, Error> {
+    let thread_id = ctx.channel_id().to_string();
+    let Some(guild_id) = ctx.guild_id() else {
+        return Ok(None);
+    };
+    let serenity::Channel::Guild(channel) = ctx.channel_id().to_channel(ctx.serenity_context()).await? else {
+        return Ok(None);
+    };
+    let in_thread = is_thread(channel.kind);
+    let bound_channel = if in_thread {
+        match channel.parent_id {
+            Some(p) => p,
+            None => return Ok(None),
+        }
+    } else {
+        channel.id
+    };
+    let thread_label = channel.name.clone();
+    let Some(marker) = pico_core::thread_marker::load(&ctx.data().db, crate::consts::PLATFORM, &thread_id).await else {
+        return Ok(None);
+    };
+    if marker.closed_at.is_some() {
+        return Ok(None);
+    }
+    let root_config = pico_core::config::load_root(&pico_shared::paths::worker_config(&ctx.data().root))?;
+    let guild_name = guild_id.name(&ctx.serenity_context().cache);
+    let channel_name = channel_display_name(ctx.serenity_context(), guild_id, bound_channel);
+    let (context_block, identity) = build_thread_context(
+        guild_id,
+        guild_name.as_deref(),
+        bound_channel,
+        channel_name.as_deref(),
+        ctx.channel_id(),
+        &thread_label,
+        &thread_id,
+        &marker.profile,
+        &marker.cwd,
+        marker.worktree.as_ref(),
+        ctx.author().id,
+        root_config.timezone(),
+    );
+    pico_core::session::resume(pico_core::session::ResumeSession {
+        pool: &ctx.data().pool,
+        root: &ctx.data().root,
+        profile: &marker.profile,
+        cwd: marker.cwd.clone(),
+        identity,
+        context_block: &context_block,
+        surface_rules: include_str!("discord_surface.md"),
+        thread_id: &thread_id,
+    })
+    .await
+    .map_err(|e| e.into())
 }
 
 #[poise::command(slash_command, rename = "dev-deploy")]
@@ -1336,28 +1401,20 @@ pub(crate) async fn drive_thread_turn(
         timezone,
     } = inputs;
 
-    let guild_line = pico_core::prompt::id_value(guild_id.get(), guild_name.as_deref());
-    let channel_line = pico_core::prompt::id_value(bound_channel.get(), channel_name.as_deref());
-    let thread_line = pico_core::prompt::id_value(target.get(), Some(&thread_label));
-    let context_block = pico_core::prompt::runtime_context_block(&pico_core::prompt::RuntimeContext {
-        platform: crate::consts::PLATFORM,
-        extra: &[("guild", guild_line)],
-        channel: &channel_line,
-        thread: &thread_line,
-        profile: &profile,
-        cwd: &cwd,
-        worktree: worktree_origin
-            .as_ref()
-            .map(|w| (w.base_repo.as_path(), w.default_branch.as_str())),
+    let (context_block, identity) = build_thread_context(
+        guild_id,
+        guild_name.as_deref(),
+        bound_channel,
+        channel_name.as_deref(),
+        target,
+        &thread_label,
+        &thread_id,
+        &profile,
+        &cwd,
+        worktree_origin.as_ref(),
+        author,
         timezone,
-    });
-    let identity = pico_core::omp::client::SessionIdentity {
-        platform: crate::consts::PLATFORM.to_owned(),
-        guild: guild_id.get().to_string(),
-        channel: bound_channel.get().to_string(),
-        thread: thread_id.clone(),
-        user: author.get().to_string(),
-    };
+    );
     let conversation = ConversationId::new(crate::consts::PLATFORM, &thread_id);
     let surface = DiscordSurface {
         ctx: ctx.clone(),
@@ -1387,6 +1444,44 @@ pub(crate) async fn drive_thread_turn(
         thread_id: &thread_id,
     })
     .await
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_thread_context(
+    guild_id: serenity::GuildId,
+    guild_name: Option<&str>,
+    bound_channel: serenity::ChannelId,
+    channel_name: Option<&str>,
+    target: serenity::ChannelId,
+    thread_label: &str,
+    thread_id: &str,
+    profile: &str,
+    cwd: &std::path::Path,
+    worktree_origin: Option<&pico_core::thread_marker::WorktreeOrigin>,
+    author: serenity::UserId,
+    timezone: chrono_tz::Tz,
+) -> (String, pico_core::omp::client::SessionIdentity) {
+    let guild_line = pico_core::prompt::id_value(guild_id.get(), guild_name);
+    let channel_line = pico_core::prompt::id_value(bound_channel.get(), channel_name);
+    let thread_line = pico_core::prompt::id_value(target.get(), Some(thread_label));
+    let context_block = pico_core::prompt::runtime_context_block(&pico_core::prompt::RuntimeContext {
+        platform: crate::consts::PLATFORM,
+        extra: &[("guild", guild_line)],
+        channel: &channel_line,
+        thread: &thread_line,
+        profile,
+        cwd,
+        worktree: worktree_origin.map(|w| (w.base_repo.as_path(), w.default_branch.as_str())),
+        timezone,
+    });
+    let identity = pico_core::omp::client::SessionIdentity {
+        platform: crate::consts::PLATFORM.to_owned(),
+        guild: guild_id.get().to_string(),
+        channel: bound_channel.get().to_string(),
+        thread: thread_id.to_owned(),
+        user: author.get().to_string(),
+    };
+    (context_block, identity)
 }
 
 fn is_image_attachment(att: &serenity::Attachment) -> bool {
