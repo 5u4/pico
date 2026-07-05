@@ -1709,6 +1709,7 @@ dependencies = [
  "notify",
  "parking_lot",
  "pico-shared",
+ "regex",
  "serde",
  "serde_json",
  "sqlx",

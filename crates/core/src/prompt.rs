@@ -99,6 +99,7 @@ pub fn wrap_discord_message(
     content: &str,
     quotes: &[Quote],
 ) -> String {
+    let content = crate::redact::scrub(content);
     let mut out = String::new();
     for quote in quotes {
         match quote.kind {
@@ -113,14 +114,14 @@ pub fn wrap_discord_message(
                 out.push_str(&format!(
                     " sent_at=\"{}\">\n{}\n</discord-reply>\n",
                     escape_attr(&quote.sent_at),
-                    escape_text(&quote.content)
+                    escape_text(&crate::redact::scrub(&quote.content))
                 ));
             }
             QuoteKind::Forward => {
                 out.push_str(&format!(
                     "<discord-forward sent_at=\"{}\">\n{}\n</discord-forward>\n",
                     escape_attr(&quote.sent_at),
-                    escape_text(&quote.content)
+                    escape_text(&crate::redact::scrub(&quote.content))
                 ));
             }
         }
@@ -165,7 +166,7 @@ pub fn wrap_scheduled_job(
          reasonable decisions, and put your final answer directly in your response. Do not\n\
          ask questions or wait for follow-up.\n\n",
     );
-    out.push_str(prompt);
+    out.push_str(&crate::redact::scrub(prompt));
     if let Some(context) = context
         && !context.trim().is_empty()
     {
@@ -324,6 +325,22 @@ mod tests {
             wrapped,
             "<discord-message user_id=\"42\" name=\"Victor\" sent_at=\"2026-06-23T23:15:42-07:00\" />\nhello <world> & co"
         );
+    }
+
+    #[test]
+    fn wrap_discord_message_redacts_secret_but_keeps_surrounding_text_and_wrapper() {
+        let wrapped = wrap_discord_message(
+            42,
+            "Victor",
+            "2026-06-23T23:15:42-07:00",
+            "my key is ghp_16C7e42F292c6912E7710c838347Ae178B4a keep it",
+            &[],
+        );
+        assert_eq!(
+            wrapped,
+            "<discord-message user_id=\"42\" name=\"Victor\" sent_at=\"2026-06-23T23:15:42-07:00\" />\nmy key is [REDACTED] keep it"
+        );
+        assert!(!wrapped.contains("ghp_16C7e42F292c6912E7710c838347Ae178B4a"));
     }
 
     #[test]

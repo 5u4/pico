@@ -17,11 +17,13 @@ import { initializeExtensions } from "@oh-my-pi/pi-coding-agent/modes/runtime-in
 import { theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { makeCamofoxFactory } from "./extensions/camofox";
 import { makeScheduleFactory } from "./extensions/schedule";
+import { makeSecretGuardFactory } from "./extensions/secret-guard";
 import { streamSimple } from "@oh-my-pi/pi-ai";
 import { pickDefaultAvailableModel, resolveRoleSelection } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { resolvePromptInput } from "@oh-my-pi/pi-coding-agent/system-prompt";
 import { registerProvider, reset as resetCapabilities } from "@oh-my-pi/pi-coding-agent/capability";
 import { scanSkillsFromDir, buildRuleFromMarkdown, loadFilesFromDir } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
+import { loadSecrets, collectEnvSecrets, SecretObfuscator } from "@oh-my-pi/pi-coding-agent/secrets";
 import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { computeContextBreakdown } from "@oh-my-pi/pi-coding-agent/modes/utils/context-usage";
 import { formatNumber } from "@oh-my-pi/pi-utils";
@@ -370,9 +372,19 @@ async function runCompletion(id: string, system: string, prompt: string): Promis
 
 function buildExtensions(identity: Identity): ExtensionFactory[] {
 	const factories: ExtensionFactory[] = [];
+	factories.push(makeSecretGuardFactory(identity));
 	if (camofoxEnabled) factories.push(makeCamofoxFactory(identity));
 	factories.push(makeScheduleFactory(identity));
 	return factories;
+}
+
+async function buildObfuscator(cwd: string): Promise<SecretObfuscator | undefined> {
+	if (!shared.settings.get("secrets.enabled")) return undefined;
+	const fileEntries = await loadSecrets(cwd, shared.agentDir);
+	const envEntries = collectEnvSecrets();
+	const allEntries = [...envEntries, ...fileEntries];
+	if (allEntries.length === 0) return undefined;
+	return new SecretObfuscator(allEntries);
 }
 
 function parseIdentity(value: unknown): Identity {
@@ -395,6 +407,7 @@ async function constructSession(params: OpenSessionParams): Promise<HostSession>
 		: SessionManager.create(params.cwd, params.sessionDir);
 	const pendingUi = new Map<string, PendingUi>();
 	const uiContext = new SessionUIContext(params.sessionId, pendingUi);
+	const obfuscator = await buildObfuscator(params.cwd);
 	const result = await createAgentSession({
 		cwd: params.cwd,
 		sessionManager,
@@ -402,6 +415,7 @@ async function constructSession(params: OpenSessionParams): Promise<HostSession>
 		appendSystemPrompt: await resolvePromptInput(params.appendSystemPrompt ?? undefined, "append system prompt"),
 		model: resolveModelSelector(params.model ?? ""),
 		extensions: buildExtensions(params.identity),
+		obfuscator,
 		agentDir: shared.agentDir,
 		settings: shared.settings,
 		authStorage: shared.authStorage,
