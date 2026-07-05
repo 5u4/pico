@@ -126,10 +126,6 @@ impl OmpPool {
         Ok(host)
     }
 
-    pub fn get_existing(&self, thread_id: &str) -> Option<Arc<ThreadHandle>> {
-        self.sessions.lock().get(thread_id).cloned()
-    }
-
     pub async fn get_or_spawn(&self, thread_id: &str, config: &SessionConfig) -> color_eyre::Result<Arc<ThreadHandle>> {
         if let Some(handle) = self.sessions.lock().get(thread_id)
             && handle.profile == config.profile
