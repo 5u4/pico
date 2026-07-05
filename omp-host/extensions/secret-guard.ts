@@ -1,23 +1,17 @@
 export function makeSecretGuardFactory(identity) {
   return function secretGuard(pi) {
-    const DENIED_BASENAMES = [
+    const DENIED_BASENAMES = ["discord_bot_token", ".envrc"];
+    const ALLOWED_ENV_BASENAMES = [".env.example", ".env.sample", ".env.template"];
+    const DENIED_DIR_SEGMENTS = [".ssh", ".gnupg", "secrets"];
+    const DENIED_COMMAND_TOKENS = [
       ".env",
-      ".env.local",
-      ".env.development",
-      ".env.production",
-      ".env.test",
-      ".env.staging",
       ".envrc",
       "discord_bot_token",
-    ];
-
-    const DENIED_SEGMENTS = [
-      "/.ssh/",
-      "/secrets/",
-      "/.pico/secrets",
-      ".config/gh/hosts.yml",
-      ".config/gh/hosts.yaml",
-      ".gnupg/",
+      ".ssh",
+      ".gnupg",
+      "secrets/",
+      ".pico/secrets",
+      ".config/gh/hosts",
       ".aws/credentials",
     ];
 
@@ -35,24 +29,31 @@ export function makeSecretGuardFactory(identity) {
       return colon === -1 ? name : name.slice(0, colon);
     }
 
+    function isSecretEnvBasename(name) {
+      if (ALLOWED_ENV_BASENAMES.includes(name)) return false;
+      return name === ".env" || name.startsWith(".env.");
+    }
+
     function pathDenied(pathValue) {
       const value = normalize(pathValue);
       if (!value) return false;
-      if (DENIED_BASENAMES.includes(basename(value))) return true;
-      for (const segment of DENIED_SEGMENTS) {
-        if (value.includes(segment)) return true;
+      const name = basename(value);
+      if (DENIED_BASENAMES.includes(name)) return true;
+      if (isSecretEnvBasename(name)) return true;
+      const segments = value.split("/").filter(Boolean);
+      for (const segment of segments) {
+        if (DENIED_DIR_SEGMENTS.includes(segment)) return true;
       }
+      if (segments.includes("gh") && (name === "hosts.yml" || name === "hosts.yaml")) return true;
+      if (segments.includes(".aws") && name === "credentials") return true;
       return false;
     }
 
     function commandDenied(commandValue) {
       const value = normalize(commandValue);
       if (!value) return undefined;
-      for (const token of DENIED_BASENAMES) {
+      for (const token of DENIED_COMMAND_TOKENS) {
         if (value.includes(token)) return token;
-      }
-      for (const segment of DENIED_SEGMENTS) {
-        if (value.includes(segment)) return segment;
       }
       return undefined;
     }
