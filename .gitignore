@@ -6,6 +6,5 @@ node_modules/
 .env*
 !.env.e2e.example
 !.env.hindsight.example
-.omp
 tmp
 docker-compose.override.yml
