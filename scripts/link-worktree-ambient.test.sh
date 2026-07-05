@@ -57,69 +57,67 @@ newbase() {
 
 # ---- worktree add links both ambient paths, and status stays clean ----------
 base=$(newbase)
-mkdir -p "$base/.omp/rules"; echo rule > "$base/.omp/rules/x.md"
 printf 'E2E_X=1\n' > "$base/.env.e2e"
 mkdir -p "$base/.cargo"; printf '[build]\ntarget-dir = "/tmp/x"\n' > "$base/.cargo/config.toml"
 wt="$base.wt"
 git -C "$base" worktree add -q "$wt" HEAD 2>/dev/null
-expect_symlink "worktree add links .omp" "$wt/.omp" "$base/.omp"
 expect_symlink "worktree add links .env.e2e" "$wt/.env.e2e" "$base/.env.e2e"
 expect_symlink "worktree add links .cargo" "$wt/.cargo" "$base/.cargo"
-# The .omp / .env.e2e symlinks must be ignored, or an agent's `git add -A` on the
-# pico/<thread> branch would commit them — guards the `.omp` (not `.omp/`) pattern.
+# The symlinks must be ignored, or an agent's `git add -A` on the pico/<thread>
+# branch would commit them — guards the `.env*` and `.cargo` ignore patterns.
 expect_clean "worktree status clean (symlinks ignored)" "$wt"
 
 # ---- re-running the hook is idempotent (never clobbers the existing link) ----
 ( cd "$wt" && bash scripts/link-worktree-ambient.sh ) ; rc=$?
 expect_true "rerun exits 0" [ "$rc" = 0 ]
-expect_symlink "rerun keeps .omp link" "$wt/.omp" "$base/.omp"
+expect_symlink "rerun keeps .cargo link" "$wt/.cargo" "$base/.cargo"
 rm -rf "$wt"; git -C "$base" worktree prune; rm -rf "$base"
 
 # ---- a missing source is skipped, the present one still links ----------------
 base=$(newbase)
-mkdir -p "$base/.omp"; echo r > "$base/.omp/r.md"   # no .env.e2e in this base
+mkdir -p "$base/.cargo"; echo c > "$base/.cargo/config.toml"   # no .env.e2e in this base
 wt="$base.wt"
 git -C "$base" worktree add -q "$wt" HEAD 2>/dev/null
-expect_symlink "present source links" "$wt/.omp" "$base/.omp"
+expect_symlink "present source links" "$wt/.cargo" "$base/.cargo"
 expect_no_path "missing source skipped" "$wt/.env.e2e"
 rm -rf "$wt"; git -C "$base" worktree prune; rm -rf "$base"
 
 # ---- main-worktree guard: a plain checkout must not self-link or error -------
 base=$(newbase)
-mkdir -p "$base/.omp"; echo r > "$base/.omp/r.md"
+mkdir -p "$base/.cargo"; echo c > "$base/.cargo/config.toml"
 printf 'E2E=1\n' > "$base/.env.e2e"
 out="$(cd "$base" && git checkout -q -b other 2>&1)" ; rc=$?
 expect_true "main checkout exits 0" [ "$rc" = 0 ]
-expect_true "main .omp stays a real dir" test -d "$base/.omp" -a ! -L "$base/.omp"
+expect_true "main .cargo stays a real dir" test -d "$base/.cargo" -a ! -L "$base/.cargo"
 rm -rf "$base"
 
 # ---- an existing real path is never replaced by a link -----------------------
 base=$(newbase)
-mkdir -p "$base/.omp"; echo r > "$base/.omp/r.md"
+mkdir -p "$base/.cargo"; echo c > "$base/.cargo/config.toml"
 wt="$base.wt"
 git -C "$base" worktree add -q "$wt" HEAD 2>/dev/null
-rm "$wt/.omp"; mkdir "$wt/.omp"; echo local > "$wt/.omp/own.md"   # worktree-owned
+rm -rf "$wt/.cargo"; mkdir "$wt/.cargo"; echo local > "$wt/.cargo/own.toml"   # worktree-owned
 ( cd "$wt" && bash scripts/link-worktree-ambient.sh )
-expect_true "existing real dir kept" test -d "$wt/.omp" -a ! -L "$wt/.omp"
+expect_true "existing real dir kept" test -d "$wt/.cargo" -a ! -L "$wt/.cargo"
 rm -rf "$wt"; git -C "$base" worktree prune; rm -rf "$base"
 
 # ---- a base path with a space still links (awk must not split on whitespace) -
 sproot=$(mktemp -d); sp="$sproot/has space"
 base=$(newbase "$sp/repo")
-mkdir -p "$base/.omp"; echo r > "$base/.omp/r.md"
+mkdir -p "$base/.cargo"; echo c > "$base/.cargo/config.toml"
 wt="$sp/wt"
 git -C "$base" worktree add -q "$wt" HEAD 2>/dev/null
-expect_symlink "spaced base path links .omp" "$wt/.omp" "$base/.omp"
+expect_symlink "spaced base path links .cargo" "$wt/.cargo" "$base/.cargo"
 rm -rf "$sproot"
 
 # ---- absent script (old fork ref): hook no-ops, worktree add still succeeds --
 base=$(newbase)
-mkdir -p "$base/.omp"; echo r > "$base/.omp/r.md"
+mkdir -p "$base/.cargo"; echo c > "$base/.cargo/config.toml"
 rm "$base/scripts/link-worktree-ambient.sh"   # hook resolves main's copy → gone
 wt="$base.wt"
 git -C "$base" worktree add -q "$wt" HEAD 2>/dev/null ; rc=$?
 expect_true "absent script: worktree add succeeds" [ "$rc" = 0 ]
-expect_no_path "absent script: no link created" "$wt/.omp"
+expect_no_path "absent script: no link created" "$wt/.cargo"
 rm -rf "$wt"; git -C "$base" worktree prune; rm -rf "$base"
 
 # ---- summary ----------------------------------------------------------------
