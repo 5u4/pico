@@ -9,6 +9,7 @@ pub mod mid_turn;
 pub mod omp;
 pub mod platform_render;
 pub mod prompt;
+pub mod redact;
 pub mod render;
 pub mod schedule;
 pub mod session;
