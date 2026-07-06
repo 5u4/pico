@@ -54,3 +54,9 @@ pub_use = "deny"
 
 [profile.dev.package.backtrace]
 opt-level = 3
+
+[profile.dev.package."*"]
+debug = false
+
+[profile.test.package."*"]
+debug = false
