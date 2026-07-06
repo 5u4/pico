@@ -11,6 +11,21 @@ services:
     shm_size: "1gb"
     restart: unless-stopped
     working_dir: /home/pico/.pico/agent
+    # Optional build-resource guardrails for small hosts. Rust debug links (esp.
+    # deps that statically bundle large C/C++, e.g. duckdb "bundled") can spike an
+    # `ld` to multiple GB; on a low-RAM box that fills swap and freezes pico (the
+    # runaway process gets stuck in uninterruptible swap I/O, so even SIGKILL can't
+    # land). Both default to no-op — set PICO_MEM_LIMIT to enable.
+    #
+    # PICO_MEM_LIMIT caps container memory AND swap (equal => container swap = 0),
+    # so a runaway build is cleanly OOM-killed (the fat `ld`, never tiny pico)
+    # instead of thrashing the host. Unset/0 = unlimited (default, unchanged).
+    # Size it to (total_RAM - ~2G): 8G host -> 6g, 16G -> 14g, 32G -> 30g.
+    # The swap cap needs host swap accounting: cgroup v2 (modern kernels) has it
+    # always; cgroup v1 needs boot arg `swapaccount=1`, else Docker warns and
+    # ignores memswap_limit (mem_limit still applies — pico is just not swap-capped).
+    mem_limit: ${PICO_MEM_LIMIT:-0}
+    memswap_limit: ${PICO_MEM_LIMIT:-0}
     # Fully unprivileged: image runs as USER pico; the only thing pico needs that
     # it does not own is the docker socket, granted here via its group.
     group_add:
@@ -30,6 +45,11 @@ services:
     environment:
       VNC_BIND: "0.0.0.0"
       # RUST_LOG: "pico_core=trace"   # stdout stays info; a target directive ADDS to the file (floor is debug) — e.g. to capture the omp frame stream
+      # Cap parallel cargo jobs for EVERY build in the container (pico's own /update
+      # and user-project worktree builds alike) to bound peak concurrent-link memory
+      # on small hosts. "default" = one job per core (unchanged); set a number (e.g.
+      # "2") to limit. Must be "default" or a positive integer — never empty.
+      CARGO_BUILD_JOBS: "${CARGO_BUILD_JOBS:-default}"
     volumes:
       - ${HOME}/.pico:/home/pico/.pico
       - ${HOME}/.omp:/home/pico/.omp
