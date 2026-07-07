@@ -48,8 +48,8 @@ impl Drop for RendererGuard {
 }
 
 pub struct TurnToken {
-    _turn: tokio::sync::OwnedMutexGuard<()>,
     _renderer: RendererGuard,
+    _turn: tokio::sync::OwnedMutexGuard<()>,
 }
 
 pub struct ThreadHandle {
@@ -317,6 +317,12 @@ async fn forward_or_launch(
                 Ok(()) => return,
                 Err(mpsc::error::SendError(returned)) => {
                     event = returned;
+                    {
+                        let mut slot = renderer.lock();
+                        if slot.as_ref().is_some_and(|current| current.same_channel(&tx)) {
+                            *slot = None;
+                        }
+                    }
                     tokio::task::yield_now().await;
                     continue;
                 }
