@@ -23,7 +23,7 @@ use crate::omp::protocol::{
     message_start_event,
 };
 
-const READY_TIMEOUT: Duration = Duration::from_secs(30);
+const READY_TIMEOUT: Duration = Duration::from_secs(60);
 
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 
