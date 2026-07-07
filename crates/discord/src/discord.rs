@@ -81,6 +81,14 @@ pub(crate) fn framework(
                     root: Arc::clone(&root),
                     cancel: cancel.clone(),
                 };
+                pool.set_background_launcher(Arc::new(DiscordBackgroundLauncher {
+                    ctx: ctx.clone(),
+                    mid_turn: mid_turn.clone(),
+                    cancels: cancels.clone(),
+                    pending_answers: pending_answers.clone(),
+                    cancel: cancel.clone(),
+                    tracker: tracker.clone(),
+                }));
                 match pico_core::config::load_root(&pico_shared::paths::worker_config(&root)) {
                     Ok(root_config) => match pico_shared::paths::worker_root() {
                         Ok(sched_root) => {
@@ -426,9 +434,9 @@ async fn shake(
         ShakeMode::Images => "images",
     };
     let outcome = {
-        let mut session = handle.lock().await;
-        let result = session.client.shake(mode_str).await;
-        while session.events.try_recv().is_ok() {}
+        let (_turn, mut events) = handle.begin_turn().await;
+        let result = handle.client().shake(mode_str).await;
+        while events.try_recv().is_ok() {}
         result
     };
     match outcome {
@@ -477,9 +485,9 @@ async fn compact(
         }
     };
     let outcome = {
-        let mut session = handle.lock().await;
-        let result = session.client.compact(focus.as_deref()).await;
-        while session.events.try_recv().is_ok() {}
+        let (_turn, mut events) = handle.begin_turn().await;
+        let result = handle.client().compact(focus.as_deref()).await;
+        while events.try_recv().is_ok() {}
         result
     };
     match outcome {
@@ -1633,6 +1641,67 @@ impl pico_core::surface::Surface for DiscordSurface {
                 false
             }
         }
+    }
+}
+
+pub(crate) struct DiscordBackgroundLauncher {
+    pub(crate) ctx: serenity::Context,
+    pub(crate) mid_turn: MidTurnQueue,
+    pub(crate) cancels: CancelRegistry,
+    pub(crate) pending_answers: crate::ui::PendingAnswers,
+    pub(crate) cancel: CancellationToken,
+    pub(crate) tracker: TaskTracker,
+}
+
+impl pico_core::omp::pool::BackgroundTurnLauncher for DiscordBackgroundLauncher {
+    fn launch(
+        &self,
+        thread_id: String,
+        client: pico_core::omp::client::OmpSessionHandle,
+        token: pico_core::omp::pool::TurnToken,
+        events: tokio::sync::mpsc::UnboundedReceiver<pico_core::omp::protocol::OmpEvent>,
+    ) {
+        let ctx = self.ctx.clone();
+        let mid_turn = self.mid_turn.clone();
+        let cancels = self.cancels.clone();
+        let pending = self.pending_answers.clone();
+        let cancel = self.cancel.clone();
+        self.tracker.spawn(async move {
+            use pico_core::surface::Surface as _;
+            let _token = token;
+            let Ok(channel_id) = thread_id.parse::<u64>() else {
+                tracing::warn!(%thread_id, "background turn: unparsable thread id; dropping");
+                return;
+            };
+            let channel = serenity::ChannelId::new(channel_id);
+            let surface = DiscordSurface {
+                ctx,
+                channel,
+                trigger: None,
+                author: serenity::UserId::new(1),
+                pending,
+                cancel: cancel.clone(),
+            };
+            surface.say("🚀 A background task finished — here's the result.").await;
+            let conversation = ConversationId::new(crate::consts::PLATFORM, &thread_id);
+            let req = pico_core::engine::TurnRequest {
+                conversation: &conversation,
+                kind: pico_core::engine::TurnKind::Background,
+                mode: StreamingBehavior::default(),
+                cancel: &cancel,
+            };
+            let rt = pico_core::engine::TurnRuntime {
+                mid_turn: &mid_turn,
+                cancels: &cancels,
+            };
+            let mut events = events;
+            let mut title_seed = None;
+            if let Err(e) =
+                pico_core::engine::drive_turn(&surface, &client, &mut events, req, rt, &mut title_seed).await
+            {
+                tracing::warn!(error = %format!("{e:#}"), %thread_id, "background turn failed");
+            }
+        });
     }
 }
 

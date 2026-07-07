@@ -60,12 +60,14 @@ pub async fn run_turn<S: Surface>(p: RunTurn<'_, S>) -> color_eyre::Result<TurnS
     let handle = p.pool.get_or_spawn(p.thread_id, &built.config).await?;
     let mut title_seed: Option<String> = None;
     let result = {
-        let mut session = handle.lock().await;
-        tracing::Span::current().record("session_id", session.client.session_id());
+        let (_turn, mut events) = handle.begin_turn().await;
+        tracing::Span::current().record("session_id", handle.client().session_id());
         let req = crate::engine::TurnRequest {
             conversation: p.conversation,
-            prompt: p.wrapped,
-            images: p.images,
+            kind: crate::engine::TurnKind::Active {
+                prompt: p.wrapped,
+                images: p.images,
+            },
             mode: p.mode,
             cancel: p.cancel,
         };
@@ -73,7 +75,7 @@ pub async fn run_turn<S: Surface>(p: RunTurn<'_, S>) -> color_eyre::Result<TurnS
             mid_turn: p.mid_turn,
             cancels: p.cancels,
         };
-        crate::engine::drive_turn(p.surface, &mut session, req, rt, &mut title_seed).await
+        crate::engine::drive_turn(p.surface, handle.client(), &mut events, req, rt, &mut title_seed).await
     };
     match &result {
         Ok(outcome) => {

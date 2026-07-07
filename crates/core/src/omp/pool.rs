@@ -19,26 +19,67 @@ use crate::omp::{
 
 type HostSlot = Arc<tokio::sync::Mutex<Option<Arc<OmpHost>>>>;
 
+type RendererSlot = Arc<Mutex<Option<mpsc::UnboundedSender<OmpEvent>>>>;
+
+type LauncherSlot = Arc<Mutex<Option<Arc<dyn BackgroundTurnLauncher>>>>;
+
 pub(crate) const IDLE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
 const SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 
-pub struct ThreadSession {
-    pub client: OmpSessionHandle,
-    pub events: mpsc::UnboundedReceiver<OmpEvent>,
+pub trait BackgroundTurnLauncher: Send + Sync {
+    fn launch(
+        &self,
+        thread_id: String,
+        client: OmpSessionHandle,
+        token: TurnToken,
+        events: mpsc::UnboundedReceiver<OmpEvent>,
+    );
+}
+
+struct RendererGuard {
+    slot: RendererSlot,
+}
+
+impl Drop for RendererGuard {
+    fn drop(&mut self) {
+        *self.slot.lock() = None;
+    }
+}
+
+pub struct TurnToken {
+    _renderer: RendererGuard,
+    _turn: tokio::sync::OwnedMutexGuard<()>,
 }
 
 pub struct ThreadHandle {
     client: OmpSessionHandle,
-    inner: tokio::sync::Mutex<ThreadSession>,
+    turn_lock: Arc<tokio::sync::Mutex<()>>,
+    renderer: RendererSlot,
     last_active: AtomicU64,
     profile: String,
 }
 
 impl ThreadHandle {
-    pub async fn lock(&self) -> tokio::sync::MutexGuard<'_, ThreadSession> {
+    pub async fn begin_turn(&self) -> (TurnToken, mpsc::UnboundedReceiver<OmpEvent>) {
         self.last_active.store(now_millis(), Ordering::Relaxed);
-        self.inner.lock().await
+        let turn = Arc::clone(&self.turn_lock).lock_owned().await;
+        let rx = self.install_renderer();
+        (
+            TurnToken {
+                _turn: turn,
+                _renderer: RendererGuard {
+                    slot: Arc::clone(&self.renderer),
+                },
+            },
+            rx,
+        )
+    }
+
+    fn install_renderer(&self) -> mpsc::UnboundedReceiver<OmpEvent> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        *self.renderer.lock() = Some(tx);
+        rx
     }
 
     pub fn profile(&self) -> &str {
@@ -49,8 +90,12 @@ impl ThreadHandle {
         &self.client
     }
 
+    fn is_busy(&self) -> bool {
+        self.turn_lock.try_lock().is_err()
+    }
+
     async fn close(&self) -> color_eyre::Result<()> {
-        self.inner.lock().await.client.close().await
+        self.client.close().await
     }
 }
 
@@ -60,6 +105,7 @@ pub struct OmpPool {
     hosts: tokio::sync::Mutex<HashMap<String, HostSlot>>,
     sessions: Mutex<HashMap<String, Arc<ThreadHandle>>>,
     open_lock: tokio::sync::Mutex<()>,
+    launcher: LauncherSlot,
     cancel: CancellationToken,
     tracker: TaskTracker,
 }
@@ -84,6 +130,7 @@ impl OmpPool {
             hosts: tokio::sync::Mutex::new(HashMap::new()),
             sessions: Mutex::new(HashMap::new()),
             open_lock: tokio::sync::Mutex::new(()),
+            launcher: Arc::new(Mutex::new(None)),
             cancel: cancel.clone(),
             tracker: tracker.clone(),
         });
@@ -99,6 +146,10 @@ impl OmpPool {
             }
         });
         pool
+    }
+
+    pub fn set_background_launcher(&self, launcher: Arc<dyn BackgroundTurnLauncher>) {
+        *self.launcher.lock() = Some(launcher);
     }
 
     async fn host(&self, profile: &str) -> color_eyre::Result<Arc<OmpHost>> {
@@ -144,13 +195,35 @@ impl OmpPool {
         let (client, events) = host.open_session(thread_id, config).await?;
         tracing::debug!(thread_id, profile = %config.profile, session_id = %client.session_id(), "opened omp session");
         let handle = Arc::new(ThreadHandle {
-            client: client.clone(),
-            inner: tokio::sync::Mutex::new(ThreadSession { client, events }),
+            client,
+            turn_lock: Arc::new(tokio::sync::Mutex::new(())),
+            renderer: Arc::new(Mutex::new(None)),
             last_active: AtomicU64::new(now_millis()),
             profile: config.profile.clone(),
         });
+        self.spawn_pump(thread_id.to_owned(), &handle, events);
         self.sessions.lock().insert(thread_id.to_owned(), Arc::clone(&handle));
         Ok(handle)
+    }
+
+    fn spawn_pump(&self, thread_id: String, handle: &Arc<ThreadHandle>, mut events: mpsc::UnboundedReceiver<OmpEvent>) {
+        let renderer = Arc::clone(&handle.renderer);
+        let turn_lock = Arc::clone(&handle.turn_lock);
+        let launcher = Arc::clone(&self.launcher);
+        let client = handle.client.clone();
+        let cancel = self.cancel.clone();
+        self.tracker.spawn(async move {
+            loop {
+                let event = tokio::select! {
+                    () = cancel.cancelled() => break,
+                    recv = events.recv() => match recv {
+                        Some(event) => event,
+                        None => break,
+                    },
+                };
+                forward_or_launch(&thread_id, &client, &renderer, &turn_lock, &launcher, event).await;
+            }
+        });
     }
 
     pub async fn forget(&self, thread_id: &str) {
@@ -204,7 +277,7 @@ impl OmpPool {
             let mut drained = Vec::new();
             map.retain(|thread_id, handle| {
                 let idle = now.saturating_sub(handle.last_active.load(Ordering::Relaxed)) > cutoff;
-                if idle && Arc::strong_count(handle) == 1 {
+                if idle && Arc::strong_count(handle) == 1 && !handle.is_busy() {
                     drained.push((thread_id.clone(), Arc::clone(handle)));
                     false
                 } else {
@@ -227,6 +300,61 @@ impl OmpPool {
     pub async fn host_count(&self) -> usize {
         self.hosts.lock().await.len()
     }
+}
+
+async fn forward_or_launch(
+    thread_id: &str,
+    client: &OmpSessionHandle,
+    renderer: &RendererSlot,
+    turn_lock: &Arc<tokio::sync::Mutex<()>>,
+    launcher: &LauncherSlot,
+    mut event: OmpEvent,
+) {
+    loop {
+        let sink = renderer.lock().clone();
+        if let Some(tx) = sink {
+            match tx.send(event) {
+                Ok(()) => return,
+                Err(mpsc::error::SendError(returned)) => {
+                    event = returned;
+                    {
+                        let mut slot = renderer.lock();
+                        if slot.as_ref().is_some_and(|current| current.same_channel(&tx)) {
+                            *slot = None;
+                        }
+                    }
+                    tokio::task::yield_now().await;
+                    continue;
+                }
+            }
+        }
+        if !starts_background_turn(&event) {
+            return;
+        }
+        let Ok(turn) = Arc::clone(turn_lock).try_lock_owned() else {
+            tokio::task::yield_now().await;
+            continue;
+        };
+        let launcher = launcher.lock().clone();
+        let Some(launcher) = launcher else {
+            return;
+        };
+        let (tx, rx) = mpsc::unbounded_channel();
+        *renderer.lock() = Some(tx.clone());
+        let token = TurnToken {
+            _turn: turn,
+            _renderer: RendererGuard {
+                slot: Arc::clone(renderer),
+            },
+        };
+        let _ = tx.send(event);
+        launcher.launch(thread_id.to_owned(), client.clone(), token, rx);
+        return;
+    }
+}
+
+fn starts_background_turn(event: &OmpEvent) -> bool {
+    matches!(event, OmpEvent::AgentStart)
 }
 
 fn profile_host_config(base: &HostConfig, root: &Path, profile: &str) -> HostConfig {
@@ -312,5 +440,23 @@ mod tests {
         let beta_map: HashMap<String, String> = beta.env.into_iter().collect();
         assert_eq!(beta_map["PICO_PROFILE_DIR"], "/srv/pico/profiles/beta");
         assert_ne!(map["PICO_PROFILE_DIR"], beta_map["PICO_PROFILE_DIR"]);
+    }
+
+    #[test]
+    fn only_agent_start_launches_a_background_turn() {
+        use crate::omp::protocol::AssistantMessageEvent;
+
+        assert!(starts_background_turn(&OmpEvent::AgentStart));
+        assert!(!starts_background_turn(&OmpEvent::AgentEnd));
+        assert!(!starts_background_turn(&OmpEvent::TurnEnd));
+        assert!(!starts_background_turn(&OmpEvent::UiRequest(
+            crate::omp::protocol::UiRequest::Ignore
+        )));
+        assert!(!starts_background_turn(&OmpEvent::CustomMessage {
+            custom_type: "async-result".to_owned()
+        }));
+        assert!(!starts_background_turn(&OmpEvent::Message(AssistantMessageEvent::TextEnd {
+            content: "hi".to_owned()
+        })));
     }
 }

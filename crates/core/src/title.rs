@@ -32,13 +32,11 @@ pub async fn generate_and_apply<S: Surface>(
     }
     tokio::select! {
         () = cancel.cancelled() => {}
-        session = handle.lock() => {
-            match tokio::time::timeout(SESSION_SYNC_TIMEOUT, session.client.set_session_name(&title)).await {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => tracing::debug!(error = %format!("{e:#}"), "syncing omp session name failed"),
-                Err(_) => tracing::debug!("syncing omp session name timed out"),
-            }
-        }
+        result = tokio::time::timeout(SESSION_SYNC_TIMEOUT, handle.client().set_session_name(&title)) => match result {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => tracing::debug!(error = %format!("{e:#}"), "syncing omp session name failed"),
+            Err(_) => tracing::debug!("syncing omp session name timed out"),
+        },
     }
 }
 

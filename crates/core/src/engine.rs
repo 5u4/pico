@@ -12,7 +12,6 @@ use crate::{
     mid_turn::MidTurnQueue,
     omp::{
         client::OmpSessionHandle,
-        pool::ThreadSession,
         protocol::{
             AssistantMessageEvent, ImageAttachment, OmpEvent, ToolCall, ToolCallEnd, ToolCallUpdate, UiRequest,
             UiResponse,
@@ -34,10 +33,17 @@ pub enum TurnOutcome {
     Dead,
 }
 
+pub enum TurnKind<'a> {
+    Active {
+        prompt: &'a str,
+        images: &'a [ImageAttachment],
+    },
+    Background,
+}
+
 pub struct TurnRequest<'a> {
     pub conversation: &'a ConversationId,
-    pub prompt: &'a str,
-    pub images: &'a [ImageAttachment],
+    pub kind: TurnKind<'a>,
     pub mode: StreamingBehavior,
     pub cancel: &'a CancellationToken,
 }
@@ -49,13 +55,17 @@ pub struct TurnRuntime<'a> {
 
 pub async fn drive_turn<S: Surface>(
     surface: &S,
-    session: &mut ThreadSession,
+    client: &OmpSessionHandle,
+    events: &mut tokio::sync::mpsc::UnboundedReceiver<OmpEvent>,
     req: TurnRequest<'_>,
     rt: TurnRuntime<'_>,
     title_seed: &mut Option<String>,
 ) -> color_eyre::Result<TurnOutcome> {
     let _typing = surface.typing();
-    session.client.prompt(req.prompt, req.images).await?;
+    match req.kind {
+        TurnKind::Active { prompt, images } => client.prompt(prompt, images).await?,
+        TurnKind::Background => {}
+    }
     let (mut rx, _sink_guard) = rt.mid_turn.register(req.conversation, req.mode);
     let (interrupt, streaming, _cancel_guard) = rt.cancels.register(req.conversation);
     let mut aborted = false;
@@ -64,7 +74,6 @@ pub async fn drive_turn<S: Surface>(
     let mut suppress_text = false;
     let mut settling = false;
     let mut explicit_runs_pending: usize = 1;
-    let mut awaiting_deferred = false;
     let mut deferred: std::collections::VecDeque<String> = std::collections::VecDeque::new();
     let mut committed_any = false;
     let mut last_stop: Option<crate::omp::protocol::AssistantStop> = None;
@@ -77,7 +86,7 @@ pub async fn drive_turn<S: Surface>(
     let mut subagents = SubagentFeed::new(surface);
 
     loop {
-        let idle_wait = if settling && !awaiting_deferred {
+        let idle_wait = if settling {
             SETTLE_GRACE
         } else if tools_running > 0 {
             TOOL_STALL_TIMEOUT
@@ -94,15 +103,15 @@ pub async fn drive_turn<S: Surface>(
             }
             () = interrupt.cancelled(), if !aborted => {
                 aborted = true;
-                if let Err(e) = session.client.abort().await {
+                if let Err(e) = client.abort().await {
                     tracing::warn!(error = %format!("{e:#}"), "abort on /cancel failed");
                 }
                 continue;
             }
             Some((text, mode)) = rx.recv() => {
                 let forwarded = match mode {
-                    StreamingBehavior::FollowUp => session.client.follow_up(&text).await,
-                    StreamingBehavior::Steer => session.client.steer(&text).await,
+                    StreamingBehavior::FollowUp => client.follow_up(&text).await,
+                    StreamingBehavior::Steer => client.steer(&text).await,
                     StreamingBehavior::Queue => {
                         deferred.push_back(text);
                         continue;
@@ -113,10 +122,10 @@ pub async fn drive_turn<S: Surface>(
                 }
                 continue;
             }
-            recv = tokio::time::timeout(idle_wait, session.events.recv()) => match recv {
+            recv = tokio::time::timeout(idle_wait, events.recv()) => match recv {
                 Ok(event) => event,
                 Err(_) if settling => {
-                    if forward_next_pending(&session.client, &mut deferred, &mut rx).await? {
+                    if forward_next_pending(client, &mut deferred, &mut rx).await? {
                         explicit_runs_pending += 1;
                         settling = false;
                         continue;
@@ -135,7 +144,10 @@ pub async fn drive_turn<S: Surface>(
                 }
             },
         };
-        if event.is_some() {
+        if matches!(
+            event,
+            Some(OmpEvent::AgentStart | OmpEvent::Message(_) | OmpEvent::ToolStart(_))
+        ) {
             settling = false;
         }
         match event {
@@ -202,7 +214,7 @@ pub async fn drive_turn<S: Surface>(
                 }
                 activity.flush().await;
                 streaming.store(false, Ordering::Release);
-                let disposition = handle_ui(surface, &session.client, &ui_req).await;
+                let disposition = handle_ui(surface, client, &ui_req).await;
                 streaming.store(true, Ordering::Release);
                 match disposition {
                     UiDisposition::Cancelled => {
@@ -234,15 +246,10 @@ pub async fn drive_turn<S: Surface>(
                     flush_final(surface, &mut activity, &mut reply, &mut held, title_seed, answer_delivered).await;
                 answer_delivered = true;
                 suppress_text = false;
-                if explicit_runs_pending > 0 {
-                    explicit_runs_pending -= 1;
-                } else {
-                    subagents.clear_one_backgrounded();
-                }
-                if forward_next_pending(&session.client, &mut deferred, &mut rx).await? {
+                explicit_runs_pending = explicit_runs_pending.saturating_sub(1);
+                if forward_next_pending(client, &mut deferred, &mut rx).await? {
                     explicit_runs_pending += 1;
                 } else {
-                    awaiting_deferred = subagents.has_pending_background();
                     settling = true;
                 }
             }
@@ -257,7 +264,7 @@ pub async fn drive_turn<S: Surface>(
             Some(OmpEvent::CustomMessage { custom_type }) => {
                 if aborted_capture_turn(aborted, &custom_type) {
                     suppress_text = true;
-                    if let Err(e) = session.client.abort().await {
+                    if let Err(e) = client.abort().await {
                         tracing::warn!(error = %format!("{e:#}"), "aborting autolearn capture turn after /cancel failed");
                     }
                 } else if answer_delivered && custom_type == "autolearn-nudge" {
@@ -689,17 +696,6 @@ impl<'a, S: Surface> SubagentFeed<'a, S> {
             if batch.backgrounded {
                 render::detach_rows(&mut batch.rows);
             }
-        }
-    }
-
-    fn has_pending_background(&self) -> bool {
-        self.batches.values().any(|batch| batch.backgrounded)
-    }
-
-    fn clear_one_backgrounded(&mut self) {
-        if let Some(batch) = self.batches.values_mut().find(|batch| batch.backgrounded) {
-            batch.backgrounded = false;
-            render::detach_rows(&mut batch.rows);
         }
     }
 
