@@ -208,13 +208,13 @@ async fn concurrent_get_or_spawn_same_thread_shares_one_session() {
         "concurrent get_or_spawn for one thread returned different sessions"
     );
 
-    let mut session = handle.lock().await;
-    session
-        .client
+    let (_turn, mut events) = handle.begin_turn().await;
+    handle
+        .client()
         .prompt("Reply with exactly the word: pong", &[])
         .await
         .expect("shared session prompt");
-    let reply = drain_reply(&mut session.events).await;
+    let reply = drain_reply(&mut events).await;
     assert!(reply.to_lowercase().contains("pong"), "shared session reply was: {reply:?}");
 
     cancel.cancel();
@@ -468,20 +468,20 @@ async fn distinct_profiles_get_distinct_hosts() {
         "two distinct profiles must spawn two distinct hosts"
     );
 
-    let mut session_a = handle_a.lock().await;
-    let mut session_b = handle_b.lock().await;
-    session_a
-        .client
+    let (_turn_a, mut events_a) = handle_a.begin_turn().await;
+    let (_turn_b, mut events_b) = handle_b.begin_turn().await;
+    handle_a
+        .client()
         .prompt("Reply with exactly the word: alpha", &[])
         .await
         .expect("prompt alpha");
-    session_b
-        .client
+    handle_b
+        .client()
         .prompt("Reply with exactly the word: bravo", &[])
         .await
         .expect("prompt bravo");
-    let reply_a = drain_reply(&mut session_a.events).await;
-    let reply_b = drain_reply(&mut session_b.events).await;
+    let reply_a = drain_reply(&mut events_a).await;
+    let reply_b = drain_reply(&mut events_b).await;
 
     assert!(reply_a.to_lowercase().contains("alpha"), "profile alpha reply was: {reply_a:?}");
     assert!(
@@ -538,13 +538,13 @@ async fn same_profile_threads_share_one_host() {
         "two threads under one profile must share a single host"
     );
 
-    let mut session = handle_a.lock().await;
-    session
-        .client
+    let (_turn, mut events) = handle_a.begin_turn().await;
+    handle_a
+        .client()
         .prompt("Reply with exactly the word: pong", &[])
         .await
         .expect("shared-host prompt");
-    let reply = drain_reply(&mut session.events).await;
+    let reply = drain_reply(&mut events).await;
     assert!(reply.to_lowercase().contains("pong"), "shared-host reply was: {reply:?}");
 
     cancel.cancel();
@@ -643,5 +643,150 @@ async fn context_shake_compact_roundtrip() {
     }
 
     client.close().await.expect("close");
+    cancel.cancel();
+}
+
+#[tokio::test]
+#[ignore]
+async fn background_task_auto_delivers_a_second_turn() {
+    let cwd = TempDir::new("pico-omp-bg");
+    let cancel = CancellationToken::new();
+    let tracker = TaskTracker::new();
+    let (_host, client, mut events) = open_session("bg", &cwd, &cancel, &tracker).await;
+    client
+        .prompt(
+            "Use the task tool to spawn exactly one subagent: agent type \"task\", one task whose \
+     assignment is to run the bash command `sleep 20 && echo BGDONE` and report its output. \
+     After the task tool returns its spawn acknowledgement, do NOT poll and do NOT wait — \
+     immediately end your turn with a one-line message saying you launched it in the background.",
+            &[],
+        )
+        .await
+        .expect("prompt acked");
+
+    let mut log: Vec<String> = Vec::new();
+    let mut agent_ends = 0;
+    let start = std::time::Instant::now();
+    let mut tail_deadline: Option<std::time::Instant> = None;
+    let deadline = std::time::Instant::now() + Duration::from_secs(120);
+    loop {
+        let cap = tail_deadline.unwrap_or(deadline);
+        let remaining = cap.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        let recv = tokio::time::timeout(remaining, events.recv()).await;
+        let Ok(event) = recv else { break };
+        let Some(event) = event else { break };
+        let at = start.elapsed().as_millis();
+        let label = match &event {
+            OmpEvent::AgentStart => "agent_start".to_owned(),
+            OmpEvent::AgentEnd => {
+                agent_ends += 1;
+                format!("agent_end#{agent_ends}")
+            }
+            OmpEvent::TurnEnd => "turn_end".to_owned(),
+            OmpEvent::ToolStart(c) => format!("tool_start:{}", c.tool_name),
+            OmpEvent::ToolUpdate(c) => format!("tool_update:{}", c.tool_name),
+            OmpEvent::ToolEnd(c) => format!("tool_end:{}", c.tool_name),
+            OmpEvent::CustomMessage { custom_type } => format!("custom:{custom_type}"),
+            OmpEvent::Message(AssistantMessageEvent::TextDelta { .. }) => "text_delta".to_owned(),
+            OmpEvent::Message(_) => "msg_other".to_owned(),
+            OmpEvent::MessageEnd(_) => "message_end".to_owned(),
+            OmpEvent::UiRequest(_) => "ui_request".to_owned(),
+            OmpEvent::Error(e) => panic!("omp reported an error: {e}"),
+        };
+        log.push(format!("{at}ms:{label}"));
+        if agent_ends >= 2 && tail_deadline.is_none() {
+            tail_deadline = Some(std::time::Instant::now() + Duration::from_secs(12));
+        }
+    }
+
+    eprintln!("BG_EVENT_LOG: {log:#?}");
+    assert!(agent_ends >= 2, "second (async-result) turn never arrived; log: {log:?}");
+
+    client.close().await.expect("close");
+    cancel.cancel();
+}
+
+struct RecordingLauncher {
+    tx: mpsc::UnboundedSender<bool>,
+    tracker: TaskTracker,
+}
+
+impl pico_core::omp::pool::BackgroundTurnLauncher for RecordingLauncher {
+    fn launch(
+        &self,
+        _thread_id: String,
+        _client: OmpSessionHandle,
+        token: pico_core::omp::pool::TurnToken,
+        mut events: mpsc::UnboundedReceiver<OmpEvent>,
+    ) {
+        let tx = self.tx.clone();
+        self.tracker.spawn(async move {
+            let _token = token;
+            while let Ok(Some(event)) = tokio::time::timeout(Duration::from_secs(60), events.recv()).await {
+                if matches!(event, OmpEvent::AgentEnd) {
+                    let _ = tx.send(true);
+                    return;
+                }
+            }
+            let _ = tx.send(false);
+        });
+    }
+}
+
+#[tokio::test]
+#[ignore]
+async fn pump_routes_async_result_turn_to_background_launcher() {
+    let cwd = TempDir::new("pico-omp-pump");
+    let cancel = CancellationToken::new();
+    let tracker = TaskTracker::new();
+    let pool = OmpPool::new(cwd.path.clone(), HostConfig::default(), cancel.clone(), &tracker);
+    let (bg_tx, mut bg_rx) = mpsc::unbounded_channel();
+    pool.set_background_launcher(std::sync::Arc::new(RecordingLauncher {
+        tx: bg_tx,
+        tracker: tracker.clone(),
+    }));
+    let cfg = SessionConfig {
+        cwd: cwd.path.clone(),
+        session_dir: cwd.path.clone(),
+        profile: "default".into(),
+        ..SessionConfig::default()
+    };
+    let handle = pool.get_or_spawn("pump", &cfg).await.expect("open session");
+
+    {
+        let (_turn, mut events) = handle.begin_turn().await;
+        handle
+            .client()
+            .prompt(
+                "Use the task tool to spawn exactly one subagent: agent type \"task\", one task whose \
+         assignment is to run the bash command `sleep 15 && echo BGDONE` and report its output. \
+         After the task tool returns its spawn acknowledgement, do NOT poll and do NOT wait — \
+         immediately end your turn with a one-line message saying you launched it in the background.",
+                &[],
+            )
+            .await
+            .expect("prompt acked");
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(120), events.recv())
+                .await
+                .expect("timed out waiting for turn 1 agent_end")
+                .expect("event stream closed before agent_end");
+            match event {
+                OmpEvent::AgentEnd => break,
+                OmpEvent::Error(e) => panic!("omp reported an error: {e}"),
+                _ => {}
+            }
+        }
+    }
+
+    let saw_agent_end = tokio::time::timeout(Duration::from_secs(120), bg_rx.recv())
+        .await
+        .expect("background launcher was never invoked for the async-result turn")
+        .expect("background signal channel closed");
+    assert!(saw_agent_end, "background turn did not reach agent_end");
+
     cancel.cancel();
 }
