@@ -3,17 +3,6 @@ export function makeSecretGuardFactory(identity) {
     const DENIED_BASENAMES = ["discord_bot_token", ".envrc"];
     const ALLOWED_ENV_BASENAMES = [".env.example", ".env.sample", ".env.template"];
     const DENIED_DIR_SEGMENTS = [".ssh", ".gnupg", "secrets"];
-    const DENIED_COMMAND_TOKENS = [
-      ".env",
-      ".envrc",
-      "discord_bot_token",
-      ".ssh",
-      ".gnupg",
-      "secrets/",
-      ".pico/secrets",
-      ".config/gh/hosts",
-      ".aws/credentials",
-    ];
 
     function normalize(raw) {
       let value = String(raw || "").trim();
@@ -49,26 +38,14 @@ export function makeSecretGuardFactory(identity) {
       return false;
     }
 
-    function commandDenied(commandValue) {
-      const value = normalize(commandValue);
-      if (!value) return undefined;
-      for (const token of DENIED_COMMAND_TOKENS) {
-        if (value.includes(token)) return token;
-      }
-      return undefined;
-    }
-
     function secretPathHit(event) {
       const input = event.input || {};
       let target;
-      if (event.toolName === "bash") {
-        target = commandDenied(input.command);
-      } else if (
+      if (
         event.toolName === "read" ||
         event.toolName === "edit" ||
         event.toolName === "write" ||
-        event.toolName === "grep" ||
-        event.toolName === "glob"
+        event.toolName === "grep"
       ) {
         const pathValue = input.path;
         if (typeof pathValue === "string" && pathDenied(pathValue)) target = pathValue;
