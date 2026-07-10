@@ -76,6 +76,7 @@ CURRENT="$HOME_DIR/.pico/supervisor/slots/current"
 mkdir -p "$BIN"
 ln -sf "$SUP" "$BIN/pico-supervisor"
 ln -sf "$WORKER" "$BIN/pico-worker"
+ln -sf "$OMP_HOST/node_modules/.bin/omp" "$BIN/omp"
 cargo install --locked --path crates/cli --root "$HOME_DIR/.local" --target-dir "$PICO_TARGET" --force \
   || echo "[entrypoint] pico-cli install failed; schedule CLI unavailable"
 
