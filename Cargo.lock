@@ -1762,6 +1762,7 @@ dependencies = [
  "sqlx",
  "tokio",
  "tokio-util",
+ "tracing",
  "ulid",
 ]
 
@@ -1853,7 +1854,6 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "color-eyre",
- "parking_lot",
  "pico-core",
  "pico-shared",
  "serde",
