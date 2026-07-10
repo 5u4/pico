@@ -65,17 +65,19 @@ async fn main() -> color_eyre::Result<()> {
     } else {
         (None, None)
     };
-    if run_web {
+    let web_handle = if run_web {
         let root = args.root.clone();
         let port = root_config.web_port();
         let cancel = web_cancel.clone();
-        tokio::spawn(async move {
+        Some(tokio::spawn(async move {
             let cwd = std::env::current_dir().unwrap_or_else(|_| root.clone());
             if let Err(e) = pico_web::server::serve(root, cwd, port, cancel, bound_tx).await {
                 tracing::error!(error = %format!("{e:#}"), "web server exited with error");
             }
-        });
-    }
+        }))
+    } else {
+        None
+    };
 
     if run_discord {
         let app = pico_discord::app::App::build(&args.root, args.socket.clone()).await?;
@@ -128,9 +130,24 @@ async fn main() -> color_eyre::Result<()> {
                 }
                 None => tracing::warn!("standalone web (no --socket): hot-update disabled"),
             }
-        }
-        if let Err(e) = pico_shared::signal::wait_for_shutdown().await {
-            tracing::error!(error = %format!("{e:#}"), "signal wait failed; shutting down");
+            let web_exit = async {
+                match web_handle {
+                    Some(handle) => {
+                        let _ = handle.await;
+                    }
+                    None => std::future::pending::<()>().await,
+                }
+            };
+            tokio::select! {
+                res = pico_shared::signal::wait_for_shutdown() => {
+                    if let Err(e) = res {
+                        tracing::error!(error = %format!("{e:#}"), "signal wait failed; shutting down");
+                    }
+                }
+                () = web_exit => {
+                    tracing::error!("web server task exited; shutting down worker");
+                }
+            }
         }
     }
     web_cancel.cancel();
