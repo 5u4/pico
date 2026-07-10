@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/cli", "crates/core", "crates/discord", "crates/shared", "crates/worker", "crates/supervisor"]
+members = ["crates/cli", "crates/core", "crates/discord", "crates/shared", "crates/web", "crates/worker", "crates/supervisor"]
 
 [workspace.package]
 version = "0.1.0"
@@ -8,6 +8,7 @@ edition = "2024"
 rust-version = "1.94"
 
 [workspace.dependencies]
+axum = { version = "0.8", features = ["ws"] }
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 chrono-tz = "0.10"
@@ -21,6 +22,7 @@ parking_lot = "0.12.5"
 pico-core = { path = "crates/core" }
 pico-discord = { path = "crates/discord" }
 pico-shared = { path = "crates/shared" }
+pico-web = { path = "crates/web" }
 poise = "0.6.2"
 regex = "1"
 rig-core = "0.38.2"

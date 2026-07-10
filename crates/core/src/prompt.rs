@@ -134,6 +134,15 @@ pub fn wrap_discord_message(
     out
 }
 
+pub fn wrap_web_message(display_name: &str, sent_at: &str, content: &str) -> String {
+    let content = crate::redact::scrub(content);
+    format!(
+        "<web-message name=\"{}\" sent_at=\"{}\" />\n{content}",
+        escape_attr(display_name),
+        escape_attr(sent_at)
+    )
+}
+
 pub fn escape_text(value: &str) -> String {
     value.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
