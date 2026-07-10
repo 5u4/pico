@@ -18,9 +18,10 @@ pub async fn run(args: WebArgs) -> color_eyre::Result<()> {
     let cancel = CancellationToken::new();
     let signal_cancel = cancel.clone();
     tokio::spawn(async move {
-        if pico_shared::signal::wait_for_shutdown().await.is_ok() {
-            signal_cancel.cancel();
+        if let Err(e) = pico_shared::signal::wait_for_shutdown().await {
+            tracing::warn!(error = %format!("{e:#}"), "signal wait failed; shutting down web server");
         }
+        signal_cancel.cancel();
     });
 
     pico_web::server::serve(root, cwd, port, cancel, None).await

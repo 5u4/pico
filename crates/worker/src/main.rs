@@ -111,18 +111,23 @@ async fn main() -> color_eyre::Result<()> {
         )
         .await?;
     } else {
-        if let Some(rx) = bound_rx {
-            let _ = rx.await;
-        }
-        match args.socket.as_ref() {
-            Some(socket) => {
-                let token = args.ready_token.clone().unwrap_or_default();
-                match report_ready(socket, &token).await {
-                    Ok(_) => tracing::info!(socket = %socket.display(), "web reported ready to supervisor"),
-                    Err(e) => tracing::warn!(error = %format!("{e:#}"), "web failed to report ready to supervisor"),
+        let bound = match bound_rx {
+            Some(rx) => rx.await.is_ok(),
+            None => true,
+        };
+        if !bound {
+            tracing::error!("web server exited before binding; not reporting ready");
+        } else {
+            match args.socket.as_ref() {
+                Some(socket) => {
+                    let token = args.ready_token.clone().unwrap_or_default();
+                    match report_ready(socket, &token).await {
+                        Ok(_) => tracing::info!(socket = %socket.display(), "web reported ready to supervisor"),
+                        Err(e) => tracing::warn!(error = %format!("{e:#}"), "web failed to report ready to supervisor"),
+                    }
                 }
+                None => tracing::warn!("standalone web (no --socket): hot-update disabled"),
             }
-            None => tracing::warn!("standalone web (no --socket): hot-update disabled"),
         }
         if let Err(e) = pico_shared::signal::wait_for_shutdown().await {
             tracing::error!(error = %format!("{e:#}"), "signal wait failed; shutting down");
