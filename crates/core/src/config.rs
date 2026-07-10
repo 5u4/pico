@@ -69,6 +69,7 @@ pub struct RootConfig {
     timezone: chrono_tz::Tz,
     platforms: Vec<String>,
     schedule: ScheduleConfig,
+    web_port: u16,
 }
 
 impl RootConfig {
@@ -82,6 +83,10 @@ impl RootConfig {
 
     pub fn platforms(&self) -> &[String] {
         &self.platforms
+    }
+
+    pub fn web_port(&self) -> u16 {
+        self.web_port
     }
 
     pub fn schedule(&self) -> ScheduleConfig {
@@ -109,6 +114,15 @@ struct RawRootConfig {
     platforms: Vec<String>,
     #[serde(default)]
     schedule: Option<RawSchedule>,
+    #[serde(default)]
+    web: Option<RawWeb>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RawWeb {
+    #[serde(default)]
+    port: Option<u16>,
 }
 
 #[derive(Deserialize)]
@@ -160,11 +174,13 @@ pub fn load_root(config_path: &Path) -> color_eyre::Result<RootConfig> {
         timezone: timezone_configured.then_some(timezone),
         run_history: raw_schedule.run_history.unwrap_or(20),
     };
+    let web_port = raw.web.unwrap_or_default().port.unwrap_or(8420);
     Ok(RootConfig {
         worktrees_dir,
         timezone,
         platforms: raw.platforms,
         schedule,
+        web_port,
     })
 }
 

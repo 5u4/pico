@@ -55,42 +55,102 @@ async fn main() -> color_eyre::Result<()> {
 
     let config_path = pico_shared::paths::worker_config(&args.root);
     let root_config = pico_core::config::load_root(&config_path)?;
-    require_discord(root_config.platforms(), &config_path)?;
+    let (run_discord, run_web) = resolve_platforms(root_config.platforms(), &config_path)?;
 
-    let app = pico_discord::app::App::build(&args.root, args.socket.clone()).await?;
+    let web_cancel = tokio_util::sync::CancellationToken::new();
+    let web_only = run_web && !run_discord;
+    let (bound_tx, bound_rx) = if web_only {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        (Some(tx), Some(rx))
+    } else {
+        (None, None)
+    };
+    let web_handle = if run_web {
+        let root = args.root.clone();
+        let port = root_config.web_port();
+        let cancel = web_cancel.clone();
+        Some(tokio::spawn(async move {
+            let cwd = std::env::current_dir().unwrap_or_else(|_| root.clone());
+            if let Err(e) = pico_web::server::serve(root, cwd, port, cancel, bound_tx).await {
+                tracing::error!(error = %format!("{e:#}"), "web server exited with error");
+            }
+        }))
+    } else {
+        None
+    };
 
-    let on_connected = {
-        let socket = args.socket.clone();
-        let token = args.ready_token.clone().unwrap_or_default();
-        move || async move {
-            match socket {
-                Some(socket) => match report_ready(&socket, &token).await {
-                    Ok(report) => {
-                        tracing::info!(socket = %socket.display(), "reported ready to supervisor");
-                        report
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %format!("{e:#}"), "failed to report ready to supervisor");
+    if run_discord {
+        let app = pico_discord::app::App::build(&args.root, args.socket.clone()).await?;
+        let on_connected = {
+            let socket = args.socket.clone();
+            let token = args.ready_token.clone().unwrap_or_default();
+            move || async move {
+                match socket {
+                    Some(socket) => match report_ready(&socket, &token).await {
+                        Ok(report) => {
+                            tracing::info!(socket = %socket.display(), "reported ready to supervisor");
+                            report
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %format!("{e:#}"), "failed to report ready to supervisor");
+                            None
+                        }
+                    },
+                    None => {
+                        tracing::warn!("standalone (no --socket): hot-update disabled");
                         None
                     }
-                },
-                None => {
-                    tracing::warn!("standalone (no --socket): hot-update disabled");
-                    None
+                }
+            }
+        };
+        app.run(
+            async {
+                if let Err(e) = pico_shared::signal::wait_for_shutdown().await {
+                    tracing::error!(error = %format!("{e:#}"), "signal wait failed; shutting down");
+                }
+            },
+            on_connected,
+        )
+        .await?;
+    } else {
+        let bound = match bound_rx {
+            Some(rx) => rx.await.is_ok(),
+            None => true,
+        };
+        if !bound {
+            tracing::error!("web server exited before binding; not reporting ready");
+        } else {
+            match args.socket.as_ref() {
+                Some(socket) => {
+                    let token = args.ready_token.clone().unwrap_or_default();
+                    match report_ready(socket, &token).await {
+                        Ok(_) => tracing::info!(socket = %socket.display(), "web reported ready to supervisor"),
+                        Err(e) => tracing::warn!(error = %format!("{e:#}"), "web failed to report ready to supervisor"),
+                    }
+                }
+                None => tracing::warn!("standalone web (no --socket): hot-update disabled"),
+            }
+            let web_exit = async {
+                match web_handle {
+                    Some(handle) => {
+                        let _ = handle.await;
+                    }
+                    None => std::future::pending::<()>().await,
+                }
+            };
+            tokio::select! {
+                res = pico_shared::signal::wait_for_shutdown() => {
+                    if let Err(e) = res {
+                        tracing::error!(error = %format!("{e:#}"), "signal wait failed; shutting down");
+                    }
+                }
+                () = web_exit => {
+                    tracing::error!("web server task exited; shutting down worker");
                 }
             }
         }
-    };
-
-    app.run(
-        async {
-            if let Err(e) = pico_shared::signal::wait_for_shutdown().await {
-                tracing::error!(error = %format!("{e:#}"), "signal wait failed; shutting down");
-            }
-        },
-        on_connected,
-    )
-    .await?;
+    }
+    web_cancel.cancel();
 
     tracing::info!("shutdown complete; exiting");
     Ok(())
@@ -125,24 +185,26 @@ async fn report_ready(socket: &Path, token: &str) -> color_eyre::Result<Option<p
     }
 }
 
-fn require_discord(platforms: &[String], config_path: &Path) -> color_eyre::Result<()> {
+fn resolve_platforms(platforms: &[String], config_path: &Path) -> color_eyre::Result<(bool, bool)> {
     let mut run_discord = false;
+    let mut run_web = false;
     for name in platforms {
         match name.as_str() {
             "discord" => run_discord = true,
+            "web" => run_web = true,
             other => color_eyre::eyre::bail!(
-                "unknown platform {other:?} in {} (known platforms: discord)",
+                "unknown platform {other:?} in {} (known platforms: discord, web)",
                 config_path.display()
             ),
         }
     }
-    if !run_discord {
+    if !run_discord && !run_web {
         color_eyre::eyre::bail!(
-            "no platforms configured: set platforms = [\"discord\"] in {}",
+            "no platforms configured: set platforms = [\"discord\"] (and/or \"web\") in {}",
             config_path.display()
         );
     }
-    Ok(())
+    Ok((run_discord, run_web))
 }
 
 #[cfg(test)]
@@ -155,16 +217,25 @@ mod tests {
 
     #[test]
     fn accepts_discord() {
-        assert!(require_discord(&names(&["discord"]), Path::new("/x")).is_ok());
+        assert_eq!(resolve_platforms(&names(&["discord"]), Path::new("/x")).unwrap(), (true, false));
+    }
+
+    #[test]
+    fn accepts_web_and_both() {
+        assert_eq!(resolve_platforms(&names(&["web"]), Path::new("/x")).unwrap(), (false, true));
+        assert_eq!(
+            resolve_platforms(&names(&["discord", "web"]), Path::new("/x")).unwrap(),
+            (true, true)
+        );
     }
 
     #[test]
     fn rejects_unknown_platform() {
-        assert!(require_discord(&names(&["discord", "slack"]), Path::new("/x")).is_err());
+        assert!(resolve_platforms(&names(&["discord", "slack"]), Path::new("/x")).is_err());
     }
 
     #[test]
     fn rejects_empty_list() {
-        assert!(require_discord(&names(&[]), Path::new("/x")).is_err());
+        assert!(resolve_platforms(&names(&[]), Path::new("/x")).is_err());
     }
 }

@@ -134,6 +134,15 @@ pub fn wrap_discord_message(
     out
 }
 
+pub fn wrap_web_message(display_name: &str, sent_at: &str, content: &str) -> String {
+    let content = crate::redact::scrub(content);
+    format!(
+        "<web-message name=\"{}\" sent_at=\"{}\" />\n{content}",
+        escape_attr(display_name),
+        escape_attr(sent_at)
+    )
+}
+
 pub fn escape_text(value: &str) -> String {
     value.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
@@ -348,6 +357,36 @@ mod tests {
         let wrapped = wrap_discord_message(7, "a\"<&>b", "2026-01-01T00:00:00Z", "raw <tag>", &[]);
         assert!(wrapped.contains("name=\"a&quot;&lt;&amp;&gt;b\""));
         assert!(wrapped.ends_with("raw <tag>"), "content stays unescaped");
+    }
+
+    #[test]
+    fn wrap_web_message_prefixes_metadata_and_keeps_content_raw() {
+        let wrapped = wrap_web_message("you", "2026-06-23T23:15:42-07:00", "hello <world> & co");
+        assert_eq!(
+            wrapped,
+            "<web-message name=\"you\" sent_at=\"2026-06-23T23:15:42-07:00\" />\nhello <world> & co"
+        );
+    }
+
+    #[test]
+    fn wrap_web_message_escapes_name_attribute_only() {
+        let wrapped = wrap_web_message("a\"<&>b", "2026-01-01T00:00:00Z", "raw <tag>");
+        assert!(wrapped.contains("name=\"a&quot;&lt;&amp;&gt;b\""));
+        assert!(wrapped.ends_with("raw <tag>"), "content stays unescaped");
+    }
+
+    #[test]
+    fn wrap_web_message_redacts_secret_but_keeps_surrounding_text_and_wrapper() {
+        let wrapped = wrap_web_message(
+            "you",
+            "2026-06-23T23:15:42-07:00",
+            "my key is ghp_16C7e42F292c6912E7710c838347Ae178B4a keep it",
+        );
+        assert_eq!(
+            wrapped,
+            "<web-message name=\"you\" sent_at=\"2026-06-23T23:15:42-07:00\" />\nmy key is [REDACTED] keep it"
+        );
+        assert!(!wrapped.contains("ghp_16C7e42F292c6912E7710c838347Ae178B4a"));
     }
 
     #[test]

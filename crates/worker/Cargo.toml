@@ -23,8 +23,10 @@ color-eyre.workspace = true
 pico-core.workspace = true
 pico-discord.workspace = true
 pico-shared.workspace = true
+pico-web.workspace = true
 serde_json = { workspace = true, optional = true }
 tokio.workspace = true
+tokio-util.workspace = true
 tracing.workspace = true
 
 [features]
