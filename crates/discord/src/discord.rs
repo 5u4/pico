@@ -1130,8 +1130,11 @@ async fn route_message(
         match att.download().await {
             Ok(bytes) => {
                 use base64::Engine as _;
+                let mime_type = sniff_image_mime(&bytes)
+                    .map(str::to_owned)
+                    .or_else(|| att.content_type.clone())
+                    .unwrap_or_else(|| "image/png".to_owned());
                 let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
-                let mime_type = att.content_type.clone().unwrap_or_else(|| "image/png".to_owned());
                 images.push(pico_core::omp::protocol::ImageAttachment { mime_type, data });
                 file_refs.push_str(&image_ref(images.len(), att.width, att.height));
             }
@@ -1500,6 +1503,20 @@ fn is_image_content_type(content_type: Option<&str>) -> bool {
     content_type.is_some_and(|c| c.starts_with("image/"))
 }
 
+fn sniff_image_mime(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png")
+    } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        Some("image/jpeg")
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some("image/gif")
+    } else if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        Some("image/webp")
+    } else {
+        None
+    }
+}
+
 fn image_ref(index: usize, width: Option<u32>, height: Option<u32>) -> String {
     match (width, height) {
         (Some(w), Some(h)) => format!("[Image #{index}, {w}x{h}]\n"),
@@ -1864,6 +1881,16 @@ mod tests {
         assert!(!super::is_image_content_type(Some("text/plain")));
         assert!(!super::is_image_content_type(Some("IMAGE/PNG")));
         assert!(!super::is_image_content_type(None));
+    }
+
+    #[test]
+    fn sniff_image_mime_reads_magic_bytes() {
+        assert_eq!(super::sniff_image_mime(b"\x89PNG\r\n\x1a\nrest"), Some("image/png"));
+        assert_eq!(super::sniff_image_mime(&[0xFF, 0xD8, 0xFF, 0xE0]), Some("image/jpeg"));
+        assert_eq!(super::sniff_image_mime(b"GIF89a..."), Some("image/gif"));
+        assert_eq!(super::sniff_image_mime(b"RIFF\0\0\0\0WEBPVP8 "), Some("image/webp"));
+        assert_eq!(super::sniff_image_mime(b"not an image"), None);
+        assert_eq!(super::sniff_image_mime(b""), None);
     }
 
     #[test]
