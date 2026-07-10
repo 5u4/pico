@@ -1,0 +1,344 @@
+{
+  "version": 1,
+  "locales": [
+    "en",
+    "zh"
+  ],
+  "defaultLocale": "en",
+  "updated_at": "2026-07-10T00:55:16.398Z",
+  "nodes": [
+    {
+      "id": "overview",
+      "sources": [
+        {
+          "file": "crates/core/src/persona.md",
+          "hash": "4fa582bfaba2146c"
+        },
+        {
+          "file": "docker-compose.yml",
+          "hash": "2fb7cc9c9ef53a3c"
+        },
+        {
+          "file": "crates/core/src/lib.rs",
+          "hash": "f11dfaf2d3ebddcf"
+        }
+      ]
+    },
+    {
+      "id": "getting-started",
+      "parent": "overview",
+      "sources": [
+        {
+          "file": "install.sh",
+          "hash": "e0ee5eb57a834d3d"
+        },
+        {
+          "file": "docker/entrypoint.sh",
+          "hash": "f6d402ab9749516b"
+        },
+        {
+          "file": "docker-compose.yml",
+          "hash": "2fb7cc9c9ef53a3c"
+        }
+      ]
+    },
+    {
+      "id": "usage",
+      "parent": "overview",
+      "sources": [
+        {
+          "file": "crates/discord/src/discord_surface.md",
+          "hash": "eccace31799131fb"
+        },
+        {
+          "file": "crates/discord/src/discord.rs",
+          "hash": "e06bf3c2f79f30dc"
+        }
+      ]
+    },
+    {
+      "id": "architecture",
+      "parent": "overview",
+      "sources": [
+        {
+          "file": "Cargo.toml",
+          "hash": "0fb0514771748727"
+        },
+        {
+          "file": "crates/core/src/lib.rs",
+          "hash": "f11dfaf2d3ebddcf"
+        },
+        {
+          "file": "crates/core/src/surface.rs",
+          "hash": "ac7f844db881d8e1"
+        },
+        {
+          "file": "crates/core/src/schedule/mod.rs",
+          "hash": "d73eb0ef3ddaaea4"
+        }
+      ]
+    },
+    {
+      "id": "turn-engine",
+      "parent": "architecture",
+      "sources": [
+        {
+          "file": "crates/core/src/engine.rs",
+          "hash": "1ea2a1c180f70013"
+        },
+        {
+          "file": "crates/core/src/activity.rs",
+          "hash": "e39e861cef22b8fe"
+        },
+        {
+          "file": "crates/core/src/mid_turn.rs",
+          "hash": "33a23b7a612eb55b"
+        },
+        {
+          "file": "crates/core/src/cancel.rs",
+          "hash": "5b06cf033af129c1"
+        }
+      ]
+    },
+    {
+      "id": "rendering",
+      "parent": "architecture",
+      "sources": [
+        {
+          "file": "crates/core/src/surface.rs",
+          "hash": "ac7f844db881d8e1"
+        },
+        {
+          "file": "crates/core/src/render.rs",
+          "hash": "f61d3bd44e3fe761"
+        },
+        {
+          "file": "crates/core/src/platform_render.rs",
+          "hash": "7945c5b6a1252d85"
+        },
+        {
+          "file": "crates/core/src/redact.rs",
+          "hash": "699c7028f2b3b3b3"
+        }
+      ]
+    },
+    {
+      "id": "omp-host",
+      "parent": "architecture",
+      "sources": [
+        {
+          "file": "crates/core/src/omp/client.rs",
+          "hash": "d7465ae9fb277fca"
+        },
+        {
+          "file": "crates/core/src/omp/pool.rs",
+          "hash": "4f8b316ec87439b8"
+        },
+        {
+          "file": "crates/core/src/omp/protocol.rs",
+          "hash": "ebe1ae757c6001d5"
+        },
+        {
+          "file": "crates/core/src/omp/camofox.rs",
+          "hash": "337fbb0358b6d9ff"
+        },
+        {
+          "file": "crates/core/src/session.rs",
+          "hash": "7c867638656eb70e"
+        },
+        {
+          "file": "crates/core/src/prompt.rs",
+          "hash": "0ee849525937697d"
+        },
+        {
+          "file": "omp-host/host.ts",
+          "hash": "7429aaf580733947"
+        },
+        {
+          "file": "omp-host/extensions/schedule.ts",
+          "hash": "78ea4c620ff80baa"
+        },
+        {
+          "file": "omp-host/extensions/camofox.ts",
+          "hash": "6cb1094eb120e2dd"
+        },
+        {
+          "file": "omp-host/extensions/secret-guard.ts",
+          "hash": "e6c4949b9a08e2a4"
+        }
+      ]
+    },
+    {
+      "id": "discord-adapter",
+      "parent": "architecture",
+      "sources": [
+        {
+          "file": "crates/discord/src/discord.rs",
+          "hash": "e06bf3c2f79f30dc"
+        },
+        {
+          "file": "crates/discord/src/ui.rs",
+          "hash": "1f657b8d3f0eaa24"
+        },
+        {
+          "file": "crates/discord/src/app.rs",
+          "hash": "997ff82f517cf6ce"
+        },
+        {
+          "file": "crates/discord/src/approval.rs",
+          "hash": "772eca188b2ca416"
+        },
+        {
+          "file": "crates/discord/src/config.rs",
+          "hash": "fe2ce99a13fbc21d"
+        },
+        {
+          "file": "crates/discord/src/consts.rs",
+          "hash": "50951ebd2263a03e"
+        }
+      ]
+    },
+    {
+      "id": "persistence",
+      "parent": "architecture",
+      "sources": [
+        {
+          "file": "crates/core/src/db.rs",
+          "hash": "646a85942412b0b1"
+        },
+        {
+          "file": "crates/core/src/bindings.rs",
+          "hash": "45c0344503d6b2aa"
+        },
+        {
+          "file": "crates/core/src/thread_marker.rs",
+          "hash": "04604615fe8235dd"
+        },
+        {
+          "file": "crates/core/src/config.rs",
+          "hash": "e51068652d91760f"
+        },
+        {
+          "file": "crates/shared/src/paths.rs",
+          "hash": "bf113619caf194fe"
+        },
+        {
+          "file": "crates/core/migrations/0001_approvals.sql",
+          "hash": "912584f322a2bc24"
+        },
+        {
+          "file": "crates/core/migrations/0003_bindings_and_threads.sql",
+          "hash": "9e9551898d2184b1"
+        },
+        {
+          "file": "crates/core/migrations/0005_thread_channel.sql",
+          "hash": "32d4f04b3d70f7dc"
+        },
+        {
+          "file": "crates/core/migrations/0007_drop_schedules.sql",
+          "hash": "29361dbd9887edf6"
+        },
+        {
+          "file": "crates/core/migrations/0008_branch_prefix.sql",
+          "hash": "e76bb5617e5d3916"
+        }
+      ]
+    },
+    {
+      "id": "scheduling",
+      "parent": "architecture",
+      "sources": [
+        {
+          "file": "crates/core/src/schedule/mod.rs",
+          "hash": "d73eb0ef3ddaaea4"
+        },
+        {
+          "file": "crates/core/src/schedule/gate.rs",
+          "hash": "f8dc5dd014428c3e"
+        },
+        {
+          "file": "crates/discord/src/schedule_host.rs",
+          "hash": "d889717c595c401f"
+        }
+      ]
+    },
+    {
+      "id": "worktrees",
+      "parent": "architecture",
+      "sources": [
+        {
+          "file": "crates/core/src/worktree.rs",
+          "hash": "94883db253f3c306"
+        },
+        {
+          "file": "crates/core/src/title.rs",
+          "hash": "03ac75a5e1798b49"
+        }
+      ]
+    },
+    {
+      "id": "lifecycle",
+      "parent": "architecture",
+      "sources": [
+        {
+          "file": "crates/supervisor/src/supervisor.rs",
+          "hash": "24056e1a59099afd"
+        },
+        {
+          "file": "crates/supervisor/src/slots.rs",
+          "hash": "499ea563e74be2f3"
+        },
+        {
+          "file": "crates/supervisor/src/stage.rs",
+          "hash": "a5c8e010aba1ac28"
+        },
+        {
+          "file": "crates/worker/src/main.rs",
+          "hash": "3968d64668f1aadd"
+        },
+        {
+          "file": "crates/worker/build.rs",
+          "hash": "c66976a4b56adb02"
+        },
+        {
+          "file": "crates/core/src/deploy.rs",
+          "hash": "55b73a1bd8a8d502"
+        },
+        {
+          "file": "crates/shared/src/proto.rs",
+          "hash": "65a16571747f605d"
+        }
+      ]
+    },
+    {
+      "id": "cli",
+      "parent": "architecture",
+      "sources": [
+        {
+          "file": "crates/cli/src/main.rs",
+          "hash": "c031c205ebda109e"
+        },
+        {
+          "file": "crates/cli/src/omp.rs",
+          "hash": "a5b2af8fdbb6623f"
+        },
+        {
+          "file": "crates/cli/src/thread.rs",
+          "hash": "e4b2168176c4fbbf"
+        },
+        {
+          "file": "crates/cli/src/bind.rs",
+          "hash": "2e588e1a97926edd"
+        },
+        {
+          "file": "crates/cli/src/profile.rs",
+          "hash": "4a5e2e7f8891df99"
+        },
+        {
+          "file": "crates/cli/src/schedule.rs",
+          "hash": "3895b4b5b3b4d04e"
+        }
+      ]
+    }
+  ]
+}
