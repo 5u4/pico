@@ -468,7 +468,7 @@ mod tests {
 
     fn batch_args() -> serde_json::Value {
         serde_json::json!({
-            "agent": "explore",
+            "agent": "scout",
             "tasks": [
                 { "id": "ExploreRouter", "description": "map the router" },
                 { "id": "ExploreDb", "description": "map the db" },
@@ -485,8 +485,8 @@ mod tests {
         let rows = extract_subagent_rows(&batch_args());
         let content = render_subagent_batch(&rows, 0);
         assert!(content.contains("👥 Running 2 tasks · 0s"));
-        assert!(content.contains("  └ [0] explore \"map the router\"  ⏳ idle"));
-        assert!(content.contains("  └ [1] explore \"map the db\"  ⏳ idle"));
+        assert!(content.contains("  └ [0] scout \"map the router\"  ⏳ idle"));
+        assert!(content.contains("  └ [1] scout \"map the db\"  ⏳ idle"));
     }
 
     #[test]
@@ -510,7 +510,7 @@ mod tests {
         assert!(content.contains("🔧 read packages/agent/src/discord/subagent-ren\u{2026}"));
         assert!(content.contains("· 3 tools"));
         assert!(content.contains("· anthropic/claude"));
-        assert!(content.contains("  └ [1] explore \"map the db\"  ⏳ Scanning schema  · 1 tool"));
+        assert!(content.contains("  └ [1] scout \"map the db\"  ⏳ Scanning schema  · 1 tool"));
     }
 
     #[test]
@@ -526,8 +526,8 @@ mod tests {
         settle_rows(&mut rows, false);
         let content = render_subagent_batch(&rows, 3_000);
         assert!(content.starts_with("👥 Ran 2 tasks · 3s"));
-        assert!(content.contains("  └ [0] explore \"map the router\"  ✅ done  · 5 tools"));
-        assert!(content.contains("  └ [1] explore \"map the db\"  ✅ done  · 2 tools"));
+        assert!(content.contains("  └ [0] scout \"map the router\"  ✅ done  · 5 tools"));
+        assert!(content.contains("  └ [1] scout \"map the db\"  ✅ done  · 2 tools"));
     }
 
     #[test]
@@ -543,8 +543,8 @@ mod tests {
         settle_rows(&mut rows, true);
         let content = render_subagent_batch(&rows, 1_000);
         assert!(content.starts_with("❌ Ran 2 tasks · 1s"));
-        assert!(content.contains("  └ [0] explore \"map the router\"  ❌ failed  · 4 tools"));
-        assert!(content.contains("  └ [1] explore \"map the db\"  ❌ failed  · 1 tool"));
+        assert!(content.contains("  └ [0] scout \"map the router\"  ❌ failed  · 4 tools"));
+        assert!(content.contains("  └ [1] scout \"map the db\"  ❌ failed  · 1 tool"));
     }
 
     #[test]
@@ -559,13 +559,13 @@ mod tests {
         );
         let content = render_subagent_batch(&rows, 2_000);
         assert!(content.starts_with("❌ Ran 2 tasks · 2s"), "got: {content:?}");
-        assert!(content.contains("  └ [0] explore \"map the router\"  ✅ done  · 3 tools"));
+        assert!(content.contains("  └ [0] scout \"map the router\"  ✅ done  · 3 tools"));
     }
 
     #[test]
     fn multiline_fields_stay_one_row() {
         let args = serde_json::json!({
-            "agent": "explore",
+            "agent": "scout",
             "tasks": [{ "id": "A", "description": "map\nthe router" }],
         });
         let mut rows = extract_subagent_rows(&args);
@@ -577,7 +577,7 @@ mod tests {
         );
         let content = render_subagent_batch(&rows, 0);
         assert_eq!(content.lines().count(), 2, "header + one row, got: {content:?}");
-        assert!(content.contains("explore \"map\"  🔧 bash echo hi"));
+        assert!(content.contains("scout \"map\"  🔧 bash echo hi"));
     }
 
     #[test]
@@ -623,13 +623,13 @@ mod tests {
     #[test]
     fn async_task_settles_on_terminal_update_not_spawn_ack() {
         use serde_json::json;
-        let args = json!({ "agent": "explore", "tasks": [{ "id": "ReadHello", "description": "read the file" }] });
+        let args = json!({ "agent": "scout", "tasks": [{ "id": "ReadHello", "description": "read the file" }] });
         let frame = |astate: &str, pstatus: &str| {
             json!({
                 "content": [{ "type": "text", "text": "..." }],
                 "details": {
                     "async": { "state": astate, "jobId": "ReadHello", "type": "task" },
-                    "progress": [{ "index": 0, "id": "ReadHello", "agent": "explore", "status": pstatus }],
+                    "progress": [{ "index": 0, "id": "ReadHello", "agent": "scout", "status": pstatus }],
                 }
             })
         };

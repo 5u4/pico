@@ -305,7 +305,7 @@ async fn task_update_carries_subagent_progress() {
     let (_host, client, mut events) = open_session("task", &cwd, &cancel, &tracker).await;
     client
         .prompt(
-            "Use the task tool to spawn exactly one subagent: agent type \"explore\", one task whose \
+            "Use the task tool to spawn exactly one subagent: agent type \"scout\", one task whose \
      assignment is to reply with the single word done. Use the task tool — do not do it yourself.",
             &[],
         )
