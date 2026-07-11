@@ -471,7 +471,7 @@ mod tests {
         );
         assert_eq!(line("web_search", json!({ "query": "rust" })), "🔎 rust");
         assert_eq!(line("totally_unknown", json!({ "a": 1 })), "🛠️ totally_unknown");
-        assert_eq!(line("task", json!({ "agent": "explore" })), "🛠️ task");
+        assert_eq!(line("task", json!({ "agent": "scout" })), "🛠️ task");
     }
 
     #[test]
