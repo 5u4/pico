@@ -93,15 +93,14 @@ export function PicoRuntimeProvider({ children }: { children: ReactNode }) {
       if (isRunning) return;
       setMessages([]);
       send({ kind: "new", channel_id: channelId });
-      refreshTree();
     },
-    [send, isRunning, refreshTree],
+    [send, isRunning],
   );
 
   const newChannel = useCallback(
     async (label: string) => {
       const name = label.trim();
-      if (!name || name.length > 80) return;
+      if (!name) return;
       try {
         const r = await fetch("/api/channel", {
           method: "POST",
@@ -139,6 +138,7 @@ export function PicoRuntimeProvider({ children }: { children: ReactNode }) {
           setThreadId(f.thread_id);
           location.hash = f.thread_id;
           document.title = f.title ? `${f.title} · pico` : "pico";
+          refreshTree();
           break;
         case "history":
           setMessages(f.bubbles.map(toMessage));

@@ -114,7 +114,7 @@ function Channel({
           onClick={() => onNewThread(channel.channel_id)}
           aria-label="New thread"
           title="New thread"
-          className="inline-flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground opacity-0 hover:bg-background hover:text-foreground group-hover:opacity-100"
+          className="inline-flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground opacity-0 hover:bg-background hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
         >
           <PlusIcon className="size-3.5" />
         </button>
