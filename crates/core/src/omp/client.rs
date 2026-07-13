@@ -287,6 +287,12 @@ impl OmpHost {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JobStateOutcome {
+    Count(usize),
+    SessionGone,
+}
+
 impl OmpSessionHandle {
     pub fn session_id(&self) -> &str {
         &self.session_id
@@ -461,6 +467,34 @@ impl OmpSessionHandle {
             )
             .await?;
         session_result(resp)
+    }
+
+    pub async fn job_state(&self) -> color_eyre::Result<JobStateOutcome> {
+        let id = RequestId::new();
+        let resp = self
+            .host
+            .send_and_await(
+                &id,
+                &Command::JobState {
+                    id: &id,
+                    session_id: &self.session_id,
+                },
+                RESPONSE_TIMEOUT,
+            )
+            .await?;
+        if !resp.success {
+            let detail = resp.error.as_deref().unwrap_or("job_state failed without a message");
+            if detail.starts_with("unknown session") {
+                return Ok(JobStateOutcome::SessionGone);
+            }
+            return Err(eyre!("omp host job_state failed: {detail}"));
+        }
+        let count = resp
+            .result
+            .as_deref()
+            .and_then(|s| s.trim().parse::<usize>().ok())
+            .ok_or_else(|| eyre!("omp host job_state returned an unparseable count"))?;
+        Ok(JobStateOutcome::Count(count))
     }
 }
 

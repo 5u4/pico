@@ -86,11 +86,20 @@ type Json = Record<string, unknown>;
 
 const sessions = new Map<string, HostSession>();
 
+function pendingJobCount(session: AgentSession): number {
+	const manager = session.asyncJobManager;
+	const running = manager ? manager.getRunningJobs().length : 0;
+	const pending = manager?.hasPendingDeliveries() ? 1 : 0;
+	const buffered = session.yieldQueue.has("async-result") ? 1 : 0;
+	return running + pending + buffered;
+}
+
 const HOST_IDLE_MS = 30 * 60 * 1000;
 const idleSweep = setInterval(() => {
 	const now = Date.now();
 	for (const [sessionId, hostSession] of sessions) {
 		if (now - hostSession.touchedAt <= HOST_IDLE_MS) continue;
+		if (pendingJobCount(hostSession.session) > 0) continue;
 		sessions.delete(sessionId);
 		void disposeSession(hostSession);
 	}
@@ -622,6 +631,10 @@ async function handle(raw: Json): Promise<void> {
 				emitError(sessionId, m);
 				respond(id, sessionId, type, false, m);
 			}
+			return;
+		}
+		case "job_state": {
+			respondWithResult(id, sessionId, type, String(pendingJobCount(hostSession.session)));
 			return;
 		}
 		case "new_session":

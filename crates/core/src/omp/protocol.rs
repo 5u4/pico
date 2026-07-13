@@ -106,6 +106,10 @@ pub(crate) enum Command<'a> {
         session_id: &'a str,
         mode: &'a str,
     },
+    JobState {
+        id: &'a RequestId,
+        session_id: &'a str,
+    },
 }
 
 impl Command<'_> {
@@ -124,6 +128,7 @@ impl Command<'_> {
             Command::Context { .. } => "context",
             Command::Compact { .. } => "compact",
             Command::Shake { .. } => "shake",
+            Command::JobState { .. } => "job_state",
         }
     }
 }
@@ -612,6 +617,14 @@ mod tests {
             })
             .unwrap(),
             serde_json::json!({"type": "shake", "id": "req_2", "sessionId": "t1", "mode": "elide"}),
+        );
+        assert_eq!(
+            serde_json::to_value(Command::JobState {
+                id: &id,
+                session_id: "t1",
+            })
+            .unwrap(),
+            serde_json::json!({"type": "job_state", "id": "req_2", "sessionId": "t1"}),
         );
     }
 
