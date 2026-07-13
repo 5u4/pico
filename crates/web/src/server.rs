@@ -277,6 +277,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    #[cfg_attr(pico_web_skip_ui_build, ignore = "no real SPA build in skip mode")]
     async fn root_serves_spa_index() {
         let res = static_asset("/".parse().expect("uri")).await;
         assert_eq!(res.status(), axum::http::StatusCode::OK);
@@ -294,6 +295,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(pico_web_skip_ui_build, ignore = "no real SPA build in skip mode")]
     async fn unknown_route_falls_back_to_index() {
         let res = static_asset("/threads/abc".parse().expect("uri")).await;
         assert_eq!(res.status(), axum::http::StatusCode::OK);
@@ -317,6 +319,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(pico_web_skip_ui_build, ignore = "no real SPA build in skip mode")]
     async fn hashed_js_asset_has_javascript_mime() {
         let name = Assets::iter().find(|p| p.ends_with(".js")).expect("a bundled js asset");
         let res = static_asset(format!("/{name}").parse().expect("uri")).await;

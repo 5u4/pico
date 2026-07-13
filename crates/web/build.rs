@@ -17,8 +17,10 @@ fn main() {
     }
     println!("cargo:rerun-if-env-changed=PICO_WEB_SKIP_UI_BUILD");
     println!("cargo:rerun-if-env-changed=PICO_PNPM");
+    println!("cargo:rustc-check-cfg=cfg(pico_web_skip_ui_build)");
 
     if std::env::var_os("PICO_WEB_SKIP_UI_BUILD").is_some() {
+        println!("cargo:rustc-cfg=pico_web_skip_ui_build");
         std::fs::create_dir_all(&dist_dir).expect("create dist placeholder");
         std::fs::write(
             dist_dir.join("index.html"),
