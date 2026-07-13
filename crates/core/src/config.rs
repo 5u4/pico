@@ -1,4 +1,5 @@
 use std::{
+    net::{IpAddr, Ipv4Addr},
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -70,6 +71,7 @@ pub struct RootConfig {
     platforms: Vec<String>,
     schedule: ScheduleConfig,
     web_port: u16,
+    web_bind: IpAddr,
 }
 
 impl RootConfig {
@@ -87,6 +89,10 @@ impl RootConfig {
 
     pub fn web_port(&self) -> u16 {
         self.web_port
+    }
+
+    pub fn web_bind(&self) -> IpAddr {
+        self.web_bind
     }
 
     pub fn schedule(&self) -> ScheduleConfig {
@@ -123,6 +129,8 @@ struct RawRootConfig {
 struct RawWeb {
     #[serde(default)]
     port: Option<u16>,
+    #[serde(default)]
+    bind: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -174,13 +182,23 @@ pub fn load_root(config_path: &Path) -> color_eyre::Result<RootConfig> {
         timezone: timezone_configured.then_some(timezone),
         run_history: raw_schedule.run_history.unwrap_or(20),
     };
-    let web_port = raw.web.unwrap_or_default().port.unwrap_or(8420);
+    let raw_web = raw.web.unwrap_or_default();
+    let web_port = raw_web.port.unwrap_or(8420);
+    let web_bind = match raw_web.bind {
+        Some(s) => s.parse::<IpAddr>().map_err(|_| {
+            color_eyre::eyre::eyre!(
+                "invalid [web] bind {s:?} (expected an IP address like \"127.0.0.1\" or \"0.0.0.0\")"
+            )
+        })?,
+        None => IpAddr::V4(Ipv4Addr::LOCALHOST),
+    };
     Ok(RootConfig {
         worktrees_dir,
         timezone,
         platforms: raw.platforms,
         schedule,
         web_port,
+        web_bind,
     })
 }
 
@@ -390,6 +408,26 @@ mod tests {
         assert_eq!(defaults.cap, std::time::Duration::from_secs(60));
         assert_eq!(defaults.run_history, 20);
         assert_eq!(defaults.timezone, None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn load_root_reads_web_bind_and_port_with_defaults() {
+        let dir = temp_dir("rootweb");
+        let path = dir.join("worker.toml");
+
+        let cfg = super::load_root(&path).unwrap();
+        assert_eq!(cfg.web_port(), 8420);
+        assert_eq!(cfg.web_bind(), std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+
+        std::fs::write(&path, "[web]\nport = 9000\nbind = \"0.0.0.0\"\n").unwrap();
+        let cfg = super::load_root(&path).unwrap();
+        assert_eq!(cfg.web_port(), 9000);
+        assert_eq!(cfg.web_bind(), std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+
+        std::fs::write(&path, "[web]\nbind = \"not-an-ip\"\n").unwrap();
+        assert!(super::load_root(&path).is_err());
+
         std::fs::remove_dir_all(&dir).ok();
     }
 }
