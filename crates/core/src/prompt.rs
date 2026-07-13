@@ -212,6 +212,7 @@ mod tests {
         assert!(CONTINUE_NUDGE.starts_with("<system-notice>\nContinue."));
         assert!(CONTINUE_NUDGE.trim_end().ends_with("</system-notice>"));
         assert!(!CONTINUE_NUDGE.contains("<discord-message"));
+        assert!(!CONTINUE_NUDGE.contains("<web-message"));
     }
 
     fn tmp() -> PathBuf {
