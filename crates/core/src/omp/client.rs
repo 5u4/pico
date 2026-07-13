@@ -484,7 +484,7 @@ impl OmpSessionHandle {
             .await?;
         if !resp.success {
             let detail = resp.error.as_deref().unwrap_or("job_state failed without a message");
-            if detail.contains("unknown session") {
+            if detail.starts_with("unknown session") {
                 return Ok(JobStateOutcome::SessionGone);
             }
             return Err(eyre!("omp host job_state failed: {detail}"));
