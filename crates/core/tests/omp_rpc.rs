@@ -5,7 +5,7 @@ use std::{
 };
 
 use pico_core::omp::{
-    client::{HostConfig, OmpHost, OmpSessionHandle, SessionConfig},
+    client::{HostConfig, JobStateOutcome, OmpHost, OmpSessionHandle, SessionConfig},
     pool::OmpPool,
     protocol::{AssistantMessageEvent, OmpEvent, UiResponse},
 };
@@ -788,5 +788,57 @@ async fn pump_routes_async_result_turn_to_background_launcher() {
         .expect("background signal channel closed");
     assert!(saw_agent_end, "background turn did not reach agent_end");
 
+    cancel.cancel();
+}
+
+#[tokio::test]
+#[ignore]
+async fn job_state_reports_running_background_task() {
+    let cwd = TempDir::new("pico-omp-jobstate");
+    let cancel = CancellationToken::new();
+    let tracker = TaskTracker::new();
+    let (_host, client, mut events) = open_session("jobstate", &cwd, &cancel, &tracker).await;
+
+    let idle = client
+        .job_state()
+        .await
+        .expect("job_state round-trips on a fresh session");
+    assert_eq!(
+        idle,
+        JobStateOutcome::Count(0),
+        "a fresh session has no running background jobs"
+    );
+
+    client
+        .prompt(
+            "Use the task tool to spawn exactly one subagent: agent type \"task\", one task whose \
+     assignment is to run the bash command `sleep 30 && echo BGDONE` and report its output. \
+     After the task tool returns its spawn acknowledgement, do NOT poll and do NOT wait — \
+     immediately end your turn with a one-line message saying you launched it in the background.",
+            &[],
+        )
+        .await
+        .expect("prompt acked");
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(120);
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        assert!(!remaining.is_zero(), "turn 1 never reached agent_end");
+        match tokio::time::timeout(remaining, events.recv()).await {
+            Ok(Some(OmpEvent::AgentEnd)) => break,
+            Ok(Some(OmpEvent::Error(e))) => panic!("omp reported an error: {e}"),
+            Ok(Some(_)) => {}
+            Ok(None) => panic!("event stream closed before agent_end"),
+            Err(_) => panic!("timed out waiting for turn 1 agent_end"),
+        }
+    }
+
+    let running = client.job_state().await.expect("job_state round-trips after spawn");
+    assert!(
+        matches!(running, JobStateOutcome::Count(n) if n >= 1),
+        "a backgrounded task must be reported as running (got {running:?}); this is exactly what evict_idle checks"
+    );
+
+    client.close().await.expect("close");
     cancel.cancel();
 }

@@ -13,7 +13,7 @@ use tokio::sync::mpsc;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::omp::{
-    client::{HostConfig, OmpHost, OmpSessionHandle, SessionConfig},
+    client::{HostConfig, JobStateOutcome, OmpHost, OmpSessionHandle, SessionConfig},
     protocol::OmpEvent,
 };
 
@@ -270,27 +270,63 @@ impl OmpPool {
     }
 
     async fn evict_idle(&self) {
-        let now = now_millis();
         let cutoff = IDLE_TIMEOUT.as_millis() as u64;
-        let evicted: Vec<(String, Arc<ThreadHandle>)> = {
-            let mut map = self.sessions.lock();
-            let mut drained = Vec::new();
-            map.retain(|thread_id, handle| {
-                let idle = now.saturating_sub(handle.last_active.load(Ordering::Relaxed)) > cutoff;
-                if idle && Arc::strong_count(handle) == 1 && !handle.is_busy() {
-                    drained.push((thread_id.clone(), Arc::clone(handle)));
-                    false
-                } else {
-                    true
-                }
-            });
-            drained
+        let candidates: Vec<(String, Arc<ThreadHandle>)> = {
+            let map = self.sessions.lock();
+            let now = now_millis();
+            map.iter()
+                .filter(|(_, handle)| {
+                    let idle = now.saturating_sub(handle.last_active.load(Ordering::Relaxed));
+                    is_evict_candidate(idle, cutoff, Arc::strong_count(handle), handle.is_busy())
+                })
+                .map(|(thread_id, handle)| (thread_id.clone(), Arc::clone(handle)))
+                .collect()
         };
-        for (thread_id, handle) in evicted {
-            match handle.close().await {
-                Ok(()) => tracing::debug!(thread_id = thread_id.as_str(), "evicted idle omp session"),
+        for (thread_id, handle) in candidates {
+            let host_gone = match handle.client().job_state().await {
+                Ok(JobStateOutcome::Count(0)) => false,
+                Ok(JobStateOutcome::SessionGone) => true,
+                Ok(JobStateOutcome::Count(jobs)) => {
+                    tracing::debug!(
+                        thread_id = thread_id.as_str(),
+                        jobs,
+                        "keeping idle session alive: background jobs pending"
+                    );
+                    continue;
+                }
                 Err(e) => {
-                    tracing::warn!(error = %format!("{e:#}"), thread_id = thread_id.as_str(), "closing an idle session failed")
+                    tracing::warn!(error = %format!("{e:#}"), thread_id = thread_id.as_str(), "job_state query failed; keeping session alive");
+                    continue;
+                }
+            };
+            let removed = {
+                let mut map = self.sessions.lock();
+                let now = now_millis();
+                match map.get(&thread_id) {
+                    Some(current)
+                        if is_evict_candidate(
+                            now.saturating_sub(current.last_active.load(Ordering::Relaxed)),
+                            cutoff,
+                            Arc::strong_count(current).saturating_sub(1),
+                            current.is_busy(),
+                        ) =>
+                    {
+                        map.remove(&thread_id)
+                    }
+                    _ => None,
+                }
+            };
+            if let Some(handle) = removed {
+                let closed = handle.close().await;
+                if host_gone {
+                    tracing::debug!(thread_id = thread_id.as_str(), "reaped a host-forgotten omp session");
+                } else {
+                    match closed {
+                        Ok(()) => tracing::debug!(thread_id = thread_id.as_str(), "evicted idle omp session"),
+                        Err(e) => {
+                            tracing::warn!(error = %format!("{e:#}"), thread_id = thread_id.as_str(), "closing an idle session failed")
+                        }
+                    }
                 }
             }
         }
@@ -383,6 +419,10 @@ fn close_decision(strong_count: Option<usize>) -> CloseOutcome {
     }
 }
 
+fn is_evict_candidate(idle_millis: u64, cutoff_millis: u64, strong_count: usize, busy: bool) -> bool {
+    idle_millis > cutoff_millis && strong_count == 1 && !busy
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -458,5 +498,15 @@ mod tests {
         assert!(!starts_background_turn(&OmpEvent::Message(AssistantMessageEvent::TextEnd {
             content: "hi".to_owned()
         })));
+    }
+
+    #[test]
+    fn is_evict_candidate_requires_idle_free_and_unshared() {
+        let idle = 11 * 60 * 1000;
+        let cutoff = 10 * 60 * 1000;
+        assert!(is_evict_candidate(idle, cutoff, 1, false));
+        assert!(!is_evict_candidate(idle, cutoff, 1, true));
+        assert!(!is_evict_candidate(idle, cutoff, 2, false));
+        assert!(!is_evict_candidate(5 * 60 * 1000, cutoff, 1, false));
     }
 }
