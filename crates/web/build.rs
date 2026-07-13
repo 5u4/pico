@@ -15,9 +15,16 @@ fn main() {
     ] {
         println!("cargo:rerun-if-changed={}", ui_dir.join(rel).display());
     }
+    println!("cargo:rerun-if-env-changed=PICO_WEB_SKIP_UI_BUILD");
+    println!("cargo:rerun-if-env-changed=PICO_PNPM");
 
     if std::env::var_os("PICO_WEB_SKIP_UI_BUILD").is_some() {
         std::fs::create_dir_all(&dist_dir).expect("create dist placeholder");
+        std::fs::write(
+            dist_dir.join("index.html"),
+            "<!doctype html><title>pico</title><body>pico web UI build skipped (PICO_WEB_SKIP_UI_BUILD).</body>",
+        )
+        .expect("write placeholder index.html");
         return;
     }
 

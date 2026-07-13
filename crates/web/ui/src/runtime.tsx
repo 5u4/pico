@@ -101,12 +101,23 @@ export function PicoRuntimeProvider({ children }: { children: React.ReactNode })
       .map((p) => p.text)
       .join("");
     if (!text) return;
+    const ws = wsRef.current;
+    if (ws?.readyState !== WebSocket.OPEN) {
+      setMessages((prev) => [
+        ...prev,
+        { role: "assistant", content: [{ type: "text", text: "⚠️ Not connected. Reload to reconnect." }] },
+      ]);
+      return;
+    }
     setMessages((prev) => [...prev, { role: "user", content: [{ type: "text", text }] }]);
-    wsRef.current?.send(JSON.stringify({ kind: "prompt", text }));
+    ws.send(JSON.stringify({ kind: "prompt", text }));
   }, []);
 
   const onCancel = useCallback(async () => {
-    wsRef.current?.send(JSON.stringify({ kind: "cancel" }));
+    const ws = wsRef.current;
+    if (ws?.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ kind: "cancel" }));
+    }
   }, []);
 
   const runtime = useExternalStoreRuntime({
