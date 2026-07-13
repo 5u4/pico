@@ -6,7 +6,7 @@ use axum::{
         State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
-    response::Html,
+    response::IntoResponse,
     routing::get,
 };
 use color_eyre::eyre::WrapErr;
@@ -29,7 +29,10 @@ use crate::{
 
 const PLATFORM: &str = "web";
 const SURFACE_RULES: &str = include_str!("web_surface.md");
-const INDEX_HTML: &str = include_str!("index.html");
+
+#[derive(rust_embed::Embed)]
+#[folder = "ui/dist"]
+struct Assets;
 
 pub struct WebState {
     pub root: PathBuf,
@@ -73,8 +76,8 @@ pub async fn serve(
     });
 
     let app = Router::new()
-        .route("/", get(index))
         .route("/ws", get(ws_upgrade))
+        .fallback(get(static_asset))
         .with_state(state);
 
     let addr = SocketAddr::new(bind, port);
@@ -95,8 +98,25 @@ pub async fn serve(
     result
 }
 
-async fn index() -> Html<&'static str> {
-    Html(INDEX_HTML)
+async fn static_asset(uri: axum::http::Uri) -> axum::response::Response {
+    let path = uri.path().trim_start_matches('/');
+    let key = if path.is_empty() { "index.html" } else { path };
+    if let Some(file) = Assets::get(key) {
+        return asset_response(file);
+    }
+    if path.starts_with("assets/") || path.rsplit('/').next().is_some_and(|f| f.contains('.')) {
+        return axum::http::StatusCode::NOT_FOUND.into_response();
+    }
+    asset_response(Assets::get("index.html").expect("embedded index.html"))
+}
+
+fn asset_response(file: rust_embed::EmbeddedFile) -> axum::response::Response {
+    let mime = file.metadata.mimetype().to_owned();
+    let body = match file.data {
+        std::borrow::Cow::Borrowed(bytes) => axum::body::Bytes::from_static(bytes),
+        std::borrow::Cow::Owned(bytes) => axum::body::Bytes::from(bytes),
+    };
+    ([(axum::http::header::CONTENT_TYPE, mime)], body).into_response()
 }
 
 async fn ws_upgrade(ws: WebSocketUpgrade, State(state): State<Arc<WebState>>) -> axum::response::Response {
@@ -252,4 +272,69 @@ async fn run_prompt(
 async fn send_frame(socket: &mut WebSocket, frame: &ServerFrame) -> Result<(), ()> {
     let json = serde_json::to_string(frame).map_err(|_| ())?;
     socket.send(Message::Text(json.into())).await.map_err(|_| ())
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::body::to_bytes;
+
+    use super::*;
+
+    #[tokio::test]
+    #[cfg_attr(pico_web_skip_ui_build, ignore = "no real SPA build in skip mode")]
+    async fn root_serves_spa_index() {
+        let res = static_asset("/".parse().expect("uri")).await;
+        assert_eq!(res.status(), axum::http::StatusCode::OK);
+        let ct = res
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .expect("content-type")
+            .to_str()
+            .expect("utf8");
+        assert!(ct.starts_with("text/html"), "unexpected content-type: {ct}");
+        let body = to_bytes(res.into_body(), usize::MAX).await.expect("body");
+        let html = String::from_utf8(body.to_vec()).expect("utf8 body");
+        assert!(html.contains("<div id=\"root\">"), "missing SPA mount point");
+        assert!(html.contains("/assets/"), "missing hashed asset reference");
+    }
+
+    #[tokio::test]
+    #[cfg_attr(pico_web_skip_ui_build, ignore = "no real SPA build in skip mode")]
+    async fn unknown_route_falls_back_to_index() {
+        let res = static_asset("/threads/abc".parse().expect("uri")).await;
+        assert_eq!(res.status(), axum::http::StatusCode::OK);
+        let body = to_bytes(res.into_body(), usize::MAX).await.expect("body");
+        assert!(
+            String::from_utf8_lossy(&body).contains("<div id=\"root\">"),
+            "SPA fallback did not serve index"
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_hashed_asset_returns_404() {
+        let res = static_asset("/assets/index-deadbeef.js".parse().expect("uri")).await;
+        assert_eq!(res.status(), axum::http::StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn missing_file_with_extension_returns_404() {
+        let res = static_asset("/favicon.ico".parse().expect("uri")).await;
+        assert_eq!(res.status(), axum::http::StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    #[cfg_attr(pico_web_skip_ui_build, ignore = "no real SPA build in skip mode")]
+    async fn hashed_js_asset_has_javascript_mime() {
+        let name = Assets::iter().find(|p| p.ends_with(".js")).expect("a bundled js asset");
+        let res = static_asset(format!("/{name}").parse().expect("uri")).await;
+        assert_eq!(res.status(), axum::http::StatusCode::OK);
+        let ct = res
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .expect("content-type")
+            .to_str()
+            .expect("utf8")
+            .to_owned();
+        assert!(ct.contains("javascript"), "js asset served with wrong mime: {ct}");
+    }
 }

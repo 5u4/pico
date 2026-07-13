@@ -39,6 +39,12 @@ RUN curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key -o /etc
      && apt-get install -y --no-install-recommends nodejs \
      && rm -rf /var/lib/apt/lists/*
 
+# pnpm (via corepack, bundled with Node) — the pico-web crate's build.rs runs
+# `pnpm install` + `pnpm build` to compile the SPA frontend that rust-embed bakes
+# into the worker binary, so every runtime cargo build (entrypoint, /update,
+# /dev-deploy) needs pnpm on PATH.
+RUN corepack enable && corepack prepare pnpm@11.10.0 --activate
+
 # Camoufox (anti-detection Firefox) runtime deps for the camofox-browser daemon:
 # the system libraries the engine binary dynamically links (incl. GL/EGL/GBM for
 # WebGL) plus the Xvfb virtual display it runs headful inside, and fonts. The

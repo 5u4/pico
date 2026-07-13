@@ -26,6 +26,7 @@ pico-web = { path = "crates/web" }
 poise = "0.6.2"
 regex = "1"
 rig-core = "0.38.2"
+rust-embed = { version = "8", features = ["mime-guess"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 serenity = "0.12.5"
