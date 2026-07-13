@@ -210,14 +210,6 @@ So: think and write the work in English; address the maintainer in Chinese.
 
 ## No comments in code
 
-Write zero comments in code. No `//`, no `///` / `//!` doc comments, no `/* */`.
-No "what" or "why" notes, no `TODO`/`NOTE`, no section-header banners, no
-restating the code. Carry intent in names, types, and structure instead.
-
-The only allowed comments:
-- `// SAFETY:` immediately above an `unsafe` block, justifying its soundness.
-- an `SPDX-License-Identifier` header, where one is legally required.
-
-A pre-commit + CI gate (`scripts/lint-comments.sh`) fails any diff that adds any
-other comment. Do not bypass it, and do not reintroduce comments that were
-removed.
+Zero comments in code — see `rule://no-comments`, always applied. Only
+`// biome-ignore <rule>: <reason>` and SPDX headers are allowed; the
+`scripts/lint-comments.ts` gate enforces this on pre-commit and in CI.
