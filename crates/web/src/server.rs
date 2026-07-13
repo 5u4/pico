@@ -100,19 +100,23 @@ pub async fn serve(
 
 async fn static_asset(uri: axum::http::Uri) -> axum::response::Response {
     let path = uri.path().trim_start_matches('/');
-    if let Some(file) = Assets::get(if path.is_empty() { "index.html" } else { path }) {
-        let mime = file.metadata.mimetype();
-        return ([(axum::http::header::CONTENT_TYPE, mime)], file.data.into_owned()).into_response();
+    let key = if path.is_empty() { "index.html" } else { path };
+    if let Some(file) = Assets::get(key) {
+        return asset_response(file);
     }
     if path.starts_with("assets/") || path.rsplit('/').next().is_some_and(|f| f.contains('.')) {
         return axum::http::StatusCode::NOT_FOUND.into_response();
     }
-    let index = Assets::get("index.html").expect("embedded index.html");
-    (
-        [(axum::http::header::CONTENT_TYPE, index.metadata.mimetype())],
-        index.data.into_owned(),
-    )
-        .into_response()
+    asset_response(Assets::get("index.html").expect("embedded index.html"))
+}
+
+fn asset_response(file: rust_embed::EmbeddedFile) -> axum::response::Response {
+    let mime = file.metadata.mimetype().to_owned();
+    let body = match file.data {
+        std::borrow::Cow::Borrowed(bytes) => axum::body::Bytes::from_static(bytes),
+        std::borrow::Cow::Owned(bytes) => axum::body::Bytes::from(bytes),
+    };
+    ([(axum::http::header::CONTENT_TYPE, mime)], body).into_response()
 }
 
 async fn ws_upgrade(ws: WebSocketUpgrade, State(state): State<Arc<WebState>>) -> axum::response::Response {

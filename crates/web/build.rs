@@ -21,6 +21,7 @@ fn main() {
 
     if std::env::var_os("PICO_WEB_SKIP_UI_BUILD").is_some() {
         println!("cargo:rustc-cfg=pico_web_skip_ui_build");
+        let _ = std::fs::remove_dir_all(&dist_dir);
         std::fs::create_dir_all(&dist_dir).expect("create dist placeholder");
         std::fs::write(
             dist_dir.join("index.html"),
