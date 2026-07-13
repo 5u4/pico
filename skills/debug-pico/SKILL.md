@@ -37,7 +37,25 @@ The full history lives in rotating files (daily, last 7 kept); `docker logs` std
 - `$PICO_HOME/supervisor/logs/supervisor.<date>.log` — deploys, rollbacks, and worker spawns.
 - `$PICO_HOME/worker/logs/cli.<date>.log` — the `pico` CLI (`pico omp`, `bind`, `schedule`).
 
-The files record down to `debug`, and the worker and supervisor ones also capture panics with a backtrace, so start by reading today's file and grepping for the thread, session, or schedule involved — pivot on whatever fields the lines actually carry. Going deeper than the default (for example, the per-frame omp event stream) takes a target `RUST_LOG` directive, but that is set at deploy time and cannot be changed from inside a running turn.
+Each file line is one JSON object (NDJSON) from `tracing`'s json layer: `{"timestamp","level","fields":{"message",…},"target","span"?,"spans"?}`. Event `key=value` pairs land under `.fields`; the enclosing span's fields (e.g. `run_turn{thread_id=…}`) land under `.span` and `.spans[]`, so a field like `thread_id` may be in either place depending on the line. The worker/supervisor files record down to `debug` (HTTP-client crates — serenity, reqwest, hyper, h2, tungstenite, rustls — are muted to `warn` by default), the stdout slice down to `info`.
+
+Query with `jq`, pivoting on `.target` (`pico_core::…`, `pico_discord::…`), `.level`, and the fields the lines carry:
+
+```
+cd "$PICO_HOME/worker/logs"; F=worker.$(date +%F).log
+
+# One thread's turn (thread_id can be a span field OR an event field)
+jq -c 'select(.span.thread_id=="<ID>" or .fields.thread_id=="<ID>")
+       | {t:.timestamp, lvl:.level, msg:.fields.message, tgt:.target}' "$F"
+
+# Only problems
+jq -c 'select(.level=="WARN" or .level=="ERROR")' "$F"
+
+# One target, full objects
+jq 'select(.target|startswith("pico_core"))' "$F"
+```
+
+Panics land as an `ERROR` line with `panic`, `location`, and `backtrace` fields. To go below the muted defaults (e.g. the per-frame omp event stream, or un-muting an HTTP crate) needs a `RUST_LOG` directive — set at deploy time, not changeable inside a running turn; a `RUST_LOG` target directive overrides the default mute for that target.
 
 ## Approach
 

@@ -17,8 +17,10 @@ const STDOUT_DEFAULT: &str = "info";
 
 const FILE_DEFAULT: &str = "debug";
 
+const NOISE: &str = "serenity=warn,reqwest=warn,hyper=warn,h2=warn,tungstenite=warn,rustls=warn";
+
 fn file_filter() -> EnvFilter {
-    let mut filter = EnvFilter::new(FILE_DEFAULT);
+    let mut filter = EnvFilter::new(format!("{FILE_DEFAULT},{NOISE}"));
     let Ok(env) = std::env::var("RUST_LOG") else {
         return filter;
     };
@@ -55,13 +57,8 @@ pub fn init(dir: &Path, prefix: &str) -> color_eyre::Result<WorkerGuard> {
     let (writer, guard) = file_writer(dir, prefix)?;
 
     tracing_subscriber::registry()
-        .with(fmt::layer().with_filter(EnvFilter::new(STDOUT_DEFAULT)))
-        .with(
-            fmt::layer()
-                .with_ansi(false)
-                .with_writer(writer)
-                .with_filter(file_filter()),
-        )
+        .with(fmt::layer().with_filter(EnvFilter::new(format!("{STDOUT_DEFAULT},{NOISE}"))))
+        .with(fmt::layer().json().with_writer(writer).with_filter(file_filter()))
         .with(ErrorLayer::default())
         .try_init()?;
 
@@ -73,12 +70,7 @@ pub fn init_file_only(dir: &Path, prefix: &str) -> color_eyre::Result<WorkerGuar
     let (writer, guard) = file_writer(dir, prefix)?;
 
     tracing_subscriber::registry()
-        .with(
-            fmt::layer()
-                .with_ansi(false)
-                .with_writer(writer)
-                .with_filter(file_filter()),
-        )
+        .with(fmt::layer().json().with_writer(writer).with_filter(file_filter()))
         .with(ErrorLayer::default())
         .try_init()?;
 
