@@ -1,6 +1,0 @@
-#!/usr/bin/env bash
-set -eu
-
-cargo +nightly fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
-exec scripts/lint-comments.sh

@@ -1,6 +1,0 @@
-# The image builds the worker at runtime from the bind-mounted repo, so the
-# build context only needs docker/entrypoint.sh. Keep heavy/secret paths out.
-target
-.git
-.env.e2e
-**/*.log
