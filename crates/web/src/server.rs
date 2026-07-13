@@ -212,7 +212,11 @@ async fn run_prompt(
     let thread_id = thread_id.as_str();
     let text = text.as_str();
     let sent_at = pico_core::prompt::format_sent_at(chrono::Utc::now().timestamp(), state.timezone);
-    let wrapped = prompt::wrap_web_message("you", &sent_at, text);
+    let wrapped = if pico_core::prompt::is_continue_trigger(text) {
+        pico_core::prompt::CONTINUE_NUDGE.to_owned()
+    } else {
+        prompt::wrap_web_message("you", &sent_at, text)
+    };
     let context_block = prompt::runtime_context_block(&RuntimeContext {
         platform: PLATFORM,
         extra: &[],
