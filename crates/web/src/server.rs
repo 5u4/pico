@@ -150,6 +150,7 @@ async fn tree(State(state): State<Arc<WebState>>) -> axum::response::Response {
     let entries = thread_marker::list_open(&state.db, PLATFORM, &channel_id).await;
     let mut threads: Vec<history::TreeThread> = entries
         .into_iter()
+        .filter(|entry| is_valid_thread_id(&entry.thread_id))
         .map(|entry| {
             let dir = session_dir(&state, &entry.thread_id);
             let (title, _) = history::replay(&dir);

@@ -63,7 +63,6 @@ export function PicoRuntimeProvider({ children }: { children: ReactNode }) {
   const [threadId, setThreadId] = useState<string | null>(null);
   const [tree, setTree] = useState<TreeChannel[]>([]);
   const wsRef = useRef<WebSocket | null>(null);
-  const readyRef = useRef(false);
 
   const refreshTree = useCallback(() => {
     fetch("/api/tree")
@@ -102,7 +101,6 @@ export function PicoRuntimeProvider({ children }: { children: ReactNode }) {
     wsRef.current = ws;
 
     ws.onopen = () => {
-      readyRef.current = true;
       const hash = location.hash.replace(/^#/, "");
       if (hash) ws.send(JSON.stringify({ kind: "open", thread_id: hash }));
     };
@@ -166,7 +164,6 @@ export function PicoRuntimeProvider({ children }: { children: ReactNode }) {
     };
 
     ws.onclose = () => {
-      readyRef.current = false;
       if (intentional) return;
       setIsRunning(false);
       setMessages((prev) => [
