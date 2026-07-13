@@ -41,7 +41,7 @@ pub enum ServerFrame {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ClientFrame {
     Open { thread_id: String },
-    New,
+    New { channel_id: String },
     Prompt { text: String },
     Cancel,
 }

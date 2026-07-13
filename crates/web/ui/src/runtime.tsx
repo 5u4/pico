@@ -35,7 +35,8 @@ type SessionValue = {
   isRunning: boolean;
   refreshTree: () => void;
   openThread: (id: string) => void;
-  newThread: () => void;
+  newThread: (channelId: string) => void;
+  newChannel: (label: string) => Promise<void>;
 };
 
 const SessionContext = createContext<SessionValue | null>(null);
@@ -87,12 +88,37 @@ export function PicoRuntimeProvider({ children }: { children: ReactNode }) {
     },
     [send, threadId, isRunning],
   );
+  const newThread = useCallback(
+    (channelId: string) => {
+      if (isRunning) return;
+      setMessages([]);
+      send({ kind: "new", channel_id: channelId });
+    },
+    [send, isRunning],
+  );
 
-  const newThread = useCallback(() => {
-    if (isRunning) return;
-    setMessages([]);
-    send({ kind: "new" });
-  }, [send, isRunning]);
+  const newChannel = useCallback(
+    async (label: string) => {
+      const name = label.trim();
+      if (!name) return;
+      try {
+        const r = await fetch("/api/channel", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ label: name }),
+        });
+        if (!r.ok) {
+          setMessages((prev) => [
+            ...prev,
+            { id: clientId(), role: "assistant", content: [{ type: "text", text: "⚠️ Could not create channel." }] },
+          ]);
+        }
+      } finally {
+        refreshTree();
+      }
+    },
+    [refreshTree],
+  );
 
   useEffect(() => {
     let intentional = false;
@@ -112,6 +138,7 @@ export function PicoRuntimeProvider({ children }: { children: ReactNode }) {
           setThreadId(f.thread_id);
           location.hash = f.thread_id;
           document.title = f.title ? `${f.title} · pico` : "pico";
+          refreshTree();
           break;
         case "history":
           setMessages(f.bubbles.map(toMessage));
@@ -216,7 +243,7 @@ export function PicoRuntimeProvider({ children }: { children: ReactNode }) {
   });
 
   return (
-    <SessionContext.Provider value={{ threadId, tree, isRunning, refreshTree, openThread, newThread }}>
+    <SessionContext.Provider value={{ threadId, tree, isRunning, refreshTree, openThread, newThread, newChannel }}>
       <AssistantRuntimeProvider runtime={runtime}>{children}</AssistantRuntimeProvider>
     </SessionContext.Provider>
   );

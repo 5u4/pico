@@ -1,6 +1,7 @@
 mod activity;
 pub mod bindings;
 pub mod cancel;
+pub mod channels;
 pub mod config;
 pub mod db;
 pub mod deploy;
