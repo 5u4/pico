@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useState } from "react";
+import { createContext, useContext, useLayoutEffect, useState } from "react";
 
 export type Theme = "system" | "light" | "dark";
 
@@ -22,7 +22,7 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
     return stored === "light" || stored === "dark" || stored === "system" ? stored : "system";
   });
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const media = window.matchMedia("(prefers-color-scheme: dark)");
     const sync = () => applyTheme(theme, media.matches);
     sync();
