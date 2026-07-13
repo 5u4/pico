@@ -1,33 +1,33 @@
 {
-    "name": "pico",
-    "version": "0.0.0",
-    "private": true,
-    "type": "module",
-    "packageManager": "bun@1.3.14",
-    "engines": {
-        "bun": ">=1.3.14"
-    },
-    "scripts": {
-        "typecheck": "tsc --noEmit",
-        "lint": "biome check",
-        "lint:fix": "biome check --write",
-        "format": "biome format --write",
-        "lint:comments": "bun run scripts/lint-comments.ts --all",
-        "test": "bun test",
-        "check": "bun run typecheck && bun run lint && bun run lint:comments && bun test",
-        "prepare": "lefthook install"
-    },
-    "dependencies": {
-        "async-mutex": "^0.5.0",
-        "neverthrow": "^8.2.0",
-        "p-map": "^7.0.5",
-        "p-retry": "^8.0.0",
-        "zod": "^4.4.3"
-    },
-    "devDependencies": {
-        "@biomejs/biome": "2.5.3",
-        "@types/bun": "1.3.14",
-        "lefthook": "2.1.10",
-        "typescript": "7.0.2"
-    }
+  "name": "pico",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "bun@1.3.14",
+  "engines": {
+    "bun": ">=1.3.14"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "lint": "biome check",
+    "lint:fix": "biome check --write",
+    "format": "biome format --write",
+    "lint:comments": "bun run scripts/lint-comments.ts --all",
+    "test": "bun test",
+    "check": "bun run typecheck && bun run lint && bun run lint:comments && bun test",
+    "prepare": "lefthook install"
+  },
+  "dependencies": {
+    "async-mutex": "^0.5.0",
+    "neverthrow": "^8.2.0",
+    "p-map": "^7.0.5",
+    "p-retry": "^8.0.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.3",
+    "@types/bun": "1.3.14",
+    "lefthook": "2.1.10",
+    "typescript": "7.0.2"
+  }
 }
