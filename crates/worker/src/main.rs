@@ -68,10 +68,11 @@ async fn main() -> color_eyre::Result<()> {
     let web_handle = if run_web {
         let root = args.root.clone();
         let port = root_config.web_port();
+        let bind = root_config.web_bind();
         let cancel = web_cancel.clone();
         Some(tokio::spawn(async move {
             let cwd = std::env::current_dir().unwrap_or_else(|_| root.clone());
-            if let Err(e) = pico_web::server::serve(root, cwd, port, cancel, bound_tx).await {
+            if let Err(e) = pico_web::server::serve(root, cwd, bind, port, cancel, bound_tx).await {
                 tracing::error!(error = %format!("{e:#}"), "web server exited with error");
             }
         }))

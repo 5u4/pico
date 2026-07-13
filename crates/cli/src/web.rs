@@ -10,10 +10,9 @@ pub struct WebArgs {
 pub async fn run(args: WebArgs) -> color_eyre::Result<()> {
     let root = pico_shared::paths::worker_root()?;
     let cwd = std::env::current_dir()?;
-    let port = match args.port {
-        Some(p) => p,
-        None => pico_core::config::load_root(&pico_shared::paths::worker_config(&root))?.web_port(),
-    };
+    let root_config = pico_core::config::load_root(&pico_shared::paths::worker_config(&root))?;
+    let port = args.port.unwrap_or_else(|| root_config.web_port());
+    let bind = root_config.web_bind();
 
     let cancel = CancellationToken::new();
     let signal_cancel = cancel.clone();
@@ -24,5 +23,5 @@ pub async fn run(args: WebArgs) -> color_eyre::Result<()> {
         signal_cancel.cancel();
     });
 
-    pico_web::server::serve(root, cwd, port, cancel, None).await
+    pico_web::server::serve(root, cwd, bind, port, cancel, None).await
 }

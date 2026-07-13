@@ -46,6 +46,7 @@ pub struct WebState {
 pub async fn serve(
     root: PathBuf,
     cwd: PathBuf,
+    bind: std::net::IpAddr,
     port: u16,
     cancel: CancellationToken,
     on_bound: Option<tokio::sync::oneshot::Sender<()>>,
@@ -76,7 +77,7 @@ pub async fn serve(
         .route("/ws", get(ws_upgrade))
         .with_state(state);
 
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let addr = SocketAddr::new(bind, port);
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .wrap_err_with(|| format!("binding web server to {addr}"))?;
