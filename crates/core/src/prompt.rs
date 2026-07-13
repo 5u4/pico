@@ -4,6 +4,12 @@ use color_eyre::eyre::WrapErr;
 
 const PERSONA: &str = include_str!("persona.md");
 
+pub const CONTINUE_NUDGE: &str = "<system-notice>\nContinue.\n\n- You MUST resume the most recent intent and carry the unfinished work to completion.\n- Interrupted mid-step? Pick it back up from where it stopped.\n- You NEVER pause to summarize progress, re-confirm the plan, or ask whether to proceed — just continue.\n</system-notice>\n";
+
+pub fn is_continue_trigger(text: &str) -> bool {
+    text.trim() == "."
+}
+
 pub fn assemble_append(
     dest: &Path,
     surface_rules: &str,
@@ -189,6 +195,24 @@ pub fn wrap_scheduled_job(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn continue_trigger_matches_only_lone_dot() {
+        assert!(is_continue_trigger("."));
+        assert!(!is_continue_trigger(".."));
+        assert!(!is_continue_trigger("c"));
+        assert!(is_continue_trigger(". "));
+        assert!(is_continue_trigger("  .\n"));
+        assert!(!is_continue_trigger(""));
+        assert!(!is_continue_trigger("hello."));
+    }
+
+    #[test]
+    fn continue_nudge_is_bare_system_notice() {
+        assert!(CONTINUE_NUDGE.starts_with("<system-notice>\nContinue."));
+        assert!(CONTINUE_NUDGE.trim_end().ends_with("</system-notice>"));
+        assert!(!CONTINUE_NUDGE.contains("<discord-message"));
+    }
 
     fn tmp() -> PathBuf {
         let dir = std::env::temp_dir().join(format!("pico-append-{}", ulid::Ulid::new()));

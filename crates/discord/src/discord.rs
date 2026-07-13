@@ -332,7 +332,11 @@ async fn deliver_busy(ctx: Context<'_>, mode: StreamingBehavior, message: String
         .and_then(|member| member.nick.clone())
         .or_else(|| ctx.author().global_name.clone())
         .unwrap_or_else(|| ctx.author().name.clone());
-    let wrapped = pico_core::prompt::wrap_discord_message(ctx.author().id.get(), &display_name, &sent_at, text, &[]);
+    let wrapped = if pico_core::prompt::is_continue_trigger(text) {
+        pico_core::prompt::CONTINUE_NUDGE.to_owned()
+    } else {
+        pico_core::prompt::wrap_discord_message(ctx.author().id.get(), &display_name, &sent_at, text, &[])
+    };
 
     let conv = ConversationId::new(crate::consts::PLATFORM, &ctx.channel_id().to_string());
     let delivered = ctx.data().mid_turn.deliver(&conv, &wrapped, Some(mode));
@@ -1100,8 +1104,12 @@ async fn route_message(
             content: body,
         });
     }
-    let wrapped =
-        pico_core::prompt::wrap_discord_message(message.author.id.get(), &display_name, &sent_at, prompt, &quotes);
+    let is_nudge = pico_core::prompt::is_continue_trigger(prompt);
+    let wrapped = if is_nudge {
+        pico_core::prompt::CONTINUE_NUDGE.to_owned()
+    } else {
+        pico_core::prompt::wrap_discord_message(message.author.id.get(), &display_name, &sent_at, prompt, &quotes)
+    };
 
     if in_thread {
         let conversation = ConversationId::new(crate::consts::PLATFORM, &channel.id.to_string());
@@ -1146,7 +1154,7 @@ async fn route_message(
     if images.is_empty() && prompt.is_empty() && quotes.is_empty() {
         return Ok(());
     }
-    let wrapped = if file_refs.is_empty() {
+    let wrapped = if is_nudge || file_refs.is_empty() {
         wrapped
     } else {
         let body = compose_message_body(prompt, &file_refs);
