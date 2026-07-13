@@ -1,0 +1,62 @@
+services:
+  pico:
+    container_name: pico
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      args:
+        PICO_UID: "${PICO_UID:-1000}"
+        PICO_GID: "${PICO_GID:-1000}"
+    init: true
+    shm_size: "1gb"
+    restart: unless-stopped
+    working_dir: /home/pico/.pico/agent
+    mem_limit: ${PICO_MEM_LIMIT:-0}
+    memswap_limit: ${PICO_MEM_LIMIT:-0}
+    group_add:
+      - "${DOCKER_GID:-0}"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    ports:
+      - "127.0.0.1:6080:6080"
+    environment:
+      VNC_BIND: "0.0.0.0"
+      CARGO_BUILD_JOBS: "${CARGO_BUILD_JOBS:-default}"
+    volumes:
+      - ${HOME}/.pico:/home/pico/.pico
+      - ${HOME}/.omp:/home/pico/.omp
+      - /var/run/docker.sock:/var/run/docker.sock
+      - pico-supervisor:/home/pico/.pico/supervisor
+      - pico-cache:/home/pico/.cache
+      - pico-build:/home/pico/.cache/build
+  hindsight:
+    container_name: hindsight
+    image: ${PICO_HINDSIGHT_IMAGE:-ghcr.io/vectorize-io/hindsight:latest}
+    restart: unless-stopped
+    env_file:
+      - path: .env.hindsight
+        required: false
+    environment:
+      HINDSIGHT_API_LLM_PROVIDER: openai
+      HINDSIGHT_API_LLM_BASE_URL: https://api.enterprise.githubcopilot.com
+      HINDSIGHT_API_LLM_MODEL: gpt-4o-mini
+      HINDSIGHT_API_REFLECT_MAX_CONTEXT_TOKENS: "48000"
+    ports:
+      - "127.0.0.1:8888:8888"
+      - "127.0.0.1:9999:9999"
+    volumes:
+      - hindsight-data:/home/hindsight/.pg0
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8888/version"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 900s
+
+volumes:
+  pico-supervisor:
+  pico-build:
+  pico-cache:
+  hindsight-data:
