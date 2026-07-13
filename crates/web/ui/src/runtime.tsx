@@ -17,6 +17,9 @@ type ServerFrame =
 const RUNNING = { type: "running" } as const;
 const COMPLETE = { type: "complete", reason: "stop" } as const;
 
+let clientIdCounter = 0;
+const clientId = () => `c${clientIdCounter++}`;
+
 export function PicoRuntimeProvider({ children }: { children: ReactNode }) {
   const [messages, setMessages] = useState<readonly ThreadMessageLike[]>([]);
   const [isRunning, setIsRunning] = useState(false);
@@ -71,7 +74,7 @@ export function PicoRuntimeProvider({ children }: { children: ReactNode }) {
           setIsRunning(false);
           setMessages((prev) => [
             ...prev,
-            { role: "assistant", content: [{ type: "text", text: `⚠️ ${f.message}` }] },
+            { id: clientId(), role: "assistant", content: [{ type: "text", text: `⚠️ ${f.message}` }] },
           ]);
           break;
       }
@@ -83,6 +86,7 @@ export function PicoRuntimeProvider({ children }: { children: ReactNode }) {
       setMessages((prev) => [
         ...prev,
         {
+          id: clientId(),
           role: "assistant",
           content: [{ type: "text", text: "⚠️ Connection lost. Reload to reconnect." }],
         },
@@ -105,11 +109,11 @@ export function PicoRuntimeProvider({ children }: { children: ReactNode }) {
     if (ws?.readyState !== WebSocket.OPEN) {
       setMessages((prev) => [
         ...prev,
-        { role: "assistant", content: [{ type: "text", text: "⚠️ Not connected. Reload to reconnect." }] },
+        { id: clientId(), role: "assistant", content: [{ type: "text", text: "⚠️ Not connected. Reload to reconnect." }] },
       ]);
       return;
     }
-    setMessages((prev) => [...prev, { role: "user", content: [{ type: "text", text }] }]);
+    setMessages((prev) => [...prev, { id: clientId(), role: "user", content: [{ type: "text", text }] }]);
     ws.send(JSON.stringify({ kind: "prompt", text }));
   }, []);
 
