@@ -12,6 +12,7 @@ use axum::{
 use color_eyre::eyre::WrapErr;
 use pico_core::{
     cancel::CancelRegistry,
+    channels,
     config::StreamingBehavior,
     mid_turn::MidTurnQueue,
     omp::{camofox::CamofoxDaemon, client::SessionIdentity, pool::OmpPool},
@@ -76,9 +77,19 @@ pub async fn serve(
         timezone,
     });
 
+    channels::ensure(
+        &state.db,
+        PLATFORM,
+        &default_channel_id(&state),
+        &default_channel_label(&state),
+        chrono::Utc::now().timestamp(),
+    )
+    .await;
+
     let app = Router::new()
         .route("/ws", get(ws_upgrade))
         .route("/api/tree", get(tree))
+        .route("/api/channel", axum::routing::post(create_channel))
         .fallback(get(static_asset))
         .with_state(state);
 
@@ -129,7 +140,20 @@ fn session_dir(state: &WebState, thread_id: &str) -> std::path::PathBuf {
     pico_shared::paths::profile_session_dir(&state.root, pico_shared::paths::DEFAULT_PROFILE, PLATFORM, thread_id)
 }
 
-async fn record_marker(state: &WebState, thread_id: &str) {
+fn default_channel_id(state: &WebState) -> String {
+    state.cwd.display().to_string()
+}
+
+fn default_channel_label(state: &WebState) -> String {
+    state
+        .cwd
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| state.cwd.display().to_string())
+}
+
+async fn record_marker(state: &WebState, thread_id: &str, channel_id: &str) {
     thread_marker::save(
         &state.db,
         PLATFORM,
@@ -139,41 +163,77 @@ async fn record_marker(state: &WebState, thread_id: &str) {
             cwd: state.cwd.clone(),
             worktree: None,
             closed_at: None,
-            channel_id: Some(state.cwd.display().to_string()),
+            channel_id: Some(channel_id.to_owned()),
         },
     )
     .await;
 }
 
+async fn channel_of(state: &WebState, thread_id: &str) -> Option<String> {
+    thread_marker::load(&state.db, PLATFORM, thread_id)
+        .await
+        .and_then(|m| m.channel_id)
+}
+
 async fn tree(State(state): State<Arc<WebState>>) -> axum::response::Response {
-    let channel_id = state.cwd.display().to_string();
-    let entries = thread_marker::list_open(&state.db, PLATFORM, &channel_id).await;
-    let mut threads: Vec<history::TreeThread> = entries
-        .into_iter()
-        .filter(|entry| is_valid_thread_id(&entry.thread_id))
-        .map(|entry| {
-            let dir = session_dir(&state, &entry.thread_id);
-            let (title, _) = history::replay(&dir);
-            history::TreeThread {
-                thread_id: entry.thread_id,
-                title,
-                updated_at: history::thread_updated_at(&dir),
-            }
-        })
-        .collect();
-    threads.sort_by_key(|t| std::cmp::Reverse(t.updated_at));
-    let channels = vec![history::TreeChannel {
+    let channels = channels::list(&state.db, PLATFORM).await;
+    let mut out: Vec<history::TreeChannel> = Vec::with_capacity(channels.len());
+    for channel in channels {
+        let entries = thread_marker::list_open(&state.db, PLATFORM, &channel.channel_id).await;
+        let mut threads: Vec<history::TreeThread> = entries
+            .into_iter()
+            .filter(|entry| is_valid_thread_id(&entry.thread_id))
+            .map(|entry| {
+                let dir = session_dir(&state, &entry.thread_id);
+                let (title, _) = history::replay(&dir);
+                history::TreeThread {
+                    thread_id: entry.thread_id,
+                    title,
+                    updated_at: history::thread_updated_at(&dir),
+                }
+            })
+            .collect();
+        threads.sort_by_key(|t| std::cmp::Reverse(t.updated_at));
+        out.push(history::TreeChannel {
+            channel_id: channel.channel_id,
+            label: channel.label,
+            threads,
+        });
+    }
+    axum::Json(out).into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct CreateChannelBody {
+    label: String,
+}
+
+async fn create_channel(
+    State(state): State<Arc<WebState>>,
+    axum::Json(body): axum::Json<CreateChannelBody>,
+) -> axum::response::Response {
+    let label = body.label.trim();
+    if label.is_empty() || label.chars().count() > 80 {
+        return axum::http::StatusCode::BAD_REQUEST.into_response();
+    }
+    let channel_id = ulid::Ulid::new().to_string();
+    if let Err(e) = channels::create(&state.db, PLATFORM, &channel_id, label, chrono::Utc::now().timestamp()).await {
+        tracing::warn!(error = %format!("{e:#}"), "creating channel failed");
+        return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+    axum::Json(history::TreeChannel {
         channel_id,
-        label: state.cwd.display().to_string(),
-        threads,
-    }];
-    axum::Json(channels).into_response()
+        label: label.to_owned(),
+        threads: Vec::new(),
+    })
+    .into_response()
 }
 
 async fn handle_socket(mut socket: WebSocket, state: Arc<WebState>) {
     let (tx, mut rx) = unbounded_channel::<ServerFrame>();
     let seq = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     let mut current: Option<String> = None;
+    let mut current_channel: String = default_channel_id(&state);
     let mut in_flight: Option<tokio::task::JoinHandle<()>> = None;
 
     loop {
@@ -207,20 +267,28 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<WebState>) {
                                 });
                             } else {
                                 current = Some(thread_id.clone());
+                                if let Some(ch) = channel_of(&state, &thread_id).await {
+                                    current_channel = ch;
+                                }
                                 let (title, bubbles) = history::replay(&session_dir(&state, &thread_id));
                                 seq.store(bubbles.len() as u64, std::sync::atomic::Ordering::Relaxed);
                                 let _ = tx.send(ServerFrame::Opened { thread_id, title });
                                 let _ = tx.send(ServerFrame::History { bubbles });
                             }
                         }
-                        Ok(ClientFrame::New) => {
+                        Ok(ClientFrame::New { channel_id }) => {
                             if in_flight.is_some() {
                                 let _ = tx.send(ServerFrame::Error {
                                     message: "a turn is running; wait for it to finish before starting a new chat".to_owned(),
                                 });
+                            } else if !channels::exists(&state.db, PLATFORM, &channel_id).await {
+                                let _ = tx.send(ServerFrame::Error {
+                                    message: "unknown channel".to_owned(),
+                                });
                             } else {
+                                current_channel = channel_id;
                                 let thread_id = ulid::Ulid::new().to_string();
-                                record_marker(&state, &thread_id).await;
+                                record_marker(&state, &thread_id, &current_channel).await;
                                 current = Some(thread_id.clone());
                                 seq.store(0, std::sync::atomic::Ordering::Relaxed);
                                 let _ = tx.send(ServerFrame::Opened {
@@ -249,7 +317,7 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<WebState>) {
                                         id
                                     }
                                 };
-                                record_marker(&state, &thread_id).await;
+                                record_marker(&state, &thread_id, &current_channel).await;
                                 in_flight = Some(tokio::spawn(run_prompt(
                                     Arc::clone(&state),
                                     thread_id,
