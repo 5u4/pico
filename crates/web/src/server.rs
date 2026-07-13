@@ -23,6 +23,7 @@ use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::{
+    history,
     proto::{ClientFrame, ServerFrame},
     surface::WebSurface,
 };
@@ -77,6 +78,7 @@ pub async fn serve(
 
     let app = Router::new()
         .route("/ws", get(ws_upgrade))
+        .route("/api/tree", get(tree))
         .fallback(get(static_asset))
         .with_state(state);
 
@@ -123,12 +125,15 @@ async fn ws_upgrade(ws: WebSocketUpgrade, State(state): State<Arc<WebState>>) ->
     ws.on_upgrade(move |socket| handle_socket(socket, state))
 }
 
-async fn handle_socket(mut socket: WebSocket, state: Arc<WebState>) {
-    let thread_id = ulid::Ulid::new().to_string();
+fn session_dir(state: &WebState, thread_id: &str) -> std::path::PathBuf {
+    pico_shared::paths::profile_session_dir(&state.root, pico_shared::paths::DEFAULT_PROFILE, PLATFORM, thread_id)
+}
+
+async fn record_marker(state: &WebState, thread_id: &str) {
     thread_marker::save(
         &state.db,
         PLATFORM,
-        &thread_id,
+        thread_id,
         &ThreadMarker {
             profile: pico_shared::paths::DEFAULT_PROFILE.to_owned(),
             cwd: state.cwd.clone(),
@@ -138,9 +143,36 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<WebState>) {
         },
     )
     .await;
+}
 
+async fn tree(State(state): State<Arc<WebState>>) -> axum::response::Response {
+    let channel_id = state.cwd.display().to_string();
+    let entries = thread_marker::list_open(&state.db, PLATFORM, &channel_id).await;
+    let mut threads: Vec<history::TreeThread> = entries
+        .into_iter()
+        .map(|entry| {
+            let dir = session_dir(&state, &entry.thread_id);
+            let (title, _) = history::replay(&dir);
+            history::TreeThread {
+                thread_id: entry.thread_id,
+                title,
+                updated_at: history::thread_updated_at(&dir),
+            }
+        })
+        .collect();
+    threads.sort_by_key(|t| std::cmp::Reverse(t.updated_at));
+    let channels = vec![history::TreeChannel {
+        channel_id,
+        label: state.cwd.display().to_string(),
+        threads,
+    }];
+    axum::Json(channels).into_response()
+}
+
+async fn handle_socket(mut socket: WebSocket, state: Arc<WebState>) {
     let (tx, mut rx) = unbounded_channel::<ServerFrame>();
     let seq = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let mut current: Option<String> = None;
     let mut in_flight: Option<tokio::task::JoinHandle<()>> = None;
 
     loop {
@@ -163,15 +195,63 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<WebState>) {
             msg = socket.recv() => match msg {
                 Some(Ok(Message::Text(text))) => {
                     match serde_json::from_str::<ClientFrame>(&text) {
+                        Ok(ClientFrame::Open { thread_id }) => {
+                            if in_flight.is_some() {
+                                let _ = tx.send(ServerFrame::Error {
+                                    message: "a turn is running; wait for it to finish before switching chats".to_owned(),
+                                });
+                            } else if !is_valid_thread_id(&thread_id) {
+                                let _ = tx.send(ServerFrame::Error {
+                                    message: "invalid thread id".to_owned(),
+                                });
+                            } else {
+                                current = Some(thread_id.clone());
+                                let (title, bubbles) = history::replay(&session_dir(&state, &thread_id));
+                                seq.store(bubbles.len() as u64, std::sync::atomic::Ordering::Relaxed);
+                                let _ = tx.send(ServerFrame::Opened { thread_id, title });
+                                let _ = tx.send(ServerFrame::History { bubbles });
+                            }
+                        }
+                        Ok(ClientFrame::New) => {
+                            if in_flight.is_some() {
+                                let _ = tx.send(ServerFrame::Error {
+                                    message: "a turn is running; wait for it to finish before starting a new chat".to_owned(),
+                                });
+                            } else {
+                                let thread_id = ulid::Ulid::new().to_string();
+                                record_marker(&state, &thread_id).await;
+                                current = Some(thread_id.clone());
+                                seq.store(0, std::sync::atomic::Ordering::Relaxed);
+                                let _ = tx.send(ServerFrame::Opened {
+                                    thread_id,
+                                    title: String::new(),
+                                });
+                                let _ = tx.send(ServerFrame::History { bubbles: Vec::new() });
+                            }
+                        }
                         Ok(ClientFrame::Prompt { text }) => {
                             if in_flight.is_some() {
                                 let _ = tx.send(ServerFrame::Error {
                                     message: "a turn is already running in this thread".to_owned(),
                                 });
                             } else {
+                                let thread_id = match &current {
+                                    Some(id) => id.clone(),
+                                    None => {
+                                        let id = ulid::Ulid::new().to_string();
+                                        seq.store(0, std::sync::atomic::Ordering::Relaxed);
+                                        let _ = tx.send(ServerFrame::Opened {
+                                            thread_id: id.clone(),
+                                            title: String::new(),
+                                        });
+                                        current = Some(id.clone());
+                                        id
+                                    }
+                                };
+                                record_marker(&state, &thread_id).await;
                                 in_flight = Some(tokio::spawn(run_prompt(
                                     Arc::clone(&state),
-                                    thread_id.clone(),
+                                    thread_id,
                                     text,
                                     tx.clone(),
                                     Arc::clone(&seq),
@@ -179,8 +259,10 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<WebState>) {
                             }
                         }
                         Ok(ClientFrame::Cancel) => {
-                            let conversation = ConversationId::new(PLATFORM, &thread_id);
-                            state.cancels.request(&conversation);
+                            if let Some(thread_id) = &current {
+                                let conversation = ConversationId::new(PLATFORM, thread_id);
+                                state.cancels.request(&conversation);
+                            }
                         }
                         Err(e) => {
                             tracing::warn!(error = %format!("{e:#}"), "undecodable web client frame");
@@ -202,6 +284,10 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<WebState>) {
     }
 }
 
+fn is_valid_thread_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 64 && id.bytes().all(|b| b.is_ascii_alphanumeric())
+}
+
 async fn run_prompt(
     state: Arc<WebState>,
     thread_id: String,
@@ -209,7 +295,6 @@ async fn run_prompt(
     tx: UnboundedSender<ServerFrame>,
     seq: Arc<std::sync::atomic::AtomicU64>,
 ) {
-    let thread_id = thread_id.as_str();
     let text = text.as_str();
     let sent_at = pico_core::prompt::format_sent_at(chrono::Utc::now().timestamp(), state.timezone);
     let wrapped = if pico_core::prompt::is_continue_trigger(text) {
@@ -221,7 +306,7 @@ async fn run_prompt(
         platform: PLATFORM,
         extra: &[],
         channel: &prompt::escape_text(&state.cwd.display().to_string()),
-        thread: &prompt::escape_text(thread_id),
+        thread: &prompt::escape_text(&thread_id),
         profile: pico_shared::paths::DEFAULT_PROFILE,
         cwd: &state.cwd,
         worktree: None,
@@ -231,10 +316,10 @@ async fn run_prompt(
         platform: PLATFORM.to_owned(),
         guild: String::new(),
         channel: state.cwd.display().to_string(),
-        thread: thread_id.to_owned(),
+        thread: thread_id.clone(),
         user: "local".to_owned(),
     };
-    let conversation = ConversationId::new(PLATFORM, thread_id);
+    let conversation = ConversationId::new(PLATFORM, &thread_id);
     let surface = WebSurface::new(tx.clone(), seq);
 
     let _ = tx.send(ServerFrame::TurnStart);
@@ -255,14 +340,21 @@ async fn run_prompt(
         cancels: &state.cancels,
         cancel: &state.cancel,
         conversation: &conversation,
-        thread_id,
+        thread_id: &thread_id,
     })
     .await;
     match spawn {
         Ok(spawn) => {
-            if let Some(title) = spawn.title_seed {
-                let _ = tx.send(ServerFrame::Title { title });
-            }
+            let answer = spawn.title_seed.clone();
+            pico_core::title::generate_and_apply(
+                WebSurface::new(tx.clone(), Arc::new(std::sync::atomic::AtomicU64::new(0))),
+                Arc::clone(&spawn.handle),
+                Arc::clone(&state.pool),
+                text.to_owned(),
+                answer,
+                state.cancel.clone(),
+            )
+            .await;
         }
         Err(e) => {
             let _ = tx.send(ServerFrame::Error {
