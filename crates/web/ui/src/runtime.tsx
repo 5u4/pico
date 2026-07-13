@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import {
   AssistantRuntimeProvider,
   useExternalStoreRuntime,
@@ -17,7 +17,7 @@ type ServerFrame =
 const RUNNING = { type: "running" } as const;
 const COMPLETE = { type: "complete", reason: "stop" } as const;
 
-export function PicoRuntimeProvider({ children }: { children: React.ReactNode }) {
+export function PicoRuntimeProvider({ children }: { children: ReactNode }) {
   const [messages, setMessages] = useState<readonly ThreadMessageLike[]>([]);
   const [isRunning, setIsRunning] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);

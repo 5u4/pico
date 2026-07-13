@@ -1,4 +1,4 @@
-import { createContext, useContext, useLayoutEffect, useState } from "react";
+import { createContext, useContext, useLayoutEffect, useState, type ReactNode } from "react";
 
 export type Theme = "system" | "light" | "dark";
 
@@ -16,7 +16,7 @@ function applyTheme(theme: Theme, systemDark: boolean) {
   document.documentElement.classList.toggle("dark", dark);
 }
 
-export function ThemeProvider({ children }: { children: React.ReactNode }) {
+export function ThemeProvider({ children }: { children: ReactNode }) {
   const [theme, setThemeState] = useState<Theme>(() => {
     const stored = localStorage.getItem(STORAGE_KEY);
     return stored === "light" || stored === "dark" || stored === "system" ? stored : "system";
