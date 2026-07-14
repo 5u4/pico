@@ -151,7 +151,9 @@ async function maybeAutoTitle(
   if (getConversation(db, conversationId)?.title != null) return;
   setConversationTitle(db, conversationId, title);
   if (!session.sessionName) {
-    await session.setSessionName(title, "auto").catch(() => {});
+    await session.setSessionName(title, "auto").catch((e: unknown) => {
+      console.error(`title sync to omp session failed: ${e}`);
+    });
   }
   for (const ws of allSockets) sendWorkspaces(ws);
 }
@@ -165,7 +167,11 @@ async function handleCommand(ws: Ws, command: ClientCommand): Promise<void> {
       return;
     }
     if (command.kind === "prompt") {
-      void maybeAutoTitle(conversationId, session, command.text);
+      void maybeAutoTitle(conversationId, session, command.text).catch(
+        (e: unknown) => {
+          console.error(`auto-title failed: ${e}`);
+        },
+      );
       const error = await session
         .prompt(command.text)
         .then(() => undefined)
