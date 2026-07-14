@@ -141,7 +141,11 @@ async function handleCommand(ws: Ws, command: ClientCommand): Promise<void> {
         .catch((e: unknown) => (e instanceof Error ? e.message : String(e)));
       if (error) sendError(ws, error);
     } else {
-      await session.abort();
+      const error = await session
+        .abort()
+        .then(() => undefined)
+        .catch((e: unknown) => (e instanceof Error ? e.message : String(e)));
+      if (error) sendError(ws, error);
     }
     return;
   }
@@ -184,14 +188,19 @@ const server = Bun.serve<WsData, "/">({
     async open(ws) {
       allSockets.add(ws);
       const existing = listConversations(db, workspace.id);
+      const first = existing[0];
       const active =
-        existing[0] ??
+        first ??
         createConversation(db, {
           workspaceId: workspace.id,
           cwd: workspace.cwd,
           title: null,
         });
       await activate(ws, active.id, active.cwd);
+      if (!first) {
+        for (const other of allSockets)
+          if (other !== ws) sendConversations(other);
+      }
     },
     async message(ws, raw) {
       const text = typeof raw === "string" ? raw : raw.toString();

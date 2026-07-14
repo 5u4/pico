@@ -43,6 +43,8 @@ function convertMessage(message: UiMessage): ThreadMessageLike {
 type PicoContextValue = {
   conversations: ConversationSummary[];
   activeId: string | null;
+  error: string | null;
+  dismissError: () => void;
   select: (conversationId: string) => void;
   create: () => void;
 };
@@ -60,6 +62,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
   const [isRunning, setIsRunning] = useState(false);
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
   const activeIdRef = useRef<string | null>(null);
   const pendingRef = useRef<string[]>([]);
@@ -81,6 +84,8 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
         if (parsed.conversationId !== activeIdRef.current) return;
         setMessages(parsed.messages);
         setIsRunning(parsed.isStreaming);
+      } else {
+        setError(parsed.message);
       }
     };
     return () => {
@@ -117,17 +122,24 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
     () => ({
       conversations,
       activeId,
+      error,
+      dismissError: () => setError(null),
       select: (conversationId) => {
         if (conversationId === activeIdRef.current) return;
+        activeIdRef.current = conversationId;
+        setActiveId(conversationId);
         setMessages([]);
+        setError(null);
         send({ kind: "select", conversationId });
       },
       create: () => {
+        activeIdRef.current = null;
         setMessages([]);
+        setError(null);
         send({ kind: "create" });
       },
     }),
-    [conversations, activeId, send],
+    [conversations, activeId, error, send],
   );
 
   const value = useMemo(() => runtime, [runtime]);
