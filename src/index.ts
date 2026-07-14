@@ -133,7 +133,10 @@ async function handleCommand(ws: Ws, command: ClientCommand): Promise<void> {
   if (command.kind === "prompt" || command.kind === "abort") {
     const conversationId = ws.data.conversationId;
     const session = conversationId ? sessions.get(conversationId) : undefined;
-    if (!session) return;
+    if (!session) {
+      sendError(ws, "no active conversation; retry once connected");
+      return;
+    }
     if (command.kind === "prompt") {
       const error = await session
         .prompt(command.text)

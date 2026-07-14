@@ -68,14 +68,21 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
   const pendingRef = useRef<string[]>([]);
 
   useEffect(() => {
-    const socket = new WebSocket(`ws://${location.host}/ws`);
+    const scheme = location.protocol === "https:" ? "wss" : "ws";
+    const socket = new WebSocket(`${scheme}://${location.host}/ws`);
     socketRef.current = socket;
     socket.onopen = () => {
       for (const payload of pendingRef.current) socket.send(payload);
       pendingRef.current = [];
     };
     socket.onmessage = (event) => {
-      const parsed = JSON.parse(event.data) as ServerEvent;
+      let parsed: ServerEvent;
+      try {
+        parsed = JSON.parse(event.data) as ServerEvent;
+      } catch {
+        setError("received a malformed message from the server");
+        return;
+      }
       if (parsed.kind === "conversations") {
         setConversations(parsed.items);
         activeIdRef.current = parsed.activeId;
