@@ -2,7 +2,7 @@ import "./styles.css";
 import { ThemeProvider } from "next-themes";
 import { Sidebar } from "./components/sidebar";
 import { Thread } from "./components/thread";
-import { RuntimeProvider, usePico } from "./runtime";
+import { AssistantPane, RuntimeProvider, usePico } from "./runtime";
 
 function ErrorBanner() {
   const { error, dismissError } = usePico();
@@ -30,7 +30,9 @@ export function App() {
           <div className="flex min-w-0 flex-1 flex-col">
             <ErrorBanner />
             <div className="min-h-0 flex-1">
-              <Thread />
+              <AssistantPane>
+                <Thread />
+              </AssistantPane>
             </div>
           </div>
         </div>

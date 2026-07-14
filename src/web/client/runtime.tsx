@@ -16,9 +16,9 @@ import {
 } from "react";
 import type {
   ClientCommand,
-  ConversationSummary,
   ServerEvent,
   UiMessage,
+  WorkspaceSummary,
 } from "../protocol";
 
 function convertMessage(message: UiMessage): ThreadMessageLike {
@@ -41,12 +41,17 @@ function convertMessage(message: UiMessage): ThreadMessageLike {
 }
 
 type PicoContextValue = {
-  conversations: ConversationSummary[];
+  workspaces: WorkspaceSummary[];
   activeId: string | null;
+  messages: UiMessage[];
+  isRunning: boolean;
   error: string | null;
   dismissError: () => void;
   select: (conversationId: string) => void;
-  create: () => void;
+  create: (workspaceId: string) => void;
+  createWorkspace: (label: string) => void;
+  prompt: (text: string) => void;
+  cancel: () => void;
 };
 
 const PicoContext = createContext<PicoContextValue | null>(null);
@@ -60,7 +65,7 @@ export function usePico(): PicoContextValue {
 export function RuntimeProvider({ children }: { children: ReactNode }) {
   const [messages, setMessages] = useState<UiMessage[]>([]);
   const [isRunning, setIsRunning] = useState(false);
-  const [conversations, setConversations] = useState<ConversationSummary[]>([]);
+  const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
@@ -83,8 +88,8 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
         setError("received a malformed message from the server");
         return;
       }
-      if (parsed.kind === "conversations") {
-        setConversations(parsed.items);
+      if (parsed.kind === "workspaces") {
+        setWorkspaces(parsed.items);
         activeIdRef.current = parsed.activeId;
         setActiveId(parsed.activeId);
       } else if (parsed.kind === "snapshot") {
@@ -108,27 +113,22 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
     else pendingRef.current.push(payload);
   }, []);
 
-  const runtime = useExternalStoreRuntime({
-    isRunning,
-    messages,
-    convertMessage,
-    onNew: (message: AppendMessage) => {
-      const part = message.content[0];
-      if (part?.type !== "text")
-        throw new Error("only text messages are supported");
-      send({ kind: "prompt", text: part.text });
-      return Promise.resolve();
+  const prompt = useCallback(
+    (text: string) => {
+      send({ kind: "prompt", text });
     },
-    onCancel: () => {
-      send({ kind: "abort" });
-      return Promise.resolve();
-    },
-  });
+    [send],
+  );
+  const cancel = useCallback(() => {
+    send({ kind: "abort" });
+  }, [send]);
 
   const pico = useMemo<PicoContextValue>(
     () => ({
-      conversations,
+      workspaces,
       activeId,
+      messages,
+      isRunning,
       error,
       dismissError: () => setError(null),
       select: (conversationId) => {
@@ -140,23 +140,50 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
         setError(null);
         send({ kind: "select", conversationId });
       },
-      create: () => {
+      create: (workspaceId) => {
         activeIdRef.current = null;
         setMessages([]);
         setIsRunning(false);
         setError(null);
-        send({ kind: "create" });
+        send({ kind: "create", workspaceId });
       },
+      createWorkspace: (label) => {
+        activeIdRef.current = null;
+        setMessages([]);
+        setIsRunning(false);
+        setError(null);
+        send({ kind: "createWorkspace", label });
+      },
+      prompt,
+      cancel,
     }),
-    [conversations, activeId, error, send],
+    [workspaces, activeId, messages, isRunning, error, send, prompt, cancel],
   );
 
-  const value = useMemo(() => runtime, [runtime]);
+  return <PicoContext.Provider value={pico}>{children}</PicoContext.Provider>;
+}
+
+export function AssistantPane({ children }: { children: ReactNode }) {
+  const { activeId, messages, isRunning, prompt, cancel } = usePico();
+  const runtime = useExternalStoreRuntime({
+    isRunning,
+    messages,
+    convertMessage,
+    onNew: (message: AppendMessage) => {
+      const part = message.content[0];
+      if (part?.type !== "text")
+        throw new Error("only text messages are supported");
+      prompt(part.text);
+      return Promise.resolve();
+    },
+    onCancel: () => {
+      cancel();
+      return Promise.resolve();
+    },
+  });
   return (
-    <PicoContext.Provider value={pico}>
-      <AssistantRuntimeProvider runtime={value}>
-        {children}
-      </AssistantRuntimeProvider>
-    </PicoContext.Provider>
+    <AssistantRuntimeProvider key={activeId ?? "none"} runtime={runtime}>
+      {children}
+    </AssistantRuntimeProvider>
   );
 }

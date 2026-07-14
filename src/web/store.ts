@@ -7,24 +7,26 @@ import {
 } from "../store/schema";
 import { newId } from "../util/id";
 
-const WEB_WORKSPACE_LABEL = "web";
+const DEFAULT_WORKSPACE_LABEL = "web";
 
-export function getOrCreateWebWorkspace(
-  db: Database,
-  projectsRoot: string,
-): Workspace {
-  const existing = db
+export function listWorkspaces(db: Database): Workspace[] {
+  const rows = db
     .query(
-      "SELECT * FROM workspaces WHERE platform = 'web' ORDER BY createdAt ASC LIMIT 1",
+      "SELECT * FROM workspaces WHERE platform = 'web' ORDER BY createdAt ASC",
     )
-    .get();
-  if (existing) return workspaceSchema.parse(existing);
+    .all();
+  return rows.map((row) => workspaceSchema.parse(row));
+}
 
+export function createWorkspace(
+  db: Database,
+  input: { cwd: string; label: string },
+): Workspace {
   const row = {
     id: newId(),
-    cwd: projectsRoot,
+    cwd: input.cwd,
     platform: "web",
-    label: WEB_WORKSPACE_LABEL,
+    label: input.label,
     externalId: null,
     createdAt: Date.now(),
   };
@@ -33,6 +35,20 @@ export function getOrCreateWebWorkspace(
      VALUES ($id, $cwd, $platform, $label, $externalId, $createdAt)`,
   ).run(row);
   return workspaceSchema.parse(row);
+}
+
+export function getOrCreateDefaultWorkspace(
+  db: Database,
+  cwd: string,
+): Workspace {
+  const existing = listWorkspaces(db)[0];
+  if (existing) return existing;
+  return createWorkspace(db, { cwd, label: DEFAULT_WORKSPACE_LABEL });
+}
+
+export function getWorkspace(db: Database, id: string): Workspace | undefined {
+  const row = db.query("SELECT * FROM workspaces WHERE id = $id").get({ id });
+  return row ? workspaceSchema.parse(row) : undefined;
 }
 
 export function listConversations(
