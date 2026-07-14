@@ -1,4 +1,4 @@
-import { mkdirSync } from "node:fs";
+import { mkdirSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import {
@@ -93,8 +93,10 @@ export class Sessions {
     const sessionDir = join(this.sessionsRoot, conversationId);
     mkdirSync(sessionDir, { recursive: true });
 
-    const sessionManager = options.continueFromFile
-      ? await SessionManager.open(options.continueFromFile, sessionDir)
+    const resumeFile =
+      options.continueFromFile ?? latestSessionFile(sessionDir);
+    const sessionManager = resumeFile
+      ? await SessionManager.open(resumeFile, sessionDir)
       : SessionManager.create(options.cwd, sessionDir);
 
     const { session } = await createAgentSession({
@@ -109,4 +111,16 @@ export class Sessions {
     });
     return session;
   }
+}
+
+function latestSessionFile(sessionDir: string): string | undefined {
+  let entries: string[];
+  try {
+    entries = readdirSync(sessionDir);
+  } catch {
+    return undefined;
+  }
+  const files = entries.filter((name) => name.endsWith(".jsonl")).sort();
+  const latest = files.at(-1);
+  return latest ? join(sessionDir, latest) : undefined;
 }
