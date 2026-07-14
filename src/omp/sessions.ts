@@ -54,7 +54,7 @@ export class Sessions {
     if (built.isErr()) return err(built.error);
 
     if (this.generation !== generation) {
-      await built.value.dispose();
+      await Promise.allSettled([built.value.dispose()]);
       return err("sessions closed during open");
     }
     this.live.set(conversationId, built.value);

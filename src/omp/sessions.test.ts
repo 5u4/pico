@@ -112,6 +112,21 @@ describe("Sessions.open", () => {
     expect(sessions.get(id)).toBeUndefined();
     expect(sessions.created[0]?.disposeCount).toBeGreaterThanOrEqual(1);
   });
+
+  test("returns Err (not throws) when the orphan dispose rejects", async () => {
+    const sessions = new TestSessions();
+    const id = newId();
+    sessions.failDispose.add(id);
+    const gate = sessions.gate(id);
+    const opening = sessions.open(id, { cwd: "/x" });
+    const closing = sessions.closeAll();
+    gate.resolve();
+    await closing;
+    const result = await opening;
+
+    expect(result.isErr()).toBe(true);
+    expect(sessions.get(id)).toBeUndefined();
+  });
 });
 
 describe("Sessions.closeAll", () => {
