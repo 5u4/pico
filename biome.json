@@ -25,6 +25,9 @@
         "useThrowOnlyError": "error",
         "noParameterAssign": "error"
       },
+      "performance": {
+        "noBarrelFile": "error"
+      },
       "nursery": {
         "noFloatingPromises": "error"
       }
