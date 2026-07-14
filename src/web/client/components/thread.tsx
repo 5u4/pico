@@ -6,7 +6,7 @@ import {
 } from "@assistant-ui/react";
 import { ArrowUpIcon, CopyIcon, SquareIcon } from "lucide-react";
 import { MarkdownText } from "./assistant-ui/markdown-text";
-import { ReasoningGroup } from "./assistant-ui/reasoning";
+import { Reasoning, ReasoningGroup } from "./assistant-ui/reasoning";
 import { ToolFallback } from "./assistant-ui/tool-fallback";
 import { ToolGroup } from "./assistant-ui/tool-group";
 import { TooltipIconButton } from "./assistant-ui/tooltip-icon-button";
@@ -29,6 +29,7 @@ function AssistantMessage() {
         <MessagePrimitive.Parts
           components={{
             Text: MarkdownText,
+            Reasoning,
             ReasoningGroup,
             ToolGroup,
             tools: { Fallback: ToolFallback },
