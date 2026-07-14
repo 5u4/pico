@@ -8,6 +8,7 @@ import {
   getOrCreateDefaultWorkspace,
   listConversations,
   listWorkspaces,
+  setConversationTitle,
 } from "./store.ts";
 
 let db: Database;
@@ -76,5 +77,31 @@ describe("conversations", () => {
 
   test("returns undefined for an unknown conversation", () => {
     expect(getConversation(db, "missing")).toBeUndefined();
+  });
+
+  test("setConversationTitle names an untitled conversation once", () => {
+    const ws = createWorkspace(db, { cwd: "/projects", label: "w" });
+    const c = createConversation(db, {
+      workspaceId: ws.id,
+      cwd: "/projects",
+      title: null,
+    });
+    expect(setConversationTitle(db, c.id, "generated")).toBe(true);
+    expect(getConversation(db, c.id)?.title).toBe("generated");
+  });
+
+  test("setConversationTitle refuses to overwrite an existing title", () => {
+    const ws = createWorkspace(db, { cwd: "/projects", label: "w" });
+    const c = createConversation(db, {
+      workspaceId: ws.id,
+      cwd: "/projects",
+      title: "kept",
+    });
+    expect(setConversationTitle(db, c.id, "other")).toBe(false);
+    expect(getConversation(db, c.id)?.title).toBe("kept");
+  });
+
+  test("setConversationTitle reports no change for an unknown id", () => {
+    expect(setConversationTitle(db, "missing", "x")).toBe(false);
   });
 });

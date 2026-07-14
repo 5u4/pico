@@ -1,7 +1,9 @@
+import type { AgentSession } from "@oh-my-pi/pi-coding-agent";
 import type { ServerWebSocket } from "bun";
 import { loadConfig } from "./config/config";
 import { provisionRuntime } from "./omp/runtime";
 import { Sessions } from "./omp/sessions";
+import { autoTitle } from "./omp/title";
 import { defaultDbPath, openDb } from "./store/db";
 import type { Conversation } from "./store/schema";
 import index from "./web/client/index.html";
@@ -20,6 +22,7 @@ import {
   getWorkspace,
   listConversations,
   listWorkspaces,
+  setConversationTitle,
 } from "./web/store";
 
 type WsData = { conversationId: string | null };
@@ -137,15 +140,37 @@ async function activate(
   if (snap) ws.send(JSON.stringify(snap));
 }
 
+async function maybeAutoTitle(
+  conversationId: string,
+  session: AgentSession,
+  text: string,
+): Promise<void> {
+  if (getConversation(db, conversationId)?.title != null) return;
+  const title = await autoTitle(session, text).catch(() => null);
+  if (!title) return;
+  if (!setConversationTitle(db, conversationId, title)) return;
+  if (!session.sessionName) {
+    await session.setSessionName(title, "auto").catch((e: unknown) => {
+      console.error(`title sync to omp session failed: ${e}`);
+    });
+  }
+  for (const ws of allSockets) sendWorkspaces(ws);
+}
+
 async function handleCommand(ws: Ws, command: ClientCommand): Promise<void> {
   if (command.kind === "prompt" || command.kind === "abort") {
     const conversationId = ws.data.conversationId;
     const session = conversationId ? sessions.get(conversationId) : undefined;
-    if (!session) {
+    if (!conversationId || !session) {
       sendError(ws, "no active conversation; retry once connected");
       return;
     }
     if (command.kind === "prompt") {
+      void maybeAutoTitle(conversationId, session, command.text).catch(
+        (e: unknown) => {
+          console.error(`auto-title failed: ${e}`);
+        },
+      );
       const error = await session
         .prompt(command.text)
         .then(() => undefined)
