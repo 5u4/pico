@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { loadConfig, parseConfig } from "./config.ts";
 
@@ -39,16 +40,24 @@ describe("loadConfig", () => {
   test("parses an existing config file", async () => {
     const path = `/tmp/pico-config-test-${Date.now()}.json`;
     await Bun.write(path, JSON.stringify({ port: 5000 }));
-    const result = await loadConfig(path);
-    expect(result._unsafeUnwrap()).toEqual({
-      port: 5000,
-      projectsRoot: homedir(),
-    });
+    try {
+      const result = await loadConfig(path);
+      expect(result._unsafeUnwrap()).toEqual({
+        port: 5000,
+        projectsRoot: homedir(),
+      });
+    } finally {
+      rmSync(path, { force: true });
+    }
   });
 
   test("errors on malformed json", async () => {
     const path = `/tmp/pico-config-bad-${Date.now()}.json`;
     await Bun.write(path, "{ not json");
-    expect((await loadConfig(path)).isErr()).toBe(true);
+    try {
+      expect((await loadConfig(path)).isErr()).toBe(true);
+    } finally {
+      rmSync(path, { force: true });
+    }
   });
 });

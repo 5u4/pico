@@ -136,12 +136,14 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
         activeIdRef.current = conversationId;
         setActiveId(conversationId);
         setMessages([]);
+        setIsRunning(false);
         setError(null);
         send({ kind: "select", conversationId });
       },
       create: () => {
         activeIdRef.current = null;
         setMessages([]);
+        setIsRunning(false);
         setError(null);
         send({ kind: "create" });
       },
