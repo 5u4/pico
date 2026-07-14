@@ -142,6 +142,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       },
       create: (workspaceId) => {
         activeIdRef.current = null;
+        setActiveId(null);
         setMessages([]);
         setIsRunning(false);
         setError(null);
@@ -149,6 +150,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       },
       createWorkspace: (label) => {
         activeIdRef.current = null;
+        setActiveId(null);
         setMessages([]);
         setIsRunning(false);
         setError(null);

@@ -39,7 +39,7 @@ function WorkspaceItem({
         <Button
           variant="ghost"
           size="icon"
-          className="size-6 opacity-0 group-hover:opacity-100"
+          className="size-6 opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
           onClick={() => onCreate(workspace.id)}
           aria-label="New conversation"
         >
