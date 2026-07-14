@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { rmSync } from "node:fs";
 import { homedir } from "node:os";
+import { join } from "node:path";
 import { loadConfig, parseConfig } from "./config.ts";
 
 describe("parseConfig", () => {
@@ -9,15 +10,15 @@ describe("parseConfig", () => {
     expect(result.isOk()).toBe(true);
     expect(result._unsafeUnwrap()).toEqual({
       port: 4141,
-      projectsRoot: homedir(),
+      workspaceCwd: join(homedir(), ".pico"),
     });
   });
 
   test("accepts explicit values", () => {
-    const result = parseConfig({ port: 8080, projectsRoot: "/tmp/projects" });
+    const result = parseConfig({ port: 8080, workspaceCwd: "/tmp/projects" });
     expect(result._unsafeUnwrap()).toEqual({
       port: 8080,
-      projectsRoot: "/tmp/projects",
+      workspaceCwd: "/tmp/projects",
     });
   });
 
@@ -33,7 +34,7 @@ describe("loadConfig", () => {
     );
     expect(result._unsafeUnwrap()).toEqual({
       port: 4141,
-      projectsRoot: homedir(),
+      workspaceCwd: join(homedir(), ".pico"),
     });
   });
 
@@ -44,7 +45,7 @@ describe("loadConfig", () => {
       const result = await loadConfig(path);
       expect(result._unsafeUnwrap()).toEqual({
         port: 5000,
-        projectsRoot: homedir(),
+        workspaceCwd: join(homedir(), ".pico"),
       });
     } finally {
       rmSync(path, { force: true });

@@ -3,9 +3,11 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { openDb } from "../store/db.ts";
 import {
   createConversation,
+  createWorkspace,
   getConversation,
-  getOrCreateWebWorkspace,
+  getOrCreateDefaultWorkspace,
   listConversations,
+  listWorkspaces,
 } from "./store.ts";
 
 let db: Database;
@@ -18,25 +20,33 @@ afterEach(() => {
   db.close();
 });
 
-describe("getOrCreateWebWorkspace", () => {
-  test("creates a web workspace with null externalId", () => {
-    const ws = getOrCreateWebWorkspace(db, "/projects");
+describe("workspaces", () => {
+  test("createWorkspace stores a web workspace", () => {
+    const ws = createWorkspace(db, { cwd: "/projects", label: "alpha" });
     expect(ws.platform).toBe("web");
     expect(ws.externalId).toBeNull();
     expect(ws.cwd).toBe("/projects");
+    expect(ws.label).toBe("alpha");
   });
 
-  test("returns the same workspace on repeated calls", () => {
-    const first = getOrCreateWebWorkspace(db, "/projects");
-    const second = getOrCreateWebWorkspace(db, "/other");
+  test("listWorkspaces returns all web workspaces oldest first", () => {
+    const a = createWorkspace(db, { cwd: "/a", label: "a" });
+    const b = createWorkspace(db, { cwd: "/b", label: "b" });
+    expect(listWorkspaces(db).map((w) => w.id)).toEqual([a.id, b.id]);
+  });
+
+  test("getOrCreateDefaultWorkspace bootstraps once then reuses", () => {
+    const first = getOrCreateDefaultWorkspace(db, "/projects");
+    const second = getOrCreateDefaultWorkspace(db, "/other");
     expect(second.id).toBe(first.id);
     expect(second.cwd).toBe("/projects");
+    expect(listWorkspaces(db)).toHaveLength(1);
   });
 });
 
 describe("conversations", () => {
   test("create then get round-trips", () => {
-    const ws = getOrCreateWebWorkspace(db, "/projects");
+    const ws = createWorkspace(db, { cwd: "/projects", label: "w" });
     const created = createConversation(db, {
       workspaceId: ws.id,
       cwd: "/projects",
@@ -46,7 +56,7 @@ describe("conversations", () => {
   });
 
   test("lists newest first and excludes archived", () => {
-    const ws = getOrCreateWebWorkspace(db, "/projects");
+    const ws = createWorkspace(db, { cwd: "/projects", label: "w" });
     const a = createConversation(db, {
       workspaceId: ws.id,
       cwd: "/projects",

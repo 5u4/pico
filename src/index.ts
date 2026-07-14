@@ -3,19 +3,23 @@ import { loadConfig } from "./config/config";
 import { provisionRuntime } from "./omp/runtime";
 import { Sessions } from "./omp/sessions";
 import { defaultDbPath, openDb } from "./store/db";
+import type { Conversation } from "./store/schema";
 import index from "./web/client/index.html";
 import { toUiMessages } from "./web/convert";
 import {
   type ClientCommand,
-  type ConversationSummary,
   parseClientCommand,
   type ServerEvent,
+  type WorkspaceSummary,
 } from "./web/protocol";
 import {
   createConversation,
+  createWorkspace,
   getConversation,
-  getOrCreateWebWorkspace,
+  getOrCreateDefaultWorkspace,
+  getWorkspace,
   listConversations,
+  listWorkspaces,
 } from "./web/store";
 
 type WsData = { conversationId: string | null };
@@ -38,17 +42,21 @@ if (provisioned.isErr()) {
 }
 
 const db = openDb(defaultDbPath());
-const workspace = getOrCreateWebWorkspace(db, config.projectsRoot);
+getOrCreateDefaultWorkspace(db, config.workspaceCwd);
 const sessions = new Sessions(provisioned.value);
 
 const allSockets = new Set<Ws>();
 const subscribers = new Map<string, Set<Ws>>();
 const subscribed = new Set<string>();
 
-function summaries(): ConversationSummary[] {
-  return listConversations(db, workspace.id).map((c) => ({
-    id: c.id,
-    title: c.title,
+function workspaceTree(): WorkspaceSummary[] {
+  return listWorkspaces(db).map((w) => ({
+    id: w.id,
+    label: w.label,
+    conversations: listConversations(db, w.id).map((c) => ({
+      id: c.id,
+      title: c.title,
+    })),
   }));
 }
 
@@ -97,12 +105,12 @@ function attach(ws: Ws, conversationId: string): void {
   set.add(ws);
 }
 
-function sendConversations(ws: Ws): void {
+function sendWorkspaces(ws: Ws): void {
   const activeId = ws.data.conversationId;
   if (!activeId) return;
   const event: ServerEvent = {
-    kind: "conversations",
-    items: summaries(),
+    kind: "workspaces",
+    items: workspaceTree(),
     activeId,
   };
   ws.send(JSON.stringify(event));
@@ -124,7 +132,7 @@ async function activate(
     return;
   }
   attach(ws, conversationId);
-  sendConversations(ws);
+  sendWorkspaces(ws);
   const snap = snapshotFor(conversationId);
   if (snap) ws.send(JSON.stringify(snap));
 }
@@ -155,7 +163,10 @@ async function handleCommand(ws: Ws, command: ClientCommand): Promise<void> {
 
   if (command.kind === "select") {
     const conversation = getConversation(db, command.conversationId);
-    if (!conversation || conversation.workspaceId !== workspace.id) {
+    const target = conversation
+      ? getWorkspace(db, conversation.workspaceId)
+      : undefined;
+    if (!conversation || !target || target.platform !== "web") {
       sendError(ws, `unknown conversation: ${command.conversationId}`);
       return;
     }
@@ -163,13 +174,33 @@ async function handleCommand(ws: Ws, command: ClientCommand): Promise<void> {
     return;
   }
 
+  if (command.kind === "createWorkspace") {
+    const created = createWorkspace(db, {
+      cwd: config.workspaceCwd,
+      label: command.label,
+    });
+    const conversation = createConversation(db, {
+      workspaceId: created.id,
+      cwd: created.cwd,
+      title: null,
+    });
+    await activate(ws, conversation.id, conversation.cwd);
+    for (const other of allSockets) if (other !== ws) sendWorkspaces(other);
+    return;
+  }
+
+  const target = getWorkspace(db, command.workspaceId);
+  if (target?.platform !== "web") {
+    sendError(ws, `unknown workspace: ${command.workspaceId}`);
+    return;
+  }
   const created = createConversation(db, {
-    workspaceId: workspace.id,
-    cwd: workspace.cwd,
+    workspaceId: target.id,
+    cwd: target.cwd,
     title: command.title ?? null,
   });
   await activate(ws, created.id, created.cwd);
-  for (const other of allSockets) if (other !== ws) sendConversations(other);
+  for (const other of allSockets) if (other !== ws) sendWorkspaces(other);
 }
 
 const server = Bun.serve<WsData, "/">({
@@ -201,19 +232,25 @@ const server = Bun.serve<WsData, "/">({
   websocket: {
     async open(ws) {
       allSockets.add(ws);
-      const existing = listConversations(db, workspace.id);
-      const first = existing[0];
-      const active =
-        first ??
-        createConversation(db, {
-          workspaceId: workspace.id,
-          cwd: workspace.cwd,
+      let active = listWorkspaces(db)
+        .flatMap((w) => listConversations(db, w.id))
+        .reduce<Conversation | undefined>(
+          (newest, c) =>
+            newest === undefined || c.createdAt > newest.createdAt ? c : newest,
+          undefined,
+        );
+      const created = active === undefined;
+      if (!active) {
+        const target = getOrCreateDefaultWorkspace(db, config.workspaceCwd);
+        active = createConversation(db, {
+          workspaceId: target.id,
+          cwd: target.cwd,
           title: null,
         });
+      }
       await activate(ws, active.id, active.cwd);
-      if (!first) {
-        for (const other of allSockets)
-          if (other !== ws) sendConversations(other);
+      if (created) {
+        for (const other of allSockets) if (other !== ws) sendWorkspaces(other);
       }
     },
     async message(ws, raw) {
@@ -236,5 +273,5 @@ const server = Bun.serve<WsData, "/">({
 });
 
 console.log(
-  `pico web on http://localhost:${server.port} (projects ${workspace.cwd})`,
+  `pico web on http://localhost:${server.port} (workspaces in ${config.workspaceCwd})`,
 );

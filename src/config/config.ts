@@ -5,7 +5,7 @@ import { z } from "zod";
 
 export const configSchema = z.object({
   port: z.number().int().positive().default(4141),
-  projectsRoot: z.string().min(1).default(homedir()),
+  workspaceCwd: z.string().min(1).default(join(homedir(), ".pico")),
 });
 
 export type Config = z.infer<typeof configSchema>;

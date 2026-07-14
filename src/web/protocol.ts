@@ -4,7 +4,12 @@ export const clientCommandSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("prompt"), text: z.string().min(1) }),
   z.object({ kind: z.literal("abort") }),
   z.object({ kind: z.literal("select"), conversationId: z.string().min(1) }),
-  z.object({ kind: z.literal("create"), title: z.string().min(1).optional() }),
+  z.object({
+    kind: z.literal("create"),
+    workspaceId: z.string().min(1),
+    title: z.string().min(1).optional(),
+  }),
+  z.object({ kind: z.literal("createWorkspace"), label: z.string().min(1) }),
 ]);
 
 export type ClientCommand = z.infer<typeof clientCommandSchema>;
@@ -12,6 +17,12 @@ export type ClientCommand = z.infer<typeof clientCommandSchema>;
 export type ConversationSummary = {
   id: string;
   title: string | null;
+};
+
+export type WorkspaceSummary = {
+  id: string;
+  label: string | null;
+  conversations: ConversationSummary[];
 };
 
 export type JsonValue =
@@ -43,7 +54,7 @@ export type UiMessage = {
 };
 
 export type ServerEvent =
-  | { kind: "conversations"; items: ConversationSummary[]; activeId: string }
+  | { kind: "workspaces"; items: WorkspaceSummary[]; activeId: string }
   | {
       kind: "snapshot";
       conversationId: string;

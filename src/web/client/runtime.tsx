@@ -16,9 +16,9 @@ import {
 } from "react";
 import type {
   ClientCommand,
-  ConversationSummary,
   ServerEvent,
   UiMessage,
+  WorkspaceSummary,
 } from "../protocol";
 
 function convertMessage(message: UiMessage): ThreadMessageLike {
@@ -40,27 +40,43 @@ function convertMessage(message: UiMessage): ThreadMessageLike {
   };
 }
 
-type PicoContextValue = {
-  conversations: ConversationSummary[];
+type ShellContextValue = {
+  workspaces: WorkspaceSummary[];
   activeId: string | null;
   error: string | null;
   dismissError: () => void;
   select: (conversationId: string) => void;
-  create: () => void;
+  create: (workspaceId: string) => void;
+  createWorkspace: (label: string) => void;
 };
 
-const PicoContext = createContext<PicoContextValue | null>(null);
+type ThreadContextValue = {
+  activeId: string | null;
+  messages: UiMessage[];
+  isRunning: boolean;
+  prompt: (text: string) => void;
+  cancel: () => void;
+};
 
-export function usePico(): PicoContextValue {
-  const value = useContext(PicoContext);
-  if (!value) throw new Error("usePico must be used within RuntimeProvider");
+const ShellContext = createContext<ShellContextValue | null>(null);
+const ThreadContext = createContext<ThreadContextValue | null>(null);
+
+export function useShell(): ShellContextValue {
+  const value = useContext(ShellContext);
+  if (!value) throw new Error("useShell must be used within RuntimeProvider");
+  return value;
+}
+
+export function useThread(): ThreadContextValue {
+  const value = useContext(ThreadContext);
+  if (!value) throw new Error("useThread must be used within RuntimeProvider");
   return value;
 }
 
 export function RuntimeProvider({ children }: { children: ReactNode }) {
   const [messages, setMessages] = useState<UiMessage[]>([]);
   const [isRunning, setIsRunning] = useState(false);
-  const [conversations, setConversations] = useState<ConversationSummary[]>([]);
+  const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
@@ -83,8 +99,8 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
         setError("received a malformed message from the server");
         return;
       }
-      if (parsed.kind === "conversations") {
-        setConversations(parsed.items);
+      if (parsed.kind === "workspaces") {
+        setWorkspaces(parsed.items);
         activeIdRef.current = parsed.activeId;
         setActiveId(parsed.activeId);
       } else if (parsed.kind === "snapshot") {
@@ -108,6 +124,86 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
     else pendingRef.current.push(payload);
   }, []);
 
+  const prompt = useCallback(
+    (text: string) => {
+      send({ kind: "prompt", text });
+    },
+    [send],
+  );
+  const cancel = useCallback(() => {
+    send({ kind: "abort" });
+  }, [send]);
+
+  const dismissError = useCallback(() => setError(null), []);
+  const select = useCallback(
+    (conversationId: string) => {
+      if (conversationId === activeIdRef.current) return;
+      activeIdRef.current = conversationId;
+      setActiveId(conversationId);
+      setMessages([]);
+      setIsRunning(false);
+      setError(null);
+      send({ kind: "select", conversationId });
+    },
+    [send],
+  );
+  const create = useCallback(
+    (workspaceId: string) => {
+      activeIdRef.current = null;
+      setActiveId(null);
+      setMessages([]);
+      setIsRunning(false);
+      setError(null);
+      send({ kind: "create", workspaceId });
+    },
+    [send],
+  );
+  const createWorkspace = useCallback(
+    (label: string) => {
+      activeIdRef.current = null;
+      setActiveId(null);
+      setMessages([]);
+      setIsRunning(false);
+      setError(null);
+      send({ kind: "createWorkspace", label });
+    },
+    [send],
+  );
+
+  const shell = useMemo<ShellContextValue>(
+    () => ({
+      workspaces,
+      activeId,
+      error,
+      dismissError,
+      select,
+      create,
+      createWorkspace,
+    }),
+    [
+      workspaces,
+      activeId,
+      error,
+      dismissError,
+      select,
+      create,
+      createWorkspace,
+    ],
+  );
+  const thread = useMemo<ThreadContextValue>(
+    () => ({ activeId, messages, isRunning, prompt, cancel }),
+    [activeId, messages, isRunning, prompt, cancel],
+  );
+
+  return (
+    <ShellContext.Provider value={shell}>
+      <ThreadContext.Provider value={thread}>{children}</ThreadContext.Provider>
+    </ShellContext.Provider>
+  );
+}
+
+export function AssistantPane({ children }: { children: ReactNode }) {
+  const { activeId, messages, isRunning, prompt, cancel } = useThread();
   const runtime = useExternalStoreRuntime({
     isRunning,
     messages,
@@ -116,47 +212,17 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       const part = message.content[0];
       if (part?.type !== "text")
         throw new Error("only text messages are supported");
-      send({ kind: "prompt", text: part.text });
+      prompt(part.text);
       return Promise.resolve();
     },
     onCancel: () => {
-      send({ kind: "abort" });
+      cancel();
       return Promise.resolve();
     },
   });
-
-  const pico = useMemo<PicoContextValue>(
-    () => ({
-      conversations,
-      activeId,
-      error,
-      dismissError: () => setError(null),
-      select: (conversationId) => {
-        if (conversationId === activeIdRef.current) return;
-        activeIdRef.current = conversationId;
-        setActiveId(conversationId);
-        setMessages([]);
-        setIsRunning(false);
-        setError(null);
-        send({ kind: "select", conversationId });
-      },
-      create: () => {
-        activeIdRef.current = null;
-        setMessages([]);
-        setIsRunning(false);
-        setError(null);
-        send({ kind: "create" });
-      },
-    }),
-    [conversations, activeId, error, send],
-  );
-
-  const value = useMemo(() => runtime, [runtime]);
   return (
-    <PicoContext.Provider value={pico}>
-      <AssistantRuntimeProvider runtime={value}>
-        {children}
-      </AssistantRuntimeProvider>
-    </PicoContext.Provider>
+    <AssistantRuntimeProvider key={activeId ?? "none"} runtime={runtime}>
+      {children}
+    </AssistantRuntimeProvider>
   );
 }
