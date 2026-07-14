@@ -7,6 +7,7 @@ import {
   SessionManager,
 } from "@oh-my-pi/pi-coding-agent";
 import { err, ok, type Result, ResultAsync } from "neverthrow";
+import { isValidId } from "../util/id";
 import type { OmpRuntime } from "./runtime";
 
 export interface OpenOptions {
@@ -23,6 +24,7 @@ export class Sessions {
   private readonly sessionsRoot: string;
   private readonly live = new Map<string, AgentSession>();
   private readonly pending = new Map<string, Promise<AgentSession>>();
+  private generation = 0;
 
   constructor(runtime: OmpRuntime, options: SessionsOptions = {}) {
     this.runtime = runtime;
@@ -34,9 +36,13 @@ export class Sessions {
     conversationId: string,
     options: OpenOptions,
   ): Promise<Result<AgentSession, string>> {
+    if (!isValidId(conversationId)) {
+      return err(`invalid conversation id: ${conversationId}`);
+    }
     const existing = this.live.get(conversationId);
     if (existing) return ok(existing);
 
+    const generation = this.generation;
     const inFlight = this.pending.get(conversationId);
     const build = inFlight ?? this.construct(conversationId, options);
     if (!inFlight) this.pending.set(conversationId, build);
@@ -47,6 +53,10 @@ export class Sessions {
     this.pending.delete(conversationId);
     if (built.isErr()) return err(built.error);
 
+    if (this.generation !== generation) {
+      await built.value.dispose();
+      return err("sessions closed during open");
+    }
     this.live.set(conversationId, built.value);
     return ok(built.value);
   }
@@ -63,12 +73,20 @@ export class Sessions {
   }
 
   async closeAll(): Promise<void> {
-    const sessions = [...this.live.values()];
+    this.generation++;
+    const building = [...this.pending.values()];
+    const live = [...this.live.values()];
     this.live.clear();
-    await Promise.allSettled(sessions.map((session) => session.dispose()));
+    const settled = await Promise.allSettled(building);
+    const built = settled.flatMap((r) =>
+      r.status === "fulfilled" ? [r.value] : [],
+    );
+    await Promise.allSettled(
+      [...live, ...built].map((session) => session.dispose()),
+    );
   }
 
-  private async construct(
+  protected async construct(
     conversationId: string,
     options: OpenOptions,
   ): Promise<AgentSession> {

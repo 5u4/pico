@@ -36,13 +36,18 @@ export async function provisionRuntime(
   );
   if (built.isErr()) return err(built.error);
 
-  const { settings, authStorage, modelRegistry } = built.value;
+  const { settings, authStorage, modelRegistry, refreshError } = built.value;
   const available = modelRegistry.getAvailable();
   const defaultModel =
     resolveRoleSelection(["default"], settings, available)?.model ??
     pickDefaultAvailableModel(available) ??
     available[0];
-  if (!defaultModel) return err("no available model resolved from registry");
+  if (!defaultModel) {
+    const base = "no available model resolved from registry";
+    return err(
+      refreshError ? `${base} (model refresh failed: ${refreshError})` : base,
+    );
+  }
 
   return ok({ agentDir, settings, authStorage, modelRegistry, defaultModel });
 }
@@ -50,10 +55,15 @@ export async function provisionRuntime(
 async function build(
   cwd: string,
   agentDir: string,
-): Promise<Omit<OmpRuntime, "agentDir" | "defaultModel">> {
+): Promise<
+  Omit<OmpRuntime, "agentDir" | "defaultModel"> & { refreshError?: string }
+> {
   const settings = await Settings.init({ cwd, agentDir });
   const authStorage = await discoverAuthStorage(agentDir);
   const modelRegistry = new ModelRegistry(authStorage);
-  await modelRegistry.refresh("online-if-uncached").catch(() => {});
-  return { settings, authStorage, modelRegistry };
+  const refreshError = await modelRegistry
+    .refresh("online-if-uncached")
+    .then(() => undefined)
+    .catch((e: unknown) => (e instanceof Error ? e.message : String(e)));
+  return { settings, authStorage, modelRegistry, refreshError };
 }
