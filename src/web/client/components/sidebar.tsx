@@ -1,6 +1,7 @@
 import { PlusIcon } from "lucide-react";
 import { cn } from "../lib/utils";
 import { usePico } from "../runtime";
+import { ModeToggle } from "./mode-toggle";
 import { Button } from "./ui/button";
 
 export function Sidebar() {
@@ -33,6 +34,10 @@ export function Sidebar() {
           </button>
         ))}
       </nav>
+      <div className="flex items-center justify-between border-t border-border p-2">
+        <span className="px-2 text-xs text-muted-foreground">pico</span>
+        <ModeToggle />
+      </div>
     </aside>
   );
 }

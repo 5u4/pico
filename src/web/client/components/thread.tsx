@@ -2,58 +2,21 @@ import {
   ActionBarPrimitive,
   ComposerPrimitive,
   MessagePrimitive,
-  type ReasoningMessagePartComponent,
-  type TextMessagePartComponent,
   ThreadPrimitive,
-  type ToolCallMessagePartComponent,
 } from "@assistant-ui/react";
 import { ArrowUpIcon, CopyIcon, SquareIcon } from "lucide-react";
+import { MarkdownText } from "./assistant-ui/markdown-text";
+import { Reasoning, ReasoningGroup } from "./assistant-ui/reasoning";
+import { ToolFallback } from "./assistant-ui/tool-fallback";
+import { ToolGroup } from "./assistant-ui/tool-group";
+import { TooltipIconButton } from "./assistant-ui/tooltip-icon-button";
 import { Button } from "./ui/button";
-
-const MessageText: TextMessagePartComponent = ({ text }) => {
-  return <span className="whitespace-pre-wrap break-words">{text}</span>;
-};
-
-const MessageReasoning: ReasoningMessagePartComponent = ({ text }) => {
-  return (
-    <p className="whitespace-pre-wrap break-words border-l-2 border-border pl-3 text-sm text-muted-foreground italic">
-      {text}
-    </p>
-  );
-};
-
-const ToolFallback: ToolCallMessagePartComponent = ({
-  toolName,
-  args,
-  result,
-  isError,
-}) => {
-  return (
-    <div className="my-1 rounded-lg border border-border bg-muted/40 text-sm">
-      <div className="flex items-center gap-2 px-3 py-1.5 font-medium">
-        <span className={isError ? "text-destructive" : "text-foreground"}>
-          {toolName}
-        </span>
-      </div>
-      <pre className="overflow-x-auto px-3 pb-1 text-xs text-muted-foreground">
-        {JSON.stringify(args, null, 2)}
-      </pre>
-      {result !== undefined && (
-        <pre className="overflow-x-auto border-t border-border px-3 py-1.5 text-xs whitespace-pre-wrap">
-          {typeof result === "string"
-            ? result
-            : JSON.stringify(result, null, 2)}
-        </pre>
-      )}
-    </div>
-  );
-};
 
 function UserMessage() {
   return (
     <MessagePrimitive.Root className="flex justify-end">
       <div className="max-w-[80%] rounded-2xl bg-muted px-4 py-2 text-foreground">
-        <MessagePrimitive.Parts components={{ Text: MessageText }} />
+        <MessagePrimitive.Parts components={{ Text: MarkdownText }} />
       </div>
     </MessagePrimitive.Root>
   );
@@ -65,8 +28,10 @@ function AssistantMessage() {
       <div className="leading-relaxed text-foreground">
         <MessagePrimitive.Parts
           components={{
-            Text: MessageText,
-            Reasoning: MessageReasoning,
+            Text: MarkdownText,
+            Reasoning,
+            ReasoningGroup,
+            ToolGroup,
             tools: { Fallback: ToolFallback },
           }}
         />
@@ -77,9 +42,9 @@ function AssistantMessage() {
         className="flex gap-1 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100"
       >
         <ActionBarPrimitive.Copy asChild>
-          <Button variant="ghost" size="icon" className="size-7">
-            <CopyIcon className="size-4" />
-          </Button>
+          <TooltipIconButton tooltip="Copy">
+            <CopyIcon />
+          </TooltipIconButton>
         </ActionBarPrimitive.Copy>
       </ActionBarPrimitive.Root>
     </MessagePrimitive.Root>

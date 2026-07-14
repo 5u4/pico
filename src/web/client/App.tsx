@@ -1,4 +1,5 @@
 import "./styles.css";
+import { ThemeProvider } from "next-themes";
 import { Sidebar } from "./components/sidebar";
 import { Thread } from "./components/thread";
 import { RuntimeProvider, usePico } from "./runtime";
@@ -22,16 +23,18 @@ function ErrorBanner() {
 
 export function App() {
   return (
-    <RuntimeProvider>
-      <div className="flex h-dvh">
-        <Sidebar />
-        <div className="flex min-w-0 flex-1 flex-col">
-          <ErrorBanner />
-          <div className="min-h-0 flex-1">
-            <Thread />
+    <ThemeProvider attribute="class" defaultTheme="system" enableSystem>
+      <RuntimeProvider>
+        <div className="flex h-dvh">
+          <Sidebar />
+          <div className="flex min-w-0 flex-1 flex-col">
+            <ErrorBanner />
+            <div className="min-h-0 flex-1">
+              <Thread />
+            </div>
           </div>
         </div>
-      </div>
-    </RuntimeProvider>
+      </RuntimeProvider>
+    </ThemeProvider>
   );
 }
