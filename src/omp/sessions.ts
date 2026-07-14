@@ -1,0 +1,94 @@
+import { mkdirSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import {
+  type AgentSession,
+  createAgentSession,
+  SessionManager,
+} from "@oh-my-pi/pi-coding-agent";
+import { err, ok, type Result, ResultAsync } from "neverthrow";
+import type { OmpRuntime } from "./runtime";
+
+export interface OpenOptions {
+  cwd: string;
+  continueFromFile?: string;
+}
+
+export interface SessionsOptions {
+  sessionsRoot?: string;
+}
+
+export class Sessions {
+  private readonly runtime: OmpRuntime;
+  private readonly sessionsRoot: string;
+  private readonly live = new Map<string, AgentSession>();
+  private readonly pending = new Map<string, Promise<AgentSession>>();
+
+  constructor(runtime: OmpRuntime, options: SessionsOptions = {}) {
+    this.runtime = runtime;
+    this.sessionsRoot =
+      options.sessionsRoot ?? join(homedir(), ".pico", "sessions");
+  }
+
+  async open(
+    conversationId: string,
+    options: OpenOptions,
+  ): Promise<Result<AgentSession, string>> {
+    const existing = this.live.get(conversationId);
+    if (existing) return ok(existing);
+
+    const inFlight = this.pending.get(conversationId);
+    const build = inFlight ?? this.construct(conversationId, options);
+    if (!inFlight) this.pending.set(conversationId, build);
+
+    const built = await ResultAsync.fromPromise(build, (e) =>
+      e instanceof Error ? e.message : String(e),
+    );
+    this.pending.delete(conversationId);
+    if (built.isErr()) return err(built.error);
+
+    this.live.set(conversationId, built.value);
+    return ok(built.value);
+  }
+
+  get(conversationId: string): AgentSession | undefined {
+    return this.live.get(conversationId);
+  }
+
+  async close(conversationId: string): Promise<void> {
+    const session = this.live.get(conversationId);
+    if (!session) return;
+    this.live.delete(conversationId);
+    await session.dispose();
+  }
+
+  async closeAll(): Promise<void> {
+    const sessions = [...this.live.values()];
+    this.live.clear();
+    await Promise.allSettled(sessions.map((session) => session.dispose()));
+  }
+
+  private async construct(
+    conversationId: string,
+    options: OpenOptions,
+  ): Promise<AgentSession> {
+    const sessionDir = join(this.sessionsRoot, conversationId);
+    mkdirSync(sessionDir, { recursive: true });
+
+    const sessionManager = options.continueFromFile
+      ? await SessionManager.open(options.continueFromFile, sessionDir)
+      : SessionManager.create(options.cwd, sessionDir);
+
+    const { session } = await createAgentSession({
+      cwd: options.cwd,
+      sessionManager,
+      model: this.runtime.defaultModel,
+      agentDir: this.runtime.agentDir,
+      settings: this.runtime.settings,
+      authStorage: this.runtime.authStorage,
+      modelRegistry: this.runtime.modelRegistry,
+      skipPythonPreflight: true,
+    });
+    return session;
+  }
+}
