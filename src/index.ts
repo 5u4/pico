@@ -181,6 +181,17 @@ const server = Bun.serve<WsData, "/">({
   fetch(req, srv) {
     const url = new URL(req.url);
     if (url.pathname === "/ws") {
+      const origin = req.headers.get("origin");
+      if (origin) {
+        let sameOrigin = false;
+        try {
+          sameOrigin = new URL(origin).host === req.headers.get("host");
+        } catch {
+          sameOrigin = false;
+        }
+        if (!sameOrigin)
+          return new Response("forbidden origin", { status: 403 });
+      }
       return srv.upgrade(req, { data: { conversationId: null } })
         ? undefined
         : new Response("upgrade failed", { status: 400 });
