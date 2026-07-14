@@ -41,8 +41,12 @@ export function getOrCreateDefaultWorkspace(
   db: Database,
   cwd: string,
 ): Workspace {
-  const existing = listWorkspaces(db)[0];
-  if (existing) return existing;
+  const existing = db
+    .query(
+      "SELECT * FROM workspaces WHERE platform = 'web' ORDER BY createdAt ASC LIMIT 1",
+    )
+    .get();
+  if (existing) return workspaceSchema.parse(existing);
   return createWorkspace(db, { cwd, label: DEFAULT_WORKSPACE_LABEL });
 }
 

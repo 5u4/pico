@@ -2,7 +2,7 @@ import { ChevronRightIcon, FolderIcon, PlusIcon } from "lucide-react";
 import { useState } from "react";
 import type { WorkspaceSummary } from "../../protocol";
 import { cn } from "../lib/utils";
-import { usePico } from "../runtime";
+import { useShell } from "../runtime";
 import { ModeToggle } from "./mode-toggle";
 import { Button } from "./ui/button";
 import {
@@ -73,7 +73,7 @@ function WorkspaceItem({
 }
 
 export function Sidebar() {
-  const { workspaces, activeId, select, create, createWorkspace } = usePico();
+  const { workspaces, activeId, select, create, createWorkspace } = useShell();
   const [naming, setNaming] = useState(false);
   const [name, setName] = useState("");
 
@@ -113,6 +113,7 @@ export function Sidebar() {
               }
             }}
             onBlur={submit}
+            aria-label="Workspace name"
             placeholder="workspace name"
             className="w-full rounded-md border border-input bg-background px-2 py-1 text-sm outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
           />

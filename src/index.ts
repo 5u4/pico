@@ -3,6 +3,7 @@ import { loadConfig } from "./config/config";
 import { provisionRuntime } from "./omp/runtime";
 import { Sessions } from "./omp/sessions";
 import { defaultDbPath, openDb } from "./store/db";
+import type { Conversation } from "./store/schema";
 import index from "./web/client/index.html";
 import { toUiMessages } from "./web/convert";
 import {
@@ -232,8 +233,12 @@ const server = Bun.serve<WsData, "/">({
     async open(ws) {
       allSockets.add(ws);
       let active = listWorkspaces(db)
-        .map((w) => listConversations(db, w.id)[0])
-        .find((c) => c !== undefined);
+        .flatMap((w) => listConversations(db, w.id))
+        .reduce<Conversation | undefined>(
+          (newest, c) =>
+            newest === undefined || c.createdAt > newest.createdAt ? c : newest,
+          undefined,
+        );
       const created = active === undefined;
       if (!active) {
         const target = getOrCreateDefaultWorkspace(db, config.workspaceCwd);
