@@ -148,8 +148,7 @@ async function maybeAutoTitle(
   if (getConversation(db, conversationId)?.title != null) return;
   const title = await autoTitle(session, text).catch(() => null);
   if (!title) return;
-  if (getConversation(db, conversationId)?.title != null) return;
-  setConversationTitle(db, conversationId, title);
+  if (!setConversationTitle(db, conversationId, title)) return;
   if (!session.sessionName) {
     await session.setSessionName(title, "auto").catch((e: unknown) => {
       console.error(`title sync to omp session failed: ${e}`);

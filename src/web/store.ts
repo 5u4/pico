@@ -105,9 +105,11 @@ export function setConversationTitle(
   db: Database,
   id: string,
   title: string,
-): void {
-  db.query("UPDATE conversations SET title = $title WHERE id = $id").run({
-    id,
-    title,
-  });
+): boolean {
+  const result = db
+    .query(
+      "UPDATE conversations SET title = $title WHERE id = $id AND title IS NULL",
+    )
+    .run({ id, title });
+  return result.changes > 0;
 }
