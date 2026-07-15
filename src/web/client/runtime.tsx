@@ -20,6 +20,13 @@ import type {
   UiMessage,
   WorkspaceSummary,
 } from "../protocol";
+import {
+  type Action,
+  initialState,
+  reduce,
+  selectIsRunning,
+  selectView,
+} from "./state";
 
 function convertMessage(message: UiMessage): ThreadMessageLike {
   return {
@@ -74,35 +81,34 @@ export function useThread(): ThreadContextValue {
 }
 
 export function RuntimeProvider({ children }: { children: ReactNode }) {
-  const [messages, setMessages] = useState<UiMessage[]>([]);
-  const [isRunning, setIsRunning] = useState(false);
-  const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
-  const [activeId, setActiveId] = useState<string | null>(null);
-  const [threadKey, setThreadKey] = useState("");
-  const [pending, setPending] = useState<UiMessage | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const stateRef = useRef(initialState);
+  const [state, setState] = useState(initialState);
   const socketRef = useRef<WebSocket | null>(null);
-  const activeIdRef = useRef<string | null>(null);
-  const draftWorkspaceRef = useRef<string | null>(null);
-  const pendingRef = useRef<{ baseUserCount: number } | null>(null);
-  const draftSeqRef = useRef(0);
   const outbox = useRef<string[]>([]);
 
-  const applyServer = useCallback((next: UiMessage[]) => {
-    setMessages(next);
-    const p = pendingRef.current;
-    if (p) {
-      const userCount = next.filter((m) => m.role === "user").length;
-      if (userCount > p.baseUserCount) {
-        pendingRef.current = null;
-        setPending(null);
-      }
-    }
+  const send = useCallback((command: ClientCommand) => {
+    const payload = JSON.stringify(command);
+    const socket = socketRef.current;
+    if (socket && socket.readyState === WebSocket.OPEN) socket.send(payload);
+    else outbox.current.push(payload);
   }, []);
-  const nextDraftKey = useCallback(() => {
-    draftSeqRef.current += 1;
-    return `draft-${draftSeqRef.current}`;
-  }, []);
+
+  const flush = useCallback(
+    (commands: ClientCommand[]) => {
+      for (const command of commands) send(command);
+    },
+    [send],
+  );
+
+  const dispatch = useCallback(
+    (action: Action) => {
+      const result = reduce(stateRef.current, action);
+      stateRef.current = result.state;
+      setState(result.state);
+      flush(result.commands);
+    },
+    [flush],
+  );
 
   useEffect(() => {
     const scheme = location.protocol === "https:" ? "wss" : "ws";
@@ -117,172 +123,73 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       try {
         parsed = JSON.parse(event.data) as ServerEvent;
       } catch {
-        setError("received a malformed message from the server");
+        stateRef.current = {
+          ...stateRef.current,
+          error: "received a malformed message from the server",
+        };
+        setState(stateRef.current);
         return;
       }
-      if (parsed.kind === "workspaces") {
-        setWorkspaces(parsed.items);
-        if (parsed.activeId !== null) {
-          activeIdRef.current = parsed.activeId;
-          draftWorkspaceRef.current = null;
-          setActiveId(parsed.activeId);
-          setThreadKey((k) => (k === "" ? (parsed.activeId ?? "") : k));
-        } else if (parsed.draftWorkspaceId) {
-          activeIdRef.current = null;
-          draftWorkspaceRef.current = parsed.draftWorkspaceId;
-          pendingRef.current = null;
-          setActiveId(null);
-          setMessages([]);
-          setPending(null);
-          setIsRunning(false);
-          setThreadKey(nextDraftKey());
-        } else {
-          activeIdRef.current = null;
-          setActiveId(null);
-        }
-      } else if (parsed.kind === "snapshot") {
-        if (parsed.conversationId !== activeIdRef.current) return;
-        applyServer(parsed.messages);
-        setIsRunning(parsed.isStreaming);
-      } else if (parsed.kind === "stream") {
-        if (parsed.conversationId !== activeIdRef.current) return;
-        setIsRunning(parsed.isStreaming);
-        const tail = parsed.message;
-        if (tail)
-          setMessages((prev) => {
-            const last = prev.length - 1;
-            if (last >= 0 && prev[last]?.id === tail.id) {
-              const next = prev.slice();
-              next[last] = tail;
-              return next;
-            }
-            const index = prev.findIndex((m) => m.id === tail.id);
-            if (index === -1) return [...prev, tail];
-            const next = prev.slice();
-            next[index] = tail;
-            return next;
-          });
-      } else {
-        pendingRef.current = null;
-        setPending(null);
-        setIsRunning(false);
-        setError(parsed.message);
-      }
+      dispatch({ type: "server", event: parsed });
     };
     return () => {
       socketRef.current = null;
       socket.close();
     };
-  }, [applyServer, nextDraftKey]);
-
-  const send = useCallback((command: ClientCommand) => {
-    const payload = JSON.stringify(command);
-    const socket = socketRef.current;
-    if (socket && socket.readyState === WebSocket.OPEN) socket.send(payload);
-    else outbox.current.push(payload);
-  }, []);
+  }, [dispatch]);
 
   const prompt = useCallback(
-    (text: string) => {
-      const draftWorkspaceId = draftWorkspaceRef.current;
-      if (activeIdRef.current === null && !draftWorkspaceId) {
-        setError("no workspace selected for the new conversation");
-        return;
-      }
-      pendingRef.current = {
-        baseUserCount: messages.filter((m) => m.role === "user").length,
-      };
-      setPending({
-        id: "pending-user",
-        role: "user",
-        parts: [{ type: "text", text }],
-      });
-      if (draftWorkspaceId !== null && activeIdRef.current === null) {
-        send({ kind: "create", workspaceId: draftWorkspaceId, prompt: text });
-      } else {
-        send({ kind: "prompt", text });
-      }
-    },
-    [send, messages],
+    (text: string) => dispatch({ type: "prompt", text }),
+    [dispatch],
   );
-  const cancel = useCallback(() => {
-    pendingRef.current = null;
-    setPending(null);
-    send({ kind: "abort" });
-  }, [send]);
-
-  const dismissError = useCallback(() => setError(null), []);
+  const cancel = useCallback(() => dispatch({ type: "cancel" }), [dispatch]);
+  const dismissError = useCallback(
+    () => dispatch({ type: "dismissError" }),
+    [dispatch],
+  );
   const select = useCallback(
-    (conversationId: string) => {
-      if (conversationId === activeIdRef.current) return;
-      activeIdRef.current = conversationId;
-      draftWorkspaceRef.current = null;
-      pendingRef.current = null;
-      setActiveId(conversationId);
-      setThreadKey(conversationId);
-      setMessages([]);
-      setPending(null);
-      setIsRunning(false);
-      setError(null);
-      send({ kind: "select", conversationId });
-    },
-    [send],
+    (conversationId: string) => dispatch({ type: "select", conversationId }),
+    [dispatch],
   );
   const create = useCallback(
-    (workspaceId: string) => {
-      activeIdRef.current = null;
-      draftWorkspaceRef.current = workspaceId;
-      pendingRef.current = null;
-      setActiveId(null);
-      setThreadKey(nextDraftKey());
-      setMessages([]);
-      setPending(null);
-      setIsRunning(false);
-      setError(null);
-      send({ kind: "draft" });
-    },
-    [send, nextDraftKey],
+    (workspaceId: string) => dispatch({ type: "create", workspaceId }),
+    [dispatch],
   );
   const createWorkspace = useCallback(
-    (label: string) => {
-      send({ kind: "createWorkspace", label });
-    },
-    [send],
+    (label: string) => dispatch({ type: "createWorkspace", label }),
+    [dispatch],
   );
 
   const shell = useMemo<ShellContextValue>(
     () => ({
-      workspaces,
-      activeId,
-      error,
+      workspaces: state.workspaces,
+      activeId: state.activeId,
+      error: state.error,
       dismissError,
       select,
       create,
       createWorkspace,
     }),
     [
-      workspaces,
-      activeId,
-      error,
+      state.workspaces,
+      state.activeId,
+      state.error,
       dismissError,
       select,
       create,
       createWorkspace,
     ],
   );
-  const view = useMemo(
-    () => (pending ? [...messages, pending] : messages),
-    [messages, pending],
-  );
+  const view = useMemo(() => selectView(state), [state]);
   const thread = useMemo<ThreadContextValue>(
     () => ({
-      threadKey,
+      threadKey: state.threadKey,
       messages: view,
-      isRunning: isRunning || pending !== null,
+      isRunning: selectIsRunning(state),
       prompt,
       cancel,
     }),
-    [threadKey, view, isRunning, pending, prompt, cancel],
+    [state, view, prompt, cancel],
   );
 
   return (
