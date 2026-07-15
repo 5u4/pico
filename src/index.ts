@@ -139,13 +139,18 @@ function attach(ws: Ws, conversationId: string): void {
   set.add(ws);
 }
 
-function sendWorkspaces(ws: Ws): void {
-  const activeId = ws.data.conversationId;
-  if (!activeId) return;
+function detach(ws: Ws): void {
+  if (ws.data.conversationId)
+    subscribers.get(ws.data.conversationId)?.delete(ws);
+  ws.data.conversationId = null;
+}
+
+function sendWorkspaces(ws: Ws, draftWorkspaceId?: string): void {
   const event: ServerEvent = {
     kind: "workspaces",
     items: workspaceTree(),
-    activeId,
+    activeId: ws.data.conversationId,
+    ...(draftWorkspaceId ? { draftWorkspaceId } : {}),
   };
   ws.send(JSON.stringify(event));
 }
@@ -188,6 +193,22 @@ async function maybeAutoTitle(
   for (const ws of allSockets) sendWorkspaces(ws);
 }
 
+async function runPrompt(
+  ws: Ws,
+  conversationId: string,
+  session: AgentSession,
+  text: string,
+): Promise<void> {
+  void maybeAutoTitle(conversationId, session, text).catch((e: unknown) => {
+    console.error(`auto-title failed: ${e}`);
+  });
+  const error = await session
+    .prompt(text)
+    .then(() => undefined)
+    .catch((e: unknown) => (e instanceof Error ? e.message : String(e)));
+  if (error) sendError(ws, error);
+}
+
 async function handleCommand(ws: Ws, command: ClientCommand): Promise<void> {
   if (command.kind === "prompt" || command.kind === "abort") {
     const conversationId = ws.data.conversationId;
@@ -197,16 +218,7 @@ async function handleCommand(ws: Ws, command: ClientCommand): Promise<void> {
       return;
     }
     if (command.kind === "prompt") {
-      void maybeAutoTitle(conversationId, session, command.text).catch(
-        (e: unknown) => {
-          console.error(`auto-title failed: ${e}`);
-        },
-      );
-      const error = await session
-        .prompt(command.text)
-        .then(() => undefined)
-        .catch((e: unknown) => (e instanceof Error ? e.message : String(e)));
-      if (error) sendError(ws, error);
+      await runPrompt(ws, conversationId, session, command.text);
     } else {
       const error = await session
         .abort()
@@ -214,6 +226,12 @@ async function handleCommand(ws: Ws, command: ClientCommand): Promise<void> {
         .catch((e: unknown) => (e instanceof Error ? e.message : String(e)));
       if (error) sendError(ws, error);
     }
+    return;
+  }
+
+  if (command.kind === "draft") {
+    detach(ws);
+    sendWorkspaces(ws);
     return;
   }
 
@@ -235,12 +253,8 @@ async function handleCommand(ws: Ws, command: ClientCommand): Promise<void> {
       cwd: config.workspaceCwd,
       label: command.label,
     });
-    const conversation = createConversation(db, {
-      workspaceId: created.id,
-      cwd: created.cwd,
-      title: null,
-    });
-    await activate(ws, conversation.id, conversation.cwd);
+    detach(ws);
+    sendWorkspaces(ws, created.id);
     for (const other of allSockets) if (other !== ws) sendWorkspaces(other);
     return;
   }
@@ -253,10 +267,23 @@ async function handleCommand(ws: Ws, command: ClientCommand): Promise<void> {
   const created = createConversation(db, {
     workspaceId: target.id,
     cwd: target.cwd,
-    title: command.title ?? null,
+    title: null,
   });
-  await activate(ws, created.id, created.cwd);
+  const error = await ensureOpen(created.id, created.cwd);
+  if (error) {
+    sendError(ws, error);
+    return;
+  }
+  attach(ws, created.id);
+  sendWorkspaces(ws);
   for (const other of allSockets) if (other !== ws) sendWorkspaces(other);
+  const session = sessions.get(created.id);
+  if (command.prompt && session) {
+    await runPrompt(ws, created.id, session, command.prompt);
+  } else {
+    const snap = snapshotFor(created.id);
+    if (snap) ws.send(JSON.stringify(snap));
+  }
 }
 
 const server = Bun.serve<WsData, "/">({
@@ -288,25 +315,18 @@ const server = Bun.serve<WsData, "/">({
   websocket: {
     async open(ws) {
       allSockets.add(ws);
-      let active = listWorkspaces(db)
+      const active = listWorkspaces(db)
         .flatMap((w) => listConversations(db, w.id))
         .reduce<Conversation | undefined>(
           (newest, c) =>
             newest === undefined || c.createdAt > newest.createdAt ? c : newest,
           undefined,
         );
-      const created = active === undefined;
-      if (!active) {
+      if (active) {
+        await activate(ws, active.id, active.cwd);
+      } else {
         const target = getOrCreateDefaultWorkspace(db, config.workspaceCwd);
-        active = createConversation(db, {
-          workspaceId: target.id,
-          cwd: target.cwd,
-          title: null,
-        });
-      }
-      await activate(ws, active.id, active.cwd);
-      if (created) {
-        for (const other of allSockets) if (other !== ws) sendWorkspaces(other);
+        sendWorkspaces(ws, target.id);
       }
     },
     async message(ws, raw) {

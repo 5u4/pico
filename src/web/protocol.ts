@@ -7,9 +7,10 @@ export const clientCommandSchema = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("create"),
     workspaceId: z.string().min(1),
-    title: z.string().min(1).optional(),
+    prompt: z.string().min(1).optional(),
   }),
   z.object({ kind: z.literal("createWorkspace"), label: z.string().min(1) }),
+  z.object({ kind: z.literal("draft") }),
 ]);
 
 export type ClientCommand = z.infer<typeof clientCommandSchema>;
@@ -54,7 +55,12 @@ export type UiMessage = {
 };
 
 export type ServerEvent =
-  | { kind: "workspaces"; items: WorkspaceSummary[]; activeId: string }
+  | {
+      kind: "workspaces";
+      items: WorkspaceSummary[];
+      activeId: string | null;
+      draftWorkspaceId?: string;
+    }
   | {
       kind: "snapshot";
       conversationId: string;

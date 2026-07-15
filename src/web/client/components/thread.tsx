@@ -30,9 +30,15 @@ import { TooltipIconButton } from "./assistant-ui/tooltip-icon-button";
 import { Button } from "./ui/button";
 
 function UserMessage() {
+  const isPending = useAuiState((s) => s.message.id === "pending-user");
   return (
     <MessagePrimitive.Root className="flex justify-end">
-      <div className="max-w-[80%] rounded-2xl bg-muted px-4 py-2 text-foreground">
+      <div
+        className={cn(
+          "max-w-[80%] rounded-2xl bg-muted px-4 py-2 text-foreground transition-opacity",
+          isPending && "opacity-60",
+        )}
+      >
         <MessagePrimitive.Parts components={{ Text: MarkdownText }} />
       </div>
     </MessagePrimitive.Root>
