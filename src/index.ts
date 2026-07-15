@@ -1,3 +1,4 @@
+import { dispose } from "@logtape/logtape";
 import { loadConfig } from "./config/config";
 import { Engine } from "./engine/conversations";
 import { getOrCreateDefaultWorkspace } from "./engine/registry";
@@ -8,22 +9,28 @@ import { WebHub } from "./platforms/web/adapter";
 import index from "./platforms/web/client/index.html";
 import { parseClientCommand } from "./platforms/web/protocol";
 import { defaultDbPath, openDb } from "./store/db";
+import { configureLogging, log } from "./util/log";
 
 type WsData = { conversationId: string | null };
 
 const cwd = process.cwd();
 
+await configureLogging();
+const boot = log(["boot"]);
+
 const config = (await loadConfig()).match(
   (c) => c,
   (e) => {
-    console.error(`failed to load config: ${e}`);
+    boot.error("failed to load config: {error}", { error: e });
     process.exit(1);
   },
 );
 
 const provisioned = await provisionRuntime({ cwd });
 if (provisioned.isErr()) {
-  console.error(`failed to provision omp runtime: ${provisioned.error}`);
+  boot.error("failed to provision omp runtime: {error}", {
+    error: provisioned.error,
+  });
   process.exit(1);
 }
 
@@ -37,6 +44,7 @@ const hub = new WebHub({
   workspaceCwd: config.workspaceCwd,
 });
 
+const net = log(["net"]);
 const server = Bun.serve<WsData, "/">({
   port: config.port,
   development: Bun.env.NODE_ENV !== "production",
@@ -54,12 +62,17 @@ const server = Bun.serve<WsData, "/">({
         } catch {
           sameOrigin = false;
         }
-        if (!sameOrigin)
+        if (!sameOrigin) {
+          net.warning("rejected ws upgrade from forbidden origin {origin}", {
+            origin,
+          });
           return new Response("forbidden origin", { status: 403 });
+        }
       }
-      return srv.upgrade(req, { data: { conversationId: null } })
-        ? undefined
-        : new Response("upgrade failed", { status: 400 });
+      if (srv.upgrade(req, { data: { conversationId: null } }))
+        return undefined;
+      net.warning("ws upgrade failed");
+      return new Response("upgrade failed", { status: 400 });
     }
     return new Response("not found", { status: 404 });
   },
@@ -73,10 +86,17 @@ const server = Bun.serve<WsData, "/">({
       try {
         parsed = JSON.parse(text);
       } catch {
+        net.debug("dropped malformed ws frame ({bytes} bytes)", {
+          bytes: text.length,
+        });
         return;
       }
       const command = parseClientCommand(parsed);
-      if (command) await hub.handleCommand(ws, command);
+      if (!command) {
+        net.debug("dropped unrecognized ws command");
+        return;
+      }
+      await hub.handleCommand(ws, command);
     },
     close(ws) {
       hub.handleClose(ws);
@@ -84,6 +104,22 @@ const server = Bun.serve<WsData, "/">({
   },
 });
 
-console.log(
-  `pico web on http://localhost:${server.port} (workspaces in ${config.workspaceCwd})`,
+boot.info(
+  "pico web on http://localhost:{port} (workspaces in {workspaceCwd})",
+  { port: server.port, workspaceCwd: config.workspaceCwd },
 );
+
+let shuttingDown = false;
+const shutdown = async (signal: string): Promise<void> => {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  boot.info("shutting down ({signal})", { signal });
+  server.stop();
+  await sessions.closeAll();
+  db.close();
+  await dispose();
+  process.exit(0);
+};
+
+process.on("SIGINT", () => void shutdown("SIGINT"));
+process.on("SIGTERM", () => void shutdown("SIGTERM"));
