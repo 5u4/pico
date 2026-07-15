@@ -17,7 +17,7 @@ import type { Conversation, Platform } from "../../store/schema";
 import type { ClientCommand, ServerEvent, WorkspaceSummary } from "./protocol";
 
 const PLATFORM: Platform = "web";
-const DEFAULT_LABEL = "web";
+const DEFAULT_LABEL = "default";
 
 export interface HubSocket {
   data: { conversationId: string | null };
