@@ -18,19 +18,20 @@ const cwd = process.cwd();
 await configureLogging();
 const boot = log(["boot"]);
 
-const config = (await loadConfig()).match(
-  (c) => c,
-  (e) => {
-    boot.error("failed to load config: {error}", { error: e });
-    process.exit(1);
-  },
-);
+const loaded = await loadConfig();
+if (loaded.isErr()) {
+  boot.error("failed to load config: {error}", { error: loaded.error });
+  await dispose();
+  process.exit(1);
+}
+const config = loaded.value;
 
 const provisioned = await provisionRuntime({ cwd });
 if (provisioned.isErr()) {
   boot.error("failed to provision omp runtime: {error}", {
     error: provisioned.error,
   });
+  await dispose();
   process.exit(1);
 }
 
