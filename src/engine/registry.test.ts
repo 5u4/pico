@@ -9,7 +9,7 @@ import {
   listConversations,
   listWorkspaces,
   setConversationTitle,
-} from "./store.ts";
+} from "./registry.ts";
 
 let db: Database;
 
@@ -22,32 +22,41 @@ afterEach(() => {
 });
 
 describe("workspaces", () => {
-  test("createWorkspace stores a web workspace", () => {
-    const ws = createWorkspace(db, { cwd: "/projects", label: "alpha" });
+  test("createWorkspace stores a platform workspace", () => {
+    const ws = createWorkspace(db, {
+      cwd: "/projects",
+      platform: "web",
+      label: "alpha",
+    });
     expect(ws.platform).toBe("web");
     expect(ws.externalId).toBeNull();
     expect(ws.cwd).toBe("/projects");
     expect(ws.label).toBe("alpha");
   });
 
-  test("listWorkspaces returns all web workspaces oldest first", () => {
-    const a = createWorkspace(db, { cwd: "/a", label: "a" });
-    const b = createWorkspace(db, { cwd: "/b", label: "b" });
-    expect(listWorkspaces(db).map((w) => w.id)).toEqual([a.id, b.id]);
+  test("listWorkspaces filters by platform, oldest first", () => {
+    const a = createWorkspace(db, { cwd: "/a", platform: "web", label: "a" });
+    const b = createWorkspace(db, { cwd: "/b", platform: "web", label: "b" });
+    createWorkspace(db, { cwd: "/c", platform: "discord", label: "c" });
+    expect(listWorkspaces(db, "web").map((w) => w.id)).toEqual([a.id, b.id]);
   });
 
   test("getOrCreateDefaultWorkspace bootstraps once then reuses", () => {
-    const first = getOrCreateDefaultWorkspace(db, "/projects");
-    const second = getOrCreateDefaultWorkspace(db, "/other");
+    const first = getOrCreateDefaultWorkspace(db, "web", "/projects", "web");
+    const second = getOrCreateDefaultWorkspace(db, "web", "/other", "web");
     expect(second.id).toBe(first.id);
     expect(second.cwd).toBe("/projects");
-    expect(listWorkspaces(db)).toHaveLength(1);
+    expect(listWorkspaces(db, "web")).toHaveLength(1);
   });
 });
 
 describe("conversations", () => {
   test("create then get round-trips", () => {
-    const ws = createWorkspace(db, { cwd: "/projects", label: "w" });
+    const ws = createWorkspace(db, {
+      cwd: "/projects",
+      platform: "web",
+      label: "w",
+    });
     const created = createConversation(db, {
       workspaceId: ws.id,
       cwd: "/projects",
@@ -57,7 +66,11 @@ describe("conversations", () => {
   });
 
   test("lists newest first and excludes archived", () => {
-    const ws = createWorkspace(db, { cwd: "/projects", label: "w" });
+    const ws = createWorkspace(db, {
+      cwd: "/projects",
+      platform: "web",
+      label: "w",
+    });
     const a = createConversation(db, {
       workspaceId: ws.id,
       cwd: "/projects",
@@ -80,7 +93,11 @@ describe("conversations", () => {
   });
 
   test("setConversationTitle names an untitled conversation once", () => {
-    const ws = createWorkspace(db, { cwd: "/projects", label: "w" });
+    const ws = createWorkspace(db, {
+      cwd: "/projects",
+      platform: "web",
+      label: "w",
+    });
     const c = createConversation(db, {
       workspaceId: ws.id,
       cwd: "/projects",
@@ -91,7 +108,11 @@ describe("conversations", () => {
   });
 
   test("setConversationTitle refuses to overwrite an existing title", () => {
-    const ws = createWorkspace(db, { cwd: "/projects", label: "w" });
+    const ws = createWorkspace(db, {
+      cwd: "/projects",
+      platform: "web",
+      label: "w",
+    });
     const c = createConversation(db, {
       workspaceId: ws.id,
       cwd: "/projects",

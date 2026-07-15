@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import type { UiMessage, WorkspaceSummary } from "../protocol";
+import type { Message } from "../../../engine/message";
+import type { WorkspaceSummary } from "../protocol";
 import {
   initialState,
   reduce,
@@ -8,11 +9,11 @@ import {
   type ThreadState,
 } from "./state";
 
-function userMessage(id: string): UiMessage {
+function userMessage(id: string): Message {
   return { id, role: "user", parts: [{ type: "text", text: id }] };
 }
 
-function assistantMessage(id: string): UiMessage {
+function assistantMessage(id: string): Message {
   return { id, role: "assistant", parts: [{ type: "text", text: id }] };
 }
 

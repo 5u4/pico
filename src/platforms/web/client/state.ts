@@ -1,19 +1,15 @@
-import { assertNever } from "../../util/assert";
-import type {
-  ClientCommand,
-  ServerEvent,
-  UiMessage,
-  WorkspaceSummary,
-} from "../protocol";
+import type { Message } from "../../../engine/message";
+import { assertNever } from "../../../util/assert";
+import type { ClientCommand, ServerEvent, WorkspaceSummary } from "../protocol";
 
 export type ThreadState = {
-  messages: UiMessage[];
+  messages: Message[];
   isRunning: boolean;
   workspaces: WorkspaceSummary[];
   activeId: string | null;
   draftWorkspaceId: string | null;
   threadKey: string;
-  pending: UiMessage | null;
+  pending: Message | null;
   pendingBaseUserCount: number | null;
   error: string | null;
   draftSeq: number;
@@ -43,7 +39,7 @@ export type Action =
 
 type Reduced = { state: ThreadState; commands: ClientCommand[] };
 
-function mergeTail(prev: UiMessage[], tail: UiMessage): UiMessage[] {
+function mergeTail(prev: Message[], tail: Message): Message[] {
   const last = prev.length - 1;
   if (last >= 0 && prev[last]?.id === tail.id) {
     const next = prev.slice();
@@ -59,7 +55,7 @@ function mergeTail(prev: UiMessage[], tail: UiMessage): UiMessage[] {
 
 function clearPendingIfResolved(
   state: ThreadState,
-  messages: UiMessage[],
+  messages: Message[],
 ): Pick<ThreadState, "pending" | "pendingBaseUserCount"> {
   if (state.pendingBaseUserCount === null) {
     return {
@@ -167,7 +163,7 @@ function reducePrompt(state: ThreadState, text: string): Reduced {
       commands: [],
     };
   }
-  const pending: UiMessage = {
+  const pending: Message = {
     id: "pending-user",
     role: "user",
     parts: [{ type: "text", text }],
@@ -249,7 +245,7 @@ export function reduce(state: ThreadState, action: Action): Reduced {
   }
 }
 
-export function selectView(state: ThreadState): UiMessage[] {
+export function selectView(state: ThreadState): Message[] {
   return state.pending ? [...state.messages, state.pending] : state.messages;
 }
 
