@@ -100,7 +100,7 @@ function AssistantActionBar() {
 
 function Composer() {
   return (
-    <ComposerPrimitive.Root className="flex items-end gap-2 rounded-(--composer-radius) border border-border/60 bg-(--composer-bg) p-(--composer-padding) transition-[border-color] focus-within:border-border dark:border-muted-foreground/15 dark:focus-within:border-muted-foreground/30">
+    <ComposerPrimitive.Root className="flex items-center gap-2 rounded-(--composer-radius) border border-border/60 bg-(--composer-bg) p-(--composer-padding) transition-[border-color] focus-within:border-border dark:border-muted-foreground/15 dark:focus-within:border-muted-foreground/30">
       <ComposerPrimitive.Input
         autoFocus
         rows={1}
