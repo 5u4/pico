@@ -48,4 +48,29 @@ describe("readPersisted", () => {
     writePersisted<string | null>(KEY, null);
     expect(readPersisted(KEY, z.string().nullable(), "x")).toBeNull();
   });
+  test("returns the fallback when storage access throws", () => {
+    const original = localStorage.getItem;
+    localStorage.getItem = () => {
+      throw new Error("SecurityError");
+    };
+    try {
+      expect(readPersisted(KEY, z.boolean(), true)).toBe(true);
+    } finally {
+      localStorage.getItem = original;
+    }
+  });
+});
+
+describe("writePersisted", () => {
+  test("swallows storage write failures", () => {
+    const original = localStorage.setItem;
+    localStorage.setItem = () => {
+      throw new Error("QuotaExceededError");
+    };
+    try {
+      expect(() => writePersisted(KEY, "x")).not.toThrow();
+    } finally {
+      localStorage.setItem = original;
+    }
+  });
 });

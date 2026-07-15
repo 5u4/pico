@@ -12,20 +12,22 @@ export function readPersisted<T>(
   schema: z.ZodType<T>,
   fallback: T,
 ): T {
-  const raw = localStorage.getItem(key);
-  if (raw === null) return fallback;
-  let parsed: unknown;
   try {
-    parsed = JSON.parse(raw);
+    const raw = localStorage.getItem(key);
+    if (raw === null) return fallback;
+    const result = schema.safeParse(JSON.parse(raw));
+    return result.success ? result.data : fallback;
   } catch {
     return fallback;
   }
-  const result = schema.safeParse(parsed);
-  return result.success ? result.data : fallback;
 }
 
 export function writePersisted<T>(key: string, value: T): void {
-  localStorage.setItem(key, JSON.stringify(value));
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    return;
+  }
 }
 
 export function usePersisted<T>(

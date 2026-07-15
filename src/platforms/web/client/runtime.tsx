@@ -154,7 +154,11 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       );
     const first = state.workspaces[0];
     if (exists) dispatch({ type: "select", conversationId: wanted });
-    else if (first) dispatch({ type: "create", workspaceId: first.id });
+    else {
+      if (wanted !== null)
+        writePersisted(PERSIST_KEYS.activeConversation, null);
+      if (first) dispatch({ type: "create", workspaceId: first.id });
+    }
   }, [state.workspaces, state.activeId, state.draftWorkspaceId, dispatch]);
 
   useEffect(() => {
