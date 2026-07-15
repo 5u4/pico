@@ -1,7 +1,7 @@
 import { ChevronRightIcon, FolderIcon, PlusIcon } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { z } from "zod";
-import type { WorkspaceSummary } from "../../protocol";
+import type { ConversationSummary, WorkspaceSummary } from "../../protocol";
 import { cn } from "../lib/utils";
 import { PERSIST_KEYS, usePersisted } from "../persist";
 import { useShell } from "../runtime";
@@ -12,6 +12,29 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from "./ui/collapsible";
+
+function ConversationRow({
+  conversation,
+  active,
+  onSelect,
+}: {
+  conversation: ConversationSummary;
+  active: boolean;
+  onSelect: (id: string) => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={() => onSelect(conversation.id)}
+      className={cn(
+        "mb-0.5 w-full truncate rounded-md px-3 py-1.5 text-left text-sm transition-colors hover:bg-accent hover:text-accent-foreground",
+        active && "bg-accent text-accent-foreground",
+      )}
+    >
+      {conversation.title ?? "New chat"}
+    </button>
+  );
+}
 
 function WorkspaceItem({
   workspace,
@@ -28,17 +51,14 @@ function WorkspaceItem({
   onSelect: (id: string) => void;
   onCreate: (workspaceId: string) => void;
 }) {
-  const hasActive =
-    activeId !== null && workspace.conversations.some((c) => c.id === activeId);
+  const activeConversation =
+    activeId === null
+      ? undefined
+      : workspace.conversations.find((c) => c.id === activeId);
   return (
     <Collapsible open={open} onOpenChange={onOpenChange} className="mb-1">
       <div className="group flex items-center gap-1 rounded-md pr-1 hover:bg-accent/50">
-        <CollapsibleTrigger
-          className={cn(
-            "flex min-w-0 flex-1 items-center gap-1.5 rounded-md px-2 py-1.5 text-left text-sm",
-            !open && hasActive && "bg-accent/60 text-accent-foreground",
-          )}
-        >
+        <CollapsibleTrigger className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md px-2 py-1.5 text-left text-sm">
           <ChevronRightIcon
             className={cn(
               "size-3.5 shrink-0 text-muted-foreground transition-transform",
@@ -58,6 +78,15 @@ function WorkspaceItem({
           <PlusIcon className="size-3.5" />
         </Button>
       </div>
+      {!open && activeConversation && (
+        <div className="ml-4 border-l border-border pl-1">
+          <ConversationRow
+            conversation={activeConversation}
+            active
+            onSelect={onSelect}
+          />
+        </div>
+      )}
       <CollapsibleContent className="ml-4 border-l border-border pl-1">
         {workspace.conversations.length === 0 ? (
           <div className="px-3 py-1.5 text-xs text-muted-foreground">
@@ -65,18 +94,12 @@ function WorkspaceItem({
           </div>
         ) : (
           workspace.conversations.map((conversation) => (
-            <button
+            <ConversationRow
               key={conversation.id}
-              type="button"
-              onClick={() => onSelect(conversation.id)}
-              className={cn(
-                "mb-0.5 w-full truncate rounded-md px-3 py-1.5 text-left text-sm transition-colors hover:bg-accent hover:text-accent-foreground",
-                conversation.id === activeId &&
-                  "bg-accent text-accent-foreground",
-              )}
-            >
-              {conversation.title ?? "New chat"}
-            </button>
+              conversation={conversation}
+              active={conversation.id === activeId}
+              onSelect={onSelect}
+            />
           ))
         )}
       </CollapsibleContent>
@@ -93,19 +116,6 @@ export function Sidebar({ collapsed }: { collapsed: boolean }) {
     z.array(z.string()),
     [],
   );
-  const prevActive = useRef<string | null>(null);
-
-  useEffect(() => {
-    if (activeId === prevActive.current) return;
-    prevActive.current = activeId;
-    if (activeId === null) return;
-    const owner = workspaces.find((w) =>
-      w.conversations.some((c) => c.id === activeId),
-    );
-    if (!owner) return;
-    setCollapsedIds((ids) => ids.filter((id) => id !== owner.id));
-  }, [activeId, workspaces, setCollapsedIds]);
-
   const setWorkspaceOpen = (id: string, open: boolean) => {
     setCollapsedIds((ids) => {
       const has = ids.includes(id);
