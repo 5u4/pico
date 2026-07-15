@@ -51,7 +51,7 @@ type ShellContextValue = {
 };
 
 type ThreadContextValue = {
-  activeId: string | null;
+  threadKey: string;
   messages: UiMessage[];
   isRunning: boolean;
   prompt: (text: string) => void;
@@ -78,18 +78,39 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
   const [isRunning, setIsRunning] = useState(false);
   const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
+  const [threadKey, setThreadKey] = useState("");
+  const [pending, setPending] = useState<UiMessage | null>(null);
   const [error, setError] = useState<string | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
   const activeIdRef = useRef<string | null>(null);
-  const pendingRef = useRef<string[]>([]);
+  const draftWorkspaceRef = useRef<string | null>(null);
+  const pendingRef = useRef<{ baseUserCount: number } | null>(null);
+  const draftSeqRef = useRef(0);
+  const outbox = useRef<string[]>([]);
+
+  const applyServer = useCallback((next: UiMessage[]) => {
+    setMessages(next);
+    const p = pendingRef.current;
+    if (p) {
+      const userCount = next.filter((m) => m.role === "user").length;
+      if (userCount > p.baseUserCount) {
+        pendingRef.current = null;
+        setPending(null);
+      }
+    }
+  }, []);
+  const nextDraftKey = useCallback(() => {
+    draftSeqRef.current += 1;
+    return `draft-${draftSeqRef.current}`;
+  }, []);
 
   useEffect(() => {
     const scheme = location.protocol === "https:" ? "wss" : "ws";
     const socket = new WebSocket(`${scheme}://${location.host}/ws`);
     socketRef.current = socket;
     socket.onopen = () => {
-      for (const payload of pendingRef.current) socket.send(payload);
-      pendingRef.current = [];
+      for (const payload of outbox.current) socket.send(payload);
+      outbox.current = [];
     };
     socket.onmessage = (event) => {
       let parsed: ServerEvent;
@@ -101,11 +122,27 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       }
       if (parsed.kind === "workspaces") {
         setWorkspaces(parsed.items);
-        activeIdRef.current = parsed.activeId;
-        setActiveId(parsed.activeId);
+        if (parsed.activeId !== null) {
+          activeIdRef.current = parsed.activeId;
+          draftWorkspaceRef.current = null;
+          setActiveId(parsed.activeId);
+          setThreadKey((k) => (k === "" ? (parsed.activeId ?? "") : k));
+        } else if (parsed.draftWorkspaceId) {
+          activeIdRef.current = null;
+          draftWorkspaceRef.current = parsed.draftWorkspaceId;
+          pendingRef.current = null;
+          setActiveId(null);
+          setMessages([]);
+          setPending(null);
+          setIsRunning(false);
+          setThreadKey(nextDraftKey());
+        } else {
+          activeIdRef.current = null;
+          setActiveId(null);
+        }
       } else if (parsed.kind === "snapshot") {
         if (parsed.conversationId !== activeIdRef.current) return;
-        setMessages(parsed.messages);
+        applyServer(parsed.messages);
         setIsRunning(parsed.isStreaming);
       } else if (parsed.kind === "stream") {
         if (parsed.conversationId !== activeIdRef.current) return;
@@ -126,6 +163,9 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
             return next;
           });
       } else {
+        pendingRef.current = null;
+        setPending(null);
+        setIsRunning(false);
         setError(parsed.message);
       }
     };
@@ -133,22 +173,41 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       socketRef.current = null;
       socket.close();
     };
-  }, []);
+  }, [applyServer, nextDraftKey]);
 
   const send = useCallback((command: ClientCommand) => {
     const payload = JSON.stringify(command);
     const socket = socketRef.current;
     if (socket && socket.readyState === WebSocket.OPEN) socket.send(payload);
-    else pendingRef.current.push(payload);
+    else outbox.current.push(payload);
   }, []);
 
   const prompt = useCallback(
     (text: string) => {
-      send({ kind: "prompt", text });
+      const draftWorkspaceId = draftWorkspaceRef.current;
+      if (activeIdRef.current === null && !draftWorkspaceId) {
+        setError("no workspace selected for the new conversation");
+        return;
+      }
+      pendingRef.current = {
+        baseUserCount: messages.filter((m) => m.role === "user").length,
+      };
+      setPending({
+        id: "pending-user",
+        role: "user",
+        parts: [{ type: "text", text }],
+      });
+      if (draftWorkspaceId !== null && activeIdRef.current === null) {
+        send({ kind: "create", workspaceId: draftWorkspaceId, prompt: text });
+      } else {
+        send({ kind: "prompt", text });
+      }
     },
-    [send],
+    [send, messages],
   );
   const cancel = useCallback(() => {
+    pendingRef.current = null;
+    setPending(null);
     send({ kind: "abort" });
   }, [send]);
 
@@ -157,8 +216,12 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
     (conversationId: string) => {
       if (conversationId === activeIdRef.current) return;
       activeIdRef.current = conversationId;
+      draftWorkspaceRef.current = null;
+      pendingRef.current = null;
       setActiveId(conversationId);
+      setThreadKey(conversationId);
       setMessages([]);
+      setPending(null);
       setIsRunning(false);
       setError(null);
       send({ kind: "select", conversationId });
@@ -168,21 +231,20 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
   const create = useCallback(
     (workspaceId: string) => {
       activeIdRef.current = null;
+      draftWorkspaceRef.current = workspaceId;
+      pendingRef.current = null;
       setActiveId(null);
+      setThreadKey(nextDraftKey());
       setMessages([]);
+      setPending(null);
       setIsRunning(false);
       setError(null);
-      send({ kind: "create", workspaceId });
+      send({ kind: "draft" });
     },
-    [send],
+    [send, nextDraftKey],
   );
   const createWorkspace = useCallback(
     (label: string) => {
-      activeIdRef.current = null;
-      setActiveId(null);
-      setMessages([]);
-      setIsRunning(false);
-      setError(null);
       send({ kind: "createWorkspace", label });
     },
     [send],
@@ -208,9 +270,19 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       createWorkspace,
     ],
   );
+  const view = useMemo(
+    () => (pending ? [...messages, pending] : messages),
+    [messages, pending],
+  );
   const thread = useMemo<ThreadContextValue>(
-    () => ({ activeId, messages, isRunning, prompt, cancel }),
-    [activeId, messages, isRunning, prompt, cancel],
+    () => ({
+      threadKey,
+      messages: view,
+      isRunning: isRunning || pending !== null,
+      prompt,
+      cancel,
+    }),
+    [threadKey, view, isRunning, pending, prompt, cancel],
   );
 
   return (
@@ -221,7 +293,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
 }
 
 export function AssistantPane({ children }: { children: ReactNode }) {
-  const { activeId, messages, isRunning, prompt, cancel } = useThread();
+  const { threadKey, messages, isRunning, prompt, cancel } = useThread();
   const runtime = useExternalStoreRuntime({
     isRunning,
     messages,
@@ -239,7 +311,7 @@ export function AssistantPane({ children }: { children: ReactNode }) {
     },
   });
   return (
-    <AssistantRuntimeProvider key={activeId ?? "none"} runtime={runtime}>
+    <AssistantRuntimeProvider key={threadKey || "none"} runtime={runtime}>
       {children}
     </AssistantRuntimeProvider>
   );
