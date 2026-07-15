@@ -13,7 +13,7 @@ import {
   listConversations,
   listWorkspaces,
 } from "../../engine/registry";
-import type { Conversation, Platform } from "../../store/schema";
+import type { Platform } from "../../store/schema";
 import type { ClientCommand, ServerEvent, WorkspaceSummary } from "./protocol";
 
 const PLATFORM: Platform = "web";
@@ -43,26 +43,18 @@ export class WebHub<S extends SessionLike = SessionLike> {
     this.deps = deps;
   }
 
-  async handleOpen(ws: HubSocket): Promise<void> {
+  handleOpen(ws: HubSocket): void {
     this.allSockets.add(ws);
-    const active = listWorkspaces(this.deps.db, PLATFORM)
-      .flatMap((w) => listConversations(this.deps.db, w.id))
-      .reduce<Conversation | undefined>(
-        (newest, c) =>
-          newest === undefined || c.createdAt > newest.createdAt ? c : newest,
-        undefined,
-      );
-    if (active) {
-      await this.activate(ws, active.id, active.cwd);
-    } else {
-      const target = getOrCreateDefaultWorkspace(
-        this.deps.db,
-        PLATFORM,
-        this.deps.workspaceCwd,
-        DEFAULT_LABEL,
-      );
-      this.sendWorkspaces(ws, target.id);
-    }
+    const target = getOrCreateDefaultWorkspace(
+      this.deps.db,
+      PLATFORM,
+      this.deps.workspaceCwd,
+      DEFAULT_LABEL,
+    );
+    const hasConversations = listWorkspaces(this.deps.db, PLATFORM).some(
+      (w) => listConversations(this.deps.db, w.id).length > 0,
+    );
+    this.sendWorkspaces(ws, hasConversations ? undefined : target.id);
   }
 
   handleClose(ws: HubSocket): void {

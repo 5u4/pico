@@ -14,8 +14,10 @@ import {
   useRef,
   useState,
 } from "react";
+import { z } from "zod";
 import type { Message } from "../../../engine/message";
 import type { ClientCommand, ServerEvent, WorkspaceSummary } from "../protocol";
+import { PERSIST_KEYS, readPersisted, writePersisted } from "./persist";
 import {
   type Action,
   initialState,
@@ -133,6 +135,32 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       socket.close();
     };
   }, [dispatch]);
+
+  const bootstrapped = useRef(false);
+  useEffect(() => {
+    if (bootstrapped.current) return;
+    if (state.workspaces.length === 0) return;
+    if (state.activeId !== null || state.draftWorkspaceId !== null) return;
+    bootstrapped.current = true;
+    const wanted = readPersisted(
+      PERSIST_KEYS.activeConversation,
+      z.string().nullable(),
+      null,
+    );
+    const exists =
+      wanted !== null &&
+      state.workspaces.some((w) =>
+        w.conversations.some((c) => c.id === wanted),
+      );
+    const first = state.workspaces[0];
+    if (exists) dispatch({ type: "select", conversationId: wanted });
+    else if (first) dispatch({ type: "create", workspaceId: first.id });
+  }, [state.workspaces, state.activeId, state.draftWorkspaceId, dispatch]);
+
+  useEffect(() => {
+    if (!bootstrapped.current) return;
+    writePersisted(PERSIST_KEYS.activeConversation, state.activeId);
+  }, [state.activeId]);
 
   const prompt = useCallback(
     (text: string) => dispatch({ type: "prompt", text }),

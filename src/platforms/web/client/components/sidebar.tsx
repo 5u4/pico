@@ -1,7 +1,9 @@
 import { ChevronRightIcon, FolderIcon, PlusIcon } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { z } from "zod";
 import type { WorkspaceSummary } from "../../protocol";
 import { cn } from "../lib/utils";
+import { PERSIST_KEYS, usePersisted } from "../persist";
 import { useShell } from "../runtime";
 import { ModeToggle } from "./mode-toggle";
 import { Button } from "./ui/button";
@@ -14,19 +16,29 @@ import {
 function WorkspaceItem({
   workspace,
   activeId,
+  open,
+  onOpenChange,
   onSelect,
   onCreate,
 }: {
   workspace: WorkspaceSummary;
   activeId: string | null;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
   onSelect: (id: string) => void;
   onCreate: (workspaceId: string) => void;
 }) {
-  const [open, setOpen] = useState(true);
+  const hasActive =
+    activeId !== null && workspace.conversations.some((c) => c.id === activeId);
   return (
-    <Collapsible open={open} onOpenChange={setOpen} className="mb-1">
+    <Collapsible open={open} onOpenChange={onOpenChange} className="mb-1">
       <div className="group flex items-center gap-1 rounded-md pr-1 hover:bg-accent/50">
-        <CollapsibleTrigger className="flex min-w-0 flex-1 items-center gap-1.5 px-2 py-1.5 text-left text-sm">
+        <CollapsibleTrigger
+          className={cn(
+            "flex min-w-0 flex-1 items-center gap-1.5 rounded-md px-2 py-1.5 text-left text-sm",
+            !open && hasActive && "bg-accent/60 text-accent-foreground",
+          )}
+        >
           <ChevronRightIcon
             className={cn(
               "size-3.5 shrink-0 text-muted-foreground transition-transform",
@@ -76,6 +88,32 @@ export function Sidebar({ collapsed }: { collapsed: boolean }) {
   const { workspaces, activeId, select, create, createWorkspace } = useShell();
   const [naming, setNaming] = useState(false);
   const [name, setName] = useState("");
+  const [collapsedIds, setCollapsedIds] = usePersisted(
+    PERSIST_KEYS.workspacesCollapsed,
+    z.array(z.string()),
+    [],
+  );
+  const prevActive = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (activeId === prevActive.current) return;
+    prevActive.current = activeId;
+    if (activeId === null) return;
+    const owner = workspaces.find((w) =>
+      w.conversations.some((c) => c.id === activeId),
+    );
+    if (!owner) return;
+    setCollapsedIds((ids) => ids.filter((id) => id !== owner.id));
+  }, [activeId, workspaces, setCollapsedIds]);
+
+  const setWorkspaceOpen = (id: string, open: boolean) => {
+    setCollapsedIds((ids) => {
+      const has = ids.includes(id);
+      if (open && has) return ids.filter((x) => x !== id);
+      if (!open && !has) return [...ids, id];
+      return ids;
+    });
+  };
 
   const submit = () => {
     const label = name.trim();
@@ -135,6 +173,8 @@ export function Sidebar({ collapsed }: { collapsed: boolean }) {
               key={workspace.id}
               workspace={workspace}
               activeId={activeId}
+              open={!collapsedIds.includes(workspace.id)}
+              onOpenChange={(open) => setWorkspaceOpen(workspace.id, open)}
               onSelect={select}
               onCreate={create}
             />

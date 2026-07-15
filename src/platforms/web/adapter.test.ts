@@ -153,19 +153,24 @@ describe("WebHub.handleOpen", () => {
     }
   });
 
-  test("with an existing conversation activates it and sends workspaces then snapshot", async () => {
+  test("with an existing conversation sends workspaces without a draft and defers activation to the client", () => {
     const { hub, db, workspace } = makeHub();
-    const conversation = createConversation(db, {
+    createConversation(db, {
       workspaceId: workspace.id,
       cwd: workspace.cwd,
       title: null,
     });
     const ws = new FakeSocket();
 
-    await hub.handleOpen(ws);
+    hub.handleOpen(ws);
 
-    expect(ws.sent.map((e) => e.kind)).toEqual(["workspaces", "snapshot"]);
-    expect(ws.data.conversationId).toBe(conversation.id);
+    expect(ws.sent.map((e) => e.kind)).toEqual(["workspaces"]);
+    const event = ws.sent[0];
+    if (event?.kind === "workspaces") {
+      expect(event.activeId).toBeNull();
+      expect(event.draftWorkspaceId).toBeUndefined();
+    }
+    expect(ws.data.conversationId).toBeNull();
   });
 });
 
@@ -378,7 +383,11 @@ describe("WebHub auto-title", () => {
       title: null,
     });
     const ws = new FakeSocket();
-    await hub.handleOpen(ws);
+    hub.handleOpen(ws);
+    await hub.handleCommand(ws, {
+      kind: "select",
+      conversationId: conversation.id,
+    });
     ws.sent.length = 0;
 
     await hub.handleCommand(ws, {
