@@ -1,5 +1,8 @@
 import "./styles.css";
+import { PanelLeftIcon } from "lucide-react";
 import { ThemeProvider } from "next-themes";
+import { useState } from "react";
+import { TooltipIconButton } from "./components/assistant-ui/tooltip-icon-button";
 import { Sidebar } from "./components/sidebar";
 import { Thread } from "./components/thread";
 import { AssistantPane, RuntimeProvider, useShell } from "./runtime";
@@ -22,14 +25,28 @@ function ErrorBanner() {
 }
 
 export function App() {
+  const [collapsed, setCollapsed] = useState(false);
   return (
     <ThemeProvider attribute="class" defaultTheme="system" enableSystem>
       <RuntimeProvider>
         <div className="flex h-dvh">
-          <Sidebar />
+          <Sidebar
+            collapsed={collapsed}
+            onToggle={() => setCollapsed((v) => !v)}
+          />
           <div className="flex min-w-0 flex-1 flex-col">
             <ErrorBanner />
-            <div className="min-h-0 flex-1">
+            <div className="relative min-h-0 flex-1">
+              {collapsed && (
+                <TooltipIconButton
+                  tooltip="Show sidebar"
+                  side="right"
+                  className="absolute top-2 left-2 z-10 size-8 bg-background/80 backdrop-blur-sm"
+                  onClick={() => setCollapsed(false)}
+                >
+                  <PanelLeftIcon className="size-4" />
+                </TooltipIconButton>
+              )}
               <AssistantPane>
                 <Thread />
               </AssistantPane>
