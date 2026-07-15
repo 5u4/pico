@@ -10,7 +10,7 @@ import { autoTitle } from "./omp/title";
 import { defaultDbPath, openDb } from "./store/db";
 import type { Conversation } from "./store/schema";
 import index from "./web/client/index.html";
-import { collectResults, toUiMessage, toUiMessages } from "./web/convert";
+import { toUiMessage, toUiMessages } from "./web/convert";
 import {
   type ClientCommand,
   parseClientCommand,
@@ -92,11 +92,7 @@ function streamFor(conversationId: string): ServerEvent | undefined {
   const state = session.state;
   const tail = state.streamMessage;
   const message = tail
-    ? (toUiMessage(
-        tail,
-        state.messages.length,
-        collectResults(state.messages),
-      ) ?? null)
+    ? (toUiMessage(tail, state.messages.length) ?? null)
     : null;
   return {
     kind: "stream",

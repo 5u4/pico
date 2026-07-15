@@ -36,7 +36,7 @@ export function collectResults(
 export function toUiMessage(
   message: AgentMessage,
   index: number,
-  results: Map<string, ToolResultMessage>,
+  results?: Map<string, ToolResultMessage>,
 ): UiMessage | undefined {
   if (!("role" in message)) return undefined;
   if (message.role === "user") {
@@ -54,7 +54,7 @@ export function toUiMessage(
       if (block.thinking)
         parts.push({ type: "reasoning", text: block.thinking });
     } else if (block.type === "toolCall") {
-      const result = results.get(block.id);
+      const result = results?.get(block.id);
       parts.push({
         type: "tool-call",
         toolCallId: block.id,
