@@ -29,24 +29,19 @@ export function App() {
   return (
     <ThemeProvider attribute="class" defaultTheme="system" enableSystem>
       <RuntimeProvider>
-        <div className="flex h-dvh">
-          <Sidebar
-            collapsed={collapsed}
-            onToggle={() => setCollapsed((v) => !v)}
-          />
+        <div className="relative flex h-dvh">
+          <TooltipIconButton
+            tooltip={collapsed ? "Show sidebar" : "Hide sidebar"}
+            side="right"
+            className="absolute top-2 left-3 z-20 size-7"
+            onClick={() => setCollapsed((v) => !v)}
+          >
+            <PanelLeftIcon className="size-4" />
+          </TooltipIconButton>
+          <Sidebar collapsed={collapsed} />
           <div className="flex min-w-0 flex-1 flex-col">
             <ErrorBanner />
             <div className="relative min-h-0 flex-1">
-              {collapsed && (
-                <TooltipIconButton
-                  tooltip="Show sidebar"
-                  side="right"
-                  className="absolute top-2 left-2 z-10 size-8 bg-background/80 backdrop-blur-sm"
-                  onClick={() => setCollapsed(false)}
-                >
-                  <PanelLeftIcon className="size-4" />
-                </TooltipIconButton>
-              )}
               <AssistantPane>
                 <Thread />
               </AssistantPane>
