@@ -28,7 +28,7 @@ if (provisioned.isErr()) {
 }
 
 const db = openDb(defaultDbPath());
-getOrCreateDefaultWorkspace(db, "web", config.workspaceCwd, "web");
+getOrCreateDefaultWorkspace(db, "web", config.workspaceCwd, "default");
 const sessions = new Sessions(provisioned.value);
 const engine = new Engine({ db, sessions, autoTitle });
 const hub = new WebHub({
