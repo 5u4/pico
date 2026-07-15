@@ -138,13 +138,18 @@ function Composer() {
 }
 
 function ConversationLabel() {
-  const { workspaces, activeId } = useShell();
-  if (activeId === null) return null;
-  const workspace = workspaces.find((w) =>
-    w.conversations.some((c) => c.id === activeId),
-  );
+  const { workspaces, activeId, draftWorkspaceId } = useShell();
+  const workspace =
+    activeId !== null
+      ? workspaces.find((w) => w.conversations.some((c) => c.id === activeId))
+      : draftWorkspaceId !== null
+        ? workspaces.find((w) => w.id === draftWorkspaceId)
+        : undefined;
   if (!workspace) return null;
-  const conversation = workspace.conversations.find((c) => c.id === activeId);
+  const conversation =
+    activeId === null
+      ? undefined
+      : workspace.conversations.find((c) => c.id === activeId);
   const label = workspace.label ?? "workspace";
   const title = conversation?.title ?? "New chat";
   return (
