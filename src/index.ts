@@ -1,13 +1,13 @@
-import type { AgentSession } from "@oh-my-pi/pi-coding-agent";
 import { loadConfig } from "./config/config";
-import { Hub } from "./omp/hub";
-import { provisionRuntime } from "./omp/runtime";
-import { Sessions } from "./omp/sessions";
-import { autoTitle } from "./omp/title";
+import { Engine } from "./engine/conversations";
+import { getOrCreateDefaultWorkspace } from "./engine/registry";
+import { provisionRuntime } from "./engine/runtime";
+import { Sessions } from "./engine/sessions";
+import { autoTitle } from "./engine/title";
+import { WebHub } from "./platforms/web/adapter";
+import index from "./platforms/web/client/index.html";
+import { parseClientCommand } from "./platforms/web/protocol";
 import { defaultDbPath, openDb } from "./store/db";
-import index from "./web/client/index.html";
-import { parseClientCommand } from "./web/protocol";
-import { getOrCreateDefaultWorkspace } from "./web/store";
 
 type WsData = { conversationId: string | null };
 
@@ -28,13 +28,13 @@ if (provisioned.isErr()) {
 }
 
 const db = openDb(defaultDbPath());
-getOrCreateDefaultWorkspace(db, config.workspaceCwd);
+getOrCreateDefaultWorkspace(db, "web", config.workspaceCwd, "web");
 const sessions = new Sessions(provisioned.value);
-const hub = new Hub<AgentSession>({
+const engine = new Engine({ db, sessions, autoTitle });
+const hub = new WebHub({
   db,
-  sessions,
+  engine,
   workspaceCwd: config.workspaceCwd,
-  autoTitle,
 });
 
 const server = Bun.serve<WsData, "/">({

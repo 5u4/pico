@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { Message } from "../../engine/message";
 
 export const clientCommandSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("prompt"), text: z.string().min(1) }),
@@ -26,34 +27,6 @@ export type WorkspaceSummary = {
   conversations: ConversationSummary[];
 };
 
-export type JsonValue =
-  | null
-  | string
-  | number
-  | boolean
-  | JsonValue[]
-  | { [key: string]: JsonValue };
-
-export type JsonObject = { [key: string]: JsonValue };
-
-export type UiPart =
-  | { type: "text"; text: string }
-  | { type: "reasoning"; text: string }
-  | {
-      type: "tool-call";
-      toolCallId: string;
-      toolName: string;
-      args: JsonObject;
-      result?: string;
-      isError?: boolean;
-    };
-
-export type UiMessage = {
-  id: string;
-  role: "user" | "assistant";
-  parts: UiPart[];
-};
-
 export type ServerEvent =
   | {
       kind: "workspaces";
@@ -64,13 +37,13 @@ export type ServerEvent =
   | {
       kind: "snapshot";
       conversationId: string;
-      messages: UiMessage[];
+      messages: Message[];
       isStreaming: boolean;
     }
   | {
       kind: "stream";
       conversationId: string;
-      message: UiMessage | null;
+      message: Message | null;
       isStreaming: boolean;
     }
   | { kind: "error"; message: string };

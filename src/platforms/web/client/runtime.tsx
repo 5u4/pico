@@ -14,12 +14,8 @@ import {
   useRef,
   useState,
 } from "react";
-import type {
-  ClientCommand,
-  ServerEvent,
-  UiMessage,
-  WorkspaceSummary,
-} from "../protocol";
+import type { Message } from "../../../engine/message";
+import type { ClientCommand, ServerEvent, WorkspaceSummary } from "../protocol";
 import {
   type Action,
   initialState,
@@ -28,7 +24,7 @@ import {
   selectView,
 } from "./state";
 
-function convertMessage(message: UiMessage): ThreadMessageLike {
+function convertMessage(message: Message): ThreadMessageLike {
   return {
     id: message.id,
     role: message.role,
@@ -59,7 +55,7 @@ type ShellContextValue = {
 
 type ThreadContextValue = {
   threadKey: string;
-  messages: UiMessage[];
+  messages: Message[];
   isRunning: boolean;
   prompt: (text: string) => void;
   cancel: () => void;

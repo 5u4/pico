@@ -2,23 +2,22 @@ import type { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent";
 import { err, ok, type Result } from "neverthrow";
-import { openDb } from "../store/db";
-import type { ServerEvent } from "../web/protocol";
+import {
+  Engine,
+  type SessionLike,
+  type SessionStateLike,
+  type SessionsPort,
+} from "../../engine/conversations";
 import {
   createConversation,
   getConversation,
   getOrCreateDefaultWorkspace,
   listConversations,
   listWorkspaces,
-} from "../web/store";
-import {
-  Hub,
-  type HubDeps,
-  type HubSocket,
-  type SessionLike,
-  type SessionStateLike,
-  type SessionsPort,
-} from "./hub";
+} from "../../engine/registry";
+import { openDb } from "../../store/db";
+import { type HubSocket, WebHub } from "./adapter";
+import type { ServerEvent } from "./protocol";
 
 const WORKSPACE_CWD = "/tmp/pico-web-test";
 
@@ -116,21 +115,29 @@ class FakeSocket implements HubSocket {
 }
 
 function makeHub(
-  autoTitle: HubDeps<FakeSession>["autoTitle"] = async () => null,
+  autoTitle: (
+    session: FakeSession,
+    text: string,
+  ) => Promise<string | null> = async () => null,
 ) {
   const db: Database = openDb(":memory:");
-  const workspace = getOrCreateDefaultWorkspace(db, WORKSPACE_CWD);
-  const sessions = new FakeSessions();
-  const hub = new Hub<FakeSession>({
+  const workspace = getOrCreateDefaultWorkspace(
     db,
-    sessions,
+    "web",
+    WORKSPACE_CWD,
+    "web",
+  );
+  const sessions = new FakeSessions();
+  const engine = new Engine<FakeSession>({ db, sessions, autoTitle });
+  const hub = new WebHub<FakeSession>({
+    db,
+    engine,
     workspaceCwd: WORKSPACE_CWD,
-    autoTitle,
   });
   return { db, workspace, sessions, hub };
 }
 
-describe("Hub.handleOpen", () => {
+describe("WebHub.handleOpen", () => {
   test("with no conversations sends a workspaces event with draftWorkspaceId", async () => {
     const { hub, workspace } = makeHub();
     const ws = new FakeSocket();
@@ -162,7 +169,7 @@ describe("Hub.handleOpen", () => {
   });
 });
 
-describe("Hub.handleCommand select", () => {
+describe("WebHub.handleCommand select", () => {
   test("unknown conversation id sends an error", async () => {
     const { hub } = makeHub();
     const ws = new FakeSocket();
@@ -193,7 +200,7 @@ describe("Hub.handleCommand select", () => {
   });
 });
 
-describe("Hub.handleCommand create", () => {
+describe("WebHub.handleCommand create", () => {
   test("creates a conversation row and broadcasts workspaces to the socket", async () => {
     const { hub, db, workspace } = makeHub();
     const ws = new FakeSocket();
@@ -224,7 +231,7 @@ describe("Hub.handleCommand create", () => {
   });
 });
 
-describe("Hub.handleCommand createWorkspace", () => {
+describe("WebHub.handleCommand createWorkspace", () => {
   test("creates a workspace row and broadcasts to every other socket", async () => {
     const { hub, db } = makeHub();
     const ws = new FakeSocket();
@@ -234,14 +241,14 @@ describe("Hub.handleCommand createWorkspace", () => {
 
     await hub.handleCommand(ws, { kind: "createWorkspace", label: "New" });
 
-    const workspaces = listWorkspaces(db);
+    const workspaces = listWorkspaces(db, "web");
     expect(workspaces.some((w) => w.label === "New")).toBe(true);
     expect(ws.sent[0]?.kind).toBe("workspaces");
     expect(other.sent[0]?.kind).toBe("workspaces");
   });
 });
 
-describe("Hub.handleCommand prompt/abort", () => {
+describe("WebHub.handleCommand prompt/abort", () => {
   test("prompt with no active conversation sends an error", async () => {
     const { hub } = makeHub();
     const ws = new FakeSocket();
@@ -293,7 +300,7 @@ describe("Hub.handleCommand prompt/abort", () => {
   });
 });
 
-describe("Hub session event dispatch", () => {
+describe("WebHub session event dispatch", () => {
   test("a message_update event pushes a stream broadcast to subscribers", async () => {
     const { hub, db, workspace, sessions } = makeHub();
     const conversation = createConversation(db, {
@@ -339,7 +346,7 @@ describe("Hub session event dispatch", () => {
   });
 });
 
-describe("Hub session open failure", () => {
+describe("WebHub session open failure", () => {
   test("select on a session that fails to open sends the open error", async () => {
     const { hub, db, workspace, sessions } = makeHub();
     const conversation = createConversation(db, {
@@ -360,7 +367,7 @@ describe("Hub session open failure", () => {
   });
 });
 
-describe("Hub auto-title", () => {
+describe("WebHub auto-title", () => {
   test("a generated title is persisted and broadcast to every socket", async () => {
     const { hub, db, workspace, sessions } = makeHub(
       async () => "Fix the parser",
@@ -384,5 +391,38 @@ describe("Hub auto-title", () => {
     expect(sessions.get(conversation.id)?.setSessionNameCalls).toEqual([
       { name: "Fix the parser", source: "auto" },
     ]);
+  });
+});
+
+describe("WebHub concurrent activation", () => {
+  test("two sockets activating one conversation share a single bridge", async () => {
+    const { hub, db, workspace, sessions } = makeHub();
+    const conversation = createConversation(db, {
+      workspaceId: workspace.id,
+      cwd: workspace.cwd,
+      title: null,
+    });
+    const a = new FakeSocket();
+    const b = new FakeSocket();
+
+    await Promise.all([
+      hub.handleCommand(a, {
+        kind: "select",
+        conversationId: conversation.id,
+      }),
+      hub.handleCommand(b, {
+        kind: "select",
+        conversationId: conversation.id,
+      }),
+    ]);
+    a.sent.length = 0;
+    b.sent.length = 0;
+
+    sessions
+      .get(conversation.id)
+      ?.emit({ type: "message_update" } as unknown as AgentSessionEvent);
+
+    expect(a.sent.filter((e) => e.kind === "stream")).toHaveLength(1);
+    expect(b.sent.filter((e) => e.kind === "stream")).toHaveLength(1);
   });
 });

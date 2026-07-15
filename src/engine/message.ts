@@ -5,7 +5,34 @@ import type {
   TextContent,
   ToolResultMessage,
 } from "@oh-my-pi/pi-ai";
-import type { JsonObject, UiMessage, UiPart } from "./protocol";
+
+export type JsonValue =
+  | null
+  | string
+  | number
+  | boolean
+  | JsonValue[]
+  | { [key: string]: JsonValue };
+
+export type JsonObject = { [key: string]: JsonValue };
+
+export type MessagePart =
+  | { type: "text"; text: string }
+  | { type: "reasoning"; text: string }
+  | {
+      type: "tool-call";
+      toolCallId: string;
+      toolName: string;
+      args: JsonObject;
+      result?: string;
+      isError?: boolean;
+    };
+
+export type Message = {
+  id: string;
+  role: "user" | "assistant";
+  parts: MessagePart[];
+};
 
 function textFrom(content: string | (TextContent | ImageContent)[]): string {
   if (typeof content === "string") return content;
@@ -37,8 +64,8 @@ export function collectResults(
 function assistantParts(
   message: AssistantMessage,
   results: Map<string, ToolResultMessage>,
-): UiPart[] {
-  const parts: UiPart[] = [];
+): MessagePart[] {
+  const parts: MessagePart[] = [];
   for (const block of message.content) {
     if (block.type === "text") {
       if (block.text) parts.push({ type: "text", text: block.text });
@@ -60,10 +87,10 @@ function assistantParts(
   return parts;
 }
 
-export function toUiMessages(messages: AgentMessage[]): UiMessage[] {
+export function toMessages(messages: AgentMessage[]): Message[] {
   const results = collectResults(messages);
-  const out: UiMessage[] = [];
-  let run: { id: string; parts: UiPart[] } | null = null;
+  const out: Message[] = [];
+  let run: { id: string; parts: MessagePart[] } | null = null;
 
   const flush = () => {
     if (run && run.parts.length > 0) {
@@ -109,11 +136,11 @@ function runStartIndex(messages: AgentMessage[]): number {
 export function toStreamMessage(
   committed: AgentMessage[],
   stream: AgentMessage,
-): UiMessage | null {
+): Message | null {
   const start = runStartIndex(committed);
   const turn = [...committed.slice(start), stream];
   const results = collectResults(turn);
-  const parts: UiPart[] = [];
+  const parts: MessagePart[] = [];
   for (const message of turn) {
     if ("role" in message && message.role === "assistant") {
       parts.push(...assistantParts(message, results));

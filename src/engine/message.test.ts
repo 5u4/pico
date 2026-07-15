@@ -5,7 +5,7 @@ import type {
   ToolResultMessage,
   UserMessage,
 } from "@oh-my-pi/pi-ai";
-import { toStreamMessage, toUiMessages } from "./convert.ts";
+import { toMessages, toStreamMessage } from "./message.ts";
 
 function user(text: string): UserMessage {
   return { role: "user", content: text, timestamp: 0 };
@@ -46,9 +46,9 @@ function toolResult(
   };
 }
 
-describe("toUiMessages", () => {
+describe("toMessages", () => {
   test("maps a user text message", () => {
-    expect(toUiMessages([user("hello")])).toEqual([
+    expect(toMessages([user("hello")])).toEqual([
       { id: "m0", role: "user", parts: [{ type: "text", text: "hello" }] },
     ]);
   });
@@ -60,7 +60,7 @@ describe("toUiMessages", () => {
         { type: "text", text: "answer" },
       ]),
     ];
-    expect(toUiMessages(messages)[0]?.parts).toEqual([
+    expect(toMessages(messages)[0]?.parts).toEqual([
       { type: "reasoning", text: "pondering" },
       { type: "text", text: "answer" },
     ]);
@@ -78,7 +78,7 @@ describe("toUiMessages", () => {
       ]),
       toolResult("call-1", "file listing"),
     ];
-    expect(toUiMessages(messages)[0]?.parts).toEqual([
+    expect(toMessages(messages)[0]?.parts).toEqual([
       {
         type: "tool-call",
         toolCallId: "call-1",
@@ -96,7 +96,7 @@ describe("toUiMessages", () => {
         { type: "toolCall", id: "call-2", name: "read", arguments: {} },
       ]),
     ];
-    expect(toUiMessages(messages)[0]?.parts).toEqual([
+    expect(toMessages(messages)[0]?.parts).toEqual([
       {
         type: "tool-call",
         toolCallId: "call-2",
@@ -113,7 +113,7 @@ describe("toUiMessages", () => {
       assistant([{ type: "toolCall", id: "c", name: "read", arguments: {} }]),
       toolResult("c", "boom", true),
     ];
-    const part = toUiMessages(messages)[0]?.parts[0];
+    const part = toMessages(messages)[0]?.parts[0];
     expect(part).toMatchObject({
       type: "tool-call",
       isError: true,
@@ -127,12 +127,12 @@ describe("toUiMessages", () => {
       assistant([{ type: "text", text: "" }]),
       toolResult("orphan", "ignored"),
     ];
-    expect(toUiMessages(messages)).toEqual([]);
+    expect(toMessages(messages)).toEqual([]);
   });
 
   test("indexes ids by original message position", () => {
     const messages: AgentMessage[] = [user("a"), user("b")];
-    expect(toUiMessages(messages).map((m) => m.id)).toEqual(["m0", "m1"]);
+    expect(toMessages(messages).map((m) => m.id)).toEqual(["m0", "m1"]);
   });
 
   test("coalesces consecutive assistant messages into one turn", () => {
@@ -144,7 +144,7 @@ describe("toUiMessages", () => {
       toolResult("c2", "ok"),
       assistant([{ type: "text", text: "done" }]),
     ];
-    const ui = toUiMessages(messages);
+    const ui = toMessages(messages);
     expect(ui.map((m) => m.id)).toEqual(["m0", "m1"]);
     expect(ui[1]?.parts).toEqual([
       {
@@ -174,7 +174,7 @@ describe("toUiMessages", () => {
       user("b"),
       assistant([{ type: "text", text: "two" }]),
     ];
-    expect(toUiMessages(messages).map((m) => m.id)).toEqual([
+    expect(toMessages(messages).map((m) => m.id)).toEqual([
       "m0",
       "m1",
       "m2",
@@ -192,7 +192,7 @@ describe("toStreamMessage", () => {
     ];
     const stream = assistant([{ type: "text", text: "retry" }]);
     const tail = toStreamMessage(committed, stream);
-    const snapshot = toUiMessages([...committed, stream]);
+    const snapshot = toMessages([...committed, stream]);
     expect(tail?.id).toBe("m1");
     expect(tail?.id).toBe(snapshot[snapshot.length - 1]?.id);
     expect(tail?.parts).toEqual(snapshot[snapshot.length - 1]?.parts);
