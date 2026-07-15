@@ -5,7 +5,7 @@ import type {
   ToolResultMessage,
   UserMessage,
 } from "@oh-my-pi/pi-ai";
-import { toUiMessages } from "./convert.ts";
+import { toStreamMessage, toUiMessages } from "./convert.ts";
 
 function user(text: string): UserMessage {
   return { role: "user", content: text, timestamp: 0 };
@@ -133,5 +133,74 @@ describe("toUiMessages", () => {
   test("indexes ids by original message position", () => {
     const messages: AgentMessage[] = [user("a"), user("b")];
     expect(toUiMessages(messages).map((m) => m.id)).toEqual(["m0", "m1"]);
+  });
+
+  test("coalesces consecutive assistant messages into one turn", () => {
+    const messages: AgentMessage[] = [
+      user("go"),
+      assistant([{ type: "toolCall", id: "c1", name: "bash", arguments: {} }]),
+      toolResult("c1", "boom", true),
+      assistant([{ type: "toolCall", id: "c2", name: "bash", arguments: {} }]),
+      toolResult("c2", "ok"),
+      assistant([{ type: "text", text: "done" }]),
+    ];
+    const ui = toUiMessages(messages);
+    expect(ui.map((m) => m.id)).toEqual(["m0", "m1"]);
+    expect(ui[1]?.parts).toEqual([
+      {
+        type: "tool-call",
+        toolCallId: "c1",
+        toolName: "bash",
+        args: {},
+        result: "boom",
+        isError: true,
+      },
+      {
+        type: "tool-call",
+        toolCallId: "c2",
+        toolName: "bash",
+        args: {},
+        result: "ok",
+        isError: false,
+      },
+      { type: "text", text: "done" },
+    ]);
+  });
+
+  test("splits assistant turns across a user message", () => {
+    const messages: AgentMessage[] = [
+      user("a"),
+      assistant([{ type: "text", text: "one" }]),
+      user("b"),
+      assistant([{ type: "text", text: "two" }]),
+    ];
+    expect(toUiMessages(messages).map((m) => m.id)).toEqual([
+      "m0",
+      "m1",
+      "m2",
+      "m3",
+    ]);
+  });
+});
+
+describe("toStreamMessage", () => {
+  test("id matches the coalesced snapshot turn id mid-stream", () => {
+    const committed: AgentMessage[] = [
+      user("go"),
+      assistant([{ type: "toolCall", id: "c1", name: "bash", arguments: {} }]),
+      toolResult("c1", "boom", true),
+    ];
+    const stream = assistant([{ type: "text", text: "retry" }]);
+    const tail = toStreamMessage(committed, stream);
+    const snapshot = toUiMessages([...committed, stream]);
+    expect(tail?.id).toBe("m1");
+    expect(tail?.id).toBe(snapshot[snapshot.length - 1]?.id);
+    expect(tail?.parts).toEqual(snapshot[snapshot.length - 1]?.parts);
+  });
+
+  test("ids the first live step at its future index", () => {
+    const committed: AgentMessage[] = [user("go")];
+    const stream = assistant([{ type: "text", text: "hi" }]);
+    expect(toStreamMessage(committed, stream)?.id).toBe("m1");
   });
 });

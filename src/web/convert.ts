@@ -1,5 +1,6 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type {
+  AssistantMessage,
   ImageContent,
   TextContent,
   ToolResultMessage,
@@ -33,19 +34,10 @@ export function collectResults(
   return results;
 }
 
-export function toUiMessage(
-  message: AgentMessage,
-  index: number,
-  results?: Map<string, ToolResultMessage>,
-): UiMessage | undefined {
-  if (!("role" in message)) return undefined;
-  if (message.role === "user") {
-    const text = textFrom(message.content);
-    if (!text) return undefined;
-    return { id: `m${index}`, role: "user", parts: [{ type: "text", text }] };
-  }
-  if (message.role !== "assistant") return undefined;
-
+function assistantParts(
+  message: AssistantMessage,
+  results: Map<string, ToolResultMessage>,
+): UiPart[] {
   const parts: UiPart[] = [];
   for (const block of message.content) {
     if (block.type === "text") {
@@ -54,7 +46,7 @@ export function toUiMessage(
       if (block.thinking)
         parts.push({ type: "reasoning", text: block.thinking });
     } else if (block.type === "toolCall") {
-      const result = results?.get(block.id);
+      const result = results.get(block.id);
       parts.push({
         type: "tool-call",
         toolCallId: block.id,
@@ -65,16 +57,68 @@ export function toUiMessage(
       });
     }
   }
-  if (parts.length === 0) return undefined;
-  return { id: `m${index}`, role: "assistant", parts };
+  return parts;
 }
 
 export function toUiMessages(messages: AgentMessage[]): UiMessage[] {
   const results = collectResults(messages);
   const out: UiMessage[] = [];
+  let run: { id: string; parts: UiPart[] } | null = null;
+
+  const flush = () => {
+    if (run && run.parts.length > 0) {
+      out.push({ id: run.id, role: "assistant", parts: run.parts });
+    }
+    run = null;
+  };
+
   for (const [index, message] of messages.entries()) {
-    const ui = toUiMessage(message, index, results);
-    if (ui) out.push(ui);
+    if (!("role" in message)) continue;
+    if (message.role === "user") {
+      flush();
+      const text = textFrom(message.content);
+      if (text) {
+        out.push({
+          id: `m${index}`,
+          role: "user",
+          parts: [{ type: "text", text }],
+        });
+      }
+      continue;
+    }
+    if (message.role === "assistant") {
+      if (!run) run = { id: `m${index}`, parts: [] };
+      run.parts.push(...assistantParts(message, results));
+    }
   }
+  flush();
   return out;
+}
+
+function runStartIndex(messages: AgentMessage[]): number {
+  let start = messages.length;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (!message || !("role" in message)) continue;
+    if (message.role === "user") break;
+    if (message.role === "assistant") start = i;
+  }
+  return start;
+}
+
+export function toStreamMessage(
+  committed: AgentMessage[],
+  stream: AgentMessage,
+): UiMessage | null {
+  const start = runStartIndex(committed);
+  const turn = [...committed.slice(start), stream];
+  const results = collectResults(turn);
+  const parts: UiPart[] = [];
+  for (const message of turn) {
+    if ("role" in message && message.role === "assistant") {
+      parts.push(...assistantParts(message, results));
+    }
+  }
+  if (parts.length === 0) return null;
+  return { id: `m${start}`, role: "assistant", parts };
 }
