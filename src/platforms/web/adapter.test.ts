@@ -57,6 +57,30 @@ class FakeSession implements SessionLike {
     return Promise.resolve(true);
   }
 
+  contextUsage:
+    | { tokens: number; contextWindow: number; percent: number }
+    | undefined = undefined;
+  contextBreakdown = {
+    systemPromptTokens: 0,
+    systemToolsTokens: 0,
+    systemContextTokens: 0,
+    skillsTokens: 0,
+    messagesTokens: 0,
+  };
+  cost = 0;
+
+  getContextUsage() {
+    return this.contextUsage;
+  }
+
+  getContextBreakdown() {
+    return this.contextBreakdown;
+  }
+
+  getSessionStats() {
+    return { cost: this.cost };
+  }
+
   emit(event: AgentSessionEvent): void {
     for (const listener of this.listeners) listener(event);
   }
@@ -441,6 +465,76 @@ describe("WebHub session event dispatch", () => {
 
     expect(ws.sent).toHaveLength(1);
     expect(ws.sent[0]?.kind).toBe("snapshot");
+  });
+
+  test("a snapshot broadcast carries context usage computed from the session", async () => {
+    const { hub, db, workspace, sessions } = makeHub();
+    const conversation = createConversation(db, {
+      workspaceId: workspace.id,
+      cwd: workspace.cwd,
+      title: null,
+    });
+    const ws = new FakeSocket();
+    await hub.handleCommand(ws, {
+      kind: "select",
+      conversationId: conversation.id,
+    });
+    ws.sent.length = 0;
+    const session = sessions.get(conversation.id);
+    expect(session).toBeDefined();
+    if (!session) return;
+    session.contextUsage = { tokens: 3200, contextWindow: 400000, percent: 1 };
+    session.contextBreakdown = {
+      systemPromptTokens: 100,
+      systemToolsTokens: 200,
+      systemContextTokens: 300,
+      skillsTokens: 400,
+      messagesTokens: 2200,
+    };
+    session.cost = 0.42;
+
+    session.emit({ type: "agent_end", messages: [] } as AgentSessionEvent);
+
+    const event = ws.sent[0];
+    expect(event?.kind).toBe("snapshot");
+    if (event?.kind !== "snapshot") return;
+    expect(event.usage).toEqual({
+      tokens: 3200,
+      contextWindow: 400000,
+      percent: 1,
+      cost: 0.42,
+      breakdown: {
+        systemPrompt: 100,
+        systemTools: 200,
+        systemContext: 300,
+        skills: 400,
+        messages: 2200,
+      },
+    });
+  });
+
+  test("a snapshot broadcast carries null usage before any turn", async () => {
+    const { hub, db, workspace, sessions } = makeHub();
+    const conversation = createConversation(db, {
+      workspaceId: workspace.id,
+      cwd: workspace.cwd,
+      title: null,
+    });
+    const ws = new FakeSocket();
+    await hub.handleCommand(ws, {
+      kind: "select",
+      conversationId: conversation.id,
+    });
+    ws.sent.length = 0;
+    const session = sessions.get(conversation.id);
+    expect(session).toBeDefined();
+
+    session?.emit({ type: "agent_end", messages: [] } as AgentSessionEvent);
+
+    const event = ws.sent[0];
+    expect(event?.kind).toBe("snapshot");
+    if (event?.kind !== "snapshot") return;
+    expect(event.usage).toBeNull();
   });
 });
 

@@ -18,6 +18,63 @@ export interface SessionLike {
   subscribe(listener: (event: AgentSessionEvent) => void): () => void;
   readonly sessionName: string | undefined;
   setSessionName(name: string, source?: "auto" | "user"): Promise<boolean>;
+  getContextUsage(): ContextTokens | undefined;
+  getContextBreakdown(): ContextCategoryTokens | undefined;
+  getSessionStats(): { cost: number };
+}
+
+interface ContextTokens {
+  tokens: number;
+  contextWindow: number;
+  percent: number;
+}
+
+interface ContextCategoryTokens {
+  systemPromptTokens: number;
+  systemToolsTokens: number;
+  systemContextTokens: number;
+  skillsTokens: number;
+  messagesTokens: number;
+}
+
+export interface ContextUsageBreakdown {
+  systemPrompt: number;
+  systemTools: number;
+  systemContext: number;
+  skills: number;
+  messages: number;
+}
+
+export interface ContextUsageInfo {
+  tokens: number;
+  contextWindow: number;
+  percent: number;
+  cost: number;
+  breakdown: ContextUsageBreakdown | null;
+}
+
+export function computeContextUsage(
+  session: SessionLike,
+): ContextUsageInfo | undefined {
+  const usage = session.getContextUsage();
+  if (!usage) return undefined;
+  const breakdown = session.getContextBreakdown();
+  const stats = session.getSessionStats();
+  return {
+    tokens: usage.tokens,
+    contextWindow: usage.contextWindow,
+    percent: usage.percent,
+    cost: stats.cost,
+    breakdown: breakdown
+      ? {
+          systemPrompt: breakdown.systemPromptTokens,
+          systemTools: breakdown.systemToolsTokens,
+          systemContext: breakdown.systemContextTokens,
+          skills: breakdown.skillsTokens,
+          messages: breakdown.messagesTokens,
+        }
+      : null,
+  };
 }
 
 export interface SessionsPort<S extends SessionLike = SessionLike> {
@@ -28,7 +85,12 @@ export interface SessionsPort<S extends SessionLike = SessionLike> {
 export type SubscribeMode = "live" | "settled";
 
 export type TurnEvent =
-  | { kind: "snapshot"; messages: Message[]; streaming: boolean }
+  | {
+      kind: "snapshot";
+      messages: Message[];
+      streaming: boolean;
+      usage: ContextUsageInfo | null;
+    }
   | { kind: "delta"; message: Message | null; streaming: boolean }
   | { kind: "title"; title: string };
 
@@ -81,9 +143,13 @@ export class Engine<S extends SessionLike = SessionLike> {
     };
   }
 
-  snapshot(
-    conversationId: string,
-  ): { messages: Message[]; streaming: boolean } | undefined {
+  snapshot(conversationId: string):
+    | {
+        messages: Message[];
+        streaming: boolean;
+        usage: ContextUsageInfo | null;
+      }
+    | undefined {
     const session = this.deps.sessions.get(conversationId);
     if (!session) return undefined;
     const state = session.state;
@@ -91,6 +157,7 @@ export class Engine<S extends SessionLike = SessionLike> {
     return {
       messages: toMessages([...state.messages, ...stream]),
       streaming: state.isStreaming,
+      usage: computeContextUsage(session) ?? null,
     };
   }
 
@@ -159,6 +226,7 @@ export class Engine<S extends SessionLike = SessionLike> {
       kind: "snapshot",
       messages: toMessages([...state.messages, ...stream]),
       streaming,
+      usage: computeContextUsage(session) ?? null,
     };
     for (const target of targets) {
       if (target.mode === "live" || !streaming) target.listener(evt);

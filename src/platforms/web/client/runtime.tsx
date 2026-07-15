@@ -15,6 +15,7 @@ import {
   useState,
 } from "react";
 import { z } from "zod";
+import type { ContextUsageInfo } from "../../../engine/conversations";
 import type { Message } from "../../../engine/message";
 import type { ClientCommand, ServerEvent, WorkspaceSummary } from "../protocol";
 import { PERSIST_KEYS, readPersisted, writePersisted } from "./persist";
@@ -60,6 +61,7 @@ type ThreadContextValue = {
   threadKey: string;
   messages: Message[];
   isRunning: boolean;
+  usage: ContextUsageInfo | null;
   prompt: (text: string) => void;
   cancel: () => void;
 };
@@ -221,6 +223,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       threadKey: state.threadKey,
       messages: view,
       isRunning: selectIsRunning(state),
+      usage: state.usage,
       prompt,
       cancel,
     }),

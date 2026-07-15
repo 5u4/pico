@@ -98,6 +98,7 @@ describe("reduce / server / snapshot", () => {
         conversationId: "conv-2",
         messages: [userMessage("u1")],
         isStreaming: true,
+        usage: null,
       },
     });
     expect(next).toBe(state);
@@ -118,6 +119,7 @@ describe("reduce / server / snapshot", () => {
         conversationId: "conv-1",
         messages,
         isStreaming: true,
+        usage: null,
       },
     });
     expect(next.messages).toBe(messages);
@@ -139,6 +141,7 @@ describe("reduce / server / snapshot", () => {
         conversationId: "conv-1",
         messages,
         isStreaming: false,
+        usage: null,
       },
     });
     expect(next.pending).toBeNull();
@@ -160,6 +163,7 @@ describe("reduce / server / snapshot", () => {
         conversationId: "conv-1",
         messages,
         isStreaming: false,
+        usage: null,
       },
     });
     expect(next.pending).toEqual(userMessage("pending-user"));

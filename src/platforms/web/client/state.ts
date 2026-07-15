@@ -1,3 +1,4 @@
+import type { ContextUsageInfo } from "../../../engine/conversations";
 import type { Message } from "../../../engine/message";
 import { assertNever } from "../../../util/assert";
 import type { ClientCommand, ServerEvent, WorkspaceSummary } from "../protocol";
@@ -13,6 +14,7 @@ export type ThreadState = {
   pendingBaseUserCount: number | null;
   error: string | null;
   draftSeq: number;
+  usage: ContextUsageInfo | null;
 };
 
 export const initialState: ThreadState = {
@@ -26,6 +28,7 @@ export const initialState: ThreadState = {
   pendingBaseUserCount: null,
   error: null,
   draftSeq: 0,
+  usage: null,
 };
 
 export type Action =
@@ -104,6 +107,7 @@ function reduceServer(state: ThreadState, event: ServerEvent): Reduced {
             isRunning: false,
             threadKey: `draft-${draftSeq}`,
             draftSeq,
+            usage: null,
           },
           commands: [],
         };
@@ -122,6 +126,7 @@ function reduceServer(state: ThreadState, event: ServerEvent): Reduced {
           ...state,
           messages: event.messages,
           isRunning: event.isStreaming,
+          usage: event.usage,
           ...cleared,
         },
         commands: [],
@@ -195,6 +200,7 @@ function reduceSelect(state: ThreadState, conversationId: string): Reduced {
       messages: [],
       isRunning: false,
       error: null,
+      usage: null,
     },
     commands: [{ kind: "select", conversationId }],
   };
@@ -214,6 +220,7 @@ function reduceCreate(state: ThreadState, workspaceId: string): Reduced {
       messages: [],
       isRunning: false,
       error: null,
+      usage: null,
     },
     commands: [{ kind: "draft" }],
   };
