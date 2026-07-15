@@ -10,6 +10,7 @@ import type { ConversationSummary, WorkspaceSummary } from "../../protocol";
 import { cn } from "../lib/utils";
 import { PERSIST_KEYS, usePersisted } from "../persist";
 import { useShell } from "../runtime";
+import { TooltipIconButton } from "./assistant-ui/tooltip-icon-button";
 import { ModeToggle } from "./mode-toggle";
 import { Button } from "./ui/button";
 import {
@@ -90,15 +91,15 @@ function WorkspaceItem({
           <FolderIcon className="size-4 shrink-0 text-muted-foreground" />
           <span className="truncate">{workspace.label ?? "workspace"}</span>
         </CollapsibleTrigger>
-        <Button
-          variant="ghost"
-          size="icon"
+        <TooltipIconButton
+          tooltip="New Conversation"
+          side="bottom"
           className="size-6 opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
           onClick={() => onCreate(workspace.id)}
           aria-label="New conversation"
         >
           <PlusIcon className="size-3.5" />
-        </Button>
+        </TooltipIconButton>
       </div>
       {!open && activeConversation && (
         <div className="ml-4 border-l border-border pl-1">
@@ -171,15 +172,15 @@ export function Sidebar({ collapsed }: { collapsed: boolean }) {
       >
         <div className="flex items-center justify-between py-2 pr-3 pl-11">
           <span className="text-sm font-medium">Workspaces</span>
-          <Button
-            variant="ghost"
-            size="icon"
+          <TooltipIconButton
+            tooltip="New Workspace"
+            side="bottom"
             className="size-7"
             onClick={() => setNaming((v) => !v)}
             aria-label="New workspace"
           >
             <PlusIcon className="size-4" />
-          </Button>
+          </TooltipIconButton>
         </div>
         {naming && (
           <div className="px-2 pb-2">
