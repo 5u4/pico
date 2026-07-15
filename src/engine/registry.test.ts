@@ -2,6 +2,7 @@ import type { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { openDb } from "../store/db.ts";
 import {
+  archiveConversation,
   createConversation,
   createWorkspace,
   getConversation,
@@ -124,5 +125,40 @@ describe("conversations", () => {
 
   test("setConversationTitle reports no change for an unknown id", () => {
     expect(setConversationTitle(db, "missing", "x")).toBe(false);
+  });
+
+  test("archiveConversation hides it from the workspace list", () => {
+    const ws = createWorkspace(db, {
+      cwd: "/projects",
+      platform: "web",
+      label: "w",
+    });
+    const c = createConversation(db, {
+      workspaceId: ws.id,
+      cwd: "/projects",
+      title: "gone",
+    });
+    expect(archiveConversation(db, c.id)).toBe(true);
+    expect(listConversations(db, ws.id)).toHaveLength(0);
+    expect(getConversation(db, c.id)?.archivedAt).toBeGreaterThan(0);
+  });
+
+  test("archiveConversation is idempotent and reports no change when already archived", () => {
+    const ws = createWorkspace(db, {
+      cwd: "/projects",
+      platform: "web",
+      label: "w",
+    });
+    const c = createConversation(db, {
+      workspaceId: ws.id,
+      cwd: "/projects",
+      title: "once",
+    });
+    expect(archiveConversation(db, c.id)).toBe(true);
+    expect(archiveConversation(db, c.id)).toBe(false);
+  });
+
+  test("archiveConversation reports no change for an unknown id", () => {
+    expect(archiveConversation(db, "missing")).toBe(false);
   });
 });

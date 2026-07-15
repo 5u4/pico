@@ -35,6 +35,7 @@ export type Action =
   | { type: "select"; conversationId: string }
   | { type: "create"; workspaceId: string }
   | { type: "createWorkspace"; label: string }
+  | { type: "archive"; conversationId: string }
   | { type: "dismissError" };
 
 type Reduced = { state: ThreadState; commands: ClientCommand[] };
@@ -237,6 +238,11 @@ export function reduce(state: ThreadState, action: Action): Reduced {
       return {
         state,
         commands: [{ kind: "createWorkspace", label: action.label }],
+      };
+    case "archive":
+      return {
+        state,
+        commands: [{ kind: "archive", conversationId: action.conversationId }],
       };
     case "dismissError":
       return { state: { ...state, error: null }, commands: [] };

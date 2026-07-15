@@ -1,4 +1,9 @@
-import { ChevronRightIcon, FolderIcon, PlusIcon } from "lucide-react";
+import {
+  ArchiveIcon,
+  ChevronRightIcon,
+  FolderIcon,
+  PlusIcon,
+} from "lucide-react";
 import { useState } from "react";
 import { z } from "zod";
 import type { ConversationSummary, WorkspaceSummary } from "../../protocol";
@@ -17,22 +22,37 @@ function ConversationRow({
   conversation,
   active,
   onSelect,
+  onArchive,
 }: {
   conversation: ConversationSummary;
   active: boolean;
   onSelect: (id: string) => void;
+  onArchive: (conversationId: string) => void;
 }) {
   return (
-    <button
-      type="button"
-      onClick={() => onSelect(conversation.id)}
+    <div
       className={cn(
-        "mb-0.5 w-full truncate rounded-md px-3 py-1.5 text-left text-sm transition-colors hover:bg-accent hover:text-accent-foreground",
+        "group/convo mb-0.5 flex items-center gap-1 rounded-md pr-1 transition-colors hover:bg-accent hover:text-accent-foreground",
         active && "bg-accent text-accent-foreground",
       )}
     >
-      {conversation.title ?? "New chat"}
-    </button>
+      <button
+        type="button"
+        onClick={() => onSelect(conversation.id)}
+        className="min-w-0 flex-1 truncate px-3 py-1.5 text-left text-sm"
+      >
+        {conversation.title ?? "New chat"}
+      </button>
+      <Button
+        variant="ghost"
+        size="icon"
+        className="size-6 opacity-0 group-hover/convo:opacity-100 focus-visible:opacity-100"
+        onClick={() => onArchive(conversation.id)}
+        aria-label="Archive conversation"
+      >
+        <ArchiveIcon className="size-3.5" />
+      </Button>
+    </div>
   );
 }
 
@@ -43,6 +63,7 @@ function WorkspaceItem({
   onOpenChange,
   onSelect,
   onCreate,
+  onArchive,
 }: {
   workspace: WorkspaceSummary;
   activeId: string | null;
@@ -50,6 +71,7 @@ function WorkspaceItem({
   onOpenChange: (open: boolean) => void;
   onSelect: (id: string) => void;
   onCreate: (workspaceId: string) => void;
+  onArchive: (conversationId: string) => void;
 }) {
   const activeConversation =
     activeId === null
@@ -84,6 +106,7 @@ function WorkspaceItem({
             conversation={activeConversation}
             active
             onSelect={onSelect}
+            onArchive={onArchive}
           />
         </div>
       )}
@@ -99,6 +122,7 @@ function WorkspaceItem({
               conversation={conversation}
               active={conversation.id === activeId}
               onSelect={onSelect}
+              onArchive={onArchive}
             />
           ))
         )}
@@ -108,7 +132,8 @@ function WorkspaceItem({
 }
 
 export function Sidebar({ collapsed }: { collapsed: boolean }) {
-  const { workspaces, activeId, select, create, createWorkspace } = useShell();
+  const { workspaces, activeId, select, create, createWorkspace, archive } =
+    useShell();
   const [naming, setNaming] = useState(false);
   const [name, setName] = useState("");
   const [collapsedIds, setCollapsedIds] = usePersisted(
@@ -187,6 +212,7 @@ export function Sidebar({ collapsed }: { collapsed: boolean }) {
               onOpenChange={(open) => setWorkspaceOpen(workspace.id, open)}
               onSelect={select}
               onCreate={create}
+              onArchive={archive}
             />
           ))}
         </nav>

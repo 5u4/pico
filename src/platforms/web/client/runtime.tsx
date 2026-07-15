@@ -53,6 +53,7 @@ type ShellContextValue = {
   select: (conversationId: string) => void;
   create: (workspaceId: string) => void;
   createWorkspace: (label: string) => void;
+  archive: (conversationId: string) => void;
 };
 
 type ThreadContextValue = {
@@ -187,6 +188,10 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
     (label: string) => dispatch({ type: "createWorkspace", label }),
     [dispatch],
   );
+  const archive = useCallback(
+    (conversationId: string) => dispatch({ type: "archive", conversationId }),
+    [dispatch],
+  );
 
   const shell = useMemo<ShellContextValue>(
     () => ({
@@ -197,6 +202,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       select,
       create,
       createWorkspace,
+      archive,
     }),
     [
       state.workspaces,
@@ -206,6 +212,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       select,
       create,
       createWorkspace,
+      archive,
     ],
   );
   const view = useMemo(() => selectView(state), [state]);

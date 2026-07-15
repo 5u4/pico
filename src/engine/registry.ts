@@ -124,3 +124,12 @@ export function setConversationTitle(
     .run({ id, title });
   return result.changes > 0;
 }
+
+export function archiveConversation(db: Database, id: string): boolean {
+  const result = db
+    .query(
+      "UPDATE conversations SET archivedAt = $now WHERE id = $id AND archivedAt IS NULL",
+    )
+    .run({ id, now: Date.now() });
+  return result.changes > 0;
+}
