@@ -8,7 +8,10 @@ import {
 } from "@oh-my-pi/pi-coding-agent";
 import { err, ok, type Result, ResultAsync } from "neverthrow";
 import { isValidId } from "../util/id";
+import { log } from "../util/log";
 import type { OmpRuntime } from "./runtime";
+
+const logger = log(["sessions"]);
 
 export interface OpenOptions {
   cwd: string;
@@ -51,7 +54,13 @@ export class Sessions {
       e instanceof Error ? e.message : String(e),
     );
     this.pending.delete(conversationId);
-    if (built.isErr()) return err(built.error);
+    if (built.isErr()) {
+      logger.error("session open failed for {conversationId}: {error}", {
+        conversationId,
+        error: built.error,
+      });
+      return err(built.error);
+    }
 
     if (this.generation !== generation) {
       await Promise.allSettled([built.value.dispose()]);
@@ -70,6 +79,7 @@ export class Sessions {
     if (!session) return;
     this.live.delete(conversationId);
     await session.dispose();
+    logger.debug("session closed for {conversationId}", { conversationId });
   }
 
   async closeAll(): Promise<void> {
@@ -111,6 +121,10 @@ export class Sessions {
       autoApprove: true,
       hasUI: false,
     });
+    logger.info("session opened for {conversationId} ({mode})", {
+      conversationId,
+      mode: resumeFile ? "resumed" : "fresh",
+    });
     return session;
   }
 }
@@ -119,7 +133,11 @@ function latestSessionFile(sessionDir: string): string | undefined {
   let entries: string[];
   try {
     entries = readdirSync(sessionDir);
-  } catch {
+  } catch (e) {
+    logger.warning("failed to list session dir {dir}: {error}", {
+      dir: sessionDir,
+      error: e,
+    });
     return undefined;
   }
   const files = entries.filter((name) => name.endsWith(".jsonl")).sort();

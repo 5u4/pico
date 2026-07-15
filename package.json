@@ -22,6 +22,8 @@
   "dependencies": {
     "@assistant-ui/react": "^0.14",
     "@assistant-ui/react-markdown": "^0.14.5",
+    "@logtape/file": "^2.2.4",
+    "@logtape/logtape": "^2.2.4",
     "@oh-my-pi/pi-agent-core": "16.5.0",
     "@oh-my-pi/pi-ai": "16.5.0",
     "@oh-my-pi/pi-catalog": "16.5.0",

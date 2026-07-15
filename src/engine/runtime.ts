@@ -11,6 +11,9 @@ import {
 } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { err, ok, type Result, ResultAsync } from "neverthrow";
+import { log } from "../util/log";
+
+const logger = log(["runtime"]);
 
 export interface OmpRuntime {
   agentDir: string;
@@ -37,6 +40,11 @@ export async function provisionRuntime(
   if (built.isErr()) return err(built.error);
 
   const { settings, authStorage, modelRegistry, refreshError } = built.value;
+  if (refreshError) {
+    logger.warning("model registry refresh failed, using cached: {error}", {
+      error: refreshError,
+    });
+  }
   const available = modelRegistry.getAvailable();
   const defaultModel =
     resolveRoleSelection(["default"], settings, available)?.model ??
@@ -49,6 +57,10 @@ export async function provisionRuntime(
     );
   }
 
+  logger.info("omp runtime ready (default model {model}, {count} available)", {
+    model: defaultModel.id,
+    count: available.length,
+  });
   return ok({ agentDir, settings, authStorage, modelRegistry, defaultModel });
 }
 

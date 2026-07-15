@@ -1,9 +1,13 @@
 import type { Database } from "bun:sqlite";
+import { withContext } from "@logtape/logtape";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent";
 import type { Result } from "neverthrow";
+import { log } from "../util/log";
 import { type Message, toMessages, toStreamMessage } from "./message";
 import { getConversation, setConversationTitle } from "./registry";
+
+const logger = log(["engine"]);
 
 export interface SessionStateLike {
   messages: AgentMessage[];
@@ -169,21 +173,39 @@ export class Engine<S extends SessionLike = SessionLike> {
     const opened = await this.ensureOpen(conversationId, cwd);
     if (opened) return opened;
     const session = this.deps.sessions.get(conversationId);
-    if (!session) return "conversation session unavailable; retry your message";
-    void this.maybeAutoTitle(conversationId, session, text).catch(
-      (e: unknown) => {
-        console.error(`auto-title failed: ${e}`);
-      },
-    );
-    return session
-      .prompt(text)
-      .then(() => undefined)
-      .catch((e: unknown) => (e instanceof Error ? e.message : String(e)));
+    if (!session) {
+      logger.warning("session unavailable after open for {conversationId}", {
+        conversationId,
+      });
+      return "conversation session unavailable; retry your message";
+    }
+    const workspaceId =
+      getConversation(this.deps.db, conversationId)?.workspaceId ?? "unknown";
+    return withContext({ conversationId, workspaceId }, () => {
+      logger.info("turn started ({chars} chars)", { chars: text.length });
+      void this.maybeAutoTitle(conversationId, session, text).catch(
+        (e: unknown) => {
+          logger.error("auto-title failed: {error}", { error: e });
+        },
+      );
+      return session
+        .prompt(text)
+        .then(() => {
+          logger.info("turn completed");
+          return undefined;
+        })
+        .catch((e: unknown) => {
+          const message = e instanceof Error ? e.message : String(e);
+          logger.error("turn failed: {error}", { error: e });
+          return message;
+        });
+    });
   }
 
   abort(conversationId: string): Promise<string | undefined> {
     const session = this.deps.sessions.get(conversationId);
     if (!session) return Promise.resolve(undefined);
+    logger.info("turn aborted for {conversationId}", { conversationId });
     return session
       .abort()
       .then(() => undefined)
@@ -244,7 +266,7 @@ export class Engine<S extends SessionLike = SessionLike> {
     if (!setConversationTitle(this.deps.db, conversationId, title)) return;
     if (!session.sessionName) {
       await session.setSessionName(title, "auto").catch((e: unknown) => {
-        console.error(`title sync to omp session failed: ${e}`);
+        logger.error("title sync to omp session failed: {error}", { error: e });
       });
     }
     const evt: TurnEvent = { kind: "title", title };

@@ -15,7 +15,10 @@ import {
   listWorkspaces,
 } from "../../engine/registry";
 import type { Platform } from "../../store/schema";
+import { log } from "../../util/log";
 import type { ClientCommand, ServerEvent, WorkspaceSummary } from "./protocol";
+
+const logger = log(["web"]);
 
 const PLATFORM: Platform = "web";
 const DEFAULT_LABEL = "default";
@@ -113,6 +116,10 @@ export class WebHub<S extends SessionLike = SessionLike> {
         platform: PLATFORM,
         label: command.label,
       });
+      logger.info("workspace created {workspaceId} (label {label})", {
+        workspaceId: created.id,
+        label: command.label,
+      });
       this.detach(ws);
       this.sendWorkspaces(ws, created.id);
       for (const other of this.allSockets)
@@ -163,6 +170,13 @@ export class WebHub<S extends SessionLike = SessionLike> {
       cwd: target.cwd,
       title: null,
     });
+    logger.info(
+      "conversation created {conversationId} in workspace {workspaceId}",
+      {
+        conversationId: created.id,
+        workspaceId: target.id,
+      },
+    );
     const error = await this.bridge(created.id, created.cwd);
     if (error) {
       this.sendError(ws, error);
