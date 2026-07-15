@@ -100,7 +100,7 @@ function AssistantActionBar() {
 
 function Composer() {
   return (
-    <ComposerPrimitive.Root className="flex items-end gap-2 rounded-(--composer-radius) border border-border/60 bg-(--composer-bg) p-(--composer-padding) shadow-[0_4px_16px_-8px_rgba(0,0,0,0.08),0_1px_2px_rgba(0,0,0,0.04)] transition-[border-color,box-shadow] focus-within:border-border focus-within:shadow-[0_6px_24px_-8px_rgba(0,0,0,0.12),0_1px_2px_rgba(0,0,0,0.05)] dark:border-muted-foreground/15 dark:shadow-none dark:focus-within:border-muted-foreground/30">
+    <ComposerPrimitive.Root className="flex items-center gap-2 rounded-(--composer-radius) border border-border/60 bg-(--composer-bg) p-(--composer-padding) transition-[border-color] focus-within:border-border dark:border-muted-foreground/15 dark:focus-within:border-muted-foreground/30">
       <ComposerPrimitive.Input
         autoFocus
         rows={1}
@@ -110,19 +110,21 @@ function Composer() {
       <ThreadPrimitive.If running={false}>
         <ComposerPrimitive.Send asChild>
           <Button
+            variant="secondary"
             size="icon"
-            className="size-9 rounded-full"
+            className="size-8 rounded-lg"
             aria-label="Send message"
           >
-            <ArrowUpIcon className="size-5" />
+            <ArrowUpIcon className="size-4.5" />
           </Button>
         </ComposerPrimitive.Send>
       </ThreadPrimitive.If>
       <ThreadPrimitive.If running>
         <ComposerPrimitive.Cancel asChild>
           <Button
+            variant="secondary"
             size="icon"
-            className="size-9 rounded-full"
+            className="size-8 rounded-lg"
             aria-label="Stop generating"
           >
             <SquareIcon className="size-4 fill-current" />
@@ -310,9 +312,8 @@ export function Thread() {
       className="@container flex h-full flex-col bg-background"
       style={{
         ["--thread-max-width" as string]: "56rem",
-        ["--composer-bg" as string]:
-          "color-mix(in oklab, var(--color-muted) 30%, var(--color-background))",
-        ["--composer-radius" as string]: "1.5rem",
+        ["--composer-bg" as string]: "var(--color-background)",
+        ["--composer-radius" as string]: "1rem",
         ["--composer-padding" as string]: "8px",
       }}
     >
