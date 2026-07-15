@@ -1,4 +1,7 @@
-import type { AgentSession } from "@oh-my-pi/pi-coding-agent";
+import type {
+  AgentSession,
+  AgentSessionEvent,
+} from "@oh-my-pi/pi-coding-agent";
 import type { ServerWebSocket } from "bun";
 import { loadConfig } from "./config/config";
 import { provisionRuntime } from "./omp/runtime";
@@ -7,7 +10,7 @@ import { autoTitle } from "./omp/title";
 import { defaultDbPath, openDb } from "./store/db";
 import type { Conversation } from "./store/schema";
 import index from "./web/client/index.html";
-import { toUiMessages } from "./web/convert";
+import { toUiMessage, toUiMessages } from "./web/convert";
 import {
   type ClientCommand,
   parseClientCommand,
@@ -83,6 +86,34 @@ function pushSnapshot(conversationId: string): void {
   for (const ws of subscribers.get(conversationId) ?? []) ws.send(payload);
 }
 
+function streamFor(conversationId: string): ServerEvent | undefined {
+  const session = sessions.get(conversationId);
+  if (!session) return undefined;
+  const state = session.state;
+  const tail = state.streamMessage;
+  const message = tail
+    ? (toUiMessage(tail, state.messages.length) ?? null)
+    : null;
+  return {
+    kind: "stream",
+    conversationId,
+    message,
+    isStreaming: state.isStreaming,
+  };
+}
+
+function pushStream(conversationId: string): void {
+  const event = streamFor(conversationId);
+  if (!event) return;
+  const payload = JSON.stringify(event);
+  for (const ws of subscribers.get(conversationId) ?? []) ws.send(payload);
+}
+
+function dispatch(conversationId: string, event: AgentSessionEvent): void {
+  if (event.type === "message_update") pushStream(conversationId);
+  else pushSnapshot(conversationId);
+}
+
 async function ensureOpen(
   conversationId: string,
   conversationCwd: string,
@@ -91,7 +122,7 @@ async function ensureOpen(
   if (opened.isErr()) return opened.error;
   if (!subscribed.has(conversationId)) {
     subscribed.add(conversationId);
-    opened.value.subscribe(() => pushSnapshot(conversationId));
+    opened.value.subscribe((event) => dispatch(conversationId, event));
   }
   return undefined;
 }
