@@ -5,6 +5,7 @@ import type {
   TurnEvent,
 } from "../../engine/conversations";
 import {
+  archiveConversation,
   createConversation,
   createWorkspace,
   getConversation,
@@ -116,6 +117,39 @@ export class WebHub<S extends SessionLike = SessionLike> {
       this.sendWorkspaces(ws, created.id);
       for (const other of this.allSockets)
         if (other !== ws) this.sendWorkspaces(other);
+      return;
+    }
+
+    if (command.kind === "archive") {
+      const conversation = getConversation(
+        this.deps.db,
+        command.conversationId,
+      );
+      const target = conversation
+        ? getWorkspace(this.deps.db, conversation.workspaceId)
+        : undefined;
+      if (!conversation || target?.platform !== PLATFORM) {
+        this.sendError(ws, `unknown conversation: ${command.conversationId}`);
+        return;
+      }
+      archiveConversation(this.deps.db, conversation.id);
+      const wasViewing = ws.data.conversationId === conversation.id;
+      const otherViewers = [
+        ...(this.viewers.get(conversation.id) ?? []),
+      ].filter((viewer) => viewer !== ws);
+      if (wasViewing) {
+        this.detach(ws);
+        this.sendWorkspaces(ws, target.id);
+      } else {
+        this.sendWorkspaces(ws);
+      }
+      for (const viewer of otherViewers) {
+        this.detach(viewer);
+        this.sendWorkspaces(viewer, target.id);
+      }
+      for (const other of this.allSockets)
+        if (other !== ws && !otherViewers.includes(other))
+          this.sendWorkspaces(other);
       return;
     }
 

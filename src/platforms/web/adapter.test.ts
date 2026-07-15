@@ -253,6 +253,99 @@ describe("WebHub.handleCommand createWorkspace", () => {
   });
 });
 
+describe("WebHub.handleCommand archive", () => {
+  test("unknown conversation id sends an error", async () => {
+    const { hub } = makeHub();
+    const ws = new FakeSocket();
+
+    await hub.handleCommand(ws, { kind: "archive", conversationId: "missing" });
+
+    expect(ws.sent).toEqual([
+      { kind: "error", message: "unknown conversation: missing" },
+    ]);
+  });
+
+  test("archives the conversation and drops it from the workspace tree", async () => {
+    const { hub, db, workspace } = makeHub();
+    const conversation = createConversation(db, {
+      workspaceId: workspace.id,
+      cwd: workspace.cwd,
+      title: null,
+    });
+    const ws = new FakeSocket();
+
+    await hub.handleCommand(ws, {
+      kind: "archive",
+      conversationId: conversation.id,
+    });
+
+    expect(listConversations(db, workspace.id)).toHaveLength(0);
+    const event = ws.sent.at(-1);
+    expect(event?.kind).toBe("workspaces");
+    if (event?.kind === "workspaces")
+      expect(event.items.flatMap((w) => w.conversations)).toHaveLength(0);
+  });
+
+  test("kicks the active viewer back to a draft of its workspace", async () => {
+    const { hub, db, workspace } = makeHub();
+    const conversation = createConversation(db, {
+      workspaceId: workspace.id,
+      cwd: workspace.cwd,
+      title: null,
+    });
+    const ws = new FakeSocket();
+    await hub.handleCommand(ws, {
+      kind: "select",
+      conversationId: conversation.id,
+    });
+    ws.sent.length = 0;
+
+    await hub.handleCommand(ws, {
+      kind: "archive",
+      conversationId: conversation.id,
+    });
+
+    expect(ws.data.conversationId).toBeNull();
+    const event = ws.sent.at(-1);
+    expect(event?.kind).toBe("workspaces");
+    if (event?.kind === "workspaces") {
+      expect(event.activeId).toBeNull();
+      expect(event.draftWorkspaceId).toBe(workspace.id);
+    }
+  });
+
+  test("kicks other viewers of the same conversation back to a draft", async () => {
+    const { hub, db, workspace } = makeHub();
+    const conversation = createConversation(db, {
+      workspaceId: workspace.id,
+      cwd: workspace.cwd,
+      title: null,
+    });
+    const ws = new FakeSocket();
+    const other = new FakeSocket();
+    for (const socket of [ws, other]) {
+      await hub.handleCommand(socket, {
+        kind: "select",
+        conversationId: conversation.id,
+      });
+      socket.sent.length = 0;
+    }
+
+    await hub.handleCommand(ws, {
+      kind: "archive",
+      conversationId: conversation.id,
+    });
+
+    expect(other.data.conversationId).toBeNull();
+    const event = other.sent.at(-1);
+    expect(event?.kind).toBe("workspaces");
+    if (event?.kind === "workspaces") {
+      expect(event.activeId).toBeNull();
+      expect(event.draftWorkspaceId).toBe(workspace.id);
+    }
+  });
+});
+
 describe("WebHub.handleCommand prompt/abort", () => {
   test("prompt with no active conversation sends an error", async () => {
     const { hub } = makeHub();

@@ -11,6 +11,7 @@ export const clientCommandSchema = z.discriminatedUnion("kind", [
     prompt: z.string().min(1).optional(),
   }),
   z.object({ kind: z.literal("createWorkspace"), label: z.string().min(1) }),
+  z.object({ kind: z.literal("archive"), conversationId: z.string().min(1) }),
   z.object({ kind: z.literal("draft") }),
 ]);
 
