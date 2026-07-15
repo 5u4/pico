@@ -6,12 +6,14 @@ import { openDb } from "../store/db";
 import type { ServerEvent } from "../web/protocol";
 import {
   createConversation,
+  getConversation,
   getOrCreateDefaultWorkspace,
   listConversations,
   listWorkspaces,
 } from "../web/store";
 import {
   Hub,
+  type HubDeps,
   type HubSocket,
   type SessionLike,
   type SessionStateLike,
@@ -87,13 +89,35 @@ class FakeSessions implements SessionsPort<FakeSession> {
 class FakeSocket implements HubSocket {
   data: { conversationId: string | null } = { conversationId: null };
   readonly sent: ServerEvent[] = [];
+  private readonly waiters: {
+    kind: ServerEvent["kind"];
+    resolve: (event: ServerEvent) => void;
+  }[] = [];
 
   send(payload: string): void {
-    this.sent.push(JSON.parse(payload) as ServerEvent);
+    const event = JSON.parse(payload) as ServerEvent;
+    this.sent.push(event);
+    for (let i = this.waiters.length - 1; i >= 0; i--) {
+      const waiter = this.waiters[i];
+      if (waiter && waiter.kind === event.kind) {
+        this.waiters.splice(i, 1);
+        waiter.resolve(event);
+      }
+    }
+  }
+
+  waitFor(kind: ServerEvent["kind"]): Promise<ServerEvent> {
+    const existing = this.sent.find((event) => event.kind === kind);
+    if (existing) return Promise.resolve(existing);
+    const { promise, resolve } = Promise.withResolvers<ServerEvent>();
+    this.waiters.push({ kind, resolve });
+    return promise;
   }
 }
 
-function makeHub() {
+function makeHub(
+  autoTitle: HubDeps<FakeSession>["autoTitle"] = async () => null,
+) {
   const db: Database = openDb(":memory:");
   const workspace = getOrCreateDefaultWorkspace(db, WORKSPACE_CWD);
   const sessions = new FakeSessions();
@@ -101,7 +125,7 @@ function makeHub() {
     db,
     sessions,
     workspaceCwd: WORKSPACE_CWD,
-    autoTitle: async () => null,
+    autoTitle,
   });
   return { db, workspace, sessions, hub };
 }
@@ -180,6 +204,23 @@ describe("Hub.handleCommand create", () => {
     expect(rows).toHaveLength(1);
     expect(ws.data.conversationId).toBe(rows[0]?.id ?? null);
     expect(ws.sent.some((e) => e.kind === "workspaces")).toBe(true);
+  });
+
+  test("with a prompt runs it on the freshly opened session", async () => {
+    const { hub, db, workspace, sessions } = makeHub();
+    const ws = new FakeSocket();
+
+    await hub.handleCommand(ws, {
+      kind: "create",
+      workspaceId: workspace.id,
+      prompt: "kick off",
+    });
+
+    const created = listConversations(db, workspace.id)[0];
+    expect(created).toBeDefined();
+    if (created) {
+      expect(sessions.get(created.id)?.promptCalls).toEqual(["kick off"]);
+    }
   });
 });
 
@@ -295,5 +336,53 @@ describe("Hub session event dispatch", () => {
 
     expect(ws.sent).toHaveLength(1);
     expect(ws.sent[0]?.kind).toBe("snapshot");
+  });
+});
+
+describe("Hub session open failure", () => {
+  test("select on a session that fails to open sends the open error", async () => {
+    const { hub, db, workspace, sessions } = makeHub();
+    const conversation = createConversation(db, {
+      workspaceId: workspace.id,
+      cwd: workspace.cwd,
+      title: null,
+    });
+    sessions.failOpen.set(conversation.id, "disk on fire");
+    const ws = new FakeSocket();
+
+    await hub.handleCommand(ws, {
+      kind: "select",
+      conversationId: conversation.id,
+    });
+
+    expect(ws.sent).toEqual([{ kind: "error", message: "disk on fire" }]);
+    expect(ws.data.conversationId).toBeNull();
+  });
+});
+
+describe("Hub auto-title", () => {
+  test("a generated title is persisted and broadcast to every socket", async () => {
+    const { hub, db, workspace, sessions } = makeHub(
+      async () => "Fix the parser",
+    );
+    const conversation = createConversation(db, {
+      workspaceId: workspace.id,
+      cwd: workspace.cwd,
+      title: null,
+    });
+    const ws = new FakeSocket();
+    await hub.handleOpen(ws);
+    ws.sent.length = 0;
+
+    await hub.handleCommand(ws, {
+      kind: "prompt",
+      text: "the parser is broken",
+    });
+    await ws.waitFor("workspaces");
+
+    expect(getConversation(db, conversation.id)?.title).toBe("Fix the parser");
+    expect(sessions.get(conversation.id)?.setSessionNameCalls).toEqual([
+      { name: "Fix the parser", source: "auto" },
+    ]);
   });
 });

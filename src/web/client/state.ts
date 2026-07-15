@@ -136,9 +136,8 @@ function reduceServer(state: ThreadState, event: ServerEvent): Reduced {
       const messages = event.message
         ? mergeTail(state.messages, event.message)
         : state.messages;
-      const cleared = clearPendingIfResolved(state, messages);
       return {
-        state: { ...state, messages, isRunning: event.isStreaming, ...cleared },
+        state: { ...state, messages, isRunning: event.isStreaming },
         commands: [],
       };
     }
