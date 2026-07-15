@@ -3,12 +3,13 @@ import {
   ComposerPrimitive,
   MessagePrimitive,
   ThreadPrimitive,
+  useAuiState,
 } from "@assistant-ui/react";
 import { ArrowUpIcon, CopyIcon, SquareIcon } from "lucide-react";
 import { MarkdownText } from "./assistant-ui/markdown-text";
 import { Reasoning, ReasoningGroup } from "./assistant-ui/reasoning";
+import { toolCardsByName } from "./assistant-ui/tool-cards";
 import { ToolFallback } from "./assistant-ui/tool-fallback";
-import { ToolGroup } from "./assistant-ui/tool-group";
 import { TooltipIconButton } from "./assistant-ui/tooltip-icon-button";
 import { Button } from "./ui/button";
 
@@ -24,22 +25,35 @@ function UserMessage() {
 
 function AssistantMessage() {
   return (
-    <MessagePrimitive.Root className="group flex flex-col gap-1">
+    <MessagePrimitive.Root className="flex flex-col gap-1">
       <div className="leading-relaxed text-foreground">
         <MessagePrimitive.Parts
           components={{
             Text: MarkdownText,
             Reasoning,
             ReasoningGroup,
-            ToolGroup,
-            tools: { Fallback: ToolFallback },
+            tools: { by_name: toolCardsByName, Fallback: ToolFallback },
           }}
         />
       </div>
+      <AssistantActionBar />
+    </MessagePrimitive.Root>
+  );
+}
+
+function AssistantActionBar() {
+  const hasText = useAuiState((s) =>
+    s.message.parts.some(
+      (part) => part.type === "text" && part.text.trim().length > 0,
+    ),
+  );
+  if (!hasText) return null;
+
+  return (
+    <div className="flex min-h-6 items-center">
       <ActionBarPrimitive.Root
         hideWhenRunning
-        autohide="not-last"
-        className="flex gap-1 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100"
+        className="flex gap-1 text-muted-foreground"
       >
         <ActionBarPrimitive.Copy asChild>
           <TooltipIconButton tooltip="Copy">
@@ -47,7 +61,7 @@ function AssistantMessage() {
           </TooltipIconButton>
         </ActionBarPrimitive.Copy>
       </ActionBarPrimitive.Root>
-    </MessagePrimitive.Root>
+    </div>
   );
 }
 
