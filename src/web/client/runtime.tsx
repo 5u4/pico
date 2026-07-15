@@ -184,6 +184,11 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
 
   const prompt = useCallback(
     (text: string) => {
+      const draftWorkspaceId = draftWorkspaceRef.current;
+      if (activeIdRef.current === null && !draftWorkspaceId) {
+        setError("no workspace selected for the new conversation");
+        return;
+      }
       pendingRef.current = {
         baseUserCount: messages.filter((m) => m.role === "user").length,
       };
@@ -192,13 +197,8 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
         role: "user",
         parts: [{ type: "text", text }],
       });
-      if (activeIdRef.current === null) {
-        const workspaceId = draftWorkspaceRef.current;
-        if (!workspaceId) {
-          setError("no workspace selected for the new conversation");
-          return;
-        }
-        send({ kind: "create", workspaceId, prompt: text });
+      if (draftWorkspaceId !== null && activeIdRef.current === null) {
+        send({ kind: "create", workspaceId: draftWorkspaceId, prompt: text });
       } else {
         send({ kind: "prompt", text });
       }

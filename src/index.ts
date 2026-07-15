@@ -277,13 +277,17 @@ async function handleCommand(ws: Ws, command: ClientCommand): Promise<void> {
   attach(ws, created.id);
   sendWorkspaces(ws);
   for (const other of allSockets) if (other !== ws) sendWorkspaces(other);
-  const session = sessions.get(created.id);
-  if (command.prompt && session) {
-    await runPrompt(ws, created.id, session, command.prompt);
-  } else {
-    const snap = snapshotFor(created.id);
-    if (snap) ws.send(JSON.stringify(snap));
+  if (command.prompt) {
+    const session = sessions.get(created.id);
+    if (session) {
+      await runPrompt(ws, created.id, session, command.prompt);
+    } else {
+      sendError(ws, "conversation session unavailable; retry your message");
+    }
+    return;
   }
+  const snap = snapshotFor(created.id);
+  if (snap) ws.send(JSON.stringify(snap));
 }
 
 const server = Bun.serve<WsData, "/">({
