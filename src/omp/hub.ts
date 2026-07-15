@@ -3,7 +3,7 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent";
 import type { Result } from "neverthrow";
 import type { Conversation } from "../store/schema";
-import { toUiMessage, toUiMessages } from "../web/convert";
+import { toStreamMessage, toUiMessages } from "../web/convert";
 import type {
   ClientCommand,
   ServerEvent,
@@ -216,9 +216,7 @@ export class Hub<S extends SessionLike = SessionLike> {
     if (!session) return undefined;
     const state = session.state;
     const tail = state.streamMessage;
-    const message = tail
-      ? (toUiMessage(tail, state.messages.length) ?? null)
-      : null;
+    const message = tail ? toStreamMessage(state.messages, tail) : null;
     return {
       kind: "stream",
       conversationId,

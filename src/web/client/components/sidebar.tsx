@@ -1,8 +1,14 @@
-import { ChevronRightIcon, FolderIcon, PlusIcon } from "lucide-react";
+import {
+  ChevronRightIcon,
+  FolderIcon,
+  PanelLeftIcon,
+  PlusIcon,
+} from "lucide-react";
 import { useState } from "react";
 import type { WorkspaceSummary } from "../../protocol";
 import { cn } from "../lib/utils";
 import { useShell } from "../runtime";
+import { TooltipIconButton } from "./assistant-ui/tooltip-icon-button";
 import { ModeToggle } from "./mode-toggle";
 import { Button } from "./ui/button";
 import {
@@ -72,7 +78,13 @@ function WorkspaceItem({
   );
 }
 
-export function Sidebar() {
+export function Sidebar({
+  collapsed,
+  onToggle,
+}: {
+  collapsed: boolean;
+  onToggle: () => void;
+}) {
   const { workspaces, activeId, select, create, createWorkspace } = useShell();
   const [naming, setNaming] = useState(false);
   const [name, setName] = useState("");
@@ -85,54 +97,75 @@ export function Sidebar() {
   };
 
   return (
-    <aside className="flex h-dvh w-64 shrink-0 flex-col border-r border-border bg-muted/30">
-      <div className="flex items-center justify-between px-3 py-2">
-        <span className="text-sm font-medium">Workspaces</span>
-        <Button
-          variant="ghost"
-          size="icon"
-          className="size-7"
-          onClick={() => setNaming((v) => !v)}
-          aria-label="New workspace"
-        >
-          <PlusIcon className="size-4" />
-        </Button>
-      </div>
-      {naming && (
-        <div className="px-2 pb-2">
-          <input
-            // biome-ignore lint/a11y/noAutofocus: focus the inline field on open
-            autoFocus
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") submit();
-              if (e.key === "Escape") {
-                setName("");
-                setNaming(false);
-              }
-            }}
-            onBlur={submit}
-            aria-label="Workspace name"
-            placeholder="workspace name"
-            className="w-full rounded-md border border-input bg-background px-2 py-1 text-sm outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
-          />
-        </div>
+    <aside
+      className={cn(
+        "h-dvh shrink-0 overflow-hidden transition-[margin] duration-200 ease-out",
+        collapsed && "-ml-64",
       )}
-      <nav className="min-h-0 flex-1 overflow-y-auto px-2 pb-2">
-        {workspaces.map((workspace) => (
-          <WorkspaceItem
-            key={workspace.id}
-            workspace={workspace}
-            activeId={activeId}
-            onSelect={select}
-            onCreate={create}
-          />
-        ))}
-      </nav>
-      <div className="flex items-center justify-between border-t border-border p-2">
-        <span className="px-2 text-xs text-muted-foreground">pico</span>
-        <ModeToggle />
+    >
+      <div
+        inert={collapsed}
+        aria-hidden={collapsed}
+        className="flex h-full w-64 flex-col border-r border-border bg-muted/30"
+      >
+        <div className="flex items-center justify-between px-3 py-2">
+          <span className="text-sm font-medium">Workspaces</span>
+          <div className="flex items-center gap-0.5">
+            <Button
+              variant="ghost"
+              size="icon"
+              className="size-7"
+              onClick={() => setNaming((v) => !v)}
+              aria-label="New workspace"
+            >
+              <PlusIcon className="size-4" />
+            </Button>
+            <TooltipIconButton
+              tooltip="Hide sidebar"
+              side="bottom"
+              className="size-7"
+              onClick={onToggle}
+            >
+              <PanelLeftIcon className="size-4" />
+            </TooltipIconButton>
+          </div>
+        </div>
+        {naming && (
+          <div className="px-2 pb-2">
+            <input
+              // biome-ignore lint/a11y/noAutofocus: focus the inline field on open
+              autoFocus
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") submit();
+                if (e.key === "Escape") {
+                  setName("");
+                  setNaming(false);
+                }
+              }}
+              onBlur={submit}
+              aria-label="Workspace name"
+              placeholder="workspace name"
+              className="w-full rounded-md border border-input bg-background px-2 py-1 text-sm outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
+            />
+          </div>
+        )}
+        <nav className="min-h-0 flex-1 overflow-y-auto px-2 pb-2">
+          {workspaces.map((workspace) => (
+            <WorkspaceItem
+              key={workspace.id}
+              workspace={workspace}
+              activeId={activeId}
+              onSelect={select}
+              onCreate={create}
+            />
+          ))}
+        </nav>
+        <div className="flex items-center justify-between border-t border-border p-2">
+          <span className="px-2 text-xs text-muted-foreground">pico</span>
+          <ModeToggle />
+        </div>
       </div>
     </aside>
   );
