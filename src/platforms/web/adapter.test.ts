@@ -393,3 +393,36 @@ describe("WebHub auto-title", () => {
     ]);
   });
 });
+
+describe("WebHub concurrent activation", () => {
+  test("two sockets activating one conversation share a single bridge", async () => {
+    const { hub, db, workspace, sessions } = makeHub();
+    const conversation = createConversation(db, {
+      workspaceId: workspace.id,
+      cwd: workspace.cwd,
+      title: null,
+    });
+    const a = new FakeSocket();
+    const b = new FakeSocket();
+
+    await Promise.all([
+      hub.handleCommand(a, {
+        kind: "select",
+        conversationId: conversation.id,
+      }),
+      hub.handleCommand(b, {
+        kind: "select",
+        conversationId: conversation.id,
+      }),
+    ]);
+    a.sent.length = 0;
+    b.sent.length = 0;
+
+    sessions
+      .get(conversation.id)
+      ?.emit({ type: "message_update" } as unknown as AgentSessionEvent);
+
+    expect(a.sent.filter((e) => e.kind === "stream")).toHaveLength(1);
+    expect(b.sent.filter((e) => e.kind === "stream")).toHaveLength(1);
+  });
+});

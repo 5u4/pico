@@ -34,7 +34,10 @@ export class WebHub<S extends SessionLike = SessionLike> {
   private readonly deps: WebHubDeps<S>;
   private readonly allSockets = new Set<HubSocket>();
   private readonly viewers = new Map<string, Set<HubSocket>>();
-  private readonly bridges = new Map<string, () => void>();
+  private readonly bridges = new Map<
+    string,
+    { opened: Promise<string | undefined>; unsubscribe: () => void }
+  >();
 
   constructor(deps: WebHubDeps<S>) {
     this.deps = deps;
@@ -201,24 +204,26 @@ export class WebHub<S extends SessionLike = SessionLike> {
     for (const ws of this.viewers.get(conversationId) ?? []) ws.send(payload);
   }
 
-  private async bridge(
+  private bridge(
     conversationId: string,
     conversationCwd: string,
   ): Promise<string | undefined> {
-    if (this.bridges.has(conversationId)) return undefined;
+    const existing = this.bridges.get(conversationId);
+    if (existing) return existing.opened;
     const { unsubscribe, opened } = this.deps.engine.subscribe(
       conversationId,
       conversationCwd,
       "live",
       (event) => this.dispatch(conversationId, event),
     );
-    const error = await opened;
-    if (error) {
-      unsubscribe();
+    this.bridges.set(conversationId, { opened, unsubscribe });
+    return opened.then((error) => {
+      if (error) {
+        unsubscribe();
+        this.bridges.delete(conversationId);
+      }
       return error;
-    }
-    this.bridges.set(conversationId, unsubscribe);
-    return undefined;
+    });
   }
 
   private attach(ws: HubSocket, conversationId: string): void {
@@ -238,7 +243,7 @@ export class WebHub<S extends SessionLike = SessionLike> {
     const set = this.viewers.get(current);
     set?.delete(ws);
     if (set && set.size === 0) {
-      this.bridges.get(current)?.();
+      this.bridges.get(current)?.unsubscribe();
       this.bridges.delete(current);
       this.viewers.delete(current);
     }
