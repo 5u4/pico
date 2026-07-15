@@ -93,7 +93,7 @@ const statusIconMap: Record<ToolStatus, React.ElementType> = {
   "requires-action": AlertCircleIcon,
 };
 
-const formatToolDuration = (ms: number) => {
+export const formatToolDuration = (ms: number) => {
   if (ms < 1000) return "<1s";
   const seconds = ms / 1000;
   if (seconds < 10) return `${(Math.floor(seconds * 10) / 10).toFixed(1)}s`;

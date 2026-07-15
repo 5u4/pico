@@ -20,6 +20,7 @@ import { z } from "zod";
 import { cn } from "../../lib/utils";
 import { CollapsibleTrigger } from "../ui/collapsible";
 import {
+  formatToolDuration,
   ToolFallback,
   ToolFallbackContent,
   ToolFallbackRoot,
@@ -67,15 +68,6 @@ interface ToolCardConfig {
   summarize: Summarize;
 }
 
-function formatDuration(ms: number | undefined): string | undefined {
-  if (ms === undefined) return undefined;
-  if (ms < 1000) return "<1s";
-  const seconds = ms / 1000;
-  if (seconds < 10) return `${(Math.floor(seconds * 10) / 10).toFixed(1)}s`;
-  if (seconds < 60) return `${Math.floor(seconds)}s`;
-  return `${Math.floor(seconds / 60)}m ${Math.floor(seconds % 60)}s`;
-}
-
 function ToolCardTrigger({
   label,
   summary,
@@ -90,7 +82,9 @@ function ToolCardTrigger({
   isError?: boolean;
 }) {
   const isRunning = status?.type === "running";
-  const durationText = formatDuration(useToolCallElapsed());
+  const elapsedMs = useToolCallElapsed();
+  const durationText =
+    elapsedMs === undefined ? undefined : formatToolDuration(elapsedMs);
   const GlyphIcon = isError ? CircleAlertIcon : isRunning ? LoaderIcon : Icon;
 
   return (
@@ -178,10 +172,10 @@ function makeToolCard(config: ToolCardConfig): ToolCallMessagePartComponent {
     }
 
     const output = resultText(props.result);
-    const summary =
-      props.isError && output
-        ? firstLine(output)
-        : config.summarize(props.args);
+    const errorSummary = props.isError
+      ? firstLine(output?.trim() ?? "") || config.summarize(props.args)
+      : undefined;
+    const summary = errorSummary ?? config.summarize(props.args);
     const paramsText = JSON.stringify(props.args ?? {}, null, 2);
 
     return (
