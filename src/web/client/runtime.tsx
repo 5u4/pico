@@ -208,8 +208,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
   const cancel = useCallback(() => {
     pendingRef.current = null;
     setPending(null);
-    if (activeIdRef.current !== null) send({ kind: "abort" });
-    else setIsRunning(false);
+    send({ kind: "abort" });
   }, [send]);
 
   const dismissError = useCallback(() => setError(null), []);
