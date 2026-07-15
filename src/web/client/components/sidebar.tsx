@@ -119,7 +119,7 @@ export function Sidebar() {
           />
         </div>
       )}
-      <nav className="flex-1 overflow-y-auto px-2 pb-2">
+      <nav className="min-h-0 flex-1 overflow-y-auto px-2 pb-2">
         {workspaces.map((workspace) => (
           <WorkspaceItem
             key={workspace.id}

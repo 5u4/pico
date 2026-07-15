@@ -102,8 +102,8 @@ function Composer() {
 
 export function Thread() {
   return (
-    <ThreadPrimitive.Root className="flex h-dvh flex-col bg-background">
-      <ThreadPrimitive.Viewport className="flex flex-1 flex-col overflow-y-auto">
+    <ThreadPrimitive.Root className="flex h-full flex-col bg-background">
+      <ThreadPrimitive.Viewport className="relative flex flex-1 flex-col overflow-y-auto">
         <div className="mx-auto flex w-full max-w-3xl flex-1 flex-col gap-6 px-4 pt-6">
           <ThreadPrimitive.Empty>
             <div className="flex flex-1 items-center justify-center">
