@@ -72,7 +72,10 @@ export class Engine<S extends SessionLike = SessionLike> {
     const opened = this.ensureOpen(conversationId, cwd);
     return {
       unsubscribe: () => {
-        this.subscribers.get(conversationId)?.delete(subscriber);
+        const current = this.subscribers.get(conversationId);
+        if (!current) return;
+        current.delete(subscriber);
+        if (current.size === 0) this.subscribers.delete(conversationId);
       },
       opened,
     };
