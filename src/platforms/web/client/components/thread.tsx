@@ -100,35 +100,37 @@ function AssistantActionBar() {
 
 function Composer() {
   return (
-    <ComposerPrimitive.Root className="flex items-end gap-2 rounded-(--composer-radius) border border-border/60 bg-(--composer-bg) p-(--composer-padding) shadow-[0_4px_16px_-8px_rgba(0,0,0,0.08),0_1px_2px_rgba(0,0,0,0.04)] transition-[border-color,box-shadow] focus-within:border-border focus-within:shadow-[0_6px_24px_-8px_rgba(0,0,0,0.12),0_1px_2px_rgba(0,0,0,0.05)] dark:border-muted-foreground/15 dark:shadow-none dark:focus-within:border-muted-foreground/30">
+    <ComposerPrimitive.Root className="flex w-full flex-col gap-2 rounded-(--composer-radius) border border-border/60 bg-(--composer-bg) p-(--composer-padding) shadow-[0_4px_16px_-8px_rgba(0,0,0,0.08),0_1px_2px_rgba(0,0,0,0.04)] transition-[border-color,box-shadow] focus-within:border-border focus-within:shadow-[0_6px_24px_-8px_rgba(0,0,0,0.12),0_1px_2px_rgba(0,0,0,0.05)] dark:border-muted-foreground/15 dark:shadow-none dark:focus-within:border-muted-foreground/30">
       <ComposerPrimitive.Input
         autoFocus
         rows={1}
         placeholder="Message pico…"
-        className="max-h-40 min-h-9 flex-1 resize-none bg-transparent px-2.5 py-1.5 text-base outline-none placeholder:text-muted-foreground"
+        className="max-h-40 min-h-9 w-full resize-none bg-transparent px-2.5 py-1.5 text-base outline-none placeholder:text-muted-foreground"
       />
-      <ThreadPrimitive.If running={false}>
-        <ComposerPrimitive.Send asChild>
-          <Button
-            size="icon"
-            className="size-9 rounded-full"
-            aria-label="Send message"
-          >
-            <ArrowUpIcon className="size-5" />
-          </Button>
-        </ComposerPrimitive.Send>
-      </ThreadPrimitive.If>
-      <ThreadPrimitive.If running>
-        <ComposerPrimitive.Cancel asChild>
-          <Button
-            size="icon"
-            className="size-9 rounded-full"
-            aria-label="Stop generating"
-          >
-            <SquareIcon className="size-4 fill-current" />
-          </Button>
-        </ComposerPrimitive.Cancel>
-      </ThreadPrimitive.If>
+      <div className="flex items-center justify-end">
+        <ThreadPrimitive.If running={false}>
+          <ComposerPrimitive.Send asChild>
+            <Button
+              size="icon"
+              className="size-8 rounded-full"
+              aria-label="Send message"
+            >
+              <ArrowUpIcon className="size-5" />
+            </Button>
+          </ComposerPrimitive.Send>
+        </ThreadPrimitive.If>
+        <ThreadPrimitive.If running>
+          <ComposerPrimitive.Cancel asChild>
+            <Button
+              size="icon"
+              className="size-8 rounded-full"
+              aria-label="Stop generating"
+            >
+              <SquareIcon className="size-4 fill-current" />
+            </Button>
+          </ComposerPrimitive.Cancel>
+        </ThreadPrimitive.If>
+      </div>
     </ComposerPrimitive.Root>
   );
 }
