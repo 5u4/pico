@@ -170,6 +170,7 @@ export class WebHub<S extends SessionLike = SessionLike> {
       conversationId,
       messages: snap.messages,
       isStreaming: snap.streaming,
+      usage: snap.usage,
     };
   }
 
@@ -185,6 +186,7 @@ export class WebHub<S extends SessionLike = SessionLike> {
             conversationId,
             messages: event.messages,
             isStreaming: event.streaming,
+            usage: event.usage,
           }
         : {
             kind: "stream",

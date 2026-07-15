@@ -27,6 +27,7 @@ import { Reasoning, ReasoningGroup } from "./assistant-ui/reasoning";
 import { toolCardsByName } from "./assistant-ui/tool-cards";
 import { ToolFallback } from "./assistant-ui/tool-fallback";
 import { TooltipIconButton } from "./assistant-ui/tooltip-icon-button";
+import { ContextUsage } from "./context-usage";
 import { Button } from "./ui/button";
 
 function UserMessage() {
@@ -342,6 +343,10 @@ export function Thread() {
         >
           <ScrollToBottom />
           <Composer />
+          <div className="flex items-center justify-between px-1">
+            <div className="flex items-center gap-1" />
+            <ContextUsage />
+          </div>
           <ThreadPrimitive.Empty>
             <div className="min-h-19">
               <AuiIf condition={(s) => s.composer.isEmpty}>

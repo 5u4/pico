@@ -42,6 +42,30 @@ class FakeSession implements SessionLike {
     return Promise.resolve(true);
   }
 
+  contextUsage:
+    | { tokens: number; contextWindow: number; percent: number }
+    | undefined = undefined;
+  contextBreakdown = {
+    systemPromptTokens: 0,
+    systemToolsTokens: 0,
+    systemContextTokens: 0,
+    skillsTokens: 0,
+    messagesTokens: 0,
+  };
+  cost = 0;
+
+  getContextUsage() {
+    return this.contextUsage;
+  }
+
+  getContextBreakdown() {
+    return this.contextBreakdown;
+  }
+
+  getSessionStats() {
+    return { cost: this.cost };
+  }
+
   emit(event: AgentSessionEvent): void {
     for (const listener of this.listeners) listener(event);
   }

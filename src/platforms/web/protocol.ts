@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { ContextUsageInfo } from "../../engine/conversations";
 import type { Message } from "../../engine/message";
 
 export const clientCommandSchema = z.discriminatedUnion("kind", [
@@ -39,6 +40,7 @@ export type ServerEvent =
       conversationId: string;
       messages: Message[];
       isStreaming: boolean;
+      usage: ContextUsageInfo | null;
     }
   | {
       kind: "stream";
