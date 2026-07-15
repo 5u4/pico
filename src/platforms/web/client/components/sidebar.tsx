@@ -1,14 +1,8 @@
-import {
-  ChevronRightIcon,
-  FolderIcon,
-  PanelLeftIcon,
-  PlusIcon,
-} from "lucide-react";
+import { ChevronRightIcon, FolderIcon, PlusIcon } from "lucide-react";
 import { useState } from "react";
 import type { WorkspaceSummary } from "../../protocol";
 import { cn } from "../lib/utils";
 import { useShell } from "../runtime";
-import { TooltipIconButton } from "./assistant-ui/tooltip-icon-button";
 import { ModeToggle } from "./mode-toggle";
 import { Button } from "./ui/button";
 import {
@@ -78,13 +72,7 @@ function WorkspaceItem({
   );
 }
 
-export function Sidebar({
-  collapsed,
-  onToggle,
-}: {
-  collapsed: boolean;
-  onToggle: () => void;
-}) {
+export function Sidebar({ collapsed }: { collapsed: boolean }) {
   const { workspaces, activeId, select, create, createWorkspace } = useShell();
   const [naming, setNaming] = useState(false);
   const [name, setName] = useState("");
@@ -108,27 +96,17 @@ export function Sidebar({
         aria-hidden={collapsed}
         className="flex h-full w-64 flex-col border-r border-border bg-muted/30"
       >
-        <div className="flex items-center justify-between px-3 py-2">
+        <div className="flex items-center justify-between py-2 pr-3 pl-11">
           <span className="text-sm font-medium">Workspaces</span>
-          <div className="flex items-center gap-0.5">
-            <Button
-              variant="ghost"
-              size="icon"
-              className="size-7"
-              onClick={() => setNaming((v) => !v)}
-              aria-label="New workspace"
-            >
-              <PlusIcon className="size-4" />
-            </Button>
-            <TooltipIconButton
-              tooltip="Hide sidebar"
-              side="bottom"
-              className="size-7"
-              onClick={onToggle}
-            >
-              <PanelLeftIcon className="size-4" />
-            </TooltipIconButton>
-          </div>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="size-7"
+            onClick={() => setNaming((v) => !v)}
+            aria-label="New workspace"
+          >
+            <PlusIcon className="size-4" />
+          </Button>
         </div>
         {naming && (
           <div className="px-2 pb-2">
