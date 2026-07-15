@@ -49,6 +49,7 @@ function convertMessage(message: Message): ThreadMessageLike {
 type ShellContextValue = {
   workspaces: WorkspaceSummary[];
   activeId: string | null;
+  draftWorkspaceId: string | null;
   error: string | null;
   dismissError: () => void;
   select: (conversationId: string) => void;
@@ -199,6 +200,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
     () => ({
       workspaces: state.workspaces,
       activeId: state.activeId,
+      draftWorkspaceId: state.draftWorkspaceId,
       error: state.error,
       dismissError,
       select,
@@ -209,6 +211,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
     [
       state.workspaces,
       state.activeId,
+      state.draftWorkspaceId,
       state.error,
       dismissError,
       select,

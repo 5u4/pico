@@ -21,6 +21,7 @@ import {
 import type { ReactNode } from "react";
 import { useState } from "react";
 import { cn } from "../lib/utils";
+import { useShell } from "../runtime";
 import { DotMatrix } from "./assistant-ui/dot-matrix";
 import { MarkdownText } from "./assistant-ui/markdown-text";
 import { Reasoning, ReasoningGroup } from "./assistant-ui/reasoning";
@@ -133,6 +134,28 @@ function Composer() {
         </ComposerPrimitive.Cancel>
       </ThreadPrimitive.If>
     </ComposerPrimitive.Root>
+  );
+}
+
+function ConversationLabel() {
+  const { workspaces, activeId, draftWorkspaceId } = useShell();
+  const workspace =
+    activeId !== null
+      ? workspaces.find((w) => w.conversations.some((c) => c.id === activeId))
+      : draftWorkspaceId !== null
+        ? workspaces.find((w) => w.id === draftWorkspaceId)
+        : undefined;
+  if (!workspace) return null;
+  const conversation =
+    activeId === null
+      ? undefined
+      : workspace.conversations.find((c) => c.id === activeId);
+  const label = workspace.label ?? "workspace";
+  const title = conversation?.title ?? "New chat";
+  return (
+    <span className="min-w-0 truncate text-xs text-muted-foreground">
+      {label} · {title}
+    </span>
   );
 }
 
@@ -337,14 +360,14 @@ export function Thread() {
 
         <ThreadPrimitive.ViewportFooter
           className={cn(
-            "mx-auto flex w-full max-w-(--thread-max-width) flex-col gap-4 overflow-visible bg-background pb-4 md:pb-6",
+            "mx-auto flex w-full max-w-(--thread-max-width) flex-col gap-2 overflow-visible bg-background pb-2 md:pb-3",
             !isEmpty && "sticky bottom-0 mt-auto rounded-t-(--composer-radius)",
           )}
         >
           <ScrollToBottom />
           <Composer />
-          <div className="flex items-center justify-between px-1">
-            <div className="flex items-center gap-1" />
+          <div className="flex items-center justify-between gap-4 px-1">
+            <ConversationLabel />
             <ContextUsage />
           </div>
           <ThreadPrimitive.Empty>
