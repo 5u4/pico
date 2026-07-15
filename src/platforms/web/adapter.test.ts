@@ -313,6 +313,37 @@ describe("WebHub.handleCommand archive", () => {
       expect(event.draftWorkspaceId).toBe(workspace.id);
     }
   });
+
+  test("kicks other viewers of the same conversation back to a draft", async () => {
+    const { hub, db, workspace } = makeHub();
+    const conversation = createConversation(db, {
+      workspaceId: workspace.id,
+      cwd: workspace.cwd,
+      title: null,
+    });
+    const ws = new FakeSocket();
+    const other = new FakeSocket();
+    for (const socket of [ws, other]) {
+      await hub.handleCommand(socket, {
+        kind: "select",
+        conversationId: conversation.id,
+      });
+      socket.sent.length = 0;
+    }
+
+    await hub.handleCommand(ws, {
+      kind: "archive",
+      conversationId: conversation.id,
+    });
+
+    expect(other.data.conversationId).toBeNull();
+    const event = other.sent.at(-1);
+    expect(event?.kind).toBe("workspaces");
+    if (event?.kind === "workspaces") {
+      expect(event.activeId).toBeNull();
+      expect(event.draftWorkspaceId).toBe(workspace.id);
+    }
+  });
 });
 
 describe("WebHub.handleCommand prompt/abort", () => {
