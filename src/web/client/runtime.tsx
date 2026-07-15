@@ -107,6 +107,18 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
         if (parsed.conversationId !== activeIdRef.current) return;
         setMessages(parsed.messages);
         setIsRunning(parsed.isStreaming);
+      } else if (parsed.kind === "stream") {
+        if (parsed.conversationId !== activeIdRef.current) return;
+        setIsRunning(parsed.isStreaming);
+        const tail = parsed.message;
+        if (tail)
+          setMessages((prev) => {
+            const index = prev.findIndex((m) => m.id === tail.id);
+            if (index === -1) return [...prev, tail];
+            const next = prev.slice();
+            next[index] = tail;
+            return next;
+          });
       } else {
         setError(parsed.message);
       }

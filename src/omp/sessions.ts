@@ -108,6 +108,8 @@ export class Sessions {
       authStorage: this.runtime.authStorage,
       modelRegistry: this.runtime.modelRegistry,
       skipPythonPreflight: true,
+      autoApprove: true,
+      hasUI: false,
     });
     return session;
   }

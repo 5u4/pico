@@ -61,6 +61,12 @@ export type ServerEvent =
       messages: UiMessage[];
       isStreaming: boolean;
     }
+  | {
+      kind: "stream";
+      conversationId: string;
+      message: UiMessage | null;
+      isStreaming: boolean;
+    }
   | { kind: "error"; message: string };
 
 export function parseClientCommand(raw: unknown): ClientCommand | undefined {
