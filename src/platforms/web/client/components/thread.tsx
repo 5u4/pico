@@ -164,7 +164,7 @@ function ScrollToBottom() {
     <ThreadPrimitive.ScrollToBottom asChild>
       <TooltipIconButton
         tooltip="Scroll to bottom"
-        className="absolute -top-12 z-10 size-9 self-center rounded-full bg-primary p-2 text-primary-foreground shadow-md hover:bg-primary/90 disabled:invisible"
+        className="absolute -top-12 z-10 size-9 self-center rounded-full bg-primary p-2 text-primary-foreground shadow-md transition-transform hover:scale-110 disabled:invisible"
       >
         <ArrowDownIcon className="size-5" />
       </TooltipIconButton>
