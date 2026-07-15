@@ -1,7 +1,9 @@
 import { ChevronRightIcon, FolderIcon, PlusIcon } from "lucide-react";
 import { useState } from "react";
-import type { WorkspaceSummary } from "../../protocol";
+import { z } from "zod";
+import type { ConversationSummary, WorkspaceSummary } from "../../protocol";
 import { cn } from "../lib/utils";
+import { PERSIST_KEYS, usePersisted } from "../persist";
 import { useShell } from "../runtime";
 import { ModeToggle } from "./mode-toggle";
 import { Button } from "./ui/button";
@@ -11,22 +13,52 @@ import {
   CollapsibleTrigger,
 } from "./ui/collapsible";
 
+function ConversationRow({
+  conversation,
+  active,
+  onSelect,
+}: {
+  conversation: ConversationSummary;
+  active: boolean;
+  onSelect: (id: string) => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={() => onSelect(conversation.id)}
+      className={cn(
+        "mb-0.5 w-full truncate rounded-md px-3 py-1.5 text-left text-sm transition-colors hover:bg-accent hover:text-accent-foreground",
+        active && "bg-accent text-accent-foreground",
+      )}
+    >
+      {conversation.title ?? "New chat"}
+    </button>
+  );
+}
+
 function WorkspaceItem({
   workspace,
   activeId,
+  open,
+  onOpenChange,
   onSelect,
   onCreate,
 }: {
   workspace: WorkspaceSummary;
   activeId: string | null;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
   onSelect: (id: string) => void;
   onCreate: (workspaceId: string) => void;
 }) {
-  const [open, setOpen] = useState(true);
+  const activeConversation =
+    activeId === null
+      ? undefined
+      : workspace.conversations.find((c) => c.id === activeId);
   return (
-    <Collapsible open={open} onOpenChange={setOpen} className="mb-1">
+    <Collapsible open={open} onOpenChange={onOpenChange} className="mb-1">
       <div className="group flex items-center gap-1 rounded-md pr-1 hover:bg-accent/50">
-        <CollapsibleTrigger className="flex min-w-0 flex-1 items-center gap-1.5 px-2 py-1.5 text-left text-sm">
+        <CollapsibleTrigger className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md px-2 py-1.5 text-left text-sm">
           <ChevronRightIcon
             className={cn(
               "size-3.5 shrink-0 text-muted-foreground transition-transform",
@@ -46,6 +78,15 @@ function WorkspaceItem({
           <PlusIcon className="size-3.5" />
         </Button>
       </div>
+      {!open && activeConversation && (
+        <div className="ml-4 border-l border-border pl-1">
+          <ConversationRow
+            conversation={activeConversation}
+            active
+            onSelect={onSelect}
+          />
+        </div>
+      )}
       <CollapsibleContent className="ml-4 border-l border-border pl-1">
         {workspace.conversations.length === 0 ? (
           <div className="px-3 py-1.5 text-xs text-muted-foreground">
@@ -53,18 +94,12 @@ function WorkspaceItem({
           </div>
         ) : (
           workspace.conversations.map((conversation) => (
-            <button
+            <ConversationRow
               key={conversation.id}
-              type="button"
-              onClick={() => onSelect(conversation.id)}
-              className={cn(
-                "mb-0.5 w-full truncate rounded-md px-3 py-1.5 text-left text-sm transition-colors hover:bg-accent hover:text-accent-foreground",
-                conversation.id === activeId &&
-                  "bg-accent text-accent-foreground",
-              )}
-            >
-              {conversation.title ?? "New chat"}
-            </button>
+              conversation={conversation}
+              active={conversation.id === activeId}
+              onSelect={onSelect}
+            />
           ))
         )}
       </CollapsibleContent>
@@ -76,6 +111,19 @@ export function Sidebar({ collapsed }: { collapsed: boolean }) {
   const { workspaces, activeId, select, create, createWorkspace } = useShell();
   const [naming, setNaming] = useState(false);
   const [name, setName] = useState("");
+  const [collapsedIds, setCollapsedIds] = usePersisted(
+    PERSIST_KEYS.workspacesCollapsed,
+    z.array(z.string()),
+    [],
+  );
+  const setWorkspaceOpen = (id: string, open: boolean) => {
+    setCollapsedIds((ids) => {
+      const has = ids.includes(id);
+      if (open && has) return ids.filter((x) => x !== id);
+      if (!open && !has) return [...ids, id];
+      return ids;
+    });
+  };
 
   const submit = () => {
     const label = name.trim();
@@ -135,6 +183,8 @@ export function Sidebar({ collapsed }: { collapsed: boolean }) {
               key={workspace.id}
               workspace={workspace}
               activeId={activeId}
+              open={!collapsedIds.includes(workspace.id)}
+              onOpenChange={(open) => setWorkspaceOpen(workspace.id, open)}
               onSelect={select}
               onCreate={create}
             />

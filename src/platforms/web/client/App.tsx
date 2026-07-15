@@ -1,10 +1,11 @@
 import "./styles.css";
 import { PanelLeftIcon } from "lucide-react";
 import { ThemeProvider } from "next-themes";
-import { useState } from "react";
+import { z } from "zod";
 import { TooltipIconButton } from "./components/assistant-ui/tooltip-icon-button";
 import { Sidebar } from "./components/sidebar";
 import { Thread } from "./components/thread";
+import { PERSIST_KEYS, usePersisted } from "./persist";
 import { AssistantPane, RuntimeProvider, useShell } from "./runtime";
 
 function ErrorBanner() {
@@ -25,7 +26,11 @@ function ErrorBanner() {
 }
 
 export function App() {
-  const [collapsed, setCollapsed] = useState(false);
+  const [collapsed, setCollapsed] = usePersisted(
+    PERSIST_KEYS.sidebarHidden,
+    z.boolean(),
+    false,
+  );
   return (
     <ThemeProvider attribute="class" defaultTheme="system" enableSystem>
       <RuntimeProvider>
