@@ -90,7 +90,7 @@ function ToolCardTrigger({
   return (
     <CollapsibleTrigger
       data-slot="tool-card-trigger"
-      className="group/trigger flex w-fit max-w-full origin-left items-center gap-2 py-1 text-sm text-muted-foreground transition-[color,scale] hover:text-foreground active:scale-[0.98]"
+      className="group/trigger flex w-fit min-w-0 max-w-full origin-left items-center gap-2 py-1 text-sm text-muted-foreground transition-[color,scale] hover:text-foreground active:scale-[0.98]"
     >
       <GlyphIcon
         className={cn(
@@ -110,7 +110,7 @@ function ToolCardTrigger({
       {summary ? (
         <span
           className={cn(
-            "truncate text-xs",
+            "min-w-0 truncate text-xs",
             isError ? "text-destructive/90" : "text-muted-foreground",
           )}
         >
