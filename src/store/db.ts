@@ -1,7 +1,11 @@
-import { Database } from "bun:sqlite";
+import { Database, type Statement } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { Result } from "neverthrow";
+import { log } from "../util/log.ts";
+
+const dbLog = log(["db"]);
 
 export function defaultDbPath(): string {
   return join(homedir(), ".pico", "state.db");
@@ -12,14 +16,67 @@ export function openDb(path: string): Database {
     mkdirSync(dirname(path), { recursive: true });
   }
   const db = new Database(path, { create: true, strict: true });
-  db.exec("PRAGMA journal_mode = WAL");
-  db.exec("PRAGMA foreign_keys = ON");
+  db.run("PRAGMA journal_mode = WAL");
+  db.run("PRAGMA foreign_keys = ON");
   migrate(db);
-  return db;
+  return traceDb(db);
+}
+
+const STATEMENT_EXECUTORS = new Set(["run", "get", "all", "values", "iterate"]);
+
+function traced<T>(
+  sql: string,
+  params: readonly unknown[],
+  execute: () => T,
+): T {
+  const startedAt = performance.now();
+  const outcome = Result.fromThrowable(execute)();
+  const ms = Math.round((performance.now() - startedAt) * 100) / 100;
+  dbLog.debug("{sql} {params} ({ms}ms)", { sql, params, ms });
+  return outcome.match(
+    (value) => value,
+    (error) => {
+      throw error;
+    },
+  );
+}
+
+function traceStatement<T extends Statement>(stmt: T, sql: string): T {
+  return new Proxy(stmt, {
+    get(target, prop, receiver) {
+      const value = Reflect.get(target, prop, receiver);
+      if (typeof value !== "function") return value;
+      const method = value.bind(target);
+      if (typeof prop === "string" && STATEMENT_EXECUTORS.has(prop)) {
+        return (...params: unknown[]) =>
+          traced(sql, params, () => method(...params));
+      }
+      return method;
+    },
+  });
+}
+
+function traceDb(db: Database): Database {
+  return new Proxy(db, {
+    get(target, prop, receiver) {
+      const value = Reflect.get(target, prop, receiver);
+      if (typeof value !== "function") return value;
+      const method = value.bind(target);
+      if (prop === "query" || prop === "prepare") {
+        return (...args: unknown[]) =>
+          traceStatement(method(...args), String(args[0]));
+      }
+      if (prop === "run") {
+        return (sql: string, ...params: unknown[]) =>
+          traced(sql, params, () => method(sql, ...params));
+      }
+      return method;
+    },
+  });
 }
 
 function migrate(db: Database): void {
-  db.exec(`
+  db.run(`
     CREATE TABLE IF NOT EXISTS workspaces (
       id         TEXT PRIMARY KEY CHECK (length(id) > 0),
       cwd        TEXT NOT NULL CHECK (length(cwd) > 0),
