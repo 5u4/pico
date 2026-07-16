@@ -9,52 +9,83 @@ describe("parseConfig", () => {
     const result = parseConfig({});
     expect(result.isOk()).toBe(true);
     expect(result._unsafeUnwrap()).toEqual({
-      port: 4141,
       workspaceCwd: join(homedir(), ".pico"),
+      web: { port: 4141 },
     });
   });
 
   test("accepts explicit values", () => {
-    const result = parseConfig({ port: 8080, workspaceCwd: "/tmp/projects" });
-    expect(result._unsafeUnwrap()).toEqual({
-      port: 8080,
+    const result = parseConfig({
+      web: { port: 8080 },
       workspaceCwd: "/tmp/projects",
+    });
+    expect(result._unsafeUnwrap()).toEqual({
+      workspaceCwd: "/tmp/projects",
+      web: { port: 8080 },
     });
   });
 
   test("rejects a non-positive port", () => {
-    expect(parseConfig({ port: -1 }).isErr()).toBe(true);
+    expect(parseConfig({ web: { port: -1 } }).isErr()).toBe(true);
   });
 });
 
 describe("loadConfig", () => {
   test("returns defaults when the file is absent", async () => {
     const result = await loadConfig(
-      "/tmp/pico-does-not-exist-4141/config.json",
+      "/tmp/pico-does-not-exist-4141/config.toml",
     );
     expect(result._unsafeUnwrap()).toEqual({
-      port: 4141,
       workspaceCwd: join(homedir(), ".pico"),
+      web: { port: 4141 },
     });
   });
 
   test("parses an existing config file", async () => {
-    const path = `/tmp/pico-config-test-${Date.now()}.json`;
-    await Bun.write(path, JSON.stringify({ port: 5000 }));
+    const path = `/tmp/pico-config-test-${Date.now()}.toml`;
+    await Bun.write(path, "[web]\nport = 5000\n");
     try {
       const result = await loadConfig(path);
       expect(result._unsafeUnwrap()).toEqual({
-        port: 5000,
         workspaceCwd: join(homedir(), ".pico"),
+        web: { port: 5000 },
       });
     } finally {
       rmSync(path, { force: true });
     }
   });
 
-  test("errors on malformed json", async () => {
-    const path = `/tmp/pico-config-bad-${Date.now()}.json`;
-    await Bun.write(path, "{ not json");
+  test("fills defaults for an empty file", async () => {
+    const path = `/tmp/pico-config-empty-${Date.now()}.toml`;
+    await Bun.write(path, "");
+    try {
+      const result = await loadConfig(path);
+      expect(result._unsafeUnwrap()).toEqual({
+        workspaceCwd: join(homedir(), ".pico"),
+        web: { port: 4141 },
+      });
+    } finally {
+      rmSync(path, { force: true });
+    }
+  });
+
+  test("fills the port default when [web] omits it", async () => {
+    const path = `/tmp/pico-config-noport-${Date.now()}.toml`;
+    await Bun.write(path, 'workspaceCwd = "/tmp/projects"\n\n[web]\n');
+    try {
+      const result = await loadConfig(path);
+      expect(result._unsafeUnwrap()).toEqual({
+        workspaceCwd: "/tmp/projects",
+        web: { port: 4141 },
+      });
+    } finally {
+      rmSync(path, { force: true });
+    }
+  });
+
+  test("errors on malformed toml", async () => {
+    const path = `/tmp/pico-config-bad-${Date.now()}.toml`;
+    await Bun.write(path, "port = = 5000");
     try {
       expect((await loadConfig(path)).isErr()).toBe(true);
     } finally {

@@ -44,7 +44,7 @@ const hub = new WebHub({
 });
 
 const server = createServer({
-  port: config.port,
+  port: config.web.port,
   hub,
   index,
   development: Bun.env.NODE_ENV !== "production",
