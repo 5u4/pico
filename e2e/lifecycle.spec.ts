@@ -43,15 +43,7 @@ test.describe("pico web conversation lifecycle", () => {
 
   test("shows and dismisses the error banner", async ({ page }) => {
     await page.goto("/");
-    await page.getByRole("button", { name: "New workspace" }).click();
-    const nameField = page.getByLabel("Workspace name");
-    await nameField.fill("banner-ws");
-    await nameField.press("Enter");
-
-    const workspace = page
-      .getByRole("button", { name: "banner-ws", exact: true })
-      .first();
-    await workspace.click({ button: "right" });
+    await page.getByText("default", { exact: true }).click({ button: "right" });
     await page.getByRole("menuitem", { name: "Change directory" }).click();
     const cwdField = page.getByLabel("Change workspace directory");
     await cwdField.fill("/no/such/pico/dir");
@@ -60,7 +52,9 @@ test.describe("pico web conversation lifecycle", () => {
     const banner = page.getByText("not a directory:");
     await expect(banner).toBeVisible();
 
-    await page.getByRole("button", { name: "Dismiss" }).click();
-    await expect(banner).toHaveCount(0);
+    const dismiss = page.getByRole("button", { name: "Dismiss" });
+    await expect(dismiss).toBeVisible();
+    await dismiss.click();
+    await expect(banner).toBeHidden();
   });
 });
