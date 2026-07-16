@@ -140,7 +140,7 @@ describe("Engine.subscribe lazy open", () => {
   test("opening a fresh conversation resolves without error and constructs a session", async () => {
     const { engine, sessions, conversationId } = makeEngine();
     const { opened } = engine.subscribe(conversationId, CWD, "live", () => {});
-    expect(await opened).toBeUndefined();
+    expect((await opened).isOk()).toBe(true);
     expect(sessions.get(conversationId)).toBeDefined();
   });
 
@@ -148,7 +148,8 @@ describe("Engine.subscribe lazy open", () => {
     const { engine, sessions, conversationId } = makeEngine();
     sessions.failOpen.set(conversationId, "disk on fire");
     const { opened } = engine.subscribe(conversationId, CWD, "live", () => {});
-    expect(await opened).toBe("disk on fire");
+    const result = await opened;
+    expect(result.isErr() && result.error).toBe("disk on fire");
   });
 });
 
@@ -196,15 +197,16 @@ describe("Engine subscribe mode filtering", () => {
 describe("Engine.prompt", () => {
   test("lazily opens then runs on the session", async () => {
     const { engine, sessions, conversationId } = makeEngine();
-    const error = await engine.prompt(conversationId, CWD, "hi");
-    expect(error).toBeUndefined();
+    const result = await engine.prompt(conversationId, CWD, "hi");
+    expect(result.isOk()).toBe(true);
     expect(sessions.get(conversationId)).toBeDefined();
   });
 
   test("returns the open error without prompting", async () => {
     const { engine, sessions, conversationId } = makeEngine();
     sessions.failOpen.set(conversationId, "no model");
-    expect(await engine.prompt(conversationId, CWD, "hi")).toBe("no model");
+    const result = await engine.prompt(conversationId, CWD, "hi");
+    expect(result.isErr() && result.error).toBe("no model");
   });
 });
 
@@ -218,13 +220,13 @@ describe("Engine.record", () => {
     await opened;
     events.length = 0;
 
-    const error = await engine.record(
+    const result = await engine.record(
       conversationId,
       CWD,
       "command:ping",
       "Pong hi",
     );
-    expect(error).toBeUndefined();
+    expect(result.isOk()).toBe(true);
 
     const session = sessions.get(conversationId);
     expect(session?.customMessages).toEqual([
@@ -245,9 +247,13 @@ describe("Engine.record", () => {
   test("returns the open error without recording", async () => {
     const { engine, sessions, conversationId } = makeEngine();
     sessions.failOpen.set(conversationId, "no model");
-    expect(
-      await engine.record(conversationId, CWD, "command:ping", "Pong"),
-    ).toBe("no model");
+    const result = await engine.record(
+      conversationId,
+      CWD,
+      "command:ping",
+      "Pong",
+    );
+    expect(result.isErr() && result.error).toBe("no model");
   });
 });
 

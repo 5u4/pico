@@ -10,6 +10,7 @@ import index from "./platforms/web/client/index.html";
 import { parseClientCommand } from "./platforms/web/protocol";
 import { defaultDbPath, openDb } from "./store/db";
 import { configureLogging, log } from "./util/log";
+import { parseJson } from "./util/result";
 
 type WsData = { conversationId: string | null };
 
@@ -83,16 +84,14 @@ const server = Bun.serve<WsData, "/">({
     },
     async message(ws, raw) {
       const text = typeof raw === "string" ? raw : raw.toString();
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(text);
-      } catch {
+      const parsed = parseJson(text);
+      if (parsed.isErr()) {
         net.debug("dropped malformed ws frame ({bytes} bytes)", {
           bytes: text.length,
         });
         return;
       }
-      const command = parseClientCommand(parsed);
+      const command = parseClientCommand(parsed.value);
       if (!command) {
         net.debug("dropped unrecognized ws command");
         return;
