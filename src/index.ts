@@ -7,7 +7,7 @@ import { Sessions } from "./engine/sessions";
 import { autoTitle } from "./engine/title";
 import { WebHub } from "./platforms/web/adapter";
 import index from "./platforms/web/client/index.html";
-import { createServer } from "./platforms/web/server";
+import { createServer, type WsData } from "./platforms/web/server";
 import { defaultDbPath, openDb } from "./store/db";
 import { reportReady } from "./supervisor/ready";
 import { configureLogging, log } from "./util/log";
@@ -38,23 +38,26 @@ const db = openDb(defaultDbPath());
 getOrCreateDefaultWorkspace(db, "web", config.workspaceCwd, "default");
 const sessions = new Sessions(provisioned.value);
 const engine = new Engine({ db, sessions, autoTitle });
-const hub = new WebHub({
-  db,
-  engine,
-  workspaceCwd: config.workspaceCwd,
-});
-
-const server = createServer({
-  port: config.web.port,
-  hub,
-  index,
-  development: Bun.env.NODE_ENV !== "production",
-});
-
-boot.info(
-  "pico web on http://localhost:{port} (workspaces in {workspaceCwd})",
-  { port: server.port, workspaceCwd: config.workspaceCwd },
-);
+let server: Bun.Server<WsData> | undefined;
+if (config.web.enabled) {
+  const hub = new WebHub({
+    db,
+    engine,
+    workspaceCwd: config.workspaceCwd,
+  });
+  server = createServer({
+    port: config.web.port,
+    hub,
+    index,
+    development: Bun.env.NODE_ENV !== "production",
+  });
+  boot.info(
+    "pico web on http://localhost:{port} (workspaces in {workspaceCwd})",
+    { port: server.port, workspaceCwd: config.workspaceCwd },
+  );
+} else {
+  boot.info("web disabled; running headless with no platform");
+}
 
 const supervisorSocket = Bun.env.PICO_SUPERVISOR_SOCKET;
 const readyToken = Bun.env.PICO_READY_TOKEN;
@@ -74,7 +77,7 @@ const shutdown = async (signal: string): Promise<void> => {
   if (shuttingDown) return;
   shuttingDown = true;
   boot.info("shutting down ({signal})", { signal });
-  server.stop();
+  server?.stop();
   await sessions.closeAll();
   db.close();
   await dispose();
