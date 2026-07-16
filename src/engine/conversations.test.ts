@@ -27,6 +27,34 @@ class FakeSession implements SessionLike {
     return Promise.resolve(true);
   }
 
+  readonly customMessages: { customType: string; content: string }[] = [];
+
+  sendCustomMessage(
+    message: { customType: string; content: string; display: boolean },
+    _options: { triggerTurn: false },
+  ): Promise<boolean> {
+    this.customMessages.push({
+      customType: message.customType,
+      content: message.content,
+    });
+    this.state.messages.push({
+      role: "custom",
+      customType: message.customType,
+      content: message.content,
+      display: message.display,
+      timestamp: Date.now(),
+    } as (typeof this.state.messages)[number]);
+    return Promise.resolve(false);
+  }
+
+  readonly sessionManager = {
+    ensureOnDiskCalls: 0,
+    ensureOnDisk(): Promise<void> {
+      this.ensureOnDiskCalls++;
+      return Promise.resolve();
+    },
+  };
+
   abort(): Promise<unknown> {
     return Promise.resolve(undefined);
   }
@@ -177,6 +205,49 @@ describe("Engine.prompt", () => {
     const { engine, sessions, conversationId } = makeEngine();
     sessions.failOpen.set(conversationId, "no model");
     expect(await engine.prompt(conversationId, CWD, "hi")).toBe("no model");
+  });
+});
+
+describe("Engine.record", () => {
+  test("appends a custom message and broadcasts a snapshot", async () => {
+    const { engine, sessions, conversationId } = makeEngine();
+    const events: TurnEvent[] = [];
+    const { opened } = engine.subscribe(conversationId, CWD, "live", (e) =>
+      events.push(e),
+    );
+    await opened;
+    events.length = 0;
+
+    const error = await engine.record(
+      conversationId,
+      CWD,
+      "command:ping",
+      "Pong hi",
+    );
+    expect(error).toBeUndefined();
+
+    const session = sessions.get(conversationId);
+    expect(session?.customMessages).toEqual([
+      { customType: "command:ping", content: "Pong hi" },
+    ]);
+    expect(session?.sessionManager.ensureOnDiskCalls).toBe(1);
+
+    const snapshot = events.find((e) => e.kind === "snapshot");
+    expect(snapshot).toBeDefined();
+    if (snapshot?.kind !== "snapshot") throw new Error("expected snapshot");
+    expect(snapshot.messages).toContainEqual({
+      id: "m0",
+      role: "system",
+      parts: [{ type: "text", text: "Pong hi" }],
+    });
+  });
+
+  test("returns the open error without recording", async () => {
+    const { engine, sessions, conversationId } = makeEngine();
+    sessions.failOpen.set(conversationId, "no model");
+    expect(
+      await engine.record(conversationId, CWD, "command:ping", "Pong"),
+    ).toBe("no model");
   });
 });
 

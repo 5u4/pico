@@ -2,21 +2,33 @@ import { z } from "zod";
 import type { ContextUsageInfo } from "../../engine/conversations";
 import type { Message } from "../../engine/message";
 
-export const clientCommandSchema = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("prompt"), text: z.string().min(1) }),
-  z.object({ kind: z.literal("abort") }),
-  z.object({ kind: z.literal("select"), conversationId: z.string().min(1) }),
+export const commandSchema = z.discriminatedUnion("name", [
   z.object({
-    kind: z.literal("create"),
-    workspaceId: z.string().min(1),
-    prompt: z.string().min(1).optional(),
+    kind: z.literal("command"),
+    name: z.literal("ping"),
+    text: z.string().optional(),
   }),
-  z.object({ kind: z.literal("createWorkspace"), label: z.string().min(1) }),
-  z.object({ kind: z.literal("archive"), conversationId: z.string().min(1) }),
-  z.object({ kind: z.literal("draft") }),
+]);
+
+export const clientCommandSchema = z.union([
+  z.discriminatedUnion("kind", [
+    z.object({ kind: z.literal("prompt"), text: z.string().min(1) }),
+    z.object({ kind: z.literal("abort") }),
+    z.object({ kind: z.literal("select"), conversationId: z.string().min(1) }),
+    z.object({
+      kind: z.literal("create"),
+      workspaceId: z.string().min(1),
+      prompt: z.string().min(1).optional(),
+    }),
+    z.object({ kind: z.literal("createWorkspace"), label: z.string().min(1) }),
+    z.object({ kind: z.literal("archive"), conversationId: z.string().min(1) }),
+    z.object({ kind: z.literal("draft") }),
+  ]),
+  commandSchema,
 ]);
 
 export type ClientCommand = z.infer<typeof clientCommandSchema>;
+export type CommandCommand = z.infer<typeof commandSchema>;
 
 export type ConversationSummary = {
   id: string;

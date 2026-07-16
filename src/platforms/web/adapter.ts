@@ -15,8 +15,14 @@ import {
   listWorkspaces,
 } from "../../engine/registry";
 import type { Platform } from "../../store/schema";
+import { assertNever } from "../../util/assert";
 import { log } from "../../util/log";
-import type { ClientCommand, ServerEvent, WorkspaceSummary } from "./protocol";
+import type {
+  ClientCommand,
+  CommandCommand,
+  ServerEvent,
+  WorkspaceSummary,
+} from "./protocol";
 
 const logger = log(["web"]);
 
@@ -84,6 +90,26 @@ export class WebHub<S extends SessionLike = SessionLike> {
               command.text,
             )
           : await this.deps.engine.abort(conversationId);
+      if (error) this.sendError(ws, error);
+      return;
+    }
+
+    if (command.kind === "command") {
+      const conversationId = ws.data.conversationId;
+      const conversation = conversationId
+        ? getConversation(this.deps.db, conversationId)
+        : undefined;
+      if (!conversationId || !conversation) {
+        this.sendError(ws, "no active conversation; retry once connected");
+        return;
+      }
+      const text = this.runCommand(command);
+      const error = await this.deps.engine.record(
+        conversationId,
+        conversation.cwd,
+        `command:${command.name}`,
+        text,
+      );
       if (error) this.sendError(ws, error);
       return;
     }
@@ -197,6 +223,15 @@ export class WebHub<S extends SessionLike = SessionLike> {
     }
     const snap = this.snapshotEvent(created.id);
     if (snap) ws.send(JSON.stringify(snap));
+  }
+
+  private runCommand(command: CommandCommand): string {
+    switch (command.name) {
+      case "ping":
+        return `Pong ${command.text ?? ""}`.trim();
+      default:
+        return assertNever(command.name);
+    }
   }
 
   private workspaceTree(): WorkspaceSummary[] {
