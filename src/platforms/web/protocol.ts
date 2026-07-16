@@ -43,6 +43,7 @@ export type CommandCommand = z.infer<typeof commandSchema>;
 export type ConversationSummary = {
   id: string;
   title: string | null;
+  cwd: string;
 };
 
 export type WorkspaceSummary = {

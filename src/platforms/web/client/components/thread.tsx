@@ -212,9 +212,10 @@ function ConversationLabel() {
       : workspace.conversations.find((c) => c.id === activeId);
   const label = workspace.label ?? "workspace";
   const title = conversation?.title ?? "New chat";
+  const cwd = conversation?.cwd ?? workspace.cwd;
   return (
     <span className="min-w-0 truncate text-xs text-muted-foreground">
-      {label} · {title}
+      {label}/{title} · {cwd}
     </span>
   );
 }

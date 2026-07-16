@@ -266,6 +266,7 @@ export class WebHub<S extends SessionLike = SessionLike> {
       conversations: listConversations(this.deps.db, w.id).map((c) => ({
         id: c.id,
         title: c.title,
+        cwd: c.cwd,
       })),
     }));
   }
