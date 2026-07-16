@@ -12,7 +12,6 @@ export type ThreadState = {
   threadKey: string;
   pending: Message | null;
   pendingBaseUserCount: number | null;
-  error: string | null;
   draftSeq: number;
   usage: ContextUsageInfo | null;
 };
@@ -26,7 +25,6 @@ export const initialState: ThreadState = {
   threadKey: "",
   pending: null,
   pendingBaseUserCount: null,
-  error: null,
   draftSeq: 0,
   usage: null,
 };
@@ -41,10 +39,13 @@ export type Action =
   | { type: "createWorkspace"; label: string }
   | { type: "renameWorkspace"; workspaceId: string; label: string }
   | { type: "updateWorkspaceCwd"; workspaceId: string; cwd: string }
-  | { type: "archive"; conversationId: string }
-  | { type: "dismissError" };
+  | { type: "archive"; conversationId: string };
 
-type Reduced = { state: ThreadState; commands: ClientCommand[] };
+type Reduced = {
+  state: ThreadState;
+  commands: ClientCommand[];
+  toasts?: string[];
+};
 
 function mergeTail(prev: Message[], tail: Message): Message[] {
   const last = prev.length - 1;
@@ -153,9 +154,9 @@ function reduceServer(state: ThreadState, event: ServerEvent): Reduced {
           pending: null,
           pendingBaseUserCount: null,
           isRunning: false,
-          error: event.message,
         },
         commands: [],
+        toasts: [event.message],
       };
     default:
       return assertNever(event);
@@ -165,11 +166,9 @@ function reduceServer(state: ThreadState, event: ServerEvent): Reduced {
 function reducePrompt(state: ThreadState, text: string): Reduced {
   if (state.activeId === null && state.draftWorkspaceId === null) {
     return {
-      state: {
-        ...state,
-        error: "no workspace selected for the new conversation",
-      },
+      state,
       commands: [],
+      toasts: ["no workspace selected for the new conversation"],
     };
   }
   const pending: Message = {
@@ -202,7 +201,6 @@ function reduceSelect(state: ThreadState, conversationId: string): Reduced {
       threadKey: conversationId,
       messages: [],
       isRunning: false,
-      error: null,
       usage: null,
     },
     commands: [{ kind: "select", conversationId }],
@@ -222,7 +220,6 @@ function reduceCreate(state: ThreadState, workspaceId: string): Reduced {
       draftSeq,
       messages: [],
       isRunning: false,
-      error: null,
       usage: null,
     },
     commands: [{ kind: "draft" }],
@@ -238,8 +235,9 @@ export function reduce(state: ThreadState, action: Action): Reduced {
     case "command":
       if (state.activeId === null)
         return {
-          state: { ...state, error: "select a conversation first" },
+          state,
           commands: [],
+          toasts: ["select a conversation first"],
         };
       return {
         state,
@@ -286,8 +284,6 @@ export function reduce(state: ThreadState, action: Action): Reduced {
         state,
         commands: [{ kind: "archive", conversationId: action.conversationId }],
       };
-    case "dismissError":
-      return { state: { ...state, error: null }, commands: [] };
     default:
       return assertNever(action);
   }

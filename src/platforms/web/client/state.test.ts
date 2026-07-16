@@ -273,25 +273,33 @@ describe("reduce / server / error", () => {
       pendingBaseUserCount: 0,
       isRunning: true,
     };
-    const { state: next, commands } = reduce(state, {
+    const {
+      state: next,
+      commands,
+      toasts,
+    } = reduce(state, {
       type: "server",
       event: { kind: "error", message: "boom" },
     });
     expect(next.pending).toBeNull();
     expect(next.pendingBaseUserCount).toBeNull();
     expect(next.isRunning).toBe(false);
-    expect(next.error).toBe("boom");
+    expect(toasts).toEqual(["boom"]);
     expect(commands).toEqual([]);
   });
 });
 
 describe("reduce / prompt", () => {
   test("errors and sends no command when neither activeId nor draftWorkspaceId is set", () => {
-    const { state: next, commands } = reduce(initialState, {
+    const {
+      state: next,
+      commands,
+      toasts,
+    } = reduce(initialState, {
       type: "prompt",
       text: "hi",
     });
-    expect(next.error).toBe("no workspace selected for the new conversation");
+    expect(toasts).toEqual(["no workspace selected for the new conversation"]);
     expect(next.pending).toBeNull();
     expect(commands).toEqual([]);
   });
@@ -344,12 +352,12 @@ describe("reduce / cancel", () => {
 
 describe("reduce / command", () => {
   test("errors and sends no command when no conversation is active", () => {
-    const { state: next, commands } = reduce(initialState, {
+    const { commands, toasts } = reduce(initialState, {
       type: "command",
       name: "ping",
       text: "hi",
     });
-    expect(next.error).toBe("select a conversation first");
+    expect(toasts).toEqual(["select a conversation first"]);
     expect(commands).toEqual([]);
   });
 
@@ -393,7 +401,6 @@ describe("reduce / select", () => {
       pending: userMessage("pending-user"),
       pendingBaseUserCount: 1,
       isRunning: true,
-      error: "boom",
     };
     const { state: next, commands } = reduce(state, {
       type: "select",
@@ -405,7 +412,6 @@ describe("reduce / select", () => {
     expect(next.messages).toEqual([]);
     expect(next.pending).toBeNull();
     expect(next.isRunning).toBe(false);
-    expect(next.error).toBeNull();
     expect(commands).toEqual([{ kind: "select", conversationId: "conv-2" }]);
   });
 });
@@ -417,7 +423,6 @@ describe("reduce / create", () => {
       activeId: "conv-1",
       messages: [userMessage("u1")],
       isRunning: true,
-      error: "boom",
       draftSeq: 4,
     };
     const { state: next, commands } = reduce(state, {
@@ -430,7 +435,6 @@ describe("reduce / create", () => {
     expect(next.threadKey).toBe("draft-5");
     expect(next.messages).toEqual([]);
     expect(next.isRunning).toBe(false);
-    expect(next.error).toBeNull();
     expect(commands).toEqual([{ kind: "draft" }]);
   });
 });
@@ -459,15 +463,6 @@ describe("reduce / updateWorkspaceCwd", () => {
     expect(commands).toEqual([
       { kind: "updateWorkspaceCwd", workspaceId: "ws-1", cwd: "/tmp/new" },
     ]);
-  });
-});
-
-describe("reduce / dismissError", () => {
-  test("clears the error and sends no command", () => {
-    const state: ThreadState = { ...initialState, error: "boom" };
-    const { state: next, commands } = reduce(state, { type: "dismissError" });
-    expect(next.error).toBeNull();
-    expect(commands).toEqual([]);
   });
 });
 
