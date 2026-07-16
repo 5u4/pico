@@ -19,3 +19,13 @@ export function autoTitle(
     session.titleSystemPrompt,
   );
 }
+
+const PROVISIONAL_TITLE_MAX = 60;
+
+export function provisionalTitle(text: string): string | null {
+  const line = (text.trim().split(/\r?\n/, 1)[0] ?? "").trim();
+  if (!line) return null;
+  return line.length > PROVISIONAL_TITLE_MAX
+    ? `${line.slice(0, PROVISIONAL_TITLE_MAX).trimEnd()}…`
+    : line;
+}

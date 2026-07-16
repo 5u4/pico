@@ -6,7 +6,12 @@ import { errAsync, okAsync, type Result, ResultAsync } from "neverthrow";
 import { log } from "../util/log";
 import { errMessage } from "../util/result";
 import { type Message, toMessages, toStreamMessage } from "./message";
-import { getConversation, setConversationTitle } from "./registry";
+import {
+  getConversation,
+  setConversationTitle,
+  setProvisionalTitle,
+} from "./registry";
+import { provisionalTitle } from "./title";
 
 const logger = log(["engine"]);
 
@@ -312,12 +317,28 @@ export class Engine<S extends SessionLike = SessionLike> {
     }
   }
 
+  private broadcastTitle(conversationId: string, title: string): void {
+    const evt: TurnEvent = { kind: "title", title };
+    for (const target of this.subscribers.get(conversationId) ?? [])
+      target.listener(evt);
+  }
+
   private async maybeAutoTitle(
     conversationId: string,
     session: S,
     text: string,
   ): Promise<void> {
-    if (getConversation(this.deps.db, conversationId)?.title != null) return;
+    const conversation = getConversation(this.deps.db, conversationId);
+    if (conversation?.titleSource === "final") return;
+    if (conversation?.title == null) {
+      const provisional = provisionalTitle(text);
+      if (
+        provisional &&
+        setProvisionalTitle(this.deps.db, conversationId, provisional)
+      ) {
+        this.broadcastTitle(conversationId, provisional);
+      }
+    }
     const title = await this.deps.autoTitle(session, text).catch(() => null);
     if (!title) return;
     if (!setConversationTitle(this.deps.db, conversationId, title)) return;
@@ -326,8 +347,6 @@ export class Engine<S extends SessionLike = SessionLike> {
         logger.error("title sync to omp session failed: {error}", { error: e });
       });
     }
-    const evt: TurnEvent = { kind: "title", title };
-    for (const target of this.subscribers.get(conversationId) ?? [])
-      target.listener(evt);
+    this.broadcastTitle(conversationId, title);
   }
 }

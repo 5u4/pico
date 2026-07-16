@@ -99,17 +99,31 @@ export function createConversation(
     workspaceId: input.workspaceId,
     cwd: input.cwd,
     title: input.title,
+    titleSource: input.title == null ? null : "final",
     externalId: input.externalId ?? null,
     createdAt: Date.now(),
     archivedAt: null,
   };
   db.query(
     `INSERT INTO conversations
-       (id, workspaceId, cwd, title, externalId, createdAt, archivedAt)
+       (id, workspaceId, cwd, title, titleSource, externalId, createdAt, archivedAt)
      VALUES
-       ($id, $workspaceId, $cwd, $title, $externalId, $createdAt, $archivedAt)`,
+       ($id, $workspaceId, $cwd, $title, $titleSource, $externalId, $createdAt, $archivedAt)`,
   ).run(row);
   return conversationSchema.parse(row);
+}
+
+export function setProvisionalTitle(
+  db: Database,
+  id: string,
+  title: string,
+): boolean {
+  const result = db
+    .query(
+      "UPDATE conversations SET title = $title, titleSource = 'provisional' WHERE id = $id AND title IS NULL",
+    )
+    .run({ id, title });
+  return result.changes > 0;
 }
 
 export function setConversationTitle(
@@ -119,7 +133,7 @@ export function setConversationTitle(
 ): boolean {
   const result = db
     .query(
-      "UPDATE conversations SET title = $title WHERE id = $id AND title IS NULL",
+      "UPDATE conversations SET title = $title, titleSource = 'final' WHERE id = $id AND (titleSource IS NULL OR titleSource = 'provisional')",
     )
     .run({ id, title });
   return result.changes > 0;

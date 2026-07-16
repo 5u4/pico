@@ -9,7 +9,11 @@ import {
   type SessionsPort,
   type TurnEvent,
 } from "./conversations";
-import { createConversation, getOrCreateDefaultWorkspace } from "./registry";
+import {
+  createConversation,
+  getConversation,
+  getOrCreateDefaultWorkspace,
+} from "./registry";
 
 const CWD = "/tmp/pico-engine-test";
 
@@ -285,5 +289,60 @@ describe("Engine auto-title", () => {
     expect(sessions.get(conversation.id)?.setSessionNameCalls).toEqual([
       { name: "Fix the parser", source: "auto" },
     ]);
+  });
+
+  test("sets a provisional truncated title before the LLM title, then overwrites it", async () => {
+    const db = openDb(":memory:");
+    const workspace = getOrCreateDefaultWorkspace(db, "web", CWD, "web");
+    const conversation = createConversation(db, {
+      workspaceId: workspace.id,
+      cwd: CWD,
+      title: null,
+    });
+    const sessions = new FakeSessions();
+    const engine = new Engine<FakeSession>({
+      db,
+      sessions,
+      autoTitle: async () => "Fix the parser",
+    });
+    const titles: string[] = [];
+    const { opened } = engine.subscribe(conversation.id, CWD, "live", (e) => {
+      if (e.kind === "title") titles.push(e.title);
+    });
+    await opened;
+
+    await engine.prompt(conversation.id, CWD, "the parser is broken");
+    await Promise.resolve();
+
+    expect(titles).toEqual(["the parser is broken", "Fix the parser"]);
+    const stored = getConversation(db, conversation.id);
+    expect(stored?.title).toBe("Fix the parser");
+    expect(stored?.titleSource).toBe("final");
+  });
+
+  test("keeps the provisional title when the LLM declines to title", async () => {
+    const db = openDb(":memory:");
+    const workspace = getOrCreateDefaultWorkspace(db, "web", CWD, "web");
+    const conversation = createConversation(db, {
+      workspaceId: workspace.id,
+      cwd: CWD,
+      title: null,
+    });
+    const sessions = new FakeSessions();
+    const engine = new Engine<FakeSession>({
+      db,
+      sessions,
+      autoTitle: async () => null,
+    });
+    const { opened } = engine.subscribe(conversation.id, CWD, "live", () => {});
+    await opened;
+
+    await engine.prompt(conversation.id, CWD, "hi");
+    await Promise.resolve();
+
+    const stored = getConversation(db, conversation.id);
+    expect(stored?.title).toBe("hi");
+    expect(stored?.titleSource).toBe("provisional");
+    expect(sessions.get(conversation.id)?.setSessionNameCalls).toEqual([]);
   });
 });

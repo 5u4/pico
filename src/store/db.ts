@@ -38,6 +38,7 @@ function migrate(db: Database): void {
       workspaceId TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
       cwd         TEXT NOT NULL CHECK (length(cwd) > 0),
       title       TEXT,
+      titleSource TEXT,
       externalId  TEXT,
       createdAt   INTEGER NOT NULL CHECK (createdAt >= 0),
       archivedAt  INTEGER CHECK (archivedAt IS NULL OR archivedAt >= 0)
