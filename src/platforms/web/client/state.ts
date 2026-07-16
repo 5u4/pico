@@ -39,6 +39,7 @@ export type Action =
   | { type: "select"; conversationId: string }
   | { type: "create"; workspaceId: string }
   | { type: "createWorkspace"; label: string }
+  | { type: "renameWorkspace"; workspaceId: string; label: string }
   | { type: "archive"; conversationId: string }
   | { type: "dismissError" };
 
@@ -256,6 +257,17 @@ export function reduce(state: ThreadState, action: Action): Reduced {
       return {
         state,
         commands: [{ kind: "createWorkspace", label: action.label }],
+      };
+    case "renameWorkspace":
+      return {
+        state,
+        commands: [
+          {
+            kind: "renameWorkspace",
+            workspaceId: action.workspaceId,
+            label: action.label,
+          },
+        ],
       };
     case "archive":
       return {

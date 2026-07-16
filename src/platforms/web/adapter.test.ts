@@ -305,6 +305,46 @@ describe("WebHub.handleCommand createWorkspace", () => {
   });
 });
 
+describe("WebHub.handleCommand renameWorkspace", () => {
+  test("renames the workspace and broadcasts to every socket", async () => {
+    const { hub, db, workspace } = makeHub();
+    const ws = new FakeSocket();
+    const other = new FakeSocket();
+    await hub.handleOpen(ws);
+    await hub.handleOpen(other);
+    ws.sent.length = 0;
+    other.sent.length = 0;
+
+    await hub.handleCommand(ws, {
+      kind: "renameWorkspace",
+      workspaceId: workspace.id,
+      label: "Renamed",
+    });
+
+    const renamed = listWorkspaces(db, "web").find(
+      (w) => w.id === workspace.id,
+    );
+    expect(renamed?.label).toBe("Renamed");
+    expect(ws.sent[0]?.kind).toBe("workspaces");
+    expect(other.sent[0]?.kind).toBe("workspaces");
+  });
+
+  test("unknown workspace id sends an error", async () => {
+    const { hub } = makeHub();
+    const ws = new FakeSocket();
+
+    await hub.handleCommand(ws, {
+      kind: "renameWorkspace",
+      workspaceId: "missing",
+      label: "Renamed",
+    });
+
+    expect(ws.sent).toEqual([
+      { kind: "error", message: "unknown workspace: missing" },
+    ]);
+  });
+});
+
 describe("WebHub.handleCommand archive", () => {
   test("unknown conversation id sends an error", async () => {
     const { hub } = makeHub();

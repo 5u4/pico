@@ -55,6 +55,7 @@ type ShellContextValue = {
   select: (conversationId: string) => void;
   create: (workspaceId: string) => void;
   createWorkspace: (label: string) => void;
+  renameWorkspace: (workspaceId: string, label: string) => void;
   archive: (conversationId: string) => void;
 };
 
@@ -196,6 +197,11 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
     (label: string) => dispatch({ type: "createWorkspace", label }),
     [dispatch],
   );
+  const renameWorkspace = useCallback(
+    (workspaceId: string, label: string) =>
+      dispatch({ type: "renameWorkspace", workspaceId, label }),
+    [dispatch],
+  );
   const archive = useCallback(
     (conversationId: string) => dispatch({ type: "archive", conversationId }),
     [dispatch],
@@ -211,6 +217,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       select,
       create,
       createWorkspace,
+      renameWorkspace,
       archive,
     }),
     [
@@ -222,6 +229,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       select,
       create,
       createWorkspace,
+      renameWorkspace,
       archive,
     ],
   );
