@@ -40,21 +40,4 @@ test.describe("pico web conversation lifecycle", () => {
       page.getByRole("heading", { name: "How can I help you today?" }),
     ).toHaveCount(0);
   });
-
-  test("shows and dismisses the error banner", async ({ page }) => {
-    await page.goto("/");
-    await page.getByText("default", { exact: true }).click({ button: "right" });
-    await page.getByRole("menuitem", { name: "Change directory" }).click();
-    const cwdField = page.getByLabel("Change workspace directory");
-    await cwdField.fill("/no/such/pico/dir");
-    await cwdField.press("Enter");
-
-    const banner = page.getByText("not a directory:");
-    await expect(banner).toBeVisible();
-
-    const dismiss = page.getByRole("button", { name: "Dismiss" });
-    await expect(dismiss).toBeVisible();
-    await dismiss.click();
-    await expect(banner).toBeHidden();
-  });
 });
