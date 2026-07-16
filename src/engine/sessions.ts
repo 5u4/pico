@@ -6,9 +6,10 @@ import {
   createAgentSession,
   SessionManager,
 } from "@oh-my-pi/pi-coding-agent";
-import { err, ok, type Result, ResultAsync } from "neverthrow";
+import { err, ok, Result, ResultAsync } from "neverthrow";
 import { isValidId } from "../util/id";
 import { log } from "../util/log";
+import { errMessage } from "../util/result";
 import type { OmpRuntime } from "./runtime";
 
 const logger = log(["sessions"]);
@@ -50,9 +51,7 @@ export class Sessions {
     const build = inFlight ?? this.construct(conversationId, options);
     if (!inFlight) this.pending.set(conversationId, build);
 
-    const built = await ResultAsync.fromPromise(build, (e) =>
-      e instanceof Error ? e.message : String(e),
-    );
+    const built = await ResultAsync.fromPromise(build, errMessage);
     this.pending.delete(conversationId);
     if (built.isErr()) {
       logger.error("session open failed for {conversationId}: {error}", {
@@ -130,17 +129,18 @@ export class Sessions {
 }
 
 function latestSessionFile(sessionDir: string): string | undefined {
-  let entries: string[];
-  try {
-    entries = readdirSync(sessionDir);
-  } catch (e) {
+  const listed = Result.fromThrowable(
+    () => readdirSync(sessionDir),
+    errMessage,
+  )();
+  if (listed.isErr()) {
     logger.warning("failed to list session dir {dir}: {error}", {
       dir: sessionDir,
-      error: e,
+      error: listed.error,
     });
     return undefined;
   }
-  const files = entries.filter((name) => name.endsWith(".jsonl")).sort();
+  const files = listed.value.filter((name) => name.endsWith(".jsonl")).sort();
   const latest = files.at(-1);
   return latest ? join(sessionDir, latest) : undefined;
 }

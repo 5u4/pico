@@ -12,6 +12,7 @@ import {
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { err, ok, type Result, ResultAsync } from "neverthrow";
 import { log } from "../util/log";
+import { errMessage } from "../util/result";
 
 const logger = log(["runtime"]);
 
@@ -35,7 +36,7 @@ export async function provisionRuntime(
 
   const built = await ResultAsync.fromPromise(
     build(options.cwd, agentDir),
-    (e) => (e instanceof Error ? e.message : String(e)),
+    errMessage,
   );
   if (built.isErr()) return err(built.error);
 
@@ -76,6 +77,6 @@ async function build(
   const refreshError = await modelRegistry
     .refresh("online-if-uncached")
     .then(() => undefined)
-    .catch((e: unknown) => (e instanceof Error ? e.message : String(e)));
+    .catch(errMessage);
   return { settings, authStorage, modelRegistry, refreshError };
 }

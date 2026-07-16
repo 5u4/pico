@@ -1,4 +1,5 @@
 import type { Database } from "bun:sqlite";
+import type { ResultAsync } from "neverthrow";
 import type {
   Engine,
   SessionLike,
@@ -46,7 +47,7 @@ export class WebHub<S extends SessionLike = SessionLike> {
   private readonly viewers = new Map<string, Set<HubSocket>>();
   private readonly bridges = new Map<
     string,
-    { opened: Promise<string | undefined>; unsubscribe: () => void }
+    { opened: ResultAsync<void, string>; unsubscribe: () => void }
   >();
 
   constructor(deps: WebHubDeps<S>) {
@@ -82,7 +83,7 @@ export class WebHub<S extends SessionLike = SessionLike> {
         this.sendError(ws, "no active conversation; retry once connected");
         return;
       }
-      const error =
+      const result =
         command.kind === "prompt"
           ? await this.deps.engine.prompt(
               conversationId,
@@ -90,7 +91,7 @@ export class WebHub<S extends SessionLike = SessionLike> {
               command.text,
             )
           : await this.deps.engine.abort(conversationId);
-      if (error) this.sendError(ws, error);
+      if (result.isErr()) this.sendError(ws, result.error);
       return;
     }
 
@@ -104,13 +105,13 @@ export class WebHub<S extends SessionLike = SessionLike> {
         return;
       }
       const text = this.runCommand(command);
-      const error = await this.deps.engine.record(
+      const result = await this.deps.engine.record(
         conversationId,
         conversation.cwd,
         `command:${command.name}`,
         text,
       );
-      if (error) this.sendError(ws, error);
+      if (result.isErr()) this.sendError(ws, result.error);
       return;
     }
 
@@ -203,9 +204,9 @@ export class WebHub<S extends SessionLike = SessionLike> {
         workspaceId: target.id,
       },
     );
-    const error = await this.bridge(created.id, created.cwd);
-    if (error) {
-      this.sendError(ws, error);
+    const bridged = await this.bridge(created.id, created.cwd);
+    if (bridged.isErr()) {
+      this.sendError(ws, bridged.error);
       return;
     }
     this.attach(ws, created.id);
@@ -213,12 +214,12 @@ export class WebHub<S extends SessionLike = SessionLike> {
     for (const other of this.allSockets)
       if (other !== ws) this.sendWorkspaces(other);
     if (command.prompt) {
-      const promptError = await this.deps.engine.prompt(
+      const promptResult = await this.deps.engine.prompt(
         created.id,
         created.cwd,
         command.prompt,
       );
-      if (promptError) this.sendError(ws, promptError);
+      if (promptResult.isErr()) this.sendError(ws, promptResult.error);
       return;
     }
     const snap = this.snapshotEvent(created.id);
@@ -284,7 +285,7 @@ export class WebHub<S extends SessionLike = SessionLike> {
   private bridge(
     conversationId: string,
     conversationCwd: string,
-  ): Promise<string | undefined> {
+  ): ResultAsync<void, string> {
     const existing = this.bridges.get(conversationId);
     if (existing) return existing.opened;
     const { unsubscribe, opened } = this.deps.engine.subscribe(
@@ -294,12 +295,9 @@ export class WebHub<S extends SessionLike = SessionLike> {
       (event) => this.dispatch(conversationId, event),
     );
     this.bridges.set(conversationId, { opened, unsubscribe });
-    return opened.then((error) => {
-      if (error) {
-        unsubscribe();
-        this.bridges.delete(conversationId);
-      }
-      return error;
+    return opened.orTee(() => {
+      unsubscribe();
+      this.bridges.delete(conversationId);
     });
   }
 
@@ -347,9 +345,9 @@ export class WebHub<S extends SessionLike = SessionLike> {
     conversationId: string,
     conversationCwd: string,
   ): Promise<void> {
-    const error = await this.bridge(conversationId, conversationCwd);
-    if (error) {
-      this.sendError(ws, error);
+    const bridged = await this.bridge(conversationId, conversationCwd);
+    if (bridged.isErr()) {
+      this.sendError(ws, bridged.error);
       return;
     }
     this.attach(ws, conversationId);

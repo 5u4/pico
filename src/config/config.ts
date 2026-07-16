@@ -2,6 +2,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { err, ok, type Result } from "neverthrow";
 import { z } from "zod";
+import { parseJson } from "../util/result";
 
 export const configSchema = z.object({
   port: z.number().int().positive().default(4141),
@@ -28,13 +29,7 @@ export async function loadConfig(
   const file = Bun.file(path);
   if (!(await file.exists())) return parseConfig({});
   const text = await file.text();
-  let raw: unknown;
-  try {
-    raw = JSON.parse(text);
-  } catch (e) {
-    return err(
-      `invalid config json at ${path}: ${e instanceof Error ? e.message : String(e)}`,
-    );
-  }
-  return parseConfig(raw);
+  return parseJson(text)
+    .mapErr((message) => `invalid config json at ${path}: ${message}`)
+    .andThen(parseConfig);
 }

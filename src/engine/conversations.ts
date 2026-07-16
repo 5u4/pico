@@ -2,8 +2,9 @@ import type { Database } from "bun:sqlite";
 import { withContext } from "@logtape/logtape";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent";
-import type { Result } from "neverthrow";
+import { errAsync, okAsync, type Result, ResultAsync } from "neverthrow";
 import { log } from "../util/log";
+import { errMessage } from "../util/result";
 import { type Message, toMessages, toStreamMessage } from "./message";
 import { getConversation, setConversationTitle } from "./registry";
 
@@ -136,7 +137,7 @@ export class Engine<S extends SessionLike = SessionLike> {
     cwd: string,
     mode: SubscribeMode,
     listener: (event: TurnEvent) => void,
-  ): { unsubscribe: () => void; opened: Promise<string | undefined> } {
+  ): { unsubscribe: () => void; opened: ResultAsync<void, string> } {
     const subscriber: Subscriber = { mode, listener };
     let set = this.subscribers.get(conversationId);
     if (!set) {
@@ -174,78 +175,82 @@ export class Engine<S extends SessionLike = SessionLike> {
     };
   }
 
-  async prompt(
+  prompt(
     conversationId: string,
     cwd: string,
     text: string,
-  ): Promise<string | undefined> {
-    const opened = await this.ensureOpen(conversationId, cwd);
-    if (opened) return opened;
-    const session = this.deps.sessions.get(conversationId);
-    if (!session) {
-      logger.warning("session unavailable after open for {conversationId}", {
-        conversationId,
-      });
-      return "conversation session unavailable; retry your message";
-    }
-    const workspaceId =
-      getConversation(this.deps.db, conversationId)?.workspaceId ?? "unknown";
-    return withContext({ conversationId, workspaceId }, () => {
-      logger.info("turn started ({chars} chars)", { chars: text.length });
-      void this.maybeAutoTitle(conversationId, session, text).catch(
-        (e: unknown) => {
-          logger.error("auto-title failed: {error}", { error: e });
-        },
-      );
-      return session
-        .prompt(text)
-        .then(() => {
-          logger.info("turn completed");
-          return undefined;
-        })
-        .catch((e: unknown) => {
-          const message = e instanceof Error ? e.message : String(e);
-          logger.error("turn failed: {error}", { error: e });
-          return message;
+  ): ResultAsync<void, string> {
+    return this.ensureOpen(conversationId, cwd).andThen(() => {
+      const session = this.deps.sessions.get(conversationId);
+      if (!session) {
+        logger.warning("session unavailable after open for {conversationId}", {
+          conversationId,
         });
+        return errAsync<void, string>(
+          "conversation session unavailable; retry your message",
+        );
+      }
+      const workspaceId =
+        getConversation(this.deps.db, conversationId)?.workspaceId ?? "unknown";
+      return withContext({ conversationId, workspaceId }, () => {
+        logger.info("turn started ({chars} chars)", { chars: text.length });
+        void this.maybeAutoTitle(conversationId, session, text).catch(
+          (e: unknown) => {
+            logger.error("auto-title failed: {error}", { error: e });
+          },
+        );
+        return ResultAsync.fromPromise(
+          session.prompt(text).then(() => {
+            logger.info("turn completed");
+          }),
+          (e) => {
+            logger.error("turn failed: {error}", { error: e });
+            return errMessage(e);
+          },
+        );
+      });
     });
   }
 
-  abort(conversationId: string): Promise<string | undefined> {
+  abort(conversationId: string): ResultAsync<void, string> {
     const session = this.deps.sessions.get(conversationId);
-    if (!session) return Promise.resolve(undefined);
+    if (!session) return okAsync<void, string>(undefined);
     logger.info("turn aborted for {conversationId}", { conversationId });
-    return session
-      .abort()
-      .then(() => undefined)
-      .catch((e: unknown) => (e instanceof Error ? e.message : String(e)));
+    return ResultAsync.fromPromise(
+      session.abort().then(() => undefined),
+      errMessage,
+    );
   }
 
-  async record(
+  record(
     conversationId: string,
     cwd: string,
     customType: string,
     text: string,
-  ): Promise<string | undefined> {
-    const opened = await this.ensureOpen(conversationId, cwd);
-    if (opened) return opened;
-    const session = this.deps.sessions.get(conversationId);
-    if (!session) return "conversation session unavailable; retry";
-    return session
-      .sendCustomMessage(
-        { customType, content: text, display: true },
-        { triggerTurn: false },
-      )
-      .then(() => session.sessionManager.ensureOnDisk())
-      .then(() => {
-        this.broadcastSnapshot(conversationId, session);
-        return undefined;
-      })
-      .catch((e: unknown) => {
-        const message = e instanceof Error ? e.message : String(e);
-        logger.error("record failed: {error}", { error: e });
-        return message;
-      });
+  ): ResultAsync<void, string> {
+    return this.ensureOpen(conversationId, cwd).andThen(() => {
+      const session = this.deps.sessions.get(conversationId);
+      if (!session) {
+        return errAsync<void, string>(
+          "conversation session unavailable; retry",
+        );
+      }
+      return ResultAsync.fromPromise(
+        session
+          .sendCustomMessage(
+            { customType, content: text, display: true },
+            { triggerTurn: false },
+          )
+          .then(() => session.sessionManager.ensureOnDisk())
+          .then(() => {
+            this.broadcastSnapshot(conversationId, session);
+          }),
+        (e) => {
+          logger.error("record failed: {error}", { error: e });
+          return errMessage(e);
+        },
+      );
+    });
   }
 
   private broadcastSnapshot(conversationId: string, session: S): void {
@@ -261,18 +266,21 @@ export class Engine<S extends SessionLike = SessionLike> {
       target.listener(evt);
   }
 
-  private async ensureOpen(
+  private ensureOpen(
     conversationId: string,
     cwd: string,
-  ): Promise<string | undefined> {
-    if (this.deps.sessions.get(conversationId)) return undefined;
-    const opened = await this.deps.sessions.open(conversationId, { cwd });
-    if (opened.isErr()) return opened.error;
-    if (!this.bridged.has(conversationId)) {
-      this.bridged.add(conversationId);
-      opened.value.subscribe((event) => this.dispatch(conversationId, event));
-    }
-    return undefined;
+  ): ResultAsync<void, string> {
+    if (this.deps.sessions.get(conversationId))
+      return okAsync<void, string>(undefined);
+    return new ResultAsync(
+      this.deps.sessions.open(conversationId, { cwd }),
+    ).andThen((session) => {
+      if (!this.bridged.has(conversationId)) {
+        this.bridged.add(conversationId);
+        session.subscribe((event) => this.dispatch(conversationId, event));
+      }
+      return okAsync<void, string>(undefined);
+    });
   }
 
   private dispatch(conversationId: string, event: AgentSessionEvent): void {
