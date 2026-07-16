@@ -69,17 +69,27 @@ if (supervisorSocket && readyToken) {
   }
 }
 
+const stopped = Promise.withResolvers<number>();
 let shuttingDown = false;
 const shutdown = async (signal: string): Promise<void> => {
   if (shuttingDown) return;
   shuttingDown = true;
   boot.info("shutting down ({signal})", { signal });
-  server?.stop();
-  await sessions.closeAll();
-  db.close();
-  await dispose();
-  process.exit(0);
+  let code = 0;
+  try {
+    server?.stop();
+    await sessions.closeAll();
+    db.close();
+    await dispose();
+  } catch (error) {
+    boot.error("error during shutdown: {error}", { error });
+    code = 1;
+  } finally {
+    stopped.resolve(code);
+  }
 };
 
 process.on("SIGINT", () => void shutdown("SIGINT"));
 process.on("SIGTERM", () => void shutdown("SIGTERM"));
+
+process.exit(await stopped.promise);
