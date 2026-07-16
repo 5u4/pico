@@ -1,18 +1,20 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { err, ok, type Result } from "neverthrow";
+import { err, ok, Result } from "neverthrow";
 import { z } from "zod";
-import { parseJson } from "../util/result";
 
 export const configSchema = z.object({
-  port: z.number().int().positive().default(4141),
   workspaceCwd: z.string().min(1).default(join(homedir(), ".pico")),
+  web: z
+    .object({
+      port: z.number().int().positive().default(4141),
+    })
+    .prefault({}),
 });
-
 export type Config = z.infer<typeof configSchema>;
 
 export function defaultConfigPath(): string {
-  return join(homedir(), ".pico", "config.json");
+  return join(homedir(), ".pico", "config.toml");
 }
 
 export function parseConfig(raw: unknown): Result<Config, string> {
@@ -29,7 +31,9 @@ export async function loadConfig(
   const file = Bun.file(path);
   if (!(await file.exists())) return parseConfig({});
   const text = await file.text();
-  return parseJson(text)
-    .mapErr((message) => `invalid config json at ${path}: ${message}`)
-    .andThen(parseConfig);
+  return Result.fromThrowable(
+    () => Bun.TOML.parse(text) as unknown,
+    (e) =>
+      `invalid config toml at ${path}: ${e instanceof Error ? e.message : String(e)}`,
+  )().andThen(parseConfig);
 }
