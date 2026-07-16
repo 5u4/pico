@@ -9,6 +9,7 @@ import { WebHub } from "./platforms/web/adapter";
 import index from "./platforms/web/client/index.html";
 import { createServer } from "./platforms/web/server";
 import { defaultDbPath, openDb } from "./store/db";
+import { reportReady } from "./supervisor/ready";
 import { configureLogging, log } from "./util/log";
 
 const cwd = process.cwd();
@@ -54,6 +55,19 @@ boot.info(
   "pico web on http://localhost:{port} (workspaces in {workspaceCwd})",
   { port: server.port, workspaceCwd: config.workspaceCwd },
 );
+
+const supervisorSocket = Bun.env.PICO_SUPERVISOR_SOCKET;
+const readyToken = Bun.env.PICO_READY_TOKEN;
+if (supervisorSocket && readyToken) {
+  const reported = await reportReady(supervisorSocket, readyToken);
+  if (reported.isErr()) {
+    boot.warning("failed to report ready to supervisor: {error}", {
+      error: reported.error,
+    });
+  } else {
+    boot.info("reported ready to supervisor");
+  }
+}
 
 let shuttingDown = false;
 const shutdown = async (signal: string): Promise<void> => {
