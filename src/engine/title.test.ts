@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent";
-import { autoTitle, provisionalTitle } from "./title";
+import { autoTitle, provisionalTitle, titleContext } from "./title";
 
 const unusedSession = {} as AgentSession;
 
@@ -41,5 +41,21 @@ describe("provisionalTitle", () => {
     const long = "a".repeat(80);
     const result = provisionalTitle(long);
     expect(result).toBe(`${"a".repeat(60)}…`);
+  });
+});
+
+describe("titleContext", () => {
+  test("wraps prompt and reply so tiny-model preprocessing preserves both", () => {
+    const context = titleContext("the parser is broken", "I fixed the parser.");
+    expect(context).toContain("the parser is broken");
+    expect(context).toContain("I fixed the parser.");
+    expect(context).toContain("<chat>");
+    expect(context).toContain("<assistant>");
+  });
+
+  test("omits the assistant block when there is no reply", () => {
+    const context = titleContext("the parser is broken", "");
+    expect(context).toContain("the parser is broken");
+    expect(context).not.toContain("<assistant>");
   });
 });

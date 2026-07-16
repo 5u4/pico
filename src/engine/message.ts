@@ -135,6 +135,17 @@ export function toMessages(messages: AgentMessage[]): Message[] {
   return out;
 }
 
+export function assistantReplyText(messages: AgentMessage[]): string {
+  const parts: string[] = [];
+  for (const message of messages) {
+    if (!("role" in message) || message.role !== "assistant") continue;
+    for (const block of message.content) {
+      if (block.type === "text" && block.text) parts.push(block.text);
+    }
+  }
+  return parts.join("\n\n").trim();
+}
+
 function runStartIndex(messages: AgentMessage[]): number {
   let start = messages.length;
   for (let i = messages.length - 1; i >= 0; i--) {

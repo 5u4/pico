@@ -1,6 +1,20 @@
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent";
+import {
+  formatTitleConversationContext,
+  type TitleConversationTurn,
+} from "@oh-my-pi/pi-coding-agent/tiny/message-preproc";
 import { isLowSignalTitleInput } from "@oh-my-pi/pi-coding-agent/tiny/text";
 import { generateSessionTitle } from "@oh-my-pi/pi-coding-agent/utils/title-generator";
+
+export function titleContext(prompt: string, reply: string): string {
+  const turns: TitleConversationTurn[] = reply
+    ? [
+        { role: "user", text: prompt },
+        { role: "assistant", text: reply },
+      ]
+    : [{ role: "user", text: prompt }];
+  return formatTitleConversationContext(turns);
+}
 
 export function autoTitle(
   session: AgentSession,
