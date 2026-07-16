@@ -252,13 +252,20 @@ function ReasoningText({
     const scrollEl = scrollRef.current;
     const contentEl = contentRef.current;
     if (!scrollEl || !contentEl) return;
+    let frame = 0;
     const pin = () => {
-      scrollEl.scrollTop = scrollEl.scrollHeight;
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        scrollEl.scrollTop = scrollEl.scrollHeight;
+      });
     };
     pin();
     const observer = new ResizeObserver(pin);
     observer.observe(contentEl);
-    return () => observer.disconnect();
+    return () => {
+      cancelAnimationFrame(frame);
+      observer.disconnect();
+    };
   }, [isPreview]);
 
   return (
