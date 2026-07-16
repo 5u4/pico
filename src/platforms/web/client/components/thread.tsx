@@ -1,6 +1,5 @@
 import {
   ActionBarPrimitive,
-  AuiIf,
   ComposerPrimitive,
   type EmptyMessagePartComponent,
   MessagePrimitive,
@@ -12,17 +11,11 @@ import {
 import {
   ArrowDownIcon,
   ArrowUpIcon,
-  BugIcon,
-  CompassIcon,
   CopyIcon,
-  FlaskConicalIcon,
-  GitPullRequestIcon,
   SlashIcon,
   SquareIcon,
-  WandSparklesIcon,
 } from "lucide-react";
-import type { ReactNode } from "react";
-import { useRef, useState } from "react";
+import { useRef } from "react";
 import { cn } from "../lib/utils";
 import { useShell, useThread } from "../runtime";
 import { DotMatrix } from "./assistant-ui/dot-matrix";
@@ -256,151 +249,6 @@ function ThreadWelcome() {
   );
 }
 
-type SuggestionGroup = {
-  label: string;
-  icon: ReactNode;
-  options: { label: string; prompt: string }[];
-};
-
-const SUGGESTION_GROUPS: SuggestionGroup[] = [
-  {
-    label: "Understand",
-    icon: <CompassIcon />,
-    options: [
-      {
-        label: "explain the architecture",
-        prompt: "Explain the architecture of this codebase.",
-      },
-      {
-        label: "walk me through the entry point",
-        prompt: "Walk me through the main entry point of this project.",
-      },
-      {
-        label: "what does this module do",
-        prompt: "Pick a core module and explain what it does and why.",
-      },
-    ],
-  },
-  {
-    label: "Fix",
-    icon: <BugIcon />,
-    options: [
-      {
-        label: "find and fix a bug",
-        prompt: "Find a bug in the recent changes and fix it.",
-      },
-      {
-        label: "why is this test failing",
-        prompt: "Run the test suite and diagnose why a failing test fails.",
-      },
-    ],
-  },
-  {
-    label: "Refactor",
-    icon: <WandSparklesIcon />,
-    options: [
-      {
-        label: "improve readability",
-        prompt: "Refactor a file you consider hard to read, keeping behavior.",
-      },
-      {
-        label: "find dead code",
-        prompt: "Find dead or unused code that can be safely removed.",
-      },
-    ],
-  },
-  {
-    label: "Test",
-    icon: <FlaskConicalIcon />,
-    options: [
-      {
-        label: "cover the last change",
-        prompt: "Add tests covering the most recent change.",
-      },
-      {
-        label: "what isn't covered",
-        prompt: "Identify important code paths that lack test coverage.",
-      },
-    ],
-  },
-  {
-    label: "Git",
-    icon: <GitPullRequestIcon />,
-    options: [
-      {
-        label: "summarize my changes",
-        prompt: "Summarize my uncommitted changes.",
-      },
-      {
-        label: "write a commit message",
-        prompt: "Write a Conventional Commits message for the staged changes.",
-      },
-      {
-        label: "draft a PR description",
-        prompt: "Draft a pull request description for my current branch.",
-      },
-    ],
-  },
-];
-
-const suggestionChipClass =
-  "h-auto gap-1.5 rounded-full border border-border/60 px-3.5 py-1.5 text-sm font-normal whitespace-nowrap text-foreground transition-colors hover:bg-muted [&_svg]:size-4";
-
-function ThreadSuggestions() {
-  const [expandedLabel, setExpandedLabel] = useState<string | null>(null);
-  const expandedGroup = SUGGESTION_GROUPS.find(
-    (group) => group.label === expandedLabel,
-  );
-
-  return (
-    <div className="flex w-full flex-col gap-2 px-4">
-      <div className="scrollbar-none w-full overflow-x-auto">
-        <div className="mx-auto flex w-max items-center gap-2">
-          {SUGGESTION_GROUPS.map((group) => (
-            <Button
-              key={group.label}
-              variant="ghost"
-              className={cn(
-                suggestionChipClass,
-                group.label === expandedLabel && "bg-muted",
-              )}
-              onClick={() =>
-                setExpandedLabel(
-                  group.label === expandedLabel ? null : group.label,
-                )
-              }
-            >
-              {group.icon}
-              {group.label}
-            </Button>
-          ))}
-        </div>
-      </div>
-      {expandedGroup && (
-        <div
-          key={expandedGroup.label}
-          className="fade-in slide-in-from-top-1 animate-in scrollbar-none w-full overflow-x-auto duration-200"
-        >
-          <div className="mx-auto flex w-max items-center gap-2">
-            {expandedGroup.options.map((option) => (
-              <ThreadPrimitive.Suggestion
-                key={option.label}
-                prompt={option.prompt}
-                send
-                asChild
-              >
-                <Button variant="ghost" className={suggestionChipClass}>
-                  {option.label}
-                </Button>
-              </ThreadPrimitive.Suggestion>
-            ))}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
 export function Thread() {
   const isEmpty = useAuiState((s) => s.thread.messages.length === 0);
 
@@ -443,13 +291,6 @@ export function Thread() {
             <ConversationLabel />
             <ContextUsage />
           </div>
-          <ThreadPrimitive.Empty>
-            <div className="min-h-19">
-              <AuiIf condition={(s) => s.composer.isEmpty}>
-                <ThreadSuggestions />
-              </AuiIf>
-            </div>
-          </ThreadPrimitive.Empty>
         </ThreadPrimitive.ViewportFooter>
       </ThreadPrimitive.Viewport>
     </ThreadPrimitive.Root>
