@@ -9,7 +9,11 @@ import {
   type SessionsPort,
   type TurnEvent,
 } from "./conversations";
-import { createConversation, getOrCreateDefaultWorkspace } from "./registry";
+import {
+  createConversation,
+  getConversation,
+  getOrCreateDefaultWorkspace,
+} from "./registry";
 
 const CWD = "/tmp/pico-engine-test";
 
@@ -23,7 +27,19 @@ class FakeSession implements SessionLike {
   readonly setSessionNameCalls: { name: string; source?: string }[] = [];
   private readonly listeners = new Set<(event: AgentSessionEvent) => void>();
 
-  prompt(): Promise<boolean> {
+  replyText = "I fixed the broken parser.";
+
+  prompt(text: string): Promise<boolean> {
+    this.state.messages.push({
+      role: "user",
+      content: text,
+      timestamp: Date.now(),
+    } as (typeof this.state.messages)[number]);
+    this.state.messages.push({
+      role: "assistant",
+      content: [{ type: "text", text: this.replyText }],
+      timestamp: Date.now(),
+    } as (typeof this.state.messages)[number]);
     return Promise.resolve(true);
   }
 
@@ -257,8 +273,19 @@ describe("Engine.record", () => {
   });
 });
 
+function titleWaiter(want: string) {
+  const { promise, resolve } = Promise.withResolvers<void>();
+  const titles: string[] = [];
+  const listener = (event: TurnEvent) => {
+    if (event.kind !== "title") return;
+    titles.push(event.title);
+    if (event.title === want) resolve();
+  };
+  return { titles, listener, done: promise };
+}
+
 describe("Engine auto-title", () => {
-  test("emits a title event to subscribers after the first prompt", async () => {
+  test("emits the final title and syncs it to the session after the turn", async () => {
     const db = openDb(":memory:");
     const workspace = getOrCreateDefaultWorkspace(db, "web", CWD, "web");
     const conversation = createConversation(db, {
@@ -270,7 +297,140 @@ describe("Engine auto-title", () => {
     const engine = new Engine<FakeSession>({
       db,
       sessions,
-      autoTitle: async () => "Fix the parser",
+      autoTitle: () => Promise.resolve("Fix the parser"),
+    });
+    const w = titleWaiter("Fix the parser");
+    const { opened } = engine.subscribe(
+      conversation.id,
+      CWD,
+      "live",
+      w.listener,
+    );
+    await opened;
+
+    await engine.prompt(conversation.id, CWD, "the parser is broken");
+    await w.done;
+
+    expect(getConversation(db, conversation.id)?.title).toBe("Fix the parser");
+    expect(sessions.get(conversation.id)?.setSessionNameCalls).toEqual([
+      { name: "Fix the parser", source: "auto" },
+    ]);
+  });
+
+  test("shows a provisional truncated title first, then overwrites it", async () => {
+    const db = openDb(":memory:");
+    const workspace = getOrCreateDefaultWorkspace(db, "web", CWD, "web");
+    const conversation = createConversation(db, {
+      workspaceId: workspace.id,
+      cwd: CWD,
+      title: null,
+    });
+    const sessions = new FakeSessions();
+    const engine = new Engine<FakeSession>({
+      db,
+      sessions,
+      autoTitle: () => Promise.resolve("Fix the parser"),
+    });
+    const w = titleWaiter("Fix the parser");
+    const { opened } = engine.subscribe(
+      conversation.id,
+      CWD,
+      "live",
+      w.listener,
+    );
+    await opened;
+
+    await engine.prompt(conversation.id, CWD, "the parser is broken");
+    await w.done;
+
+    expect(w.titles).toEqual(["the parser is broken", "Fix the parser"]);
+    expect(getConversation(db, conversation.id)?.title).toBe("Fix the parser");
+  });
+
+  test("feeds both the prompt and the assistant reply into title generation", async () => {
+    const db = openDb(":memory:");
+    const workspace = getOrCreateDefaultWorkspace(db, "web", CWD, "web");
+    const conversation = createConversation(db, {
+      workspaceId: workspace.id,
+      cwd: CWD,
+      title: null,
+    });
+    const sessions = new FakeSessions();
+    let captured = "";
+    const engine = new Engine<FakeSession>({
+      db,
+      sessions,
+      autoTitle: (_session, text) => {
+        captured = text;
+        return Promise.resolve("Parser fixed");
+      },
+    });
+    const w = titleWaiter("Parser fixed");
+    const { opened } = engine.subscribe(
+      conversation.id,
+      CWD,
+      "live",
+      w.listener,
+    );
+    await opened;
+
+    await engine.prompt(conversation.id, CWD, "the parser is broken");
+    await w.done;
+
+    expect(captured).toContain("the parser is broken");
+    expect(captured).toContain("I fixed the broken parser.");
+  });
+
+  test("keeps the provisional title when the LLM declines to title", async () => {
+    const db = openDb(":memory:");
+    const workspace = getOrCreateDefaultWorkspace(db, "web", CWD, "web");
+    const conversation = createConversation(db, {
+      workspaceId: workspace.id,
+      cwd: CWD,
+      title: null,
+    });
+    const sessions = new FakeSessions();
+    const { promise: attempted, resolve } = Promise.withResolvers<void>();
+    const engine = new Engine<FakeSession>({
+      db,
+      sessions,
+      autoTitle: () => {
+        resolve();
+        return Promise.resolve(null);
+      },
+    });
+    const { opened } = engine.subscribe(conversation.id, CWD, "live", () => {});
+    await opened;
+
+    await engine.prompt(conversation.id, CWD, "hi");
+    expect(getConversation(db, conversation.id)?.title).toBe("hi");
+    await attempted;
+    await Promise.resolve();
+
+    expect(getConversation(db, conversation.id)?.title).toBe("hi");
+    expect(sessions.get(conversation.id)?.setSessionNameCalls).toEqual([]);
+  });
+
+  test("skips session sync and broadcast when the conversation vanished", async () => {
+    const db = openDb(":memory:");
+    const workspace = getOrCreateDefaultWorkspace(db, "web", CWD, "web");
+    const conversation = createConversation(db, {
+      workspaceId: workspace.id,
+      cwd: CWD,
+      title: null,
+    });
+    const sessions = new FakeSessions();
+    const { promise: attempted, resolve } = Promise.withResolvers<void>();
+    const engine = new Engine<FakeSession>({
+      db,
+      sessions,
+      autoTitle: () => {
+        db.query("DELETE FROM conversations WHERE id = $id").run({
+          id: conversation.id,
+        });
+        resolve();
+        return Promise.resolve("Fix the parser");
+      },
     });
     const events: TurnEvent[] = [];
     const { opened } = engine.subscribe(conversation.id, CWD, "live", (e) =>
@@ -279,9 +439,48 @@ describe("Engine auto-title", () => {
     await opened;
 
     await engine.prompt(conversation.id, CWD, "the parser is broken");
+    await attempted;
     await Promise.resolve();
 
-    expect(events.some((e) => e.kind === "title")).toBe(true);
+    expect(
+      events.some((e) => e.kind === "title" && e.title === "Fix the parser"),
+    ).toBe(false);
+    expect(sessions.get(conversation.id)?.setSessionNameCalls).toEqual([]);
+  });
+
+  test("titles only on the first turn of a conversation", async () => {
+    const db = openDb(":memory:");
+    const workspace = getOrCreateDefaultWorkspace(db, "web", CWD, "web");
+    const conversation = createConversation(db, {
+      workspaceId: workspace.id,
+      cwd: CWD,
+      title: null,
+    });
+    const sessions = new FakeSessions();
+    let calls = 0;
+    const engine = new Engine<FakeSession>({
+      db,
+      sessions,
+      autoTitle: () => {
+        calls++;
+        return Promise.resolve("Fix the parser");
+      },
+    });
+    const w = titleWaiter("Fix the parser");
+    const { opened } = engine.subscribe(
+      conversation.id,
+      CWD,
+      "live",
+      w.listener,
+    );
+    await opened;
+
+    await engine.prompt(conversation.id, CWD, "the parser is broken");
+    await w.done;
+    await engine.prompt(conversation.id, CWD, "still broken");
+    await Promise.resolve();
+
+    expect(calls).toBe(1);
     expect(sessions.get(conversation.id)?.setSessionNameCalls).toEqual([
       { name: "Fix the parser", source: "auto" },
     ]);

@@ -5,8 +5,18 @@ import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent";
 import { errAsync, okAsync, type Result, ResultAsync } from "neverthrow";
 import { log } from "../util/log";
 import { errMessage } from "../util/result";
-import { type Message, toMessages, toStreamMessage } from "./message";
-import { getConversation, setConversationTitle } from "./registry";
+import {
+  assistantReplyText,
+  type Message,
+  toMessages,
+  toStreamMessage,
+} from "./message";
+import {
+  getConversation,
+  setConversationTitle,
+  setProvisionalTitle,
+} from "./registry";
+import { provisionalTitle, titleContext } from "./title";
 
 const logger = log(["engine"]);
 
@@ -194,14 +204,16 @@ export class Engine<S extends SessionLike = SessionLike> {
         getConversation(this.deps.db, conversationId)?.workspaceId ?? "unknown";
       return withContext({ conversationId, workspaceId }, () => {
         logger.info("turn started ({chars} chars)", { chars: text.length });
-        void this.maybeAutoTitle(conversationId, session, text).catch(
-          (e: unknown) => {
-            logger.error("auto-title failed: {error}", { error: e });
-          },
-        );
+        const firstTurn = this.seedProvisionalTitle(conversationId, text);
         return ResultAsync.fromPromise(
           session.prompt(text).then(() => {
             logger.info("turn completed");
+            if (firstTurn)
+              void this.autoTitleFromReply(conversationId, session, text).catch(
+                (e: unknown) => {
+                  logger.error("auto-title failed: {error}", { error: e });
+                },
+              );
           }),
           (e) => {
             logger.error("turn failed: {error}", { error: e });
@@ -312,22 +324,38 @@ export class Engine<S extends SessionLike = SessionLike> {
     }
   }
 
-  private async maybeAutoTitle(
-    conversationId: string,
-    session: S,
-    text: string,
-  ): Promise<void> {
-    if (getConversation(this.deps.db, conversationId)?.title != null) return;
-    const title = await this.deps.autoTitle(session, text).catch(() => null);
-    if (!title) return;
-    if (!setConversationTitle(this.deps.db, conversationId, title)) return;
-    if (!session.sessionName) {
-      await session.setSessionName(title, "auto").catch((e: unknown) => {
-        logger.error("title sync to omp session failed: {error}", { error: e });
-      });
-    }
+  private broadcastTitle(conversationId: string, title: string): void {
     const evt: TurnEvent = { kind: "title", title };
     for (const target of this.subscribers.get(conversationId) ?? [])
       target.listener(evt);
+  }
+
+  private seedProvisionalTitle(conversationId: string, text: string): boolean {
+    if (getConversation(this.deps.db, conversationId)?.title != null)
+      return false;
+    const provisional = provisionalTitle(text);
+    if (
+      provisional &&
+      setProvisionalTitle(this.deps.db, conversationId, provisional)
+    ) {
+      this.broadcastTitle(conversationId, provisional);
+    }
+    return true;
+  }
+
+  private async autoTitleFromReply(
+    conversationId: string,
+    session: S,
+    prompt: string,
+  ): Promise<void> {
+    const reply = assistantReplyText(session.state.messages);
+    const context = titleContext(prompt, reply);
+    const title = await this.deps.autoTitle(session, context).catch(() => null);
+    if (!title) return;
+    if (!setConversationTitle(this.deps.db, conversationId, title)) return;
+    await session.setSessionName(title, "auto").catch((e: unknown) => {
+      logger.error("title sync to omp session failed: {error}", { error: e });
+    });
+    this.broadcastTitle(conversationId, title);
   }
 }

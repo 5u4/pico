@@ -112,7 +112,7 @@ export function createConversation(
   return conversationSchema.parse(row);
 }
 
-export function setConversationTitle(
+export function setProvisionalTitle(
   db: Database,
   id: string,
   title: string,
@@ -121,6 +121,17 @@ export function setConversationTitle(
     .query(
       "UPDATE conversations SET title = $title WHERE id = $id AND title IS NULL",
     )
+    .run({ id, title });
+  return result.changes > 0;
+}
+
+export function setConversationTitle(
+  db: Database,
+  id: string,
+  title: string,
+): boolean {
+  const result = db
+    .query("UPDATE conversations SET title = $title WHERE id = $id")
     .run({ id, title });
   return result.changes > 0;
 }

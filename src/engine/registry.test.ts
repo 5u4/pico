@@ -10,6 +10,7 @@ import {
   listConversations,
   listWorkspaces,
   setConversationTitle,
+  setProvisionalTitle,
 } from "./registry.ts";
 
 let db: Database;
@@ -108,7 +109,7 @@ describe("conversations", () => {
     expect(getConversation(db, c.id)?.title).toBe("generated");
   });
 
-  test("setConversationTitle refuses to overwrite an existing title", () => {
+  test("setConversationTitle overwrites an existing title", () => {
     const ws = createWorkspace(db, {
       cwd: "/projects",
       platform: "web",
@@ -117,10 +118,27 @@ describe("conversations", () => {
     const c = createConversation(db, {
       workspaceId: ws.id,
       cwd: "/projects",
-      title: "kept",
+      title: "provisional",
     });
-    expect(setConversationTitle(db, c.id, "other")).toBe(false);
-    expect(getConversation(db, c.id)?.title).toBe("kept");
+    expect(setConversationTitle(db, c.id, "final")).toBe(true);
+    expect(getConversation(db, c.id)?.title).toBe("final");
+  });
+
+  test("setProvisionalTitle only seeds an untitled conversation", () => {
+    const ws = createWorkspace(db, {
+      cwd: "/projects",
+      platform: "web",
+      label: "w",
+    });
+    const c = createConversation(db, {
+      workspaceId: ws.id,
+      cwd: "/projects",
+      title: null,
+    });
+    expect(setProvisionalTitle(db, c.id, "seed")).toBe(true);
+    expect(getConversation(db, c.id)?.title).toBe("seed");
+    expect(setProvisionalTitle(db, c.id, "again")).toBe(false);
+    expect(getConversation(db, c.id)?.title).toBe("seed");
   });
 
   test("setConversationTitle reports no change for an unknown id", () => {
