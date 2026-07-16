@@ -55,7 +55,7 @@ const WorkingIndicator: EmptyMessagePartComponent = ({ status }) => {
 };
 
 const AssistantText: TextMessagePartComponent = () => (
-  <div className="[&:not(:first-child)]:mt-3">
+  <div className="[&:not(:first-child)]:mt-4">
     <MarkdownText />
   </div>
 );
