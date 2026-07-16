@@ -22,3 +22,7 @@ jobs:
         run: bun run scripts/lint-comments.ts --all
       - name: test
         run: bun test
+      - name: install playwright chromium
+        run: bunx playwright install --with-deps chromium
+      - name: e2e
+        run: bun run test:e2e

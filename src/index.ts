@@ -7,12 +7,9 @@ import { Sessions } from "./engine/sessions";
 import { autoTitle } from "./engine/title";
 import { WebHub } from "./platforms/web/adapter";
 import index from "./platforms/web/client/index.html";
-import { parseClientCommand } from "./platforms/web/protocol";
+import { createServer } from "./platforms/web/server";
 import { defaultDbPath, openDb } from "./store/db";
 import { configureLogging, log } from "./util/log";
-import { parseJson } from "./util/result";
-
-type WsData = { conversationId: string | null };
 
 const cwd = process.cwd();
 
@@ -46,62 +43,11 @@ const hub = new WebHub({
   workspaceCwd: config.workspaceCwd,
 });
 
-const net = log(["net"]);
-const server = Bun.serve<WsData, "/">({
+const server = createServer({
   port: config.port,
+  hub,
+  index,
   development: Bun.env.NODE_ENV !== "production",
-  routes: {
-    "/": index,
-  },
-  fetch(req, srv) {
-    const url = new URL(req.url);
-    if (url.pathname === "/ws") {
-      const origin = req.headers.get("origin");
-      if (origin) {
-        let sameOrigin = false;
-        try {
-          sameOrigin = new URL(origin).host === req.headers.get("host");
-        } catch {
-          sameOrigin = false;
-        }
-        if (!sameOrigin) {
-          net.warning("rejected ws upgrade from forbidden origin {origin}", {
-            origin,
-          });
-          return new Response("forbidden origin", { status: 403 });
-        }
-      }
-      if (srv.upgrade(req, { data: { conversationId: null } }))
-        return undefined;
-      net.warning("ws upgrade failed");
-      return new Response("upgrade failed", { status: 400 });
-    }
-    return new Response("not found", { status: 404 });
-  },
-  websocket: {
-    async open(ws) {
-      await hub.handleOpen(ws);
-    },
-    async message(ws, raw) {
-      const text = typeof raw === "string" ? raw : raw.toString();
-      const parsed = parseJson(text);
-      if (parsed.isErr()) {
-        net.debug("dropped malformed ws frame ({bytes} bytes)", {
-          bytes: text.length,
-        });
-        return;
-      }
-      const command = parseClientCommand(parsed.value);
-      if (!command) {
-        net.debug("dropped unrecognized ws command");
-        return;
-      }
-      await hub.handleCommand(ws, command);
-    },
-    close(ws) {
-      hub.handleClose(ws);
-    },
-  },
 });
 
 boot.info(

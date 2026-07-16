@@ -7,3 +7,7 @@ node_modules/
 !.env.hindsight.example
 tmp
 docker-compose.override.yml
+test-results/
+playwright-report/
+blob-report/
+.playwright/
