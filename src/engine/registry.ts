@@ -86,6 +86,17 @@ export function renameWorkspace(
   return renamed;
 }
 
+export function updateWorkspaceCwd(
+  db: Database,
+  id: string,
+  cwd: string,
+): boolean {
+  const result = db
+    .query("UPDATE workspaces SET cwd = $cwd WHERE id = $id")
+    .run({ id, cwd });
+  return result.changes > 0;
+}
+
 export function listConversations(
   db: Database,
   workspaceId: string,

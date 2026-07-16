@@ -40,6 +40,7 @@ export type Action =
   | { type: "create"; workspaceId: string }
   | { type: "createWorkspace"; label: string }
   | { type: "renameWorkspace"; workspaceId: string; label: string }
+  | { type: "updateWorkspaceCwd"; workspaceId: string; cwd: string }
   | { type: "archive"; conversationId: string }
   | { type: "dismissError" };
 
@@ -266,6 +267,17 @@ export function reduce(state: ThreadState, action: Action): Reduced {
             kind: "renameWorkspace",
             workspaceId: action.workspaceId,
             label: action.label,
+          },
+        ],
+      };
+    case "updateWorkspaceCwd":
+      return {
+        state,
+        commands: [
+          {
+            kind: "updateWorkspaceCwd",
+            workspaceId: action.workspaceId,
+            cwd: action.cwd,
           },
         ],
       };

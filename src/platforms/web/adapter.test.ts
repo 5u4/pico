@@ -345,6 +345,66 @@ describe("WebHub.handleCommand renameWorkspace", () => {
   });
 });
 
+describe("WebHub.handleCommand updateWorkspaceCwd", () => {
+  test("updates the cwd for an existing directory and broadcasts", async () => {
+    const { hub, db, workspace } = makeHub();
+    const ws = new FakeSocket();
+    const other = new FakeSocket();
+    await hub.handleOpen(ws);
+    await hub.handleOpen(other);
+    ws.sent.length = 0;
+    other.sent.length = 0;
+
+    await hub.handleCommand(ws, {
+      kind: "updateWorkspaceCwd",
+      workspaceId: workspace.id,
+      cwd: import.meta.dir,
+    });
+
+    const updated = listWorkspaces(db, "web").find(
+      (w) => w.id === workspace.id,
+    );
+    expect(updated?.cwd).toBe(import.meta.dir);
+    expect(ws.sent[0]?.kind).toBe("workspaces");
+    expect(other.sent[0]?.kind).toBe("workspaces");
+  });
+
+  test("rejects a path that is not a directory and leaves cwd unchanged", async () => {
+    const { hub, db, workspace } = makeHub();
+    const ws = new FakeSocket();
+    const missing = `${import.meta.dir}/does-not-exist-${Date.now()}`;
+
+    await hub.handleCommand(ws, {
+      kind: "updateWorkspaceCwd",
+      workspaceId: workspace.id,
+      cwd: missing,
+    });
+
+    expect(ws.sent).toEqual([
+      { kind: "error", message: `not a directory: ${missing}` },
+    ]);
+    const unchanged = listWorkspaces(db, "web").find(
+      (w) => w.id === workspace.id,
+    );
+    expect(unchanged?.cwd).toBe(WORKSPACE_CWD);
+  });
+
+  test("unknown workspace id sends an error", async () => {
+    const { hub } = makeHub();
+    const ws = new FakeSocket();
+
+    await hub.handleCommand(ws, {
+      kind: "updateWorkspaceCwd",
+      workspaceId: "missing",
+      cwd: import.meta.dir,
+    });
+
+    expect(ws.sent).toEqual([
+      { kind: "error", message: "unknown workspace: missing" },
+    ]);
+  });
+});
+
 describe("WebHub.handleCommand archive", () => {
   test("unknown conversation id sends an error", async () => {
     const { hub } = makeHub();

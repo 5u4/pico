@@ -2,6 +2,7 @@ import {
   ArchiveIcon,
   ChevronRightIcon,
   FolderIcon,
+  FolderInputIcon,
   PencilIcon,
   PlusIcon,
 } from "lucide-react";
@@ -73,6 +74,7 @@ function WorkspaceItem({
   onCreate,
   onArchive,
   onRename,
+  onUpdateCwd,
 }: {
   workspace: WorkspaceSummary;
   activeId: string | null;
@@ -82,31 +84,41 @@ function WorkspaceItem({
   onCreate: (workspaceId: string) => void;
   onArchive: (conversationId: string) => void;
   onRename: (workspaceId: string, label: string) => void;
+  onUpdateCwd: (workspaceId: string, cwd: string) => void;
 }) {
-  const [renaming, setRenaming] = useState(false);
+  const [editing, setEditing] = useState<"none" | "rename" | "cwd">("none");
   const [draft, setDraft] = useState("");
-  const cancelRename = useRef(false);
+  const cancelEdit = useRef(false);
   const activeConversation =
     activeId === null
       ? undefined
       : workspace.conversations.find((c) => c.id === activeId);
   const startRename = () => {
     setDraft(workspace.label ?? "");
-    setRenaming(true);
+    setEditing("rename");
   };
-  const submitRename = () => {
-    if (cancelRename.current) {
-      cancelRename.current = false;
-      setRenaming(false);
+  const startUpdateCwd = () => {
+    setDraft(workspace.cwd);
+    setEditing("cwd");
+  };
+  const submitEdit = () => {
+    const mode = editing;
+    setEditing("none");
+    if (cancelEdit.current) {
+      cancelEdit.current = false;
       return;
     }
-    const label = draft.trim();
-    if (label && label !== workspace.label) onRename(workspace.id, label);
-    setRenaming(false);
+    const value = draft.trim();
+    if (!value) return;
+    if (mode === "rename") {
+      if (value !== workspace.label) onRename(workspace.id, value);
+    } else if (mode === "cwd") {
+      if (value !== workspace.cwd) onUpdateCwd(workspace.id, value);
+    }
   };
   return (
     <Collapsible open={open} onOpenChange={onOpenChange} className="mb-1">
-      {renaming ? (
+      {editing !== "none" ? (
         <div className="px-2 py-1">
           <input
             // biome-ignore lint/a11y/noAutofocus: focus the inline field on open
@@ -116,12 +128,16 @@ function WorkspaceItem({
             onKeyDown={(e) => {
               if (e.key === "Enter") e.currentTarget.blur();
               if (e.key === "Escape") {
-                cancelRename.current = true;
+                cancelEdit.current = true;
                 e.currentTarget.blur();
               }
             }}
-            onBlur={submitRename}
-            aria-label="Rename workspace"
+            onBlur={submitEdit}
+            aria-label={
+              editing === "cwd"
+                ? "Change workspace directory"
+                : "Rename workspace"
+            }
             className="w-full rounded-md border border-input bg-background px-2 py-1 text-sm outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
           />
         </div>
@@ -156,6 +172,10 @@ function WorkspaceItem({
             <ContextMenuItem onSelect={startRename}>
               <PencilIcon />
               Rename
+            </ContextMenuItem>
+            <ContextMenuItem onSelect={startUpdateCwd}>
+              <FolderInputIcon />
+              Change directory
             </ContextMenuItem>
           </ContextMenuContent>
         </ContextMenu>
@@ -199,6 +219,7 @@ export function Sidebar({ collapsed }: { collapsed: boolean }) {
     create,
     createWorkspace,
     renameWorkspace,
+    updateWorkspaceCwd,
     archive,
   } = useShell();
   const [naming, setNaming] = useState(false);
@@ -281,6 +302,7 @@ export function Sidebar({ collapsed }: { collapsed: boolean }) {
               onCreate={create}
               onArchive={archive}
               onRename={renameWorkspace}
+              onUpdateCwd={updateWorkspaceCwd}
             />
           ))}
         </nav>
