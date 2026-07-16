@@ -7,6 +7,9 @@ import {
   workspaceSchema,
 } from "../store/schema";
 import { newId } from "../util/id";
+import { log } from "../util/log";
+
+const logger = log(["engine"]);
 
 export function listWorkspaces(db: Database, platform: Platform): Workspace[] {
   const rows = db
@@ -153,5 +156,11 @@ export function archiveConversation(db: Database, id: string): boolean {
       "UPDATE conversations SET archivedAt = $now WHERE id = $id AND archivedAt IS NULL",
     )
     .run({ id, now: Date.now() });
-  return result.changes > 0;
+  const archived = result.changes > 0;
+  if (archived) {
+    logger.info("conversation archived {conversationId}", {
+      conversationId: id,
+    });
+  }
+  return archived;
 }

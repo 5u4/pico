@@ -182,11 +182,7 @@ export class WebHub<S extends SessionLike = SessionLike> {
         this.sendError(ws, `unknown conversation: ${command.conversationId}`);
         return;
       }
-      if (archiveConversation(this.deps.db, conversation.id)) {
-        logger.info("conversation archived {conversationId}", {
-          conversationId: conversation.id,
-        });
-      }
+      archiveConversation(this.deps.db, conversation.id);
       const wasViewing = ws.data.conversationId === conversation.id;
       const otherViewers = [
         ...(this.viewers.get(conversation.id) ?? []),
