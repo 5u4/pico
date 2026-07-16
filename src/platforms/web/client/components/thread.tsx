@@ -288,6 +288,7 @@ function useOlderLoader() {
   }, [hasMore, requestOlder]);
 
   useLayoutEffect(() => {
+    if (!busyRef.current || loadingOlder) return;
     const el = viewportRef.current;
     const anchor = anchorRef.current;
     const firstId = messages[0]?.id ?? null;
@@ -298,10 +299,15 @@ function useOlderLoader() {
       firstId !== prevFirstIdRef.current
     ) {
       el.scrollTop = anchor.top + (el.scrollHeight - anchor.height);
-      anchorRef.current = null;
-      busyRef.current = false;
     }
     prevFirstIdRef.current = firstId;
+    anchorRef.current = null;
+    busyRef.current = false;
+  }, [messages, loadingOlder]);
+
+  useLayoutEffect(() => {
+    if (busyRef.current) return;
+    prevFirstIdRef.current = messages[0]?.id ?? null;
   }, [messages]);
 
   return { viewportRef, sentinelRef, hasMore, loadingOlder };
