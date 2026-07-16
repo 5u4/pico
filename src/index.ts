@@ -69,6 +69,7 @@ if (supervisorSocket && readyToken) {
   }
 }
 
+const stopped = Promise.withResolvers<void>();
 let shuttingDown = false;
 const shutdown = async (signal: string): Promise<void> => {
   if (shuttingDown) return;
@@ -78,8 +79,11 @@ const shutdown = async (signal: string): Promise<void> => {
   await sessions.closeAll();
   db.close();
   await dispose();
-  process.exit(0);
+  stopped.resolve();
 };
 
 process.on("SIGINT", () => void shutdown("SIGINT"));
 process.on("SIGTERM", () => void shutdown("SIGTERM"));
+
+await stopped.promise;
+process.exit(0);
