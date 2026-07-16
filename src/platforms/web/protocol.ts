@@ -33,6 +33,7 @@ export const clientCommandSchema = z.union([
     }),
     z.object({ kind: z.literal("archive"), conversationId: z.string().min(1) }),
     z.object({ kind: z.literal("draft") }),
+    z.object({ kind: z.literal("heartbeat") }),
   ]),
   commandSchema,
 ]);
@@ -73,7 +74,8 @@ export type ServerEvent =
       message: Message | null;
       isStreaming: boolean;
     }
-  | { kind: "error"; message: string };
+  | { kind: "error"; message: string }
+  | { kind: "heartbeatAck" };
 
 export function parseClientCommand(raw: unknown): ClientCommand | undefined {
   const parsed = clientCommandSchema.safeParse(raw);

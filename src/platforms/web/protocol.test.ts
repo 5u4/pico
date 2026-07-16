@@ -22,6 +22,12 @@ describe("parseClientCommand", () => {
     });
   });
 
+  test("parses a heartbeat command", () => {
+    expect(parseClientCommand({ kind: "heartbeat" })).toEqual({
+      kind: "heartbeat",
+    });
+  });
+
   test("rejects an unknown command name", () => {
     expect(
       parseClientCommand({ kind: "command", name: "unknown" }),

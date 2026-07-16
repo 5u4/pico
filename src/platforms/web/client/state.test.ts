@@ -171,6 +171,22 @@ describe("reduce / server / snapshot", () => {
   });
 });
 
+describe("reduce / server / heartbeatAck", () => {
+  test("is a no-op that preserves state identity", () => {
+    const state: ThreadState = {
+      ...initialState,
+      activeId: "conv-1",
+      isRunning: true,
+    };
+    const { state: next, commands } = reduce(state, {
+      type: "server",
+      event: { kind: "heartbeatAck" },
+    });
+    expect(next).toBe(state);
+    expect(commands).toEqual([]);
+  });
+});
+
 describe("reduce / server / stream", () => {
   test("ignored when conversationId does not match activeId", () => {
     const state: ThreadState = { ...initialState, activeId: "conv-1" };

@@ -231,6 +231,20 @@ describe("createServer websocket round-trip", () => {
     }
   });
 
+  test("a heartbeat command is answered with a heartbeatAck", async () => {
+    const harness = startServer();
+    const client = await TestClient.connect(harness.port);
+    try {
+      await client.waitFor((e) => e.kind === "workspaces");
+      client.send({ kind: "heartbeat" });
+      const ack = await client.waitFor((e) => e.kind === "heartbeatAck");
+      expect(ack.kind).toBe("heartbeatAck");
+    } finally {
+      client.close();
+      await harness.close();
+    }
+  });
+
   test("an unrecognized command is dropped without tearing down the socket", async () => {
     const harness = startServer();
     const client = await TestClient.connect(harness.port);

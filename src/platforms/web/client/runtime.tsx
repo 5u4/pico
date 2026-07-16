@@ -19,6 +19,13 @@ import { z } from "zod";
 import type { ContextUsageInfo } from "../../../engine/conversations";
 import type { Message } from "../../../engine/message";
 import type { ClientCommand, ServerEvent, WorkspaceSummary } from "../protocol";
+import {
+  backoffDelayMs,
+  type ConnectionStatus,
+  HEARTBEAT_INTERVAL_MS,
+  HEARTBEAT_TIMEOUT_MS,
+  RECONNECTED_NOTICE_MS,
+} from "./connection";
 import { PERSIST_KEYS, readPersisted, writePersisted } from "./persist";
 import {
   type Action,
@@ -71,6 +78,7 @@ type ThreadContextValue = {
 
 const ShellContext = createContext<ShellContextValue | null>(null);
 const ThreadContext = createContext<ThreadContextValue | null>(null);
+const ConnectionContext = createContext<ConnectionStatus>("connecting");
 
 export function useShell(): ShellContextValue {
   const value = useContext(ShellContext);
@@ -84,11 +92,18 @@ export function useThread(): ThreadContextValue {
   return value;
 }
 
+export function useConnection(): ConnectionStatus {
+  return useContext(ConnectionContext);
+}
+
 export function RuntimeProvider({ children }: { children: ReactNode }) {
   const stateRef = useRef(initialState);
   const [state, setState] = useState(initialState);
   const socketRef = useRef<WebSocket | null>(null);
   const outbox = useRef<string[]>([]);
+  const [status, setStatus] = useState<ConnectionStatus>("connecting");
+  const reselectRef = useRef<string | null>(null);
+  const hadOnlineRef = useRef(false);
 
   const send = useCallback((command: ClientCommand) => {
     const payload = JSON.stringify(command);
@@ -118,34 +133,131 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
   );
 
   useEffect(() => {
-    const scheme = location.protocol === "https:" ? "wss" : "ws";
-    const socket = new WebSocket(`${scheme}://${location.host}/ws`);
-    socketRef.current = socket;
-    socket.onopen = () => {
-      for (const payload of outbox.current) socket.send(payload);
-      outbox.current = [];
+    let closed = false;
+    let attempt = 0;
+    let socket: WebSocket | null = null;
+    let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+    let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
+    let pongTimer: ReturnType<typeof setTimeout> | undefined;
+    let noticeTimer: ReturnType<typeof setTimeout> | undefined;
+
+    const stopHeartbeat = () => {
+      clearInterval(heartbeatTimer);
+      clearTimeout(pongTimer);
+      heartbeatTimer = undefined;
+      pongTimer = undefined;
     };
-    socket.onmessage = (event) => {
-      let parsed: ServerEvent;
-      try {
-        parsed = JSON.parse(event.data) as ServerEvent;
-      } catch {
-        toast.error("received a malformed message from the server", {
-          duration: Number.POSITIVE_INFINITY,
-        });
-        return;
-      }
-      dispatch({ type: "server", event: parsed });
+
+    const scheduleReconnect = () => {
+      if (closed || reconnectTimer !== undefined) return;
+      const base = backoffDelayMs(attempt);
+      const delay = base * (0.85 + Math.random() * 0.3);
+      attempt += 1;
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = undefined;
+        connect();
+      }, delay);
     };
+
+    const connect = () => {
+      if (closed) return;
+      const scheme = location.protocol === "https:" ? "wss" : "ws";
+      socket = new WebSocket(`${scheme}://${location.host}/ws`);
+      socketRef.current = socket;
+      const active = socket;
+      active.onopen = () => {
+        if (closed) return;
+        attempt = 0;
+        clearTimeout(noticeTimer);
+        if (hadOnlineRef.current) {
+          setStatus("reconnected");
+          noticeTimer = setTimeout(
+            () => setStatus("online"),
+            RECONNECTED_NOTICE_MS,
+          );
+        } else {
+          setStatus("online");
+        }
+        hadOnlineRef.current = true;
+        const reselect = reselectRef.current;
+        if (reselect !== null)
+          active.send(
+            JSON.stringify({ kind: "select", conversationId: reselect }),
+          );
+        for (const payload of outbox.current) active.send(payload);
+        outbox.current = [];
+        heartbeatTimer = setInterval(() => {
+          if (active.readyState !== WebSocket.OPEN) return;
+          active.send(JSON.stringify({ kind: "heartbeat" }));
+          clearTimeout(pongTimer);
+          pongTimer = setTimeout(() => active.close(), HEARTBEAT_TIMEOUT_MS);
+        }, HEARTBEAT_INTERVAL_MS);
+      };
+      active.onmessage = (event) => {
+        let parsed: ServerEvent;
+        try {
+          parsed = JSON.parse(event.data) as ServerEvent;
+        } catch {
+          toast.error("received a malformed message from the server", {
+            duration: Number.POSITIVE_INFINITY,
+          });
+          return;
+        }
+        if (parsed.kind === "heartbeatAck") {
+          clearTimeout(pongTimer);
+          pongTimer = undefined;
+          return;
+        }
+        dispatch({ type: "server", event: parsed });
+      };
+      active.onclose = () => {
+        if (socketRef.current === active) socketRef.current = null;
+        if (active !== socket) return;
+        socket = null;
+        stopHeartbeat();
+        if (closed) return;
+        clearTimeout(noticeTimer);
+        noticeTimer = undefined;
+        reselectRef.current = stateRef.current.activeId;
+        if (hadOnlineRef.current) setStatus("reconnecting");
+        scheduleReconnect();
+      };
+    };
+
+    const wake = () => {
+      if (closed) return;
+      if (document.visibilityState === "hidden") return;
+      if (socket?.readyState === WebSocket.OPEN) return;
+      clearTimeout(reconnectTimer);
+      reconnectTimer = undefined;
+      const stale = socket;
+      socket = null;
+      stale?.close();
+      attempt = 0;
+      connect();
+    };
+
+    connect();
+    window.addEventListener("online", wake);
+    window.addEventListener("focus", wake);
+    document.addEventListener("visibilitychange", wake);
     return () => {
+      closed = true;
+      window.removeEventListener("online", wake);
+      window.removeEventListener("focus", wake);
+      document.removeEventListener("visibilitychange", wake);
+      clearTimeout(reconnectTimer);
+      clearTimeout(noticeTimer);
+      stopHeartbeat();
       socketRef.current = null;
-      socket.close();
+      socket?.close();
     };
   }, [dispatch]);
 
   const bootstrapped = useRef(false);
   useEffect(() => {
     if (bootstrapped.current) return;
+    if (reselectRef.current !== null) return;
     if (state.workspaces.length === 0) return;
     if (state.activeId !== null || state.draftWorkspaceId !== null) return;
     bootstrapped.current = true;
@@ -248,9 +360,13 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
   );
 
   return (
-    <ShellContext.Provider value={shell}>
-      <ThreadContext.Provider value={thread}>{children}</ThreadContext.Provider>
-    </ShellContext.Provider>
+    <ConnectionContext.Provider value={status}>
+      <ShellContext.Provider value={shell}>
+        <ThreadContext.Provider value={thread}>
+          {children}
+        </ThreadContext.Provider>
+      </ShellContext.Provider>
+    </ConnectionContext.Provider>
   );
 }
 
