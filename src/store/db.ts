@@ -2,6 +2,7 @@ import { Database, type Statement } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { Result } from "neverthrow";
 import { log } from "../util/log.ts";
 
 const dbLog = log(["db"]);
@@ -23,13 +24,21 @@ export function openDb(path: string): Database {
 
 const STATEMENT_EXECUTORS = new Set(["run", "get", "all", "values", "iterate"]);
 
-function logQuery(
+function traced<T>(
   sql: string,
   params: readonly unknown[],
-  startedAt: number,
-): void {
+  execute: () => T,
+): T {
+  const startedAt = performance.now();
+  const outcome = Result.fromThrowable(execute)();
   const ms = Math.round((performance.now() - startedAt) * 100) / 100;
   dbLog.debug("{sql} {params} ({ms}ms)", { sql, params, ms });
+  return outcome.match(
+    (value) => value,
+    (error) => {
+      throw error;
+    },
+  );
 }
 
 function traceStatement<T extends Statement>(stmt: T, sql: string): T {
@@ -39,12 +48,8 @@ function traceStatement<T extends Statement>(stmt: T, sql: string): T {
       if (typeof value !== "function") return value;
       const method = value.bind(target);
       if (typeof prop === "string" && STATEMENT_EXECUTORS.has(prop)) {
-        return (...params: unknown[]) => {
-          const startedAt = performance.now();
-          const result = method(...params);
-          logQuery(sql, params, startedAt);
-          return result;
-        };
+        return (...params: unknown[]) =>
+          traced(sql, params, () => method(...params));
       }
       return method;
     },
@@ -62,12 +67,8 @@ function traceDb(db: Database): Database {
           traceStatement(method(...args), String(args[0]));
       }
       if (prop === "run") {
-        return (sql: string, ...params: unknown[]) => {
-          const startedAt = performance.now();
-          const result = method(sql, ...params);
-          logQuery(sql, params, startedAt);
-          return result;
-        };
+        return (sql: string, ...params: unknown[]) =>
+          traced(sql, params, () => method(sql, ...params));
       }
       return method;
     },
