@@ -111,6 +111,11 @@ const MIGRATIONS: readonly Migration[] = [
   },
 ];
 
+export const LATEST_SCHEMA_VERSION = MIGRATIONS.reduce(
+  (max, m) => Math.max(max, m.version),
+  0,
+);
+
 export function migrate(db: Database): void {
   const row = db.query("PRAGMA user_version").get() as {
     user_version: number;

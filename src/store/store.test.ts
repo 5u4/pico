@@ -1,6 +1,9 @@
 import type { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { migrate, openDb } from "./db.ts";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { LATEST_SCHEMA_VERSION, openDb } from "./db.ts";
 import { conversationSchema, workspaceSchema } from "./schema.ts";
 
 let db: Database;
@@ -245,20 +248,35 @@ describe("schema versioning", () => {
     const { user_version } = db.query("PRAGMA user_version").get() as {
       user_version: number;
     };
-    expect(user_version).toBe(1);
+    expect(user_version).toBe(LATEST_SCHEMA_VERSION);
   });
 
-  test("reopening an existing database is a no-op that preserves rows", () => {
-    insertWorkspace({
-      id: "w1",
-      cwd: "/repo",
-      platform: "web",
-      label: null,
-      externalId: null,
-      createdAt: 1000,
-    });
-    migrate(db);
-    const row = db.query("SELECT id FROM workspaces WHERE id = 'w1'").get();
-    expect(row).toEqual({ id: "w1" });
+  test("reopening an on-disk database is a no-op that preserves rows", () => {
+    const dir = mkdtempSync(join(tmpdir(), "pico-store-"));
+    const path = join(dir, "state.db");
+    try {
+      const first = openDb(path);
+      first
+        .query(
+          `INSERT INTO workspaces (id, cwd, platform, label, externalId, createdAt)
+           VALUES ('w1', '/repo', 'web', NULL, NULL, 1000)`,
+        )
+        .run();
+      first.close();
+
+      const second = openDb(path);
+      const version = second.query("PRAGMA user_version").get() as {
+        user_version: number;
+      };
+      const row = second
+        .query("SELECT id FROM workspaces WHERE id = 'w1'")
+        .get();
+      second.close();
+
+      expect(version.user_version).toBe(LATEST_SCHEMA_VERSION);
+      expect(row).toEqual({ id: "w1" });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
