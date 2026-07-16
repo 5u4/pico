@@ -317,7 +317,6 @@ describe("Engine auto-title", () => {
     expect(titles).toEqual(["the parser is broken", "Fix the parser"]);
     const stored = getConversation(db, conversation.id);
     expect(stored?.title).toBe("Fix the parser");
-    expect(stored?.titleSource).toBe("final");
   });
 
   test("keeps the provisional title when the LLM declines to title", async () => {
@@ -342,7 +341,38 @@ describe("Engine auto-title", () => {
 
     const stored = getConversation(db, conversation.id);
     expect(stored?.title).toBe("hi");
-    expect(stored?.titleSource).toBe("provisional");
     expect(sessions.get(conversation.id)?.setSessionNameCalls).toEqual([]);
+  });
+
+  test("does not re-title once the session already has a name", async () => {
+    const db = openDb(":memory:");
+    const workspace = getOrCreateDefaultWorkspace(db, "web", CWD, "web");
+    const conversation = createConversation(db, {
+      workspaceId: workspace.id,
+      cwd: CWD,
+      title: null,
+    });
+    const sessions = new FakeSessions();
+    let calls = 0;
+    const engine = new Engine<FakeSession>({
+      db,
+      sessions,
+      autoTitle: () => {
+        calls++;
+        return Promise.resolve("Fix the parser");
+      },
+    });
+    const { opened } = engine.subscribe(conversation.id, CWD, "live", () => {});
+    await opened;
+
+    await engine.prompt(conversation.id, CWD, "the parser is broken");
+    await Promise.resolve();
+    await engine.prompt(conversation.id, CWD, "still broken");
+    await Promise.resolve();
+
+    expect(calls).toBe(1);
+    expect(sessions.get(conversation.id)?.setSessionNameCalls).toEqual([
+      { name: "Fix the parser", source: "auto" },
+    ]);
   });
 });

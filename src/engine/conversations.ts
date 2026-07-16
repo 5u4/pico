@@ -328,9 +328,8 @@ export class Engine<S extends SessionLike = SessionLike> {
     session: S,
     text: string,
   ): Promise<void> {
-    const conversation = getConversation(this.deps.db, conversationId);
-    if (conversation?.titleSource === "final") return;
-    if (conversation?.title == null) {
+    if (session.sessionName) return;
+    if (getConversation(this.deps.db, conversationId)?.title == null) {
       const provisional = provisionalTitle(text);
       if (
         provisional &&
@@ -342,11 +341,9 @@ export class Engine<S extends SessionLike = SessionLike> {
     const title = await this.deps.autoTitle(session, text).catch(() => null);
     if (!title) return;
     if (!setConversationTitle(this.deps.db, conversationId, title)) return;
-    if (!session.sessionName) {
-      await session.setSessionName(title, "auto").catch((e: unknown) => {
-        logger.error("title sync to omp session failed: {error}", { error: e });
-      });
-    }
+    await session.setSessionName(title, "auto").catch((e: unknown) => {
+      logger.error("title sync to omp session failed: {error}", { error: e });
+    });
     this.broadcastTitle(conversationId, title);
   }
 }
