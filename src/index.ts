@@ -51,13 +51,12 @@ if (config.web.enabled) {
     index,
     development: Bun.env.NODE_ENV !== "production",
   });
-  boot.info(
-    "pico web on http://localhost:{port} (workspaces in {workspaceCwd})",
-    { port: server.port, workspaceCwd: config.workspaceCwd },
-  );
-} else {
-  boot.info("web disabled; running headless with no platform");
 }
+
+boot.info("web: {web} (workspaces in {workspaceCwd})", {
+  web: server ? `http://localhost:${server.port}` : "disabled",
+  workspaceCwd: config.workspaceCwd,
+});
 
 const supervisorSocket = Bun.env.PICO_SUPERVISOR_SOCKET;
 const readyToken = Bun.env.PICO_READY_TOKEN;
