@@ -94,7 +94,14 @@ export function updateWorkspaceCwd(
   const result = db
     .query("UPDATE workspaces SET cwd = $cwd WHERE id = $id")
     .run({ id, cwd });
-  return result.changes > 0;
+  const updated = result.changes > 0;
+  if (updated) {
+    logger.info("workspace cwd updated {workspaceId} (cwd {cwd})", {
+      workspaceId: id,
+      cwd,
+    });
+  }
+  return updated;
 }
 
 export function listConversations(

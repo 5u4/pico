@@ -30,11 +30,6 @@ import type {
 const PLATFORM: Platform = "web";
 const DEFAULT_LABEL = "default";
 
-function isDirectory(path: string): boolean {
-  const stat = statSync(path, { throwIfNoEntry: false });
-  return stat?.isDirectory() ?? false;
-}
-
 export interface HubSocket {
   data: { conversationId: string | null };
   send(payload: string): void;
@@ -172,7 +167,15 @@ export class WebHub<S extends SessionLike = SessionLike> {
         this.sendError(ws, `unknown workspace: ${command.workspaceId}`);
         return;
       }
-      if (!isDirectory(command.cwd)) {
+      let cwdIsDirectory = false;
+      try {
+        cwdIsDirectory =
+          statSync(command.cwd, { throwIfNoEntry: false })?.isDirectory() ??
+          false;
+      } catch {
+        cwdIsDirectory = false;
+      }
+      if (!cwdIsDirectory) {
         this.sendError(ws, `not a directory: ${command.cwd}`);
         return;
       }
