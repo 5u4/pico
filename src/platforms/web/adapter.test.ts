@@ -205,6 +205,35 @@ describe("WebHub.handleOpen", () => {
     }
   });
 
+  test("bootstraps a Default workspace on a fresh db when none exists", async () => {
+    const db = openDb(":memory:");
+    const sessions = new FakeSessions();
+    const engine = new Engine<FakeSession>({
+      db,
+      sessions,
+      autoTitle: async () => null,
+    });
+    const hub = new WebHub<FakeSession>({
+      db,
+      engine,
+      workspaceCwd: WORKSPACE_CWD,
+    });
+    const ws = new FakeSocket();
+
+    expect(listWorkspaces(db, "web")).toHaveLength(0);
+    await hub.handleOpen(ws);
+
+    const workspaces = listWorkspaces(db, "web");
+    expect(workspaces).toHaveLength(1);
+    expect(workspaces[0]?.label).toBe("Default");
+    expect(workspaces[0]?.cwd).toBe(WORKSPACE_CWD);
+    const event = ws.sent[0];
+    expect(event?.kind).toBe("workspaces");
+    if (event?.kind === "workspaces") {
+      expect(event.draftWorkspaceId).toBe(workspaces[0]?.id);
+    }
+  });
+
   test("with an existing conversation sends workspaces without a draft and defers activation to the client", () => {
     const { hub, db, workspace } = makeHub();
     createConversation(db, {

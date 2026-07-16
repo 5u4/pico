@@ -28,7 +28,7 @@ import type {
 } from "./protocol";
 
 const PLATFORM: Platform = "web";
-const DEFAULT_LABEL = "default";
+const DEFAULT_LABEL = "Default";
 
 export interface HubSocket {
   data: { conversationId: string | null };

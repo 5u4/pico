@@ -1,7 +1,6 @@
 import { dispose } from "@logtape/logtape";
 import { loadConfig } from "./config/config";
 import { Engine } from "./engine/conversations";
-import { getOrCreateDefaultWorkspace } from "./engine/registry";
 import { provisionRuntime } from "./engine/runtime";
 import { Sessions } from "./engine/sessions";
 import { autoTitle } from "./engine/title";
@@ -35,7 +34,6 @@ if (provisioned.isErr()) {
 }
 
 const db = openDb(defaultDbPath());
-getOrCreateDefaultWorkspace(db, "web", config.workspaceCwd, "default");
 const sessions = new Sessions(provisioned.value);
 const engine = new Engine({ db, sessions, autoTitle });
 let server: Bun.Server<WsData> | undefined;
