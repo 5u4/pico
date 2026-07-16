@@ -1,6 +1,6 @@
 import type { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { openDb } from "./db.ts";
+import { migrate, openDb } from "./db.ts";
 import { conversationSchema, workspaceSchema } from "./schema.ts";
 
 let db: Database;
@@ -237,5 +237,28 @@ describe("foreign key cascade", () => {
     db.query("DELETE FROM workspaces WHERE id = 'w1'").run();
     const row = db.query("SELECT * FROM conversations WHERE id = 'c1'").get();
     expect(row).toBeNull();
+  });
+});
+
+describe("schema versioning", () => {
+  test("a freshly opened database is stamped at the latest migration version", () => {
+    const { user_version } = db.query("PRAGMA user_version").get() as {
+      user_version: number;
+    };
+    expect(user_version).toBe(1);
+  });
+
+  test("reopening an existing database is a no-op that preserves rows", () => {
+    insertWorkspace({
+      id: "w1",
+      cwd: "/repo",
+      platform: "web",
+      label: null,
+      externalId: null,
+      createdAt: 1000,
+    });
+    migrate(db);
+    const row = db.query("SELECT id FROM workspaces WHERE id = 'w1'").get();
+    expect(row).toEqual({ id: "w1" });
   });
 });
