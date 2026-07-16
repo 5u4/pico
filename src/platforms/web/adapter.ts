@@ -74,6 +74,11 @@ export class WebHub<S extends SessionLike = SessionLike> {
   }
 
   async handleCommand(ws: HubSocket, command: ClientCommand): Promise<void> {
+    if (command.kind === "heartbeat") {
+      ws.send(JSON.stringify({ kind: "heartbeatAck" } satisfies ServerEvent));
+      return;
+    }
+
     if (command.kind === "prompt" || command.kind === "abort") {
       const conversationId = ws.data.conversationId;
       const conversation = conversationId

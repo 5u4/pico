@@ -257,6 +257,18 @@ describe("WebHub.handleCommand select", () => {
   });
 });
 
+describe("WebHub.handleCommand heartbeat", () => {
+  test("replies with a heartbeatAck and touches nothing else", async () => {
+    const { hub } = makeHub();
+    const ws = new FakeSocket();
+
+    await hub.handleCommand(ws, { kind: "heartbeat" });
+
+    expect(ws.sent).toEqual([{ kind: "heartbeatAck" }]);
+    expect(ws.data.conversationId).toBeNull();
+  });
+});
+
 describe("WebHub.handleCommand create", () => {
   test("creates a conversation row and broadcasts workspaces to the socket", async () => {
     const { hub, db, workspace } = makeHub();

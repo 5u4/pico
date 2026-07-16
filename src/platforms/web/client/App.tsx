@@ -3,6 +3,7 @@ import { PanelLeftIcon } from "lucide-react";
 import { ThemeProvider } from "next-themes";
 import { z } from "zod";
 import { TooltipIconButton } from "./components/assistant-ui/tooltip-icon-button";
+import { ConnectionBanner } from "./components/connection-banner";
 import { Sidebar } from "./components/sidebar";
 import { Thread } from "./components/thread";
 import { Toaster } from "./components/ui/sonner";
@@ -30,6 +31,7 @@ export function App() {
           <Sidebar collapsed={collapsed} />
           <div className="flex min-w-0 flex-1 flex-col">
             <div className="relative min-h-0 flex-1">
+              <ConnectionBanner />
               <AssistantPane>
                 <Thread />
               </AssistantPane>
