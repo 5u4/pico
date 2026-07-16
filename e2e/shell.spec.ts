@@ -10,11 +10,11 @@ test.describe("pico web shell", () => {
       page.getByRole("heading", { name: "How can I help you today?" }),
     ).toBeVisible();
     await expect(page.getByText("Workspaces")).toBeVisible();
-    await expect(page.getByText("default", { exact: true })).toBeVisible();
+    await expect(page.getByText("Default", { exact: true })).toBeVisible();
     await expect(
       page.getByPlaceholder("Message pico… (/ for commands)"),
     ).toBeVisible();
-    await expect(page.getByText("default/New chat")).toBeVisible();
+    await expect(page.getByText("Default/New chat")).toBeVisible();
   });
 
   test("sends a prompt and renders the reply, reasoning, and tool card", async ({
