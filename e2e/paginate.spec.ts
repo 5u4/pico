@@ -1,6 +1,8 @@
 import { expect, test } from "@playwright/test";
 
-const PAGINATE_URL = "http://localhost:4144";
+const PAGINATE_PORT = process.env.PICO_E2E_PAGINATE_PORT ?? "4144";
+const PAGINATE_URL =
+  process.env.PICO_E2E_PAGINATE_URL ?? `http://localhost:${PAGINATE_PORT}`;
 
 test.use({ baseURL: PAGINATE_URL });
 

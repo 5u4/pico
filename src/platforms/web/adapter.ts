@@ -131,8 +131,7 @@ export class WebHub<S extends SessionLike = SessionLike> {
       const older = this.deps.engine.loadOlder(
         command.conversationId,
         command.beforeId,
-      );
-      if (!older) return;
+      ) ?? { messages: [], hasMore: false };
       ws.send(
         JSON.stringify({
           kind: "older",
