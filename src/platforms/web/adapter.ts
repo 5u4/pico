@@ -183,6 +183,9 @@ export class WebHub<S extends SessionLike = SessionLike> {
         return;
       }
       archiveConversation(this.deps.db, conversation.id);
+      logger.info("conversation archived {conversationId}", {
+        conversationId: conversation.id,
+      });
       const wasViewing = ws.data.conversationId === conversation.id;
       const otherViewers = [
         ...(this.viewers.get(conversation.id) ?? []),
