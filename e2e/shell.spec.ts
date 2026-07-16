@@ -14,7 +14,7 @@ test.describe("pico web shell", () => {
     await expect(
       page.getByPlaceholder("Message pico… (/ for commands)"),
     ).toBeVisible();
-    await expect(page.getByText("default · New chat")).toBeVisible();
+    await expect(page.getByText("default/New chat")).toBeVisible();
   });
 
   test("sends a prompt and renders the reply, reasoning, and tool card", async ({
@@ -65,7 +65,7 @@ test.describe("pico web shell", () => {
 
     await workspace.hover();
     await page.getByRole("button", { name: "New conversation" }).last().click();
-    await expect(page.getByText("scratch · New chat")).toBeVisible();
+    await expect(page.getByText("scratch/New chat")).toBeVisible();
   });
 
   test("switches to the dark theme", async ({ page }) => {
