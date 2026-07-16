@@ -177,10 +177,6 @@ export class WebHub<S extends SessionLike = SessionLike> {
         return;
       }
       updateWorkspaceCwd(this.deps.db, target.id, command.cwd);
-      logger.info("workspace cwd updated {workspaceId} (cwd {cwd})", {
-        workspaceId: target.id,
-        cwd: command.cwd,
-      });
       for (const other of this.allSockets) this.sendWorkspaces(other);
       return;
     }
