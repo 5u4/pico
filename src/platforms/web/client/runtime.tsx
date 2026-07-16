@@ -14,6 +14,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { toast } from "sonner";
 import { z } from "zod";
 import type { ContextUsageInfo } from "../../../engine/conversations";
 import type { Message } from "../../../engine/message";
@@ -50,8 +51,6 @@ type ShellContextValue = {
   workspaces: WorkspaceSummary[];
   activeId: string | null;
   draftWorkspaceId: string | null;
-  error: string | null;
-  dismissError: () => void;
   select: (conversationId: string) => void;
   create: (workspaceId: string) => void;
   createWorkspace: (label: string) => void;
@@ -111,6 +110,9 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       stateRef.current = result.state;
       setState(result.state);
       flush(result.commands);
+      if (result.toasts)
+        for (const message of result.toasts)
+          toast.error(message, { duration: Number.POSITIVE_INFINITY });
     },
     [flush],
   );
@@ -128,11 +130,9 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       try {
         parsed = JSON.parse(event.data) as ServerEvent;
       } catch {
-        stateRef.current = {
-          ...stateRef.current,
-          error: "received a malformed message from the server",
-        };
-        setState(stateRef.current);
+        toast.error("received a malformed message from the server", {
+          duration: Number.POSITIVE_INFINITY,
+        });
         return;
       }
       dispatch({ type: "server", event: parsed });
@@ -182,10 +182,6 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
     [dispatch],
   );
   const cancel = useCallback(() => dispatch({ type: "cancel" }), [dispatch]);
-  const dismissError = useCallback(
-    () => dispatch({ type: "dismissError" }),
-    [dispatch],
-  );
   const select = useCallback(
     (conversationId: string) => dispatch({ type: "select", conversationId }),
     [dispatch],
@@ -218,8 +214,6 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       workspaces: state.workspaces,
       activeId: state.activeId,
       draftWorkspaceId: state.draftWorkspaceId,
-      error: state.error,
-      dismissError,
       select,
       create,
       createWorkspace,
@@ -231,8 +225,6 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       state.workspaces,
       state.activeId,
       state.draftWorkspaceId,
-      state.error,
-      dismissError,
       select,
       create,
       createWorkspace,
