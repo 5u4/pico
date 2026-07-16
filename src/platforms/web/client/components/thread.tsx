@@ -3,6 +3,7 @@ import {
   ComposerPrimitive,
   type EmptyMessagePartComponent,
   MessagePrimitive,
+  type TextMessagePartComponent,
   ThreadPrimitive,
   type Unstable_SlashCommand,
   unstable_useSlashCommandAdapter,
@@ -53,6 +54,12 @@ const WorkingIndicator: EmptyMessagePartComponent = ({ status }) => {
   );
 };
 
+const AssistantText: TextMessagePartComponent = () => (
+  <div className="[&:not(:first-child)]:mt-4">
+    <MarkdownText />
+  </div>
+);
+
 function AssistantMessage() {
   return (
     <MessagePrimitive.Root className="flex flex-col gap-1">
@@ -60,7 +67,7 @@ function AssistantMessage() {
         <MessagePrimitive.Parts
           components={{
             Empty: WorkingIndicator,
-            Text: MarkdownText,
+            Text: AssistantText,
             Reasoning,
             ReasoningGroup,
             tools: { by_name: toolCardsByName, Fallback: ToolFallback },
