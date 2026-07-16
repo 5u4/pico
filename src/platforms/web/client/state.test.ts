@@ -18,7 +18,7 @@ function assistantMessage(id: string): Message {
 }
 
 const workspaces: WorkspaceSummary[] = [
-  { id: "ws-1", label: "Workspace 1", conversations: [] },
+  { id: "ws-1", label: "Workspace 1", cwd: "/tmp/ws-1", conversations: [] },
 ];
 
 describe("reduce / server / workspaces", () => {
@@ -444,6 +444,20 @@ describe("reduce / createWorkspace", () => {
     expect(next).toBe(initialState);
     expect(commands).toEqual([
       { kind: "createWorkspace", label: "New workspace" },
+    ]);
+  });
+});
+
+describe("reduce / updateWorkspaceCwd", () => {
+  test("sends an updateWorkspaceCwd command without touching state", () => {
+    const { state: next, commands } = reduce(initialState, {
+      type: "updateWorkspaceCwd",
+      workspaceId: "ws-1",
+      cwd: "/tmp/new",
+    });
+    expect(next).toBe(initialState);
+    expect(commands).toEqual([
+      { kind: "updateWorkspaceCwd", workspaceId: "ws-1", cwd: "/tmp/new" },
     ]);
   });
 });

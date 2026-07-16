@@ -1,4 +1,5 @@
 import type { Database } from "bun:sqlite";
+import { statSync } from "node:fs";
 import type { ResultAsync } from "neverthrow";
 import type {
   Engine,
@@ -15,6 +16,7 @@ import {
   listConversations,
   listWorkspaces,
   renameWorkspace,
+  updateWorkspaceCwd,
 } from "../../engine/registry";
 import type { Platform } from "../../store/schema";
 import { assertNever } from "../../util/assert";
@@ -159,6 +161,29 @@ export class WebHub<S extends SessionLike = SessionLike> {
       return;
     }
 
+    if (command.kind === "updateWorkspaceCwd") {
+      const target = getWorkspace(this.deps.db, command.workspaceId);
+      if (target?.platform !== PLATFORM) {
+        this.sendError(ws, `unknown workspace: ${command.workspaceId}`);
+        return;
+      }
+      let cwdIsDirectory = false;
+      try {
+        cwdIsDirectory =
+          statSync(command.cwd, { throwIfNoEntry: false })?.isDirectory() ??
+          false;
+      } catch {
+        cwdIsDirectory = false;
+      }
+      if (!cwdIsDirectory) {
+        this.sendError(ws, `not a directory: ${command.cwd}`);
+        return;
+      }
+      updateWorkspaceCwd(this.deps.db, target.id, command.cwd);
+      for (const other of this.allSockets) this.sendWorkspaces(other);
+      return;
+    }
+
     if (command.kind === "archive") {
       const conversation = getConversation(
         this.deps.db,
@@ -237,6 +262,7 @@ export class WebHub<S extends SessionLike = SessionLike> {
     return listWorkspaces(this.deps.db, PLATFORM).map((w) => ({
       id: w.id,
       label: w.label,
+      cwd: w.cwd,
       conversations: listConversations(this.deps.db, w.id).map((c) => ({
         id: c.id,
         title: c.title,

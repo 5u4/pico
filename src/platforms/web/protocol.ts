@@ -26,6 +26,11 @@ export const clientCommandSchema = z.union([
       workspaceId: z.string().min(1),
       label: z.string().min(1),
     }),
+    z.object({
+      kind: z.literal("updateWorkspaceCwd"),
+      workspaceId: z.string().min(1),
+      cwd: z.string().min(1),
+    }),
     z.object({ kind: z.literal("archive"), conversationId: z.string().min(1) }),
     z.object({ kind: z.literal("draft") }),
   ]),
@@ -43,6 +48,7 @@ export type ConversationSummary = {
 export type WorkspaceSummary = {
   id: string;
   label: string | null;
+  cwd: string;
   conversations: ConversationSummary[];
 };
 
