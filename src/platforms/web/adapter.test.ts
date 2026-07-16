@@ -41,6 +41,34 @@ class FakeSession implements SessionLike {
     return Promise.resolve(true);
   }
 
+  readonly customMessages: { customType: string; content: string }[] = [];
+
+  sendCustomMessage(
+    message: { customType: string; content: string; display: boolean },
+    _options: { triggerTurn: false },
+  ): Promise<boolean> {
+    this.customMessages.push({
+      customType: message.customType,
+      content: message.content,
+    });
+    this.state.messages.push({
+      role: "custom",
+      customType: message.customType,
+      content: message.content,
+      display: message.display,
+      timestamp: Date.now(),
+    } as (typeof this.state.messages)[number]);
+    return Promise.resolve(false);
+  }
+
+  readonly sessionManager = {
+    ensureOnDiskCalls: 0,
+    ensureOnDisk(): Promise<void> {
+      this.ensureOnDiskCalls++;
+      return Promise.resolve();
+    },
+  };
+
   abort(): Promise<unknown> {
     this.abortCalls++;
     return Promise.resolve(undefined);
@@ -419,6 +447,72 @@ describe("WebHub.handleCommand prompt/abort", () => {
     await hub.handleCommand(ws, { kind: "abort" });
 
     expect(sessions.get(conversation.id)?.abortCalls).toBe(1);
+  });
+});
+
+describe("WebHub.handleCommand command", () => {
+  test("ping with no active conversation sends an error", async () => {
+    const { hub } = makeHub();
+    const ws = new FakeSocket();
+
+    await hub.handleCommand(ws, { kind: "command", name: "ping" });
+
+    expect(ws.sent).toEqual([
+      {
+        kind: "error",
+        message: "no active conversation; retry once connected",
+      },
+    ]);
+  });
+
+  test("ping records Pong with the argument and broadcasts a snapshot", async () => {
+    const { hub, db, workspace, sessions } = makeHub();
+    const conversation = createConversation(db, {
+      workspaceId: workspace.id,
+      cwd: workspace.cwd,
+      title: null,
+    });
+    const ws = new FakeSocket();
+    await hub.handleCommand(ws, {
+      kind: "select",
+      conversationId: conversation.id,
+    });
+
+    await hub.handleCommand(ws, {
+      kind: "command",
+      name: "ping",
+      text: "hi",
+    });
+
+    expect(sessions.get(conversation.id)?.customMessages).toEqual([
+      { customType: "command:ping", content: "Pong hi" },
+    ]);
+    const snapshot = ws.sent.findLast((e) => e.kind === "snapshot");
+    expect(snapshot?.kind === "snapshot" && snapshot.messages).toContainEqual({
+      id: "m0",
+      role: "system",
+      parts: [{ type: "text", text: "Pong hi" }],
+    });
+  });
+
+  test("ping without text records a bare Pong", async () => {
+    const { hub, db, workspace, sessions } = makeHub();
+    const conversation = createConversation(db, {
+      workspaceId: workspace.id,
+      cwd: workspace.cwd,
+      title: null,
+    });
+    const ws = new FakeSocket();
+    await hub.handleCommand(ws, {
+      kind: "select",
+      conversationId: conversation.id,
+    });
+
+    await hub.handleCommand(ws, { kind: "command", name: "ping" });
+
+    expect(sessions.get(conversation.id)?.customMessages).toEqual([
+      { customType: "command:ping", content: "Pong" },
+    ]);
   });
 });
 

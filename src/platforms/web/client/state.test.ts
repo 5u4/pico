@@ -342,6 +342,37 @@ describe("reduce / cancel", () => {
   });
 });
 
+describe("reduce / command", () => {
+  test("errors and sends no command when no conversation is active", () => {
+    const { state: next, commands } = reduce(initialState, {
+      type: "command",
+      name: "ping",
+      text: "hi",
+    });
+    expect(next.error).toBe("select a conversation first");
+    expect(commands).toEqual([]);
+  });
+
+  test("sends a command with its text when a conversation is active", () => {
+    const state: ThreadState = { ...initialState, activeId: "conv-1" };
+    const { state: next, commands } = reduce(state, {
+      type: "command",
+      name: "ping",
+      text: "hi",
+    });
+    expect(next).toBe(state);
+    expect(commands).toEqual([{ kind: "command", name: "ping", text: "hi" }]);
+  });
+
+  test("omits text when the command has none", () => {
+    const state: ThreadState = { ...initialState, activeId: "conv-1" };
+    const { commands } = reduce(state, { type: "command", name: "ping" });
+    expect(commands).toEqual([
+      { kind: "command", name: "ping", text: undefined },
+    ]);
+  });
+});
+
 describe("reduce / select", () => {
   test("is a no-op when selecting the already-active conversation", () => {
     const state: ThreadState = { ...initialState, activeId: "conv-1" };

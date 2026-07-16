@@ -30,7 +30,7 @@ export type MessagePart =
 
 export type Message = {
   id: string;
-  role: "user" | "assistant";
+  role: "user" | "assistant" | "system";
   parts: MessagePart[];
 };
 
@@ -101,6 +101,19 @@ export function toMessages(messages: AgentMessage[]): Message[] {
 
   for (const [index, message] of messages.entries()) {
     if (!("role" in message)) continue;
+    if (message.role === "custom") {
+      flush();
+      if (!message.display) continue;
+      const text = textFrom(message.content);
+      if (text) {
+        out.push({
+          id: `m${index}`,
+          role: "system",
+          parts: [{ type: "text", text }],
+        });
+      }
+      continue;
+    }
     if (message.role === "user") {
       flush();
       const text = textFrom(message.content);

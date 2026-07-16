@@ -64,6 +64,7 @@ type ThreadContextValue = {
   isRunning: boolean;
   usage: ContextUsageInfo | null;
   prompt: (text: string) => void;
+  command: (name: "ping", text?: string) => void;
   cancel: () => void;
 };
 
@@ -174,6 +175,10 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
     (text: string) => dispatch({ type: "prompt", text }),
     [dispatch],
   );
+  const command = useCallback(
+    (name: "ping", text?: string) => dispatch({ type: "command", name, text }),
+    [dispatch],
+  );
   const cancel = useCallback(() => dispatch({ type: "cancel" }), [dispatch]);
   const dismissError = useCallback(
     () => dispatch({ type: "dismissError" }),
@@ -228,9 +233,10 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       isRunning: selectIsRunning(state),
       usage: state.usage,
       prompt,
+      command,
       cancel,
     }),
-    [state, view, prompt, cancel],
+    [state, view, prompt, command, cancel],
   );
 
   return (

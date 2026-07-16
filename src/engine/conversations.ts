@@ -19,6 +19,15 @@ export interface SessionLike {
   readonly state: SessionStateLike;
   prompt(text: string): Promise<boolean>;
   abort(): Promise<unknown>;
+  sendCustomMessage(
+    message: {
+      customType: string;
+      content: string;
+      display: boolean;
+    },
+    options: { triggerTurn: false },
+  ): Promise<boolean>;
+  readonly sessionManager: { ensureOnDisk(): Promise<void> };
   subscribe(listener: (event: AgentSessionEvent) => void): () => void;
   readonly sessionName: string | undefined;
   setSessionName(name: string, source?: "auto" | "user"): Promise<boolean>;
@@ -210,6 +219,46 @@ export class Engine<S extends SessionLike = SessionLike> {
       .abort()
       .then(() => undefined)
       .catch((e: unknown) => (e instanceof Error ? e.message : String(e)));
+  }
+
+  async record(
+    conversationId: string,
+    cwd: string,
+    customType: string,
+    text: string,
+  ): Promise<string | undefined> {
+    const opened = await this.ensureOpen(conversationId, cwd);
+    if (opened) return opened;
+    const session = this.deps.sessions.get(conversationId);
+    if (!session) return "conversation session unavailable; retry";
+    return session
+      .sendCustomMessage(
+        { customType, content: text, display: true },
+        { triggerTurn: false },
+      )
+      .then(() => session.sessionManager.ensureOnDisk())
+      .then(() => {
+        this.broadcastSnapshot(conversationId, session);
+        return undefined;
+      })
+      .catch((e: unknown) => {
+        const message = e instanceof Error ? e.message : String(e);
+        logger.error("record failed: {error}", { error: e });
+        return message;
+      });
+  }
+
+  private broadcastSnapshot(conversationId: string, session: S): void {
+    const state = session.state;
+    const stream = state.streamMessage ? [state.streamMessage] : [];
+    const evt: TurnEvent = {
+      kind: "snapshot",
+      messages: toMessages([...state.messages, ...stream]),
+      streaming: state.isStreaming,
+      usage: computeContextUsage(session) ?? null,
+    };
+    for (const target of this.subscribers.get(conversationId) ?? [])
+      target.listener(evt);
   }
 
   private async ensureOpen(

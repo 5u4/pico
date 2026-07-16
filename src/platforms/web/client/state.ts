@@ -34,6 +34,7 @@ export const initialState: ThreadState = {
 export type Action =
   | { type: "server"; event: ServerEvent }
   | { type: "prompt"; text: string }
+  | { type: "command"; name: "ping"; text?: string }
   | { type: "cancel" }
   | { type: "select"; conversationId: string }
   | { type: "create"; workspaceId: string }
@@ -232,6 +233,16 @@ export function reduce(state: ThreadState, action: Action): Reduced {
       return reduceServer(state, action.event);
     case "prompt":
       return reducePrompt(state, action.text);
+    case "command":
+      if (state.activeId === null)
+        return {
+          state: { ...state, error: "select a conversation first" },
+          commands: [],
+        };
+      return {
+        state,
+        commands: [{ kind: "command", name: action.name, text: action.text }],
+      };
     case "cancel":
       return {
         state: { ...state, pending: null, pendingBaseUserCount: null },

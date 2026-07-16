@@ -11,6 +11,16 @@ function user(text: string): UserMessage {
   return { role: "user", content: text, timestamp: 0 };
 }
 
+function custom(content: string, display = true): AgentMessage {
+  return {
+    role: "custom",
+    customType: "command:ping",
+    content,
+    display,
+    timestamp: 0,
+  } as AgentMessage;
+}
+
 function assistant(content: AssistantMessage["content"]): AssistantMessage {
   return {
     role: "assistant",
@@ -179,6 +189,31 @@ describe("toMessages", () => {
       "m1",
       "m2",
       "m3",
+    ]);
+  });
+
+  test("renders a displayed custom message as a system message", () => {
+    expect(toMessages([custom("Pong hi")])).toEqual([
+      { id: "m0", role: "system", parts: [{ type: "text", text: "Pong hi" }] },
+    ]);
+  });
+
+  test("drops a hidden custom message", () => {
+    expect(toMessages([custom("secret", false)])).toEqual([]);
+  });
+
+  test("flushes the assistant run before a custom message", () => {
+    const messages: AgentMessage[] = [
+      assistant([{ type: "text", text: "hi" }]),
+      custom("Pong there"),
+    ];
+    expect(toMessages(messages)).toEqual([
+      { id: "m0", role: "assistant", parts: [{ type: "text", text: "hi" }] },
+      {
+        id: "m1",
+        role: "system",
+        parts: [{ type: "text", text: "Pong there" }],
+      },
     ]);
   });
 });
