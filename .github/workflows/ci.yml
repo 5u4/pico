@@ -22,6 +22,21 @@ jobs:
         run: bun run scripts/lint-comments.ts --all
       - name: test
         run: bun test
+      - name: rust toolchain (clippy)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: rust toolchain (nightly rustfmt)
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: rust fmt
+        run: cargo +nightly fmt --all -- --check
+      - name: rust clippy
+        run: cargo +stable clippy --all-targets -- -D warnings
+      - name: rust test
+        run: cargo +stable test
       - name: install playwright chromium
         run: bunx playwright install --with-deps chromium
       - name: e2e
