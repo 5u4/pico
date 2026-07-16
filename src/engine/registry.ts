@@ -41,6 +41,10 @@ export function createWorkspace(
     `INSERT INTO workspaces (id, cwd, platform, label, externalId, createdAt)
      VALUES ($id, $cwd, $platform, $label, $externalId, $createdAt)`,
   ).run(row);
+  logger.info("workspace created {workspaceId} (label {label})", {
+    workspaceId: row.id,
+    label: input.label,
+  });
   return workspaceSchema.parse(row);
 }
 
@@ -72,7 +76,14 @@ export function renameWorkspace(
   const result = db
     .query("UPDATE workspaces SET label = $label WHERE id = $id")
     .run({ id, label });
-  return result.changes > 0;
+  const renamed = result.changes > 0;
+  if (renamed) {
+    logger.info("workspace renamed {workspaceId} (label {label})", {
+      workspaceId: id,
+      label,
+    });
+  }
+  return renamed;
 }
 
 export function listConversations(
@@ -123,6 +134,10 @@ export function createConversation(
      VALUES
        ($id, $workspaceId, $cwd, $title, $externalId, $createdAt, $archivedAt)`,
   ).run(row);
+  logger.info(
+    "conversation created {conversationId} in workspace {workspaceId}",
+    { conversationId: row.id, workspaceId: input.workspaceId },
+  );
   return conversationSchema.parse(row);
 }
 
