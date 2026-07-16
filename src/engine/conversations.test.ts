@@ -486,3 +486,51 @@ describe("Engine auto-title", () => {
     ]);
   });
 });
+
+describe("Engine snapshot windowing", () => {
+  async function seed(count: number) {
+    const { engine, sessions, conversationId } = makeEngine();
+    const { opened } = engine.subscribe(conversationId, CWD, "live", () => {});
+    await opened;
+    const session = sessions.get(conversationId);
+    if (!session) throw new Error("session missing");
+    session.state.messages = Array.from({ length: count }, (_, i) => ({
+      role: "user",
+      content: `msg ${i}`,
+      timestamp: 0,
+    })) as typeof session.state.messages;
+    return { engine, conversationId };
+  }
+
+  test("snapshot returns only the tail window and flags hasMore", async () => {
+    const { engine, conversationId } = await seed(100);
+    const snap = engine.snapshot(conversationId);
+    expect(snap?.messages).toHaveLength(40);
+    expect(snap?.hasMore).toBe(true);
+    expect(snap?.messages[0]?.id).toBe("m60");
+    expect(snap?.messages.at(-1)?.id).toBe("m99");
+  });
+
+  test("snapshot returns everything with hasMore false when short", async () => {
+    const { engine, conversationId } = await seed(5);
+    const snap = engine.snapshot(conversationId);
+    expect(snap?.messages).toHaveLength(5);
+    expect(snap?.hasMore).toBe(false);
+  });
+
+  test("loadOlder returns the page before the cursor", async () => {
+    const { engine, conversationId } = await seed(100);
+    const older = engine.loadOlder(conversationId, "m60");
+    expect(older?.messages.map((m) => m.id)).toEqual(
+      Array.from({ length: 30 }, (_, i) => `m${30 + i}`),
+    );
+    expect(older?.hasMore).toBe(true);
+  });
+
+  test("loadOlder stops at the start with hasMore false", async () => {
+    const { engine, conversationId } = await seed(100);
+    const older = engine.loadOlder(conversationId, "m20");
+    expect(older?.messages).toHaveLength(20);
+    expect(older?.hasMore).toBe(false);
+  });
+});

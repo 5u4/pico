@@ -71,9 +71,12 @@ type ThreadContextValue = {
   messages: Message[];
   isRunning: boolean;
   usage: ContextUsageInfo | null;
+  hasMore: boolean;
+  loadingOlder: boolean;
   prompt: (text: string) => void;
   command: (name: "ping", text?: string) => void;
   cancel: () => void;
+  loadOlder: () => void;
 };
 
 const ShellContext = createContext<ShellContextValue | null>(null);
@@ -320,6 +323,10 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
     (conversationId: string) => dispatch({ type: "archive", conversationId }),
     [dispatch],
   );
+  const loadOlder = useCallback(
+    () => dispatch({ type: "loadOlder" }),
+    [dispatch],
+  );
 
   const shell = useMemo<ShellContextValue>(
     () => ({
@@ -352,11 +359,14 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       messages: view,
       isRunning: selectIsRunning(state),
       usage: state.usage,
+      hasMore: state.hasMore,
+      loadingOlder: state.loadingOlder,
       prompt,
       command,
       cancel,
+      loadOlder,
     }),
-    [state, view, prompt, command, cancel],
+    [state, view, prompt, command, cancel, loadOlder],
   );
 
   return (

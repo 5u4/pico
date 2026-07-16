@@ -245,6 +245,50 @@ describe("createServer websocket round-trip", () => {
     }
   });
 
+  test("loadOlder returns an older page for the active conversation", async () => {
+    const harness = startServer();
+    const client = await TestClient.connect(harness.port);
+    try {
+      const open = await client.waitFor((e) => e.kind === "workspaces");
+      if (open.kind !== "workspaces") throw new Error("expected workspaces");
+      const workspaceId = open.items[0]?.id;
+      if (!workspaceId) throw new Error("expected a workspace id");
+      client.send({ kind: "create", workspaceId });
+      const created = await client.waitFor(
+        (e) =>
+          e.kind === "workspaces" && e.items[0]?.conversations.length === 1,
+      );
+      if (created.kind !== "workspaces")
+        throw new Error("expected populated workspaces");
+      const conversationId = created.items[0]?.conversations[0]?.id;
+      if (!conversationId) throw new Error("expected a conversation id");
+
+      client.send({ kind: "prompt", text: "one" });
+      const snap = await client.waitFor(
+        (e) =>
+          e.kind === "snapshot" &&
+          e.messages.some((m) => m.role === "assistant"),
+      );
+      if (snap.kind !== "snapshot") throw new Error("expected snapshot");
+      expect(snap.messages.length).toBeGreaterThanOrEqual(2);
+      const cursor = snap.messages.at(-1)?.id;
+      const firstId = snap.messages[0]?.id;
+      if (!cursor || !firstId)
+        throw new Error("expected first and cursor message ids");
+
+      client.send({ kind: "loadOlder", conversationId, beforeId: cursor });
+      const older = await client.waitFor((e) => e.kind === "older");
+      if (older.kind !== "older") throw new Error("expected older event");
+      expect(older.conversationId).toBe(conversationId);
+      expect(older.messages.map((m) => m.id)).toContain(firstId);
+      expect(older.messages.at(-1)?.id).not.toBe(cursor);
+      expect(older.hasMore).toBe(false);
+    } finally {
+      client.close();
+      await harness.close();
+    }
+  });
+
   test("an unrecognized command is dropped without tearing down the socket", async () => {
     const harness = startServer();
     const client = await TestClient.connect(harness.port);

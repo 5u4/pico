@@ -14,6 +14,8 @@ export type ThreadState = {
   pendingBaseUserCount: number | null;
   draftSeq: number;
   usage: ContextUsageInfo | null;
+  hasMore: boolean;
+  loadingOlder: boolean;
 };
 
 export const initialState: ThreadState = {
@@ -27,6 +29,8 @@ export const initialState: ThreadState = {
   pendingBaseUserCount: null,
   draftSeq: 0,
   usage: null,
+  hasMore: false,
+  loadingOlder: false,
 };
 
 export type Action =
@@ -39,7 +43,8 @@ export type Action =
   | { type: "createWorkspace"; label: string }
   | { type: "renameWorkspace"; workspaceId: string; label: string }
   | { type: "updateWorkspaceCwd"; workspaceId: string; cwd: string }
-  | { type: "archive"; conversationId: string };
+  | { type: "archive"; conversationId: string }
+  | { type: "loadOlder" };
 
 type Reduced = {
   state: ThreadState;
@@ -59,6 +64,51 @@ function mergeTail(prev: Message[], tail: Message): Message[] {
   const next = prev.slice();
   next[index] = tail;
   return next;
+}
+
+function idIndex(id: string): number {
+  const n = Number.parseInt(id.slice(1), 10);
+  return Number.isNaN(n) ? Number.POSITIVE_INFINITY : n;
+}
+
+function mergeById(prev: Message[], incoming: Message[]): Message[] {
+  const out: Message[] = [];
+  let i = 0;
+  let j = 0;
+  while (i < prev.length && j < incoming.length) {
+    const a = prev[i];
+    const b = incoming[j];
+    if (!a) {
+      i++;
+      continue;
+    }
+    if (!b) {
+      j++;
+      continue;
+    }
+    const ai = idIndex(a.id);
+    const bi = idIndex(b.id);
+    if (ai < bi) {
+      out.push(a);
+      i++;
+    } else if (ai > bi) {
+      out.push(b);
+      j++;
+    } else {
+      out.push(b);
+      i++;
+      j++;
+    }
+  }
+  for (; i < prev.length; i++) {
+    const a = prev[i];
+    if (a) out.push(a);
+  }
+  for (; j < incoming.length; j++) {
+    const b = incoming[j];
+    if (b) out.push(b);
+  }
+  return out;
 }
 
 function clearPendingIfResolved(
@@ -112,6 +162,8 @@ function reduceServer(state: ThreadState, event: ServerEvent): Reduced {
             threadKey: `draft-${draftSeq}`,
             draftSeq,
             usage: null,
+            hasMore: false,
+            loadingOlder: false,
           },
           commands: [],
         };
@@ -124,14 +176,29 @@ function reduceServer(state: ThreadState, event: ServerEvent): Reduced {
     case "snapshot": {
       if (event.conversationId !== state.activeId)
         return { state, commands: [] };
-      const cleared = clearPendingIfResolved(state, event.messages);
+      const messages = mergeById(state.messages, event.messages);
+      const cleared = clearPendingIfResolved(state, messages);
       return {
         state: {
           ...state,
-          messages: event.messages,
+          messages,
           isRunning: event.isStreaming,
           usage: event.usage,
+          hasMore: event.hasMore,
           ...cleared,
+        },
+        commands: [],
+      };
+    }
+    case "older": {
+      if (event.conversationId !== state.activeId)
+        return { state, commands: [] };
+      return {
+        state: {
+          ...state,
+          messages: mergeById(event.messages, state.messages),
+          hasMore: event.hasMore,
+          loadingOlder: false,
         },
         commands: [],
       };
@@ -204,6 +271,8 @@ function reduceSelect(state: ThreadState, conversationId: string): Reduced {
       messages: [],
       isRunning: false,
       usage: null,
+      hasMore: false,
+      loadingOlder: false,
     },
     commands: [{ kind: "select", conversationId }],
   };
@@ -223,6 +292,8 @@ function reduceCreate(state: ThreadState, workspaceId: string): Reduced {
       messages: [],
       isRunning: false,
       usage: null,
+      hasMore: false,
+      loadingOlder: false,
     },
     commands: [{ kind: "draft" }],
   };
@@ -286,6 +357,26 @@ export function reduce(state: ThreadState, action: Action): Reduced {
         state,
         commands: [{ kind: "archive", conversationId: action.conversationId }],
       };
+    case "loadOlder": {
+      const first = state.messages[0];
+      if (
+        state.activeId === null ||
+        !state.hasMore ||
+        state.loadingOlder ||
+        !first
+      )
+        return { state, commands: [] };
+      return {
+        state: { ...state, loadingOlder: true },
+        commands: [
+          {
+            kind: "loadOlder",
+            conversationId: state.activeId,
+            beforeId: first.id,
+          },
+        ],
+      };
+    }
     default:
       return assertNever(action);
   }

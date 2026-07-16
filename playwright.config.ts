@@ -4,6 +4,8 @@ const PORT = 4142;
 const BASE_URL = `http://localhost:${PORT}`;
 const STREAM_PORT = 4143;
 const STREAM_URL = `http://localhost:${STREAM_PORT}`;
+const PAGINATE_PORT = 4144;
+const PAGINATE_URL = `http://localhost:${PAGINATE_PORT}`;
 
 export default defineConfig({
   testDir: "./e2e",
@@ -36,6 +38,14 @@ export default defineConfig({
       command: "bun run e2e/stream-server.ts",
       env: { PICO_E2E_STREAM_PORT: String(STREAM_PORT) },
       url: STREAM_URL,
+      reuseExistingServer: !process.env.CI,
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+    {
+      command: "bun run e2e/paginate-server.ts",
+      env: { PICO_E2E_PAGINATE_PORT: String(PAGINATE_PORT) },
+      url: PAGINATE_URL,
       reuseExistingServer: !process.env.CI,
       stdout: "pipe",
       stderr: "pipe",

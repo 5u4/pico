@@ -8,6 +8,10 @@ import { errMessage } from "../util/result";
 import {
   assistantReplyText,
   type Message,
+  OLDER_PAGE,
+  olderWindow,
+  SNAPSHOT_TAIL,
+  tailWindow,
   toMessages,
   toStreamMessage,
 } from "./message";
@@ -114,6 +118,7 @@ export type TurnEvent =
       messages: Message[];
       streaming: boolean;
       usage: ContextUsageInfo | null;
+      hasMore: boolean;
     }
   | { kind: "delta"; message: Message | null; streaming: boolean }
   | { kind: "title"; title: string };
@@ -172,16 +177,46 @@ export class Engine<S extends SessionLike = SessionLike> {
         messages: Message[];
         streaming: boolean;
         usage: ContextUsageInfo | null;
+        hasMore: boolean;
       }
     | undefined {
     const session = this.deps.sessions.get(conversationId);
     if (!session) return undefined;
+    const evt = this.buildSnapshot(session, session.state.isStreaming);
+    return {
+      messages: evt.messages,
+      streaming: evt.streaming,
+      usage: evt.usage,
+      hasMore: evt.hasMore,
+    };
+  }
+
+  loadOlder(
+    conversationId: string,
+    beforeId: string,
+  ): { messages: Message[]; hasMore: boolean } | undefined {
+    const session = this.deps.sessions.get(conversationId);
+    if (!session) return undefined;
+    const all = toMessages(session.state.messages);
+    return olderWindow(all, beforeId, OLDER_PAGE);
+  }
+
+  private buildSnapshot(
+    session: S,
+    streaming: boolean,
+  ): Extract<TurnEvent, { kind: "snapshot" }> {
     const state = session.state;
     const stream = state.streamMessage ? [state.streamMessage] : [];
+    const { window, hasMore } = tailWindow(
+      toMessages([...state.messages, ...stream]),
+      SNAPSHOT_TAIL,
+    );
     return {
-      messages: toMessages([...state.messages, ...stream]),
-      streaming: state.isStreaming,
+      kind: "snapshot",
+      messages: window,
+      streaming,
       usage: computeContextUsage(session) ?? null,
+      hasMore,
     };
   }
 
@@ -266,14 +301,7 @@ export class Engine<S extends SessionLike = SessionLike> {
   }
 
   private broadcastSnapshot(conversationId: string, session: S): void {
-    const state = session.state;
-    const stream = state.streamMessage ? [state.streamMessage] : [];
-    const evt: TurnEvent = {
-      kind: "snapshot",
-      messages: toMessages([...state.messages, ...stream]),
-      streaming: state.isStreaming,
-      usage: computeContextUsage(session) ?? null,
-    };
+    const evt = this.buildSnapshot(session, session.state.isStreaming);
     for (const target of this.subscribers.get(conversationId) ?? [])
       target.listener(evt);
   }
@@ -312,13 +340,7 @@ export class Engine<S extends SessionLike = SessionLike> {
       return;
     }
 
-    const stream = state.streamMessage ? [state.streamMessage] : [];
-    const evt: TurnEvent = {
-      kind: "snapshot",
-      messages: toMessages([...state.messages, ...stream]),
-      streaming,
-      usage: computeContextUsage(session) ?? null,
-    };
+    const evt = this.buildSnapshot(session, streaming);
     for (const target of targets) {
       if (target.mode === "live" || !streaming) target.listener(evt);
     }
