@@ -6,7 +6,8 @@ const BASE_URL = `http://localhost:${PORT}`;
 export default defineConfig({
   testDir: "./e2e",
   testMatch: "**/*.spec.ts",
-  fullyParallel: true,
+  fullyParallel: false,
+  workers: 1,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 2 : 0,
   reporter: process.env.CI ? "github" : "list",
