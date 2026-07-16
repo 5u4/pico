@@ -31,7 +31,7 @@ import { Button } from "./ui/button";
 function UserMessage() {
   const isPending = useAuiState((s) => s.message.id === "pending-user");
   return (
-    <MessagePrimitive.Root className="flex justify-end">
+    <MessagePrimitive.Root className="flex justify-end data-[aui-top-anchor-user]:pt-4">
       <div
         className={cn(
           "max-w-[80%] rounded-2xl bg-muted px-4 py-2 text-foreground transition-opacity",
