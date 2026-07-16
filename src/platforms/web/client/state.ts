@@ -72,10 +72,43 @@ function idIndex(id: string): number {
 }
 
 function mergeById(prev: Message[], incoming: Message[]): Message[] {
-  const map = new Map<string, Message>();
-  for (const m of prev) map.set(m.id, m);
-  for (const m of incoming) map.set(m.id, m);
-  return [...map.values()].sort((a, b) => idIndex(a.id) - idIndex(b.id));
+  const out: Message[] = [];
+  let i = 0;
+  let j = 0;
+  while (i < prev.length && j < incoming.length) {
+    const a = prev[i];
+    const b = incoming[j];
+    if (!a) {
+      i++;
+      continue;
+    }
+    if (!b) {
+      j++;
+      continue;
+    }
+    const ai = idIndex(a.id);
+    const bi = idIndex(b.id);
+    if (ai < bi) {
+      out.push(a);
+      i++;
+    } else if (ai > bi) {
+      out.push(b);
+      j++;
+    } else {
+      out.push(b);
+      i++;
+      j++;
+    }
+  }
+  for (; i < prev.length; i++) {
+    const a = prev[i];
+    if (a) out.push(a);
+  }
+  for (; j < incoming.length; j++) {
+    const b = incoming[j];
+    if (b) out.push(b);
+  }
+  return out;
 }
 
 function clearPendingIfResolved(
