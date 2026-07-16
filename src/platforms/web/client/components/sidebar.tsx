@@ -5,7 +5,7 @@ import {
   PencilIcon,
   PlusIcon,
 } from "lucide-react";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { z } from "zod";
 import type { ConversationSummary, WorkspaceSummary } from "../../protocol";
 import { cn } from "../lib/utils";
@@ -85,6 +85,7 @@ function WorkspaceItem({
 }) {
   const [renaming, setRenaming] = useState(false);
   const [draft, setDraft] = useState("");
+  const cancelRename = useRef(false);
   const activeConversation =
     activeId === null
       ? undefined
@@ -94,6 +95,11 @@ function WorkspaceItem({
     setRenaming(true);
   };
   const submitRename = () => {
+    if (cancelRename.current) {
+      cancelRename.current = false;
+      setRenaming(false);
+      return;
+    }
     const label = draft.trim();
     if (label && label !== workspace.label) onRename(workspace.id, label);
     setRenaming(false);
@@ -108,8 +114,11 @@ function WorkspaceItem({
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === "Enter") submitRename();
-              if (e.key === "Escape") setRenaming(false);
+              if (e.key === "Enter") e.currentTarget.blur();
+              if (e.key === "Escape") {
+                cancelRename.current = true;
+                e.currentTarget.blur();
+              }
             }}
             onBlur={submitRename}
             aria-label="Rename workspace"
