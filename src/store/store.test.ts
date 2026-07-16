@@ -1,6 +1,9 @@
 import type { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { openDb } from "./db.ts";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { LATEST_SCHEMA_VERSION, openDb } from "./db.ts";
 import { conversationSchema, workspaceSchema } from "./schema.ts";
 
 let db: Database;
@@ -237,5 +240,43 @@ describe("foreign key cascade", () => {
     db.query("DELETE FROM workspaces WHERE id = 'w1'").run();
     const row = db.query("SELECT * FROM conversations WHERE id = 'c1'").get();
     expect(row).toBeNull();
+  });
+});
+
+describe("schema versioning", () => {
+  test("a freshly opened database is stamped at the latest migration version", () => {
+    const { user_version } = db.query("PRAGMA user_version").get() as {
+      user_version: number;
+    };
+    expect(user_version).toBe(LATEST_SCHEMA_VERSION);
+  });
+
+  test("reopening an on-disk database is a no-op that preserves rows", () => {
+    const dir = mkdtempSync(join(tmpdir(), "pico-store-"));
+    const path = join(dir, "state.db");
+    try {
+      const first = openDb(path);
+      first
+        .query(
+          `INSERT INTO workspaces (id, cwd, platform, label, externalId, createdAt)
+           VALUES ('w1', '/repo', 'web', NULL, NULL, 1000)`,
+        )
+        .run();
+      first.close();
+
+      const second = openDb(path);
+      const version = second.query("PRAGMA user_version").get() as {
+        user_version: number;
+      };
+      const row = second
+        .query("SELECT id FROM workspaces WHERE id = 'w1'")
+        .get();
+      second.close();
+
+      expect(version.user_version).toBe(LATEST_SCHEMA_VERSION);
+      expect(row).toEqual({ id: "w1" });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

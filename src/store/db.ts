@@ -75,33 +75,56 @@ function traceDb(db: Database): Database {
   });
 }
 
-function migrate(db: Database): void {
-  db.run(`
-    CREATE TABLE IF NOT EXISTS workspaces (
-      id         TEXT PRIMARY KEY CHECK (length(id) > 0),
-      cwd        TEXT NOT NULL CHECK (length(cwd) > 0),
-      platform   TEXT NOT NULL,
-      label      TEXT,
-      externalId TEXT,
-      createdAt  INTEGER NOT NULL CHECK (createdAt >= 0)
-    );
+type Migration = { readonly version: number; readonly up: string };
 
-    CREATE UNIQUE INDEX IF NOT EXISTS workspaces_platform_external
-      ON workspaces (platform, externalId)
-      WHERE externalId IS NOT NULL;
+const MIGRATIONS: readonly Migration[] = [
+  {
+    version: 1,
+    up: `
+      CREATE TABLE workspaces (
+        id         TEXT PRIMARY KEY CHECK (length(id) > 0),
+        cwd        TEXT NOT NULL CHECK (length(cwd) > 0),
+        platform   TEXT NOT NULL,
+        label      TEXT,
+        externalId TEXT,
+        createdAt  INTEGER NOT NULL CHECK (createdAt >= 0)
+      );
 
-    CREATE TABLE IF NOT EXISTS conversations (
-      id          TEXT PRIMARY KEY CHECK (length(id) > 0),
-      workspaceId TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
-      cwd         TEXT NOT NULL CHECK (length(cwd) > 0),
-      title       TEXT,
-      externalId  TEXT,
-      createdAt   INTEGER NOT NULL CHECK (createdAt >= 0),
-      archivedAt  INTEGER CHECK (archivedAt IS NULL OR archivedAt >= 0)
-    );
+      CREATE UNIQUE INDEX workspaces_platform_external
+        ON workspaces (platform, externalId)
+        WHERE externalId IS NOT NULL;
 
-    CREATE UNIQUE INDEX IF NOT EXISTS conversations_workspace_external
-      ON conversations (workspaceId, externalId)
-      WHERE externalId IS NOT NULL;
-  `);
+      CREATE TABLE conversations (
+        id          TEXT PRIMARY KEY CHECK (length(id) > 0),
+        workspaceId TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+        cwd         TEXT NOT NULL CHECK (length(cwd) > 0),
+        title       TEXT,
+        externalId  TEXT,
+        createdAt   INTEGER NOT NULL CHECK (createdAt >= 0),
+        archivedAt  INTEGER CHECK (archivedAt IS NULL OR archivedAt >= 0)
+      );
+
+      CREATE UNIQUE INDEX conversations_workspace_external
+        ON conversations (workspaceId, externalId)
+        WHERE externalId IS NOT NULL;
+    `,
+  },
+];
+
+export const LATEST_SCHEMA_VERSION = MIGRATIONS.reduce(
+  (max, m) => Math.max(max, m.version),
+  0,
+);
+
+export function migrate(db: Database): void {
+  const row = db.query("PRAGMA user_version").get() as {
+    user_version: number;
+  };
+  const pending = MIGRATIONS.filter((m) => m.version > row.user_version);
+  db.transaction(() => {
+    for (const m of pending) {
+      db.run(m.up);
+      db.run(`PRAGMA user_version = ${m.version}`);
+    }
+  })();
 }
