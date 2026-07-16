@@ -96,8 +96,8 @@ impl Supervisor {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(e.into()),
         }
-        let listener = tokio::net::UnixListener::bind(&socket)
-            .wrap_err_with(|| format!("bind {}", socket.display()))?;
+        let listener =
+            tokio::net::UnixListener::bind(&socket).wrap_err_with(|| format!("bind {}", socket.display()))?;
         tracing::info!(socket = %socket.display(), "supervisor listening");
 
         let watcher = self.cancel.clone();
@@ -128,10 +128,7 @@ impl Supervisor {
         result
     }
 
-    async fn accept_loop(
-        self: std::sync::Arc<Self>,
-        listener: tokio::net::UnixListener,
-    ) -> color_eyre::Result<()> {
+    async fn accept_loop(self: std::sync::Arc<Self>, listener: tokio::net::UnixListener) -> color_eyre::Result<()> {
         loop {
             let stream = tokio::select! {
                 biased;
@@ -164,10 +161,7 @@ impl Supervisor {
         }
     }
 
-    async fn handle_conn(
-        self: std::sync::Arc<Self>,
-        stream: tokio::net::UnixStream,
-    ) -> color_eyre::Result<()> {
+    async fn handle_conn(self: std::sync::Arc<Self>, stream: tokio::net::UnixStream) -> color_eyre::Result<()> {
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = tokio::io::BufReader::new(read_half);
         let read = tokio::select! {
@@ -202,10 +196,7 @@ impl Supervisor {
 
     fn signal_ready(&self, token: &str) {
         let mut pending = self.pending_ready.lock().expect("pending_ready poisoned");
-        if pending
-            .as_ref()
-            .is_some_and(|(expected, _)| expected == token)
-        {
+        if pending.as_ref().is_some_and(|(expected, _)| expected == token) {
             let (_, tx) = pending.take().expect("pending_ready checked non-empty");
             let _ = tx.send(());
             tracing::info!("worker reported ready");
@@ -223,9 +214,7 @@ impl Supervisor {
             };
         }
         let version = commit_sha(&slot).await;
-        let desc = version
-            .clone()
-            .unwrap_or_else(|| slot.display().to_string());
+        let desc = version.clone().unwrap_or_else(|| slot.display().to_string());
         tracing::info!(slot = %slot.display(), desc = %desc, "deploy starting");
 
         let previous = match self.slots.current_target() {
@@ -262,12 +251,7 @@ impl Supervisor {
         }
     }
 
-    async fn recover(
-        &self,
-        previous: Option<PathBuf>,
-        desc: &str,
-        deploy_err: color_eyre::Report,
-    ) -> Response {
+    async fn recover(&self, previous: Option<PathBuf>, desc: &str, deploy_err: color_eyre::Report) -> Response {
         let Some(prev) = previous else {
             self.record(desc, "failed");
             tracing::error!(
@@ -275,14 +259,10 @@ impl Supervisor {
                 "deploy failed and no previous slot — NO WORKER RUNNING"
             );
             return Response::Error {
-                message: format!(
-                    "deploy failed ({deploy_err:#}); no previous slot; no worker running"
-                ),
+                message: format!("deploy failed ({deploy_err:#}); no previous slot; no worker running"),
             };
         };
-        let prev_desc = commit_sha(&prev)
-            .await
-            .unwrap_or_else(|| prev.display().to_string());
+        let prev_desc = commit_sha(&prev).await.unwrap_or_else(|| prev.display().to_string());
         match self.spawn_and_validate(&prev).await {
             Ok(proc) => {
                 *self.worker.lock().await = Some(proc);
@@ -323,9 +303,7 @@ impl Supervisor {
             }
         };
 
-        let desc = commit_sha(&prev)
-            .await
-            .unwrap_or_else(|| prev.display().to_string());
+        let desc = commit_sha(&prev).await.unwrap_or_else(|| prev.display().to_string());
         tracing::info!(slot = %prev.display(), desc = %desc, "rollback starting");
 
         if let Some(old) = self.worker.lock().await.take() {
@@ -366,12 +344,7 @@ impl Supervisor {
             }
         };
         let (running, pid, uptime_secs, version) = match &*self.worker.lock().await {
-            Some(w) => (
-                true,
-                w.pid,
-                Some(w.started_at.elapsed().as_secs()),
-                w.version.clone(),
-            ),
+            Some(w) => (true, w.pid, Some(w.started_at.elapsed().as_secs()), w.version.clone()),
             None => (false, None, None, None),
         };
         let deploys = self
@@ -424,10 +397,7 @@ impl Supervisor {
         {
             Ok(child) => child,
             Err(e) => {
-                self.pending_ready
-                    .lock()
-                    .expect("pending_ready poisoned")
-                    .take();
+                self.pending_ready.lock().expect("pending_ready poisoned").take();
                 return Err(e).wrap_err_with(|| format!("spawn bun in {}", slot.display()));
             }
         };
@@ -444,10 +414,7 @@ impl Supervisor {
             }
         };
 
-        self.pending_ready
-            .lock()
-            .expect("pending_ready poisoned")
-            .take();
+        self.pending_ready.lock().expect("pending_ready poisoned").take();
 
         match outcome {
             Ok(()) => {

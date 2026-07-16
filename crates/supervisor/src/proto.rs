@@ -94,10 +94,7 @@ mod tests {
 
     #[test]
     fn error_response_tagged() {
-        let wire = serde_json::to_string(&Response::Error {
-            message: "boom".into(),
-        })
-        .unwrap();
+        let wire = serde_json::to_string(&Response::Error { message: "boom".into() }).unwrap();
         assert_eq!(wire, r#"{"status":"error","message":"boom"}"#);
     }
 }

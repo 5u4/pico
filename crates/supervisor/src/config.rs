@@ -50,10 +50,7 @@ impl Config {
             if is_executable_file(explicit) {
                 return Ok(explicit.clone());
             }
-            return Err(eyre!(
-                "configured bun_path {} is not an executable file",
-                explicit.display()
-            ));
+            return Err(eyre!("configured bun_path {} is not an executable file", explicit.display()));
         }
         for candidate in bun_candidates() {
             if is_executable_file(&candidate) {

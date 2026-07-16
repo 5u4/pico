@@ -30,19 +30,13 @@ async fn run_daemon() -> color_eyre::Result<()> {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
         .init();
-    tracing::info!(
-        version = env!("CARGO_PKG_VERSION"),
-        "pico supervisor starting"
-    );
+    tracing::info!(version = env!("CARGO_PKG_VERSION"), "pico supervisor starting");
 
     let dir = config::supervisor_dir()?;
     let config = config::Config::load(&dir)?;
     let bun = config.resolve_bun()?;
     tracing::info!(bun = %bun.display(), "resolved bun");
-    let socket_path = config
-        .socket_path
-        .clone()
-        .unwrap_or_else(|| dir.join("pico.sock"));
+    let socket_path = config.socket_path.clone().unwrap_or_else(|| dir.join("pico.sock"));
     let slots = slots::Slots::new(&dir)?;
     let sup = Arc::new(supervisor::Supervisor::new(config, bun, socket_path, slots));
 

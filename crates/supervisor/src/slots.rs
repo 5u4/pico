@@ -9,8 +9,7 @@ pub struct Slots {
 impl Slots {
     pub fn new(base: &Path) -> color_eyre::Result<Self> {
         let slots_dir = base.join("slots");
-        std::fs::create_dir_all(&slots_dir)
-            .wrap_err_with(|| format!("create {}", slots_dir.display()))?;
+        std::fs::create_dir_all(&slots_dir).wrap_err_with(|| format!("create {}", slots_dir.display()))?;
         Ok(Self { slots_dir })
     }
 
