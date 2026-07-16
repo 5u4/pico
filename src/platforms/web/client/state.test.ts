@@ -96,9 +96,10 @@ describe("reduce / server / snapshot", () => {
       event: {
         kind: "snapshot",
         conversationId: "conv-2",
-        messages: [userMessage("u1")],
+        messages: [userMessage("m1")],
         isStreaming: true,
         usage: null,
+        hasMore: false,
       },
     });
     expect(next).toBe(state);
@@ -111,7 +112,7 @@ describe("reduce / server / snapshot", () => {
       activeId: "conv-1",
       isRunning: false,
     };
-    const messages = [userMessage("u1"), assistantMessage("a1")];
+    const messages = [userMessage("m0"), assistantMessage("m1")];
     const { state: next } = reduce(state, {
       type: "server",
       event: {
@@ -120,10 +121,34 @@ describe("reduce / server / snapshot", () => {
         messages,
         isStreaming: true,
         usage: null,
+        hasMore: true,
       },
     });
-    expect(next.messages).toBe(messages);
+    expect(next.messages).toEqual(messages);
     expect(next.isRunning).toBe(true);
+    expect(next.hasMore).toBe(true);
+  });
+
+  test("merges a tail-window snapshot without dropping loaded-older messages", () => {
+    const state: ThreadState = {
+      ...initialState,
+      activeId: "conv-1",
+      messages: [userMessage("m0"), assistantMessage("m1")],
+      hasMore: false,
+    };
+    const { state: next } = reduce(state, {
+      type: "server",
+      event: {
+        kind: "snapshot",
+        conversationId: "conv-1",
+        messages: [assistantMessage("m1"), userMessage("m2")],
+        isStreaming: false,
+        usage: null,
+        hasMore: true,
+      },
+    });
+    expect(next.messages.map((m) => m.id)).toEqual(["m0", "m1", "m2"]);
+    expect(next.hasMore).toBe(true);
   });
 
   test("clears pending once a snapshot brings a new user message", () => {
@@ -133,7 +158,7 @@ describe("reduce / server / snapshot", () => {
       pending: userMessage("pending-user"),
       pendingBaseUserCount: 1,
     };
-    const messages = [userMessage("u1"), userMessage("u2")];
+    const messages = [userMessage("m0"), userMessage("m2")];
     const { state: next } = reduce(state, {
       type: "server",
       event: {
@@ -142,6 +167,7 @@ describe("reduce / server / snapshot", () => {
         messages,
         isStreaming: false,
         usage: null,
+        hasMore: false,
       },
     });
     expect(next.pending).toBeNull();
@@ -155,7 +181,7 @@ describe("reduce / server / snapshot", () => {
       pending: userMessage("pending-user"),
       pendingBaseUserCount: 1,
     };
-    const messages = [userMessage("u1")];
+    const messages = [userMessage("m0")];
     const { state: next } = reduce(state, {
       type: "server",
       event: {
@@ -164,10 +190,94 @@ describe("reduce / server / snapshot", () => {
         messages,
         isStreaming: false,
         usage: null,
+        hasMore: false,
       },
     });
     expect(next.pending).toEqual(userMessage("pending-user"));
     expect(next.pendingBaseUserCount).toBe(1);
+  });
+});
+
+describe("reduce / server / older", () => {
+  test("prepends older messages and updates hasMore", () => {
+    const state: ThreadState = {
+      ...initialState,
+      activeId: "conv-1",
+      messages: [userMessage("m4"), assistantMessage("m5")],
+      hasMore: true,
+      loadingOlder: true,
+    };
+    const { state: next } = reduce(state, {
+      type: "server",
+      event: {
+        kind: "older",
+        conversationId: "conv-1",
+        messages: [userMessage("m2"), assistantMessage("m3")],
+        hasMore: false,
+      },
+    });
+    expect(next.messages.map((m) => m.id)).toEqual(["m2", "m3", "m4", "m5"]);
+    expect(next.hasMore).toBe(false);
+    expect(next.loadingOlder).toBe(false);
+  });
+
+  test("ignored when conversationId does not match activeId", () => {
+    const state: ThreadState = {
+      ...initialState,
+      activeId: "conv-1",
+      loadingOlder: true,
+    };
+    const { state: next, commands } = reduce(state, {
+      type: "server",
+      event: {
+        kind: "older",
+        conversationId: "conv-2",
+        messages: [userMessage("m0")],
+        hasMore: false,
+      },
+    });
+    expect(next).toBe(state);
+    expect(commands).toEqual([]);
+  });
+});
+
+describe("reduce / loadOlder", () => {
+  test("emits a loadOlder command anchored on the first message", () => {
+    const state: ThreadState = {
+      ...initialState,
+      activeId: "conv-1",
+      messages: [userMessage("m2"), assistantMessage("m3")],
+      hasMore: true,
+    };
+    const { state: next, commands } = reduce(state, { type: "loadOlder" });
+    expect(next.loadingOlder).toBe(true);
+    expect(commands).toEqual([
+      { kind: "loadOlder", conversationId: "conv-1", beforeId: "m2" },
+    ]);
+  });
+
+  test("no-op when hasMore is false", () => {
+    const state: ThreadState = {
+      ...initialState,
+      activeId: "conv-1",
+      messages: [userMessage("m2")],
+      hasMore: false,
+    };
+    const { state: next, commands } = reduce(state, { type: "loadOlder" });
+    expect(next).toBe(state);
+    expect(commands).toEqual([]);
+  });
+
+  test("no-op when already loading older", () => {
+    const state: ThreadState = {
+      ...initialState,
+      activeId: "conv-1",
+      messages: [userMessage("m2")],
+      hasMore: true,
+      loadingOlder: true,
+    };
+    const { commands } = reduce(state, { type: "loadOlder" });
+    expect(commands).toEqual([]);
   });
 });
 

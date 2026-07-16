@@ -33,6 +33,11 @@ export const clientCommandSchema = z.union([
     }),
     z.object({ kind: z.literal("archive"), conversationId: z.string().min(1) }),
     z.object({ kind: z.literal("draft") }),
+    z.object({
+      kind: z.literal("loadOlder"),
+      conversationId: z.string().min(1),
+      beforeId: z.string().min(1),
+    }),
     z.object({ kind: z.literal("heartbeat") }),
   ]),
   commandSchema,
@@ -67,6 +72,13 @@ export type ServerEvent =
       messages: Message[];
       isStreaming: boolean;
       usage: ContextUsageInfo | null;
+      hasMore: boolean;
+    }
+  | {
+      kind: "older";
+      conversationId: string;
+      messages: Message[];
+      hasMore: boolean;
     }
   | {
       kind: "stream";

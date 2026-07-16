@@ -5,7 +5,13 @@ import type {
   ToolResultMessage,
   UserMessage,
 } from "@oh-my-pi/pi-ai";
-import { toMessages, toStreamMessage } from "./message.ts";
+import {
+  type Message,
+  olderWindow,
+  tailWindow,
+  toMessages,
+  toStreamMessage,
+} from "./message.ts";
 
 function user(text: string): UserMessage {
   return { role: "user", content: text, timestamp: 0 };
@@ -237,5 +243,48 @@ describe("toStreamMessage", () => {
     const committed: AgentMessage[] = [user("go")];
     const stream = assistant([{ type: "text", text: "hi" }]);
     expect(toStreamMessage(committed, stream)?.id).toBe("m1");
+  });
+});
+
+function msg(id: string): Message {
+  return { id, role: "user", parts: [{ type: "text", text: id }] };
+}
+
+describe("tailWindow", () => {
+  test("returns all with hasMore false when under the limit", () => {
+    const all = [msg("m0"), msg("m1")];
+    expect(tailWindow(all, 5)).toEqual({ window: all, hasMore: false });
+  });
+
+  test("keeps the last limit messages and flags hasMore", () => {
+    const all = [msg("m0"), msg("m1"), msg("m2"), msg("m3")];
+    const { window, hasMore } = tailWindow(all, 2);
+    expect(window.map((m) => m.id)).toEqual(["m2", "m3"]);
+    expect(hasMore).toBe(true);
+  });
+});
+
+describe("olderWindow", () => {
+  test("returns the page before the cursor and hasMore when more remain", () => {
+    const all = [msg("m0"), msg("m1"), msg("m2"), msg("m3")];
+    const { messages, hasMore } = olderWindow(all, "m3", 2);
+    expect(messages.map((m) => m.id)).toEqual(["m1", "m2"]);
+    expect(hasMore).toBe(true);
+  });
+
+  test("stops at the start with hasMore false", () => {
+    const all = [msg("m0"), msg("m1"), msg("m2")];
+    const { messages, hasMore } = olderWindow(all, "m2", 5);
+    expect(messages.map((m) => m.id)).toEqual(["m0", "m1"]);
+    expect(hasMore).toBe(false);
+  });
+
+  test("empty when the cursor is the first message or missing", () => {
+    const all = [msg("m0"), msg("m1")];
+    expect(olderWindow(all, "m0", 5)).toEqual({ messages: [], hasMore: false });
+    expect(olderWindow(all, "nope", 5)).toEqual({
+      messages: [],
+      hasMore: false,
+    });
   });
 });

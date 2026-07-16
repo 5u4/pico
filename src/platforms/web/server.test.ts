@@ -245,6 +245,45 @@ describe("createServer websocket round-trip", () => {
     }
   });
 
+  test("loadOlder returns an older page for the active conversation", async () => {
+    const harness = startServer();
+    const client = await TestClient.connect(harness.port);
+    try {
+      const open = await client.waitFor((e) => e.kind === "workspaces");
+      if (open.kind !== "workspaces") return;
+      const workspaceId = open.items[0]?.id;
+      if (!workspaceId) return;
+      client.send({ kind: "create", workspaceId });
+      const created = await client.waitFor(
+        (e) =>
+          e.kind === "workspaces" && e.items[0]?.conversations.length === 1,
+      );
+      if (created.kind !== "workspaces") return;
+      const conversationId = created.items[0]?.conversations[0]?.id;
+      if (!conversationId) return;
+
+      client.send({ kind: "prompt", text: "one" });
+      const snap = await client.waitFor(
+        (e) =>
+          e.kind === "snapshot" &&
+          e.messages.some((m) => m.role === "assistant"),
+      );
+      if (snap.kind !== "snapshot") return;
+      const firstId = snap.messages[0]?.id;
+      if (!firstId) return;
+
+      client.send({ kind: "loadOlder", conversationId, beforeId: firstId });
+      const older = await client.waitFor((e) => e.kind === "older");
+      expect(older.kind).toBe("older");
+      if (older.kind !== "older") return;
+      expect(older.conversationId).toBe(conversationId);
+      expect(older.hasMore).toBe(false);
+    } finally {
+      client.close();
+      await harness.close();
+    }
+  });
+
   test("an unrecognized command is dropped without tearing down the socket", async () => {
     const harness = startServer();
     const client = await TestClient.connect(harness.port);

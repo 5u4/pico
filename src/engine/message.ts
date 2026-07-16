@@ -173,3 +173,25 @@ export function toStreamMessage(
   if (parts.length === 0) return null;
   return { id: `m${start}`, role: "assistant", parts };
 }
+
+export const SNAPSHOT_TAIL = 40;
+export const OLDER_PAGE = 30;
+
+export function tailWindow(
+  messages: Message[],
+  limit: number,
+): { window: Message[]; hasMore: boolean } {
+  if (messages.length <= limit) return { window: messages, hasMore: false };
+  return { window: messages.slice(messages.length - limit), hasMore: true };
+}
+
+export function olderWindow(
+  messages: Message[],
+  beforeId: string,
+  limit: number,
+): { messages: Message[]; hasMore: boolean } {
+  const index = messages.findIndex((m) => m.id === beforeId);
+  if (index <= 0) return { messages: [], hasMore: false };
+  const start = Math.max(0, index - limit);
+  return { messages: messages.slice(start, index), hasMore: start > 0 };
+}

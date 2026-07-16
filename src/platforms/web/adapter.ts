@@ -126,6 +126,24 @@ export class WebHub<S extends SessionLike = SessionLike> {
       return;
     }
 
+    if (command.kind === "loadOlder") {
+      if (ws.data.conversationId !== command.conversationId) return;
+      const older = this.deps.engine.loadOlder(
+        command.conversationId,
+        command.beforeId,
+      );
+      if (!older) return;
+      ws.send(
+        JSON.stringify({
+          kind: "older",
+          conversationId: command.conversationId,
+          messages: older.messages,
+          hasMore: older.hasMore,
+        } satisfies ServerEvent),
+      );
+      return;
+    }
+
     if (command.kind === "select") {
       const conversation = getConversation(
         this.deps.db,
@@ -285,6 +303,7 @@ export class WebHub<S extends SessionLike = SessionLike> {
       messages: snap.messages,
       isStreaming: snap.streaming,
       usage: snap.usage,
+      hasMore: snap.hasMore,
     };
   }
 
@@ -301,6 +320,7 @@ export class WebHub<S extends SessionLike = SessionLike> {
             messages: event.messages,
             isStreaming: event.streaming,
             usage: event.usage,
+            hasMore: event.hasMore,
           }
         : {
             kind: "stream",

@@ -16,7 +16,7 @@ import {
   SlashIcon,
   SquareIcon,
 } from "lucide-react";
-import { useRef } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef } from "react";
 import { cn } from "../lib/utils";
 import { useShell, useThread } from "../runtime";
 import { DotMatrix } from "./assistant-ui/dot-matrix";
@@ -257,8 +257,59 @@ function ThreadWelcome() {
   );
 }
 
+function useOlderLoader() {
+  const { messages, hasMore, loadingOlder, loadOlder } = useThread();
+  const viewportRef = useRef<HTMLDivElement | null>(null);
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
+  const anchorRef = useRef<{ height: number; top: number } | null>(null);
+  const busyRef = useRef(false);
+  const prevFirstIdRef = useRef<string | null>(null);
+
+  const requestOlder = useCallback(() => {
+    const el = viewportRef.current;
+    if (!el || busyRef.current) return;
+    busyRef.current = true;
+    anchorRef.current = { height: el.scrollHeight, top: el.scrollTop };
+    loadOlder();
+  }, [loadOlder]);
+
+  useEffect(() => {
+    const el = viewportRef.current;
+    const sentinel = sentinelRef.current;
+    if (!el || !sentinel || !hasMore) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) requestOlder();
+      },
+      { root: el, rootMargin: "300px 0px 0px 0px" },
+    );
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [hasMore, requestOlder]);
+
+  useLayoutEffect(() => {
+    const el = viewportRef.current;
+    const anchor = anchorRef.current;
+    const firstId = messages[0]?.id ?? null;
+    if (
+      el &&
+      anchor &&
+      firstId !== null &&
+      firstId !== prevFirstIdRef.current
+    ) {
+      el.scrollTop = anchor.top + (el.scrollHeight - anchor.height);
+      anchorRef.current = null;
+      busyRef.current = false;
+    }
+    prevFirstIdRef.current = firstId;
+  }, [messages]);
+
+  return { viewportRef, sentinelRef, hasMore, loadingOlder };
+}
+
 export function Thread() {
   const isEmpty = useAuiState((s) => s.thread.messages.length === 0);
+  const { viewportRef, sentinelRef, hasMore, loadingOlder } = useOlderLoader();
 
   return (
     <ThreadPrimitive.Root
@@ -271,12 +322,21 @@ export function Thread() {
       }}
     >
       <ThreadPrimitive.Viewport
+        ref={viewportRef}
         turnAnchor="top"
         className={cn(
           "relative flex flex-1 flex-col overflow-y-scroll overscroll-contain scroll-smooth px-4 pt-4",
           isEmpty && "justify-center",
         )}
       >
+        {hasMore && (
+          <div
+            ref={sentinelRef}
+            className="flex h-6 shrink-0 items-center justify-center text-xs text-muted-foreground"
+          >
+            {loadingOlder ? "Loading earlier messages…" : ""}
+          </div>
+        )}
         <ThreadPrimitive.Empty>
           <ThreadWelcome />
         </ThreadPrimitive.Empty>
