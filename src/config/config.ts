@@ -7,6 +7,7 @@ export const configSchema = z.object({
   workspaceCwd: z.string().min(1).default(join(homedir(), ".pico")),
   web: z
     .object({
+      enabled: z.boolean().default(false),
       port: z.number().int().positive().default(4141),
     })
     .prefault({}),

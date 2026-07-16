@@ -10,18 +10,18 @@ describe("parseConfig", () => {
     expect(result.isOk()).toBe(true);
     expect(result._unsafeUnwrap()).toEqual({
       workspaceCwd: join(homedir(), ".pico"),
-      web: { port: 4141 },
+      web: { enabled: false, port: 4141 },
     });
   });
 
   test("accepts explicit values", () => {
     const result = parseConfig({
-      web: { port: 8080 },
+      web: { enabled: true, port: 8080 },
       workspaceCwd: "/tmp/projects",
     });
     expect(result._unsafeUnwrap()).toEqual({
       workspaceCwd: "/tmp/projects",
-      web: { port: 8080 },
+      web: { enabled: true, port: 8080 },
     });
   });
 
@@ -37,7 +37,7 @@ describe("loadConfig", () => {
     );
     expect(result._unsafeUnwrap()).toEqual({
       workspaceCwd: join(homedir(), ".pico"),
-      web: { port: 4141 },
+      web: { enabled: false, port: 4141 },
     });
   });
 
@@ -48,7 +48,7 @@ describe("loadConfig", () => {
       const result = await loadConfig(path);
       expect(result._unsafeUnwrap()).toEqual({
         workspaceCwd: join(homedir(), ".pico"),
-        web: { port: 5000 },
+        web: { enabled: false, port: 5000 },
       });
     } finally {
       rmSync(path, { force: true });
@@ -62,7 +62,7 @@ describe("loadConfig", () => {
       const result = await loadConfig(path);
       expect(result._unsafeUnwrap()).toEqual({
         workspaceCwd: join(homedir(), ".pico"),
-        web: { port: 4141 },
+        web: { enabled: false, port: 4141 },
       });
     } finally {
       rmSync(path, { force: true });
@@ -76,7 +76,7 @@ describe("loadConfig", () => {
       const result = await loadConfig(path);
       expect(result._unsafeUnwrap()).toEqual({
         workspaceCwd: "/tmp/projects",
-        web: { port: 4141 },
+        web: { enabled: false, port: 4141 },
       });
     } finally {
       rmSync(path, { force: true });
