@@ -411,6 +411,43 @@ describe("Engine auto-title", () => {
     expect(sessions.get(conversation.id)?.setSessionNameCalls).toEqual([]);
   });
 
+  test("skips session sync and broadcast when the conversation vanished", async () => {
+    const db = openDb(":memory:");
+    const workspace = getOrCreateDefaultWorkspace(db, "web", CWD, "web");
+    const conversation = createConversation(db, {
+      workspaceId: workspace.id,
+      cwd: CWD,
+      title: null,
+    });
+    const sessions = new FakeSessions();
+    const { promise: attempted, resolve } = Promise.withResolvers<void>();
+    const engine = new Engine<FakeSession>({
+      db,
+      sessions,
+      autoTitle: () => {
+        db.query("DELETE FROM conversations WHERE id = $id").run({
+          id: conversation.id,
+        });
+        resolve();
+        return Promise.resolve("Fix the parser");
+      },
+    });
+    const events: TurnEvent[] = [];
+    const { opened } = engine.subscribe(conversation.id, CWD, "live", (e) =>
+      events.push(e),
+    );
+    await opened;
+
+    await engine.prompt(conversation.id, CWD, "the parser is broken");
+    await attempted;
+    await Promise.resolve();
+
+    expect(
+      events.some((e) => e.kind === "title" && e.title === "Fix the parser"),
+    ).toBe(false);
+    expect(sessions.get(conversation.id)?.setSessionNameCalls).toEqual([]);
+  });
+
   test("titles only on the first turn of a conversation", async () => {
     const db = openDb(":memory:");
     const workspace = getOrCreateDefaultWorkspace(db, "web", CWD, "web");

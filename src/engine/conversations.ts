@@ -352,7 +352,7 @@ export class Engine<S extends SessionLike = SessionLike> {
     const context = titleContext(prompt, reply);
     const title = await this.deps.autoTitle(session, context).catch(() => null);
     if (!title) return;
-    setConversationTitle(this.deps.db, conversationId, title);
+    if (!setConversationTitle(this.deps.db, conversationId, title)) return;
     await session.setSessionName(title, "auto").catch((e: unknown) => {
       logger.error("title sync to omp session failed: {error}", { error: e });
     });
