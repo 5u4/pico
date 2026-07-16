@@ -34,7 +34,7 @@ test.describe("pico web streaming", () => {
     await expect(page.getByLabel("Send message")).toBeVisible();
     await expect(page.getByText("Working")).toHaveCount(0);
 
-    await page.waitForTimeout(700);
+    await page.waitForTimeout(1500);
     await expect(
       page.getByText("streamed reply to cancel me now please stop soon"),
     ).toHaveCount(0);

@@ -9,8 +9,6 @@ import type {
 
 export type FakeResponder = (text: string) => AgentMessage[];
 
-export type FakeSessionOptions = { stepMs?: number };
-
 export const echoResponder: FakeResponder = (text) => [
   {
     role: "assistant",
