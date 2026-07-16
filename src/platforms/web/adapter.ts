@@ -14,6 +14,7 @@ import {
   getWorkspace,
   listConversations,
   listWorkspaces,
+  renameWorkspace,
 } from "../../engine/registry";
 import type { Platform } from "../../store/schema";
 import { assertNever } from "../../util/assert";
@@ -151,6 +152,21 @@ export class WebHub<S extends SessionLike = SessionLike> {
       this.sendWorkspaces(ws, created.id);
       for (const other of this.allSockets)
         if (other !== ws) this.sendWorkspaces(other);
+      return;
+    }
+
+    if (command.kind === "renameWorkspace") {
+      const target = getWorkspace(this.deps.db, command.workspaceId);
+      if (target?.platform !== PLATFORM) {
+        this.sendError(ws, `unknown workspace: ${command.workspaceId}`);
+        return;
+      }
+      renameWorkspace(this.deps.db, target.id, command.label);
+      logger.info("workspace renamed {workspaceId} (label {label})", {
+        workspaceId: target.id,
+        label: command.label,
+      });
+      for (const other of this.allSockets) this.sendWorkspaces(other);
       return;
     }
 

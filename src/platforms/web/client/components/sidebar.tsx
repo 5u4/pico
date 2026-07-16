@@ -2,9 +2,10 @@ import {
   ArchiveIcon,
   ChevronRightIcon,
   FolderIcon,
+  PencilIcon,
   PlusIcon,
 } from "lucide-react";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { z } from "zod";
 import type { ConversationSummary, WorkspaceSummary } from "../../protocol";
 import { cn } from "../lib/utils";
@@ -18,6 +19,12 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from "./ui/collapsible";
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuTrigger,
+} from "./ui/context-menu";
 
 function ConversationRow({
   conversation,
@@ -65,6 +72,7 @@ function WorkspaceItem({
   onSelect,
   onCreate,
   onArchive,
+  onRename,
 }: {
   workspace: WorkspaceSummary;
   activeId: string | null;
@@ -73,34 +81,85 @@ function WorkspaceItem({
   onSelect: (id: string) => void;
   onCreate: (workspaceId: string) => void;
   onArchive: (conversationId: string) => void;
+  onRename: (workspaceId: string, label: string) => void;
 }) {
+  const [renaming, setRenaming] = useState(false);
+  const [draft, setDraft] = useState("");
+  const cancelRename = useRef(false);
   const activeConversation =
     activeId === null
       ? undefined
       : workspace.conversations.find((c) => c.id === activeId);
+  const startRename = () => {
+    setDraft(workspace.label ?? "");
+    setRenaming(true);
+  };
+  const submitRename = () => {
+    if (cancelRename.current) {
+      cancelRename.current = false;
+      setRenaming(false);
+      return;
+    }
+    const label = draft.trim();
+    if (label && label !== workspace.label) onRename(workspace.id, label);
+    setRenaming(false);
+  };
   return (
     <Collapsible open={open} onOpenChange={onOpenChange} className="mb-1">
-      <div className="group flex items-center gap-1 rounded-md pr-1 hover:bg-accent/50">
-        <CollapsibleTrigger className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md px-2 py-1.5 text-left text-sm">
-          <ChevronRightIcon
-            className={cn(
-              "size-3.5 shrink-0 text-muted-foreground transition-transform",
-              open && "rotate-90",
-            )}
+      {renaming ? (
+        <div className="px-2 py-1">
+          <input
+            // biome-ignore lint/a11y/noAutofocus: focus the inline field on open
+            autoFocus
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") e.currentTarget.blur();
+              if (e.key === "Escape") {
+                cancelRename.current = true;
+                e.currentTarget.blur();
+              }
+            }}
+            onBlur={submitRename}
+            aria-label="Rename workspace"
+            className="w-full rounded-md border border-input bg-background px-2 py-1 text-sm outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
           />
-          <FolderIcon className="size-4 shrink-0 text-muted-foreground" />
-          <span className="truncate">{workspace.label ?? "workspace"}</span>
-        </CollapsibleTrigger>
-        <TooltipIconButton
-          tooltip="New Conversation"
-          side="bottom"
-          className="size-6 opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
-          onClick={() => onCreate(workspace.id)}
-          aria-label="New conversation"
-        >
-          <PlusIcon className="size-3.5" />
-        </TooltipIconButton>
-      </div>
+        </div>
+      ) : (
+        <ContextMenu>
+          <ContextMenuTrigger asChild>
+            <div className="group flex items-center gap-1 rounded-md pr-1 hover:bg-accent/50">
+              <CollapsibleTrigger className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md px-2 py-1.5 text-left text-sm">
+                <ChevronRightIcon
+                  className={cn(
+                    "size-3.5 shrink-0 text-muted-foreground transition-transform",
+                    open && "rotate-90",
+                  )}
+                />
+                <FolderIcon className="size-4 shrink-0 text-muted-foreground" />
+                <span className="truncate">
+                  {workspace.label ?? "workspace"}
+                </span>
+              </CollapsibleTrigger>
+              <TooltipIconButton
+                tooltip="New Conversation"
+                side="bottom"
+                className="size-6 opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
+                onClick={() => onCreate(workspace.id)}
+                aria-label="New conversation"
+              >
+                <PlusIcon className="size-3.5" />
+              </TooltipIconButton>
+            </div>
+          </ContextMenuTrigger>
+          <ContextMenuContent>
+            <ContextMenuItem onSelect={startRename}>
+              <PencilIcon />
+              Rename
+            </ContextMenuItem>
+          </ContextMenuContent>
+        </ContextMenu>
+      )}
       {!open && activeConversation && (
         <div className="ml-4 border-l border-border pl-1">
           <ConversationRow
@@ -133,8 +192,15 @@ function WorkspaceItem({
 }
 
 export function Sidebar({ collapsed }: { collapsed: boolean }) {
-  const { workspaces, activeId, select, create, createWorkspace, archive } =
-    useShell();
+  const {
+    workspaces,
+    activeId,
+    select,
+    create,
+    createWorkspace,
+    renameWorkspace,
+    archive,
+  } = useShell();
   const [naming, setNaming] = useState(false);
   const [name, setName] = useState("");
   const [collapsedIds, setCollapsedIds] = usePersisted(
@@ -214,6 +280,7 @@ export function Sidebar({ collapsed }: { collapsed: boolean }) {
               onSelect={select}
               onCreate={create}
               onArchive={archive}
+              onRename={renameWorkspace}
             />
           ))}
         </nav>

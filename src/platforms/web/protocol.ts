@@ -21,6 +21,11 @@ export const clientCommandSchema = z.union([
       prompt: z.string().min(1).optional(),
     }),
     z.object({ kind: z.literal("createWorkspace"), label: z.string().min(1) }),
+    z.object({
+      kind: z.literal("renameWorkspace"),
+      workspaceId: z.string().min(1),
+      label: z.string().min(1),
+    }),
     z.object({ kind: z.literal("archive"), conversationId: z.string().min(1) }),
     z.object({ kind: z.literal("draft") }),
   ]),

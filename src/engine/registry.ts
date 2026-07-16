@@ -61,6 +61,17 @@ export function getWorkspace(db: Database, id: string): Workspace | undefined {
   return row ? workspaceSchema.parse(row) : undefined;
 }
 
+export function renameWorkspace(
+  db: Database,
+  id: string,
+  label: string,
+): boolean {
+  const result = db
+    .query("UPDATE workspaces SET label = $label WHERE id = $id")
+    .run({ id, label });
+  return result.changes > 0;
+}
+
 export function listConversations(
   db: Database,
   workspaceId: string,
