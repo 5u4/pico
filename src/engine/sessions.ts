@@ -10,6 +10,11 @@ import { err, ok, Result, ResultAsync } from "neverthrow";
 import { isValidId } from "../util/id";
 import { log } from "../util/log";
 import { errMessage } from "../util/result";
+import {
+  assembleAppendPrompt,
+  defaultIdentityPath,
+  loadIdentity,
+} from "./identity";
 import type { OmpRuntime } from "./runtime";
 
 const logger = log(["sessions"]);
@@ -21,11 +26,13 @@ export interface OpenOptions {
 
 export interface SessionsOptions {
   sessionsRoot?: string;
+  identityPath?: string;
 }
 
 export class Sessions {
   private readonly runtime: OmpRuntime;
   private readonly sessionsRoot: string;
+  private readonly identityPath: string;
   private readonly live = new Map<string, AgentSession>();
   private readonly pending = new Map<string, Promise<AgentSession>>();
   private generation = 0;
@@ -34,6 +41,7 @@ export class Sessions {
     this.runtime = runtime;
     this.sessionsRoot =
       options.sessionsRoot ?? join(homedir(), ".pico", "sessions");
+    this.identityPath = options.identityPath ?? defaultIdentityPath();
   }
 
   async open(
@@ -108,6 +116,9 @@ export class Sessions {
       ? await SessionManager.open(resumeFile, sessionDir)
       : SessionManager.create(options.cwd, sessionDir);
 
+    const appendSystemPrompt = assembleAppendPrompt(
+      loadIdentity(this.identityPath),
+    );
     const { session } = await createAgentSession({
       cwd: options.cwd,
       sessionManager,
@@ -116,6 +127,7 @@ export class Sessions {
       settings: this.runtime.settings,
       authStorage: this.runtime.authStorage,
       modelRegistry: this.runtime.modelRegistry,
+      appendSystemPrompt,
       skipPythonPreflight: true,
       autoApprove: true,
       hasUI: false,

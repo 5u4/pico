@@ -1,3 +1,4 @@
+import { join } from "node:path";
 import { dispose } from "@logtape/logtape";
 import { loadConfig } from "./config/config";
 import { Engine } from "./engine/conversations";
@@ -34,7 +35,9 @@ if (provisioned.isErr()) {
 }
 
 const db = openDb(defaultDbPath());
-const sessions = new Sessions(provisioned.value);
+const sessions = new Sessions(provisioned.value, {
+  identityPath: join(config.workspaceCwd, "identity.md"),
+});
 const engine = new Engine({ db, sessions, autoTitle });
 let server: Bun.Server<WsData> | undefined;
 if (config.web.enabled) {
