@@ -39,6 +39,7 @@ const hub = new WebHub<FakeWebSession>({
   db,
   engine,
   workspaceCwd: "/tmp/pico-e2e-sticky",
+  worktreeCwd: "/tmp/pico-e2e-sticky",
 });
 const server = createServer({ port, hub, index, development: true });
 
