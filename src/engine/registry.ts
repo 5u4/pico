@@ -155,7 +155,6 @@ export function createConversation(
     workspaceId: string;
     cwd: string;
     title: string | null;
-    branch?: string | null;
     externalId?: string | null;
   },
 ): Conversation {
@@ -164,33 +163,21 @@ export function createConversation(
     workspaceId: input.workspaceId,
     cwd: input.cwd,
     title: input.title,
-    branch: input.branch ?? null,
     externalId: input.externalId ?? null,
     createdAt: Date.now(),
     archivedAt: null,
   };
   db.query(
     `INSERT INTO conversations
-       (id, workspaceId, cwd, title, branch, externalId, createdAt, archivedAt)
+       (id, workspaceId, cwd, title, externalId, createdAt, archivedAt)
      VALUES
-       ($id, $workspaceId, $cwd, $title, $branch, $externalId, $createdAt, $archivedAt)`,
+       ($id, $workspaceId, $cwd, $title, $externalId, $createdAt, $archivedAt)`,
   ).run(row);
   logger.info(
     "conversation created {conversationId} in workspace {workspaceId}",
     { conversationId: row.id, workspaceId: input.workspaceId },
   );
   return conversationSchema.parse(row);
-}
-
-export function setConversationBranch(
-  db: Database,
-  id: string,
-  branch: string,
-): boolean {
-  const result = db
-    .query("UPDATE conversations SET branch = $branch WHERE id = $id")
-    .run({ id, branch });
-  return result.changes > 0;
 }
 
 export function setProvisionalTitle(
@@ -223,10 +210,11 @@ export function countActiveWorktreeConversations(
 ): number {
   const row = db
     .query(
-      `SELECT COUNT(*) AS n FROM conversations
-       WHERE workspaceId = $workspaceId
-         AND archivedAt IS NULL
-         AND branch IS NOT NULL`,
+      `SELECT COUNT(*) AS n FROM conversations c
+       JOIN workspaces w ON w.id = c.workspaceId
+       WHERE c.workspaceId = $workspaceId
+         AND c.archivedAt IS NULL
+         AND w.defaultBranch IS NOT NULL`,
     )
     .get({ workspaceId }) as { n: number };
   return row.n;

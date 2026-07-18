@@ -22,7 +22,7 @@ import {
   renameWorkspace,
   updateWorkspaceCwd,
 } from "../../engine/registry";
-import { sanitizeRefSegment } from "../../engine/worktree";
+import { currentBranch, sanitizeRefSegment } from "../../engine/worktree";
 import { isWorktreeWorkspace, type Platform } from "../../store/schema";
 import { assertNever } from "../../util/assert";
 import type {
@@ -90,7 +90,7 @@ export class WebHub<S extends SessionLike = SessionLike> {
     void this.deps.engine.releaseIfIdle(conversationId);
   }
 
-  handleOpen(ws: HubSocket): void {
+  async handleOpen(ws: HubSocket): Promise<void> {
     this.allSockets.add(ws);
     const target = getOrCreateDefaultWorkspace(
       this.deps.db,
@@ -101,7 +101,7 @@ export class WebHub<S extends SessionLike = SessionLike> {
     const hasConversations = listWorkspaces(this.deps.db, PLATFORM).some(
       (w) => listConversations(this.deps.db, w.id).length > 0,
     );
-    this.sendWorkspaces(ws, hasConversations ? undefined : target.id);
+    await this.sendWorkspaces(ws, hasConversations ? undefined : target.id);
     ws.send(
       JSON.stringify({
         kind: "attention",
@@ -164,7 +164,7 @@ export class WebHub<S extends SessionLike = SessionLike> {
 
     if (command.kind === "draft") {
       this.detach(ws);
-      this.sendWorkspaces(ws);
+      await this.sendWorkspaces(ws);
       return;
     }
 
@@ -208,9 +208,9 @@ export class WebHub<S extends SessionLike = SessionLike> {
         label: command.label,
       });
       this.detach(ws);
-      this.sendWorkspaces(ws, created.id);
+      await this.sendWorkspaces(ws, created.id);
       for (const other of this.allSockets)
-        if (other !== ws) this.sendWorkspaces(other);
+        if (other !== ws) await this.sendWorkspaces(other);
       return;
     }
 
@@ -221,7 +221,7 @@ export class WebHub<S extends SessionLike = SessionLike> {
         return;
       }
       renameWorkspace(this.deps.db, target.id, command.label);
-      for (const other of this.allSockets) this.sendWorkspaces(other);
+      for (const other of this.allSockets) await this.sendWorkspaces(other);
       return;
     }
 
@@ -273,7 +273,7 @@ export class WebHub<S extends SessionLike = SessionLike> {
         };
       }
       updateWorkspaceCwd(this.deps.db, target.id, command.cwd, worktree);
-      for (const other of this.allSockets) this.sendWorkspaces(other);
+      for (const other of this.allSockets) await this.sendWorkspaces(other);
       return;
     }
 
@@ -303,18 +303,18 @@ export class WebHub<S extends SessionLike = SessionLike> {
       ].filter((viewer) => viewer !== ws);
       if (wasViewing) {
         this.detach(ws);
-        this.sendWorkspaces(ws, target.id);
+        await this.sendWorkspaces(ws, target.id);
       } else {
-        this.sendWorkspaces(ws);
+        await this.sendWorkspaces(ws);
       }
       for (const viewer of otherViewers) {
         this.detach(viewer);
-        this.sendWorkspaces(viewer, target.id);
+        await this.sendWorkspaces(viewer, target.id);
       }
       this.finalizeArchive(conversation.id);
       for (const other of this.allSockets)
         if (other !== ws && !otherViewers.includes(other))
-          this.sendWorkspaces(other);
+          await this.sendWorkspaces(other);
       return;
     }
 
@@ -340,9 +340,9 @@ export class WebHub<S extends SessionLike = SessionLike> {
       return;
     }
     this.attach(ws, created.id);
-    this.sendWorkspaces(ws);
+    await this.sendWorkspaces(ws);
     for (const other of this.allSockets)
-      if (other !== ws) this.sendWorkspaces(other);
+      if (other !== ws) await this.sendWorkspaces(other);
     if (command.prompt) {
       const promptResult = await this.deps.engine.prompt(
         created.id,
@@ -365,21 +365,27 @@ export class WebHub<S extends SessionLike = SessionLike> {
     }
   }
 
-  private workspaceTree(): WorkspaceSummary[] {
-    return listWorkspaces(this.deps.db, PLATFORM).map((w) => ({
-      id: w.id,
-      label: w.label,
-      cwd: w.cwd,
-      worktree: isWorktreeWorkspace(w),
-      defaultBranch: w.defaultBranch,
-      branchPrefix: w.branchPrefix,
-      conversations: listConversations(this.deps.db, w.id).map((c) => ({
-        id: c.id,
-        title: c.title,
-        cwd: c.cwd,
-        branch: c.branch,
+  private workspaceTree(): Promise<WorkspaceSummary[]> {
+    return Promise.all(
+      listWorkspaces(this.deps.db, PLATFORM).map(async (w) => ({
+        id: w.id,
+        label: w.label,
+        cwd: w.cwd,
+        worktree: isWorktreeWorkspace(w),
+        defaultBranch: w.defaultBranch,
+        branchPrefix: w.branchPrefix,
+        conversations: await Promise.all(
+          listConversations(this.deps.db, w.id).map(async (c) => ({
+            id: c.id,
+            title: c.title,
+            cwd: c.cwd,
+            branch: isWorktreeWorkspace(w)
+              ? (await currentBranch(c.cwd)).unwrapOr(null)
+              : null,
+          })),
+        ),
       })),
-    }));
+    );
   }
 
   private snapshotEvent(conversationId: string): ServerEvent | undefined {
@@ -395,9 +401,12 @@ export class WebHub<S extends SessionLike = SessionLike> {
     };
   }
 
-  private dispatch(conversationId: string, event: TurnEvent): void {
+  private async dispatch(
+    conversationId: string,
+    event: TurnEvent,
+  ): Promise<void> {
     if (event.kind === "title") {
-      for (const ws of this.allSockets) this.sendWorkspaces(ws);
+      for (const ws of this.allSockets) await this.sendWorkspaces(ws);
       return;
     }
     const payload = JSON.stringify(
@@ -463,10 +472,13 @@ export class WebHub<S extends SessionLike = SessionLike> {
     ws.data.conversationId = null;
   }
 
-  private sendWorkspaces(ws: HubSocket, draftWorkspaceId?: string): void {
+  private async sendWorkspaces(
+    ws: HubSocket,
+    draftWorkspaceId?: string,
+  ): Promise<void> {
     const event: ServerEvent = {
       kind: "workspaces",
-      items: this.workspaceTree(),
+      items: await this.workspaceTree(),
       activeId: ws.data.conversationId,
       ...(draftWorkspaceId ? { draftWorkspaceId } : {}),
     };
@@ -490,7 +502,7 @@ export class WebHub<S extends SessionLike = SessionLike> {
     }
     this.attach(ws, conversationId);
     this.clearAttention(conversationId);
-    this.sendWorkspaces(ws);
+    await this.sendWorkspaces(ws);
     const snap = this.snapshotEvent(conversationId);
     if (snap) ws.send(JSON.stringify(snap));
   }

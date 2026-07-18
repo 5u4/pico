@@ -6,9 +6,10 @@ import {
   isWorktreeWorkspace,
   type Workspace,
 } from "../store/schema";
-import { createConversation, setConversationBranch } from "./registry";
+import { createConversation } from "./registry";
 import {
   createWorktree,
+  currentBranch,
   removeWorktree,
   renameBranch,
   slugify,
@@ -20,6 +21,13 @@ export function worktreeDest(
   conversationId: string,
 ): string {
   return join(worktreeCwd, workspaceId, conversationId);
+}
+
+function initialBranch(
+  workspace: Workspace & { branchPrefix: string },
+  conversationId: string,
+): string {
+  return `${workspace.branchPrefix}/${conversationId.slice(-8).toLowerCase()}`;
 }
 
 export async function provisionConversation(
@@ -36,7 +44,7 @@ export async function provisionConversation(
   if (!isWorktreeWorkspace(workspace)) return ok(conversation);
 
   const dest = worktreeDest(worktreeCwd, workspace.id, conversation.id);
-  const branch = `${workspace.branchPrefix}/${conversation.id.slice(-8).toLowerCase()}`;
+  const branch = initialBranch(workspace, conversation.id);
   const created = await createWorktree({
     baseRepo: workspace.cwd,
     defaultBranch: workspace.defaultBranch,
@@ -49,10 +57,11 @@ export async function provisionConversation(
     });
     return err(created.error);
   }
-  db.query(
-    "UPDATE conversations SET cwd = $cwd, branch = $branch WHERE id = $id",
-  ).run({ cwd: dest, branch, id: conversation.id });
-  return ok({ ...conversation, cwd: dest, branch });
+  db.query("UPDATE conversations SET cwd = $cwd WHERE id = $id").run({
+    cwd: dest,
+    id: conversation.id,
+  });
+  return ok({ ...conversation, cwd: dest });
 }
 export function deprovisionConversation(
   workspace: Workspace,
@@ -63,20 +72,21 @@ export function deprovisionConversation(
 }
 
 export async function renameConversationBranch(
-  db: Database,
   workspace: Workspace,
   conversation: Conversation,
   title: string,
 ): Promise<Result<void, string>> {
-  if (!isWorktreeWorkspace(workspace) || !conversation.branch) return ok();
+  if (!isWorktreeWorkspace(workspace)) return ok();
   const slug = slugify(title);
   if (!slug) return ok();
+  const live = await currentBranch(conversation.cwd);
+  if (live.isErr() || live.value !== initialBranch(workspace, conversation.id))
+    return ok();
   const renamed = await renameBranch({
     baseRepo: workspace.cwd,
-    from: conversation.branch,
+    from: live.value,
     to: `${workspace.branchPrefix}/${slug}`,
   });
   if (renamed.isErr()) return err(renamed.error);
-  setConversationBranch(db, conversation.id, renamed.value);
   return ok();
 }
