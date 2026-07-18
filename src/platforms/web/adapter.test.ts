@@ -188,7 +188,7 @@ function makeHub(
     workspaceCwd: WORKSPACE_CWD,
     worktreeCwd: WORKSPACE_CWD,
   });
-  return { db, workspace, sessions, hub };
+  return { db, workspace, sessions, hub, engine };
 }
 
 describe("WebHub.handleOpen", () => {
@@ -882,5 +882,72 @@ describe("WebHub concurrent activation", () => {
 
     expect(a.sent.filter((e) => e.kind === "stream")).toHaveLength(1);
     expect(b.sent.filter((e) => e.kind === "stream")).toHaveLength(1);
+  });
+});
+
+describe("WebHub attention on turn settle", () => {
+  test("a turn settling with no viewer flags attention and broadcasts to all sockets", async () => {
+    const { hub, db, workspace, engine } = makeHub();
+    const conversation = createConversation(db, {
+      workspaceId: workspace.id,
+      cwd: workspace.cwd,
+      title: null,
+    });
+    const ws = new FakeSocket();
+    hub.handleOpen(ws);
+    ws.sent.length = 0;
+
+    await engine.prompt(conversation.id, conversation.cwd, "hi");
+
+    const event = ws.sent.find((e) => e.kind === "attention");
+    expect(event?.kind).toBe("attention");
+    if (event?.kind !== "attention") return;
+    expect(event.conversationIds).toContain(conversation.id);
+  });
+
+  test("a turn settling while the conversation is viewed does not flag attention", async () => {
+    const { hub, db, workspace, engine } = makeHub();
+    const conversation = createConversation(db, {
+      workspaceId: workspace.id,
+      cwd: workspace.cwd,
+      title: null,
+    });
+    const ws = new FakeSocket();
+    hub.handleOpen(ws);
+    await hub.handleCommand(ws, {
+      kind: "select",
+      conversationId: conversation.id,
+    });
+    ws.sent.length = 0;
+
+    await engine.prompt(conversation.id, conversation.cwd, "hi");
+
+    expect(ws.sent.some((e) => e.kind === "attention")).toBe(false);
+  });
+
+  test("selecting a flagged conversation clears its attention for every socket", async () => {
+    const { hub, db, workspace, engine } = makeHub();
+    const conversation = createConversation(db, {
+      workspaceId: workspace.id,
+      cwd: workspace.cwd,
+      title: null,
+    });
+    const viewer = new FakeSocket();
+    const other = new FakeSocket();
+    hub.handleOpen(viewer);
+    hub.handleOpen(other);
+
+    await engine.prompt(conversation.id, conversation.cwd, "hi");
+    other.sent.length = 0;
+
+    await hub.handleCommand(viewer, {
+      kind: "select",
+      conversationId: conversation.id,
+    });
+
+    const event = other.sent.find((e) => e.kind === "attention");
+    expect(event?.kind).toBe("attention");
+    if (event?.kind !== "attention") return;
+    expect(event.conversationIds).not.toContain(conversation.id);
   });
 });

@@ -139,6 +139,9 @@ export class Engine<S extends SessionLike = SessionLike> {
   private readonly deps: EngineDeps<S>;
   private readonly subscribers = new Map<string, Set<Subscriber>>();
   private readonly bridged = new Set<string>();
+  private readonly settleListeners = new Set<
+    (conversationId: string) => void
+  >();
 
   constructor(deps: EngineDeps<S>) {
     this.deps = deps;
@@ -146,6 +149,11 @@ export class Engine<S extends SessionLike = SessionLike> {
 
   get(conversationId: string): S | undefined {
     return this.deps.sessions.get(conversationId);
+  }
+
+  onSettled(listener: (conversationId: string) => void): () => void {
+    this.settleListeners.add(listener);
+    return () => this.settleListeners.delete(listener);
   }
 
   subscribe(
@@ -244,6 +252,7 @@ export class Engine<S extends SessionLike = SessionLike> {
         return ResultAsync.fromPromise(
           session.prompt(text).then(() => {
             logger.info("turn completed");
+            this.emitSettled(conversationId);
             if (firstTurn)
               void this.autoTitleFromReply(conversationId, session, text).catch(
                 (e: unknown) => {
@@ -305,6 +314,10 @@ export class Engine<S extends SessionLike = SessionLike> {
     const evt = this.buildSnapshot(session, session.state.isStreaming);
     for (const target of this.subscribers.get(conversationId) ?? [])
       target.listener(evt);
+  }
+
+  private emitSettled(conversationId: string): void {
+    for (const listener of this.settleListeners) listener(conversationId);
   }
 
   private ensureOpen(

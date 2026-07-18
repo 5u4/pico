@@ -548,6 +548,30 @@ describe("reduce / select", () => {
     expect(next.isRunning).toBe(false);
     expect(commands).toEqual([{ kind: "select", conversationId: "conv-2" }]);
   });
+
+  test("selecting a conversation drops it from the attention list", () => {
+    const state: ThreadState = {
+      ...initialState,
+      activeId: "conv-1",
+      attention: ["conv-1", "conv-2"],
+    };
+    const { state: next } = reduce(state, {
+      type: "select",
+      conversationId: "conv-2",
+    });
+    expect(next.attention).toEqual(["conv-1"]);
+  });
+});
+
+describe("reduce / server / attention", () => {
+  test("replaces the attention list from the server event", () => {
+    const { state: next, commands } = reduce(initialState, {
+      type: "server",
+      event: { kind: "attention", conversationIds: ["conv-1", "conv-2"] },
+    });
+    expect(next.attention).toEqual(["conv-1", "conv-2"]);
+    expect(commands).toEqual([]);
+  });
 });
 
 describe("reduce / create", () => {
