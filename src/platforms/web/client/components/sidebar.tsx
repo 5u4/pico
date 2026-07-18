@@ -172,7 +172,7 @@ function ConversationRow({
       <ContextMenuTrigger asChild>
         <div
           className={cn(
-            "group/convo mb-0.5 flex items-center gap-1 rounded-md pr-1 transition-colors hover:bg-accent/50",
+            "mb-0.5 flex items-center gap-1 rounded-md pr-1 transition-colors hover:bg-accent/50",
             active && "bg-accent text-accent-foreground",
           )}
         >
