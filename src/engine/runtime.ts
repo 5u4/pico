@@ -72,6 +72,7 @@ async function build(
   Omit<OmpRuntime, "agentDir" | "defaultModel"> & { refreshError?: string }
 > {
   const settings = await Settings.init({ cwd, agentDir });
+  settings.override("secrets.enabled", true);
   const authStorage = await discoverAuthStorage(agentDir);
   const modelRegistry = new ModelRegistry(authStorage);
   const refreshError = await modelRegistry

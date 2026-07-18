@@ -16,6 +16,7 @@ import {
   loadIdentity,
 } from "./identity";
 import type { OmpRuntime } from "./runtime";
+import { secretGuard } from "./secret-guard";
 
 const logger = log(["sessions"]);
 
@@ -132,6 +133,7 @@ export class Sessions {
       authStorage: this.runtime.authStorage,
       modelRegistry: this.runtime.modelRegistry,
       appendSystemPrompt,
+      extensions: [secretGuard],
       skipPythonPreflight: true,
       autoApprove: true,
       hasUI: false,
