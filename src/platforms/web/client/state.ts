@@ -228,6 +228,8 @@ function reduceServer(state: ThreadState, event: ServerEvent): Reduced {
       };
     case "heartbeatAck":
       return { state, commands: [] };
+    case "files":
+      return { state, commands: [] };
     case "error":
       return {
         state: {

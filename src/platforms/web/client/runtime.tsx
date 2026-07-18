@@ -18,10 +18,16 @@ import { toast } from "sonner";
 import { z } from "zod";
 import type { ContextUsageInfo } from "../../../engine/conversations";
 import type { Message } from "../../../engine/message";
-import type { ClientCommand, ServerEvent, WorkspaceSummary } from "../protocol";
+import type {
+  ClientCommand,
+  FileMatch,
+  ServerEvent,
+  WorkspaceSummary,
+} from "../protocol";
 import {
   backoffDelayMs,
   type ConnectionStatus,
+  FILE_SEARCH_DEBOUNCE_MS,
   HEARTBEAT_INTERVAL_MS,
   HEARTBEAT_TIMEOUT_MS,
   RECONNECTED_NOTICE_MS,
@@ -84,8 +90,15 @@ type ThreadContextValue = {
   loadOlder: () => void;
 };
 
+type FilePickerContextValue = {
+  results: FileMatch[];
+  isLoading: boolean;
+  search: (query: string) => void;
+};
+
 const ShellContext = createContext<ShellContextValue | null>(null);
 const ThreadContext = createContext<ThreadContextValue | null>(null);
+const FilePickerContext = createContext<FilePickerContextValue | null>(null);
 const ConnectionContext = createContext<ConnectionStatus>("connecting");
 
 export function useShell(): ShellContextValue {
@@ -97,6 +110,13 @@ export function useShell(): ShellContextValue {
 export function useThread(): ThreadContextValue {
   const value = useContext(ThreadContext);
   if (!value) throw new Error("useThread must be used within RuntimeProvider");
+  return value;
+}
+
+export function useFilePicker(): FilePickerContextValue {
+  const value = useContext(FilePickerContext);
+  if (!value)
+    throw new Error("useFilePicker must be used within RuntimeProvider");
   return value;
 }
 
@@ -112,6 +132,14 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
   const [status, setStatus] = useState<ConnectionStatus>("connecting");
   const reselectRef = useRef<string | null>(null);
   const hadOnlineRef = useRef(false);
+  const [fileResults, setFileResults] = useState<FileMatch[]>([]);
+  const [fileLoading, setFileLoading] = useState(false);
+  const fileSeqRef = useRef(0);
+  const fileLastSeenSeqRef = useRef(-1);
+  const fileQueryRef = useRef<string | null>(null);
+  const fileTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(
+    undefined,
+  );
 
   const send = useCallback((command: ClientCommand) => {
     const payload = JSON.stringify(command);
@@ -119,6 +147,28 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
     if (socket && socket.readyState === WebSocket.OPEN) socket.send(payload);
     else outbox.current.push(payload);
   }, []);
+
+  const searchFiles = useCallback(
+    (query: string) => {
+      if (fileQueryRef.current === query) return;
+      fileQueryRef.current = query;
+      clearTimeout(fileTimerRef.current);
+      const trimmed = query.trim();
+      if (trimmed.length === 0) {
+        fileTimerRef.current = setTimeout(() => {
+          setFileResults([]);
+          setFileLoading(false);
+        }, 0);
+        return;
+      }
+      fileTimerRef.current = setTimeout(() => {
+        const seq = ++fileSeqRef.current;
+        setFileLoading(true);
+        send({ kind: "searchFiles", query: trimmed, seq });
+      }, FILE_SEARCH_DEBOUNCE_MS);
+    },
+    [send],
+  );
 
   const flush = useCallback(
     (commands: ClientCommand[]) => {
@@ -214,6 +264,13 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
         if (parsed.kind === "heartbeatAck") {
           clearTimeout(pongTimer);
           pongTimer = undefined;
+          return;
+        }
+        if (parsed.kind === "files") {
+          if (parsed.seq < fileLastSeenSeqRef.current) return;
+          fileLastSeenSeqRef.current = parsed.seq;
+          setFileResults(parsed.matches);
+          if (parsed.seq === fileSeqRef.current) setFileLoading(false);
           return;
         }
         dispatch({ type: "server", event: parsed });
@@ -383,12 +440,23 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
     }),
     [state, view, prompt, command, cancel, loadOlder],
   );
+  const filePicker = useMemo<FilePickerContextValue>(
+    () => ({
+      results: fileResults,
+      isLoading: fileLoading,
+      search: searchFiles,
+    }),
+    [fileResults, fileLoading, searchFiles],
+  );
+  useEffect(() => () => clearTimeout(fileTimerRef.current), []);
 
   return (
     <ConnectionContext.Provider value={status}>
       <ShellContext.Provider value={shell}>
         <ThreadContext.Provider value={thread}>
-          {children}
+          <FilePickerContext.Provider value={filePicker}>
+            {children}
+          </FilePickerContext.Provider>
         </ThreadContext.Provider>
       </ShellContext.Provider>
     </ConnectionContext.Provider>

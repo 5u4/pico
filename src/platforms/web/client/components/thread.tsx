@@ -5,7 +5,9 @@ import {
   MessagePrimitive,
   type TextMessagePartComponent,
   ThreadPrimitive,
+  type Unstable_DirectiveFormatter,
   type Unstable_SlashCommand,
+  type Unstable_TriggerItem,
   unstable_useSlashCommandAdapter,
   useAuiState,
 } from "@assistant-ui/react";
@@ -13,12 +15,20 @@ import {
   ArrowDownIcon,
   ArrowUpIcon,
   CopyIcon,
+  FileIcon,
+  FolderIcon,
   SlashIcon,
   SquareIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useLayoutEffect, useRef } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+} from "react";
 import { cn } from "../lib/utils";
-import { useShell, useThread } from "../runtime";
+import { useFilePicker, useShell, useThread } from "../runtime";
 import { DotMatrix } from "./assistant-ui/dot-matrix";
 import { MarkdownText } from "./assistant-ui/markdown-text";
 import { Reasoning, ReasoningGroup } from "./assistant-ui/reasoning";
@@ -113,6 +123,42 @@ function AssistantActionBar() {
   );
 }
 
+const MENTION_FORMATTER: Unstable_DirectiveFormatter = {
+  serialize(item) {
+    return /\s/.test(item.id) ? `@"${item.id}"` : `@${item.id}`;
+  },
+  parse(text) {
+    return [{ kind: "text", text }];
+  },
+};
+
+type FileMentionAdapter = {
+  categories: () => readonly never[];
+  categoryItems: () => readonly never[];
+  search: (query: string) => readonly Unstable_TriggerItem[];
+};
+
+function useFileMention(): { adapter: FileMentionAdapter; isLoading: boolean } {
+  const { results, isLoading, search } = useFilePicker();
+  const adapter = useMemo<FileMentionAdapter>(
+    () => ({
+      categories: () => [],
+      categoryItems: () => [],
+      search: (query: string) => {
+        search(query);
+        return results.map((match) => ({
+          id: match.path,
+          type: "file",
+          label: match.path,
+          metadata: { isDirectory: match.isDirectory },
+        }));
+      },
+    }),
+    [results, search],
+  );
+  return { adapter, isLoading };
+}
+
 function Composer() {
   const { command } = useThread();
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -129,6 +175,7 @@ function Composer() {
     removeOnExecute: true,
     fallbackIcon: SlashIcon,
   });
+  const mention = useFileMention();
   return (
     <ComposerPrimitive.Unstable_TriggerPopoverRoot>
       <ComposerPrimitive.Root className="relative flex items-center gap-2 rounded-(--composer-radius) border border-border/60 bg-(--composer-bg) p-(--composer-padding) transition-[border-color] focus-within:border-border dark:border-muted-foreground/15 dark:focus-within:border-muted-foreground/30">
@@ -136,7 +183,7 @@ function Composer() {
           ref={inputRef}
           autoFocus
           rows={1}
-          placeholder="Message pico… (/ for commands)"
+          placeholder="Message pico… (/ for commands, @ for files)"
           className="max-h-40 min-h-9 flex-1 resize-none bg-transparent px-2.5 py-1.5 text-base outline-none placeholder:text-muted-foreground"
         />
         <ThreadPrimitive.If running={false}>
@@ -193,6 +240,45 @@ function Composer() {
                 {items.length === 0 && (
                   <div className="px-3 py-2 text-sm text-muted-foreground">
                     No matching commands
+                  </div>
+                )}
+              </div>
+            )}
+          </ComposerPrimitive.Unstable_TriggerPopoverItems>
+        </ComposerPrimitive.Unstable_TriggerPopover>
+        <ComposerPrimitive.Unstable_TriggerPopover
+          char="@"
+          adapter={mention.adapter}
+          isLoading={mention.isLoading}
+          className="absolute start-0 bottom-full z-50 mb-2 max-h-72 w-96 overflow-y-auto rounded-xl border border-border/60 bg-popover text-popover-foreground shadow-lg"
+        >
+          <ComposerPrimitive.Unstable_TriggerPopover.Directive
+            formatter={MENTION_FORMATTER}
+          />
+          <ComposerPrimitive.Unstable_TriggerPopoverItems>
+            {(items) => (
+              <div className="flex flex-col py-1">
+                {items.map((item, index) => {
+                  const isDirectory = item.metadata?.isDirectory === true;
+                  return (
+                    <ComposerPrimitive.Unstable_TriggerPopoverItem
+                      key={item.id}
+                      item={item}
+                      index={index}
+                      className="flex items-center gap-2 px-3 py-1.5 text-start outline-none transition-colors hover:bg-accent data-[highlighted]:bg-accent"
+                    >
+                      {isDirectory ? (
+                        <FolderIcon className="size-3.5 shrink-0 text-primary" />
+                      ) : (
+                        <FileIcon className="size-3.5 shrink-0 text-muted-foreground" />
+                      )}
+                      <span className="truncate text-sm">{item.label}</span>
+                    </ComposerPrimitive.Unstable_TriggerPopoverItem>
+                  );
+                })}
+                {items.length === 0 && (
+                  <div className="px-3 py-2 text-sm text-muted-foreground">
+                    {mention.isLoading ? "Searching…" : "No matching files"}
                   </div>
                 )}
               </div>

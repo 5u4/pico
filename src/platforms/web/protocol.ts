@@ -48,6 +48,11 @@ export const clientCommandSchema = z.union([
       conversationId: z.string().min(1),
       beforeId: z.string().min(1),
     }),
+    z.object({
+      kind: z.literal("searchFiles"),
+      query: z.string(),
+      seq: z.number().int().nonnegative(),
+    }),
     z.object({ kind: z.literal("heartbeat") }),
   ]),
   commandSchema,
@@ -71,6 +76,11 @@ export type WorkspaceSummary = {
   defaultBranch: string | null;
   branchPrefix: string | null;
   conversations: ConversationSummary[];
+};
+
+export type FileMatch = {
+  path: string;
+  isDirectory: boolean;
 };
 
 export type ServerEvent =
@@ -102,7 +112,8 @@ export type ServerEvent =
     }
   | { kind: "error"; message: string }
   | { kind: "attention"; conversationIds: string[] }
-  | { kind: "heartbeatAck" };
+  | { kind: "heartbeatAck" }
+  | { kind: "files"; seq: number; matches: FileMatch[] };
 
 export function parseClientCommand(raw: unknown): ClientCommand | undefined {
   const parsed = clientCommandSchema.safeParse(raw);

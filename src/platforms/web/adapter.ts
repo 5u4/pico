@@ -1,5 +1,6 @@
 import type { Database } from "bun:sqlite";
 import { statSync } from "node:fs";
+import { fuzzyFind } from "@oh-my-pi/pi-natives";
 import type { ResultAsync } from "neverthrow";
 import type {
   Engine,
@@ -113,6 +114,11 @@ export class WebHub<S extends SessionLike = SessionLike> {
   async handleCommand(ws: HubSocket, command: ClientCommand): Promise<void> {
     if (command.kind === "heartbeat") {
       ws.send(JSON.stringify({ kind: "heartbeatAck" } satisfies ServerEvent));
+      return;
+    }
+
+    if (command.kind === "searchFiles") {
+      await this.handleSearchFiles(ws, command.query, command.seq);
       return;
     }
 
@@ -357,6 +363,48 @@ export class WebHub<S extends SessionLike = SessionLike> {
         return `Pong ${command.text ?? ""}`.trim();
       default:
         return assertNever(command.name);
+    }
+  }
+
+  private async handleSearchFiles(
+    ws: HubSocket,
+    query: string,
+    seq: number,
+  ): Promise<void> {
+    const trimmed = query.trim();
+    if (trimmed.length === 0) {
+      ws.send(JSON.stringify({ kind: "files", seq, matches: [] }));
+      return;
+    }
+    const conversationId = ws.data.conversationId;
+    const conversation = conversationId
+      ? getConversation(this.deps.db, conversationId)
+      : undefined;
+    const cwd = conversation?.cwd ?? this.deps.workspaceCwd;
+    try {
+      const result = await fuzzyFind({
+        query: trimmed,
+        path: cwd,
+        gitignore: true,
+        maxResults: 50,
+        cache: true,
+        timeoutMs: 2000,
+      });
+      const matches = result.matches.map((m) => ({
+        path: m.path,
+        isDirectory: m.isDirectory,
+      }));
+      ws.send(
+        JSON.stringify({ kind: "files", seq, matches } satisfies ServerEvent),
+      );
+    } catch {
+      ws.send(
+        JSON.stringify({
+          kind: "files",
+          seq,
+          matches: [],
+        } satisfies ServerEvent),
+      );
     }
   }
 

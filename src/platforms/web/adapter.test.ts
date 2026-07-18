@@ -1,5 +1,8 @@
 import type { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent";
 import { err, ok, type Result } from "neverthrow";
 import {
@@ -949,5 +952,55 @@ describe("WebHub attention on turn settle", () => {
     expect(event?.kind).toBe("attention");
     if (event?.kind !== "attention") return;
     expect(event.conversationIds).not.toContain(conversation.id);
+  });
+});
+
+describe("WebHub.handleCommand searchFiles", () => {
+  test("empty query returns empty matches echoing seq", async () => {
+    const { hub } = makeHub();
+    const ws = new FakeSocket();
+
+    await hub.handleCommand(ws, { kind: "searchFiles", query: "  ", seq: 7 });
+
+    expect(ws.sent).toHaveLength(1);
+    const event = ws.sent[0];
+    expect(event?.kind).toBe("files");
+    if (event?.kind === "files") {
+      expect(event.seq).toBe(7);
+      expect(event.matches).toEqual([]);
+    }
+  });
+
+  test("resolves matches against the active conversation cwd", async () => {
+    const { db, hub, workspace } = makeHub();
+    const dir = mkdtempSync(join(tmpdir(), "pico-picker-test-"));
+    writeFileSync(join(dir, "widget.ts"), "export const x = 1;\n");
+    mkdirSync(join(dir, "sub"));
+    writeFileSync(join(dir, "sub", "gadget.ts"), "y\n");
+    const conversation = createConversation(db, {
+      workspaceId: workspace.id,
+      cwd: dir,
+      title: null,
+    });
+    const ws = new FakeSocket();
+    ws.data.conversationId = conversation.id;
+
+    try {
+      await hub.handleCommand(ws, {
+        kind: "searchFiles",
+        query: "widget",
+        seq: 2,
+      });
+
+      const event = ws.sent.find((e) => e.kind === "files");
+      expect(event?.kind).toBe("files");
+      if (event?.kind === "files") {
+        expect(event.seq).toBe(2);
+        expect(event.matches.map((m) => m.path)).toContain("widget.ts");
+        expect(event.matches.map((m) => m.path)).not.toContain("sub/gadget.ts");
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

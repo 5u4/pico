@@ -13,6 +13,7 @@
         "@oh-my-pi/pi-ai": "16.5.0",
         "@oh-my-pi/pi-catalog": "16.5.0",
         "@oh-my-pi/pi-coding-agent": "16.5.0",
+        "@oh-my-pi/pi-natives": "16.5.0",
         "@radix-ui/react-collapsible": "^1.1.16",
         "@radix-ui/react-context-menu": "^2.3.3",
         "@radix-ui/react-dialog": "^1.1.19",

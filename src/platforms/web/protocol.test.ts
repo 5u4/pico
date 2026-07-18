@@ -28,6 +28,18 @@ describe("parseClientCommand", () => {
     });
   });
 
+  test("parses a searchFiles command", () => {
+    expect(
+      parseClientCommand({ kind: "searchFiles", query: "adapter", seq: 3 }),
+    ).toEqual({ kind: "searchFiles", query: "adapter", seq: 3 });
+  });
+
+  test("rejects a searchFiles command with a negative seq", () => {
+    expect(
+      parseClientCommand({ kind: "searchFiles", query: "x", seq: -1 }),
+    ).toBeUndefined();
+  });
+
   test("rejects an unknown command name", () => {
     expect(
       parseClientCommand({ kind: "command", name: "unknown" }),
