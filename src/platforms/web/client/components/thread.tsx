@@ -7,6 +7,7 @@ import {
   ThreadPrimitive,
   type Unstable_SlashCommand,
   unstable_useSlashCommandAdapter,
+  useAui,
   useAuiState,
 } from "@assistant-ui/react";
 import {
@@ -54,11 +55,28 @@ const WorkingIndicator: EmptyMessagePartComponent = ({ status }) => {
   );
 };
 
-const AssistantText: TextMessagePartComponent = () => (
-  <div className="[&:not(:first-child)]:mt-4">
-    <MarkdownText />
-  </div>
-);
+const AssistantText: TextMessagePartComponent = () => {
+  const query = useAui().part.query;
+  const index =
+    query && "type" in query && query.type === "index" ? query.index : null;
+  const muted = useAuiState((s) => {
+    if (s.message.status?.type === "running") return true;
+    if (index === null) return false;
+    return s.message.parts.some(
+      (part, i) => i > index && part.type === "tool-call",
+    );
+  });
+  return (
+    <div
+      className={cn(
+        "transition-colors [&:not(:first-child)]:mt-4",
+        muted && "text-muted-foreground",
+      )}
+    >
+      <MarkdownText />
+    </div>
+  );
+};
 
 function AssistantMessage() {
   return (
