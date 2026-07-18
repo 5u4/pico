@@ -101,10 +101,10 @@ test.describe("pico web sidebar", () => {
     await expect(page.getByText("echo: archive target message")).toBeVisible();
 
     const row = page
-      .locator("div.group\\/convo")
-      .filter({ hasText: "archive target message" });
-    await row.hover();
-    await row.getByRole("button", { name: "Archive conversation" }).click();
+      .getByRole("button", { name: "archive target message" })
+      .first();
+    await row.click({ button: "right" });
+    await page.getByRole("menuitem", { name: "Archive" }).click();
 
     await expect(
       page.getByRole("heading", { name: "How can I help you today?" }),
