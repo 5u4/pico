@@ -7,7 +7,7 @@ import {
   PencilIcon,
   PlusIcon,
 } from "lucide-react";
-import { useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { z } from "zod";
 import type { ConversationSummary, WorkspaceSummary } from "../../protocol";
 import { cn } from "../lib/utils";
@@ -159,11 +159,13 @@ function DirectoryDialog({
 function ConversationRow({
   conversation,
   active,
+  attention,
   onSelect,
   onArchive,
 }: {
   conversation: ConversationSummary;
   active: boolean;
+  attention: boolean;
   onSelect: (id: string) => void;
   onArchive: (conversationId: string) => void;
 }) {
@@ -181,8 +183,17 @@ function ConversationRow({
             onClick={() => onSelect(conversation.id)}
             className="flex min-w-0 flex-1 flex-col px-3 py-1.5 text-left"
           >
-            <span className="truncate text-sm">
-              {conversation.title ?? "New chat"}
+            <span className="flex min-w-0 items-center gap-1.5">
+              {attention && (
+                <span
+                  role="img"
+                  className="size-1.5 shrink-0 rounded-full bg-sky-500"
+                  aria-label="Awaiting your reply"
+                />
+              )}
+              <span className="truncate text-sm">
+                {conversation.title ?? "New chat"}
+              </span>
             </span>
             {conversation.branch && (
               <span className="truncate text-muted-foreground text-xs">
@@ -213,6 +224,7 @@ function WorkspaceItem({
   onSelect,
   onCreate,
   onArchive,
+  attention,
   onRename,
   onUpdateCwd,
 }: {
@@ -223,6 +235,7 @@ function WorkspaceItem({
   onSelect: (id: string) => void;
   onCreate: (workspaceId: string) => void;
   onArchive: (conversationId: string) => void;
+  attention: Set<string>;
   onRename: (workspaceId: string, label: string) => void;
   onUpdateCwd: (
     workspaceId: string,
@@ -336,6 +349,7 @@ function WorkspaceItem({
           <ConversationRow
             conversation={activeConversation}
             active
+            attention={attention.has(activeConversation.id)}
             onSelect={onSelect}
             onArchive={onArchive}
           />
@@ -352,6 +366,7 @@ function WorkspaceItem({
               key={conversation.id}
               conversation={conversation}
               active={conversation.id === activeId}
+              attention={attention.has(conversation.id)}
               onSelect={onSelect}
               onArchive={onArchive}
             />
@@ -372,7 +387,9 @@ export function Sidebar({ collapsed }: { collapsed: boolean }) {
     renameWorkspace,
     updateWorkspaceCwd,
     archive,
+    attention,
   } = useShell();
+  const attentionSet = useMemo(() => new Set(attention), [attention]);
   const [naming, setNaming] = useState(false);
   const [name, setName] = useState("");
   const [collapsedIds, setCollapsedIds] = usePersisted(
@@ -452,6 +469,7 @@ export function Sidebar({ collapsed }: { collapsed: boolean }) {
               onSelect={select}
               onCreate={create}
               onArchive={archive}
+              attention={attentionSet}
               onRename={renameWorkspace}
               onUpdateCwd={updateWorkspaceCwd}
             />

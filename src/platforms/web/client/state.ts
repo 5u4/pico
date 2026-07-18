@@ -16,6 +16,7 @@ export type ThreadState = {
   usage: ContextUsageInfo | null;
   hasMore: boolean;
   loadingOlder: boolean;
+  attention: string[];
 };
 
 export const initialState: ThreadState = {
@@ -31,6 +32,7 @@ export const initialState: ThreadState = {
   usage: null,
   hasMore: false,
   loadingOlder: false,
+  attention: [],
 };
 
 export type Action =
@@ -219,6 +221,11 @@ function reduceServer(state: ThreadState, event: ServerEvent): Reduced {
         commands: [],
       };
     }
+    case "attention":
+      return {
+        state: { ...state, attention: event.conversationIds },
+        commands: [],
+      };
     case "heartbeatAck":
       return { state, commands: [] };
     case "error":
@@ -278,6 +285,7 @@ function reduceSelect(state: ThreadState, conversationId: string): Reduced {
       usage: null,
       hasMore: false,
       loadingOlder: false,
+      attention: state.attention.filter((id) => id !== conversationId),
     },
     commands: [{ kind: "select", conversationId }],
   };

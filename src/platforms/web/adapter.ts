@@ -55,9 +55,34 @@ export class WebHub<S extends SessionLike = SessionLike> {
     string,
     { opened: ResultAsync<void, string>; unsubscribe: () => void }
   >();
+  private readonly attention = new Set<string>();
 
   constructor(deps: WebHubDeps<S>) {
     this.deps = deps;
+    this.deps.engine.onSettled((conversationId) =>
+      this.onSettled(conversationId),
+    );
+  }
+
+  private onSettled(conversationId: string): void {
+    if ((this.viewers.get(conversationId)?.size ?? 0) > 0) return;
+    if (this.attention.has(conversationId)) return;
+    this.attention.add(conversationId);
+    this.broadcastAttention();
+  }
+
+  private broadcastAttention(): void {
+    const event: ServerEvent = {
+      kind: "attention",
+      conversationIds: [...this.attention],
+    };
+    const payload = JSON.stringify(event);
+    for (const ws of this.allSockets) ws.send(payload);
+  }
+
+  private clearAttention(conversationId: string): void {
+    if (!this.attention.delete(conversationId)) return;
+    this.broadcastAttention();
   }
 
   handleOpen(ws: HubSocket): void {
@@ -72,6 +97,12 @@ export class WebHub<S extends SessionLike = SessionLike> {
       (w) => listConversations(this.deps.db, w.id).length > 0,
     );
     this.sendWorkspaces(ws, hasConversations ? undefined : target.id);
+    ws.send(
+      JSON.stringify({
+        kind: "attention",
+        conversationIds: [...this.attention],
+      } satisfies ServerEvent),
+    );
   }
 
   handleClose(ws: HubSocket): void {
@@ -261,6 +292,7 @@ export class WebHub<S extends SessionLike = SessionLike> {
         }
       }
       archiveConversation(this.deps.db, conversation.id);
+      this.clearAttention(conversation.id);
       const wasViewing = ws.data.conversationId === conversation.id;
       const otherViewers = [
         ...(this.viewers.get(conversation.id) ?? []),
@@ -452,6 +484,7 @@ export class WebHub<S extends SessionLike = SessionLike> {
       return;
     }
     this.attach(ws, conversationId);
+    this.clearAttention(conversationId);
     this.sendWorkspaces(ws);
     const snap = this.snapshotEvent(conversationId);
     if (snap) ws.send(JSON.stringify(snap));

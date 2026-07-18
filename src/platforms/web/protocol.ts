@@ -101,6 +101,7 @@ export type ServerEvent =
       isStreaming: boolean;
     }
   | { kind: "error"; message: string }
+  | { kind: "attention"; conversationIds: string[] }
   | { kind: "heartbeatAck" };
 
 export function parseClientCommand(raw: unknown): ClientCommand | undefined {

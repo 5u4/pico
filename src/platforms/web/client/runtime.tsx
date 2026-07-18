@@ -68,6 +68,7 @@ type ShellContextValue = {
     worktree: { defaultBranch: string; branchPrefix: string } | null,
   ) => void;
   archive: (conversationId: string) => void;
+  attention: string[];
 };
 
 type ThreadContextValue = {
@@ -292,6 +293,11 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
     writePersisted(PERSIST_KEYS.activeConversation, state.activeId);
   }, [state.activeId]);
 
+  useEffect(() => {
+    const count = state.attention.length;
+    document.title = count > 0 ? `(${count}) pico` : "pico";
+  }, [state.attention.length]);
+
   const prompt = useCallback(
     (text: string) => dispatch({ type: "prompt", text }),
     [dispatch],
@@ -346,6 +352,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       renameWorkspace,
       updateWorkspaceCwd,
       archive,
+      attention: state.attention,
     }),
     [
       state.workspaces,
@@ -357,6 +364,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       renameWorkspace,
       updateWorkspaceCwd,
       archive,
+      state.attention,
     ],
   );
   const view = useMemo(() => selectView(state), [state]);
