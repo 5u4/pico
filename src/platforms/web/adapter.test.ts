@@ -198,7 +198,7 @@ describe("WebHub.handleOpen", () => {
 
     await hub.handleOpen(ws);
 
-    expect(ws.sent).toHaveLength(1);
+    expect(ws.sent.map((e) => e.kind)).toEqual(["workspaces", "attention"]);
     const event = ws.sent[0];
     expect(event?.kind).toBe("workspaces");
     if (event?.kind === "workspaces") {
@@ -248,7 +248,7 @@ describe("WebHub.handleOpen", () => {
 
     hub.handleOpen(ws);
 
-    expect(ws.sent.map((e) => e.kind)).toEqual(["workspaces"]);
+    expect(ws.sent.map((e) => e.kind)).toEqual(["workspaces", "attention"]);
     const event = ws.sent[0];
     if (event?.kind === "workspaces") {
       expect(event.activeId).toBeNull();

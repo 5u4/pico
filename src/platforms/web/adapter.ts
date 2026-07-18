@@ -97,13 +97,12 @@ export class WebHub<S extends SessionLike = SessionLike> {
       (w) => listConversations(this.deps.db, w.id).length > 0,
     );
     this.sendWorkspaces(ws, hasConversations ? undefined : target.id);
-    if (this.attention.size > 0)
-      ws.send(
-        JSON.stringify({
-          kind: "attention",
-          conversationIds: [...this.attention],
-        } satisfies ServerEvent),
-      );
+    ws.send(
+      JSON.stringify({
+        kind: "attention",
+        conversationIds: [...this.attention],
+      } satisfies ServerEvent),
+    );
   }
 
   handleClose(ws: HubSocket): void {

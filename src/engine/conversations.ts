@@ -317,7 +317,13 @@ export class Engine<S extends SessionLike = SessionLike> {
   }
 
   private emitSettled(conversationId: string): void {
-    for (const listener of this.settleListeners) listener(conversationId);
+    for (const listener of this.settleListeners) {
+      try {
+        listener(conversationId);
+      } catch (e) {
+        logger.error("settle listener failed: {error}", { error: e });
+      }
+    }
   }
 
   private ensureOpen(
