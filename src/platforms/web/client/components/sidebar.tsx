@@ -168,36 +168,40 @@ function ConversationRow({
   onArchive: (conversationId: string) => void;
 }) {
   return (
-    <div
-      className={cn(
-        "group/convo mb-0.5 flex items-center gap-1 rounded-md pr-1 transition-colors hover:bg-accent/50",
-        active && "bg-accent text-accent-foreground",
-      )}
-    >
-      <button
-        type="button"
-        onClick={() => onSelect(conversation.id)}
-        className="flex min-w-0 flex-1 flex-col px-3 py-1.5 text-left"
-      >
-        <span className="truncate text-sm">
-          {conversation.title ?? "New chat"}
-        </span>
-        {conversation.branch && (
-          <span className="truncate text-muted-foreground text-xs">
-            {conversation.branch}
-          </span>
-        )}
-      </button>
-      <Button
-        variant="ghost"
-        size="icon"
-        className="size-6 opacity-0 group-hover/convo:opacity-100 focus-visible:opacity-100"
-        onClick={() => onArchive(conversation.id)}
-        aria-label="Archive conversation"
-      >
-        <ArchiveIcon className="size-3.5" />
-      </Button>
-    </div>
+    <ContextMenu>
+      <ContextMenuTrigger asChild>
+        <div
+          className={cn(
+            "group/convo mb-0.5 flex items-center gap-1 rounded-md pr-1 transition-colors hover:bg-accent/50",
+            active && "bg-accent text-accent-foreground",
+          )}
+        >
+          <button
+            type="button"
+            onClick={() => onSelect(conversation.id)}
+            className="flex min-w-0 flex-1 flex-col px-3 py-1.5 text-left"
+          >
+            <span className="truncate text-sm">
+              {conversation.title ?? "New chat"}
+            </span>
+            {conversation.branch && (
+              <span className="truncate text-muted-foreground text-xs">
+                {conversation.branch}
+              </span>
+            )}
+          </button>
+        </div>
+      </ContextMenuTrigger>
+      <ContextMenuContent>
+        <ContextMenuItem
+          variant="destructive"
+          onSelect={() => onArchive(conversation.id)}
+        >
+          <ArchiveIcon />
+          Archive
+        </ContextMenuItem>
+      </ContextMenuContent>
+    </ContextMenu>
   );
 }
 
