@@ -330,6 +330,7 @@ export function Thread() {
       <ThreadPrimitive.Viewport
         ref={viewportRef}
         turnAnchor="top"
+        autoScroll
         className={cn(
           "relative flex flex-1 flex-col overflow-y-scroll overscroll-contain scroll-smooth px-4 pt-4",
           isEmpty && "justify-center",
