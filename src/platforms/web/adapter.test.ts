@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent";
 import { err, ok, type Result } from "neverthrow";
 import {
+  type AsyncJobActivity,
   Engine,
   type SessionLike,
   type SessionStateLike,
@@ -110,6 +111,15 @@ class FakeSession implements SessionLike {
     return { cost: this.cost };
   }
 
+  asyncSnapshot: AsyncJobActivity | null = {
+    running: [],
+    delivery: { queued: 0 },
+  };
+
+  getAsyncJobSnapshot(): AsyncJobActivity | null {
+    return this.asyncSnapshot;
+  }
+
   emit(event: AgentSessionEvent): void {
     for (const listener of this.listeners) listener(event);
   }
@@ -118,9 +128,19 @@ class FakeSession implements SessionLike {
 class FakeSessions implements SessionsPort<FakeSession> {
   readonly sessions = new Map<string, FakeSession>();
   readonly failOpen = new Map<string, string>();
+  readonly pending = new Set<string>();
 
   get(id: string): FakeSession | undefined {
     return this.sessions.get(id);
+  }
+
+  isPending(id: string): boolean {
+    return this.pending.has(id);
+  }
+
+  close(id: string): Promise<void> {
+    this.sessions.delete(id);
+    return Promise.resolve();
   }
 
   open(

@@ -307,6 +307,7 @@ export class WebHub<S extends SessionLike = SessionLike> {
         this.detach(viewer);
         this.sendWorkspaces(viewer, target.id);
       }
+      void this.deps.engine.releaseIfIdle(conversation.id);
       for (const other of this.allSockets)
         if (other !== ws && !otherViewers.includes(other))
           this.sendWorkspaces(other);
