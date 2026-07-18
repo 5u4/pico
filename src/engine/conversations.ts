@@ -459,32 +459,45 @@ export class Engine<S extends SessionLike = SessionLike> {
   }
 
   async release(conversationId: string): Promise<void> {
-    this.bridged.delete(conversationId);
-    this.lastActivity.delete(conversationId);
     const unsubscribe = this.bridgeUnsub.get(conversationId);
-    this.bridgeUnsub.delete(conversationId);
     try {
       unsubscribe?.();
+    } catch (e) {
+      logger.error("bridge unsubscribe failed for {conversationId}: {error}", {
+        conversationId,
+        error: e,
+      });
+    }
+    try {
       await this.deps.sessions.close(conversationId);
-      logger.info("session released for {conversationId}", { conversationId });
     } catch (e) {
       logger.error("session release failed for {conversationId}: {error}", {
         conversationId,
         error: e,
       });
+      return;
     }
+    this.bridged.delete(conversationId);
+    this.bridgeUnsub.delete(conversationId);
+    this.lastActivity.delete(conversationId);
+    logger.info("session released for {conversationId}", { conversationId });
   }
 
   async releaseIfIdle(conversationId: string): Promise<void> {
+    if (this.hasViewers(conversationId)) return;
     if (this.busy(conversationId)) return;
     await this.release(conversationId);
   }
 
   private reapable(conversationId: string, now: number): boolean {
-    if ((this.subscribers.get(conversationId)?.size ?? 0) > 0) return false;
+    if (this.hasViewers(conversationId)) return false;
     if (this.busy(conversationId)) return false;
     const last = this.lastActivity.get(conversationId) ?? 0;
     return now - last > IDLE_MS;
+  }
+
+  private hasViewers(conversationId: string): boolean {
+    return (this.subscribers.get(conversationId)?.size ?? 0) > 0;
   }
 
   private busy(conversationId: string): boolean {

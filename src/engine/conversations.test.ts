@@ -654,10 +654,22 @@ describe("Engine idle reap", () => {
     expect(sessions.get(conversationId)).toBeUndefined();
   });
 
-  test("release swallows a close failure instead of rejecting", async () => {
+  test("release keeps a failed session tracked so sweep retries it", async () => {
     const { engine, sessions, conversationId } = await opened();
     sessions.failClose.add(conversationId);
     await expect(engine.release(conversationId)).resolves.toBeUndefined();
+    expect(sessions.get(conversationId)).toBeDefined();
+    sessions.failClose.delete(conversationId);
+    engine.sweep(Date.now() + FUTURE);
+    await Promise.resolve();
+    expect(sessions.get(conversationId)).toBeUndefined();
+  });
+
+  test("releaseIfIdle spares a session with an attached viewer", async () => {
+    const { engine, sessions, conversationId } = await opened();
+    engine.subscribe(conversationId, CWD, "live", () => {});
+    await engine.releaseIfIdle(conversationId);
+    expect(sessions.get(conversationId)).toBeDefined();
   });
 
   test("releaseIfIdle spares a busy session", async () => {
