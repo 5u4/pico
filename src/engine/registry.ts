@@ -96,20 +96,25 @@ export function updateWorkspaceCwd(
   db: Database,
   id: string,
   cwd: string,
-  worktree: { defaultBranch: string; branchPrefix: string } | null,
+  worktree: { defaultBranch: string; branchPrefix: string } | null | undefined,
 ): boolean {
-  const result = db
-    .query(
-      `UPDATE workspaces
-         SET cwd = $cwd, defaultBranch = $defaultBranch, branchPrefix = $branchPrefix
-       WHERE id = $id`,
-    )
-    .run({
-      id,
-      cwd,
-      defaultBranch: worktree?.defaultBranch ?? null,
-      branchPrefix: worktree?.branchPrefix ?? null,
-    });
+  const result =
+    worktree === undefined
+      ? db
+          .query("UPDATE workspaces SET cwd = $cwd WHERE id = $id")
+          .run({ id, cwd })
+      : db
+          .query(
+            `UPDATE workspaces
+               SET cwd = $cwd, defaultBranch = $defaultBranch, branchPrefix = $branchPrefix
+             WHERE id = $id`,
+          )
+          .run({
+            id,
+            cwd,
+            defaultBranch: worktree?.defaultBranch ?? null,
+            branchPrefix: worktree?.branchPrefix ?? null,
+          });
   const updated = result.changes > 0;
   if (updated) {
     logger.info("workspace cwd updated {workspaceId} (cwd {cwd})", {

@@ -217,9 +217,15 @@ export class WebHub<S extends SessionLike = SessionLike> {
         );
         return;
       }
-      let worktree: { defaultBranch: string; branchPrefix: string } | null =
-        null;
-      if (command.worktree) {
+      let worktree:
+        | { defaultBranch: string; branchPrefix: string }
+        | null
+        | undefined;
+      if (command.worktree === undefined) {
+        worktree = undefined;
+      } else if (command.worktree === null) {
+        worktree = null;
+      } else {
         const prefix = sanitizeRefSegment(command.worktree.branchPrefix);
         if (prefix.isErr()) {
           this.sendError(ws, prefix.error);

@@ -32,9 +32,9 @@ function insertWorkspace(row: {
      VALUES
        ($id, $cwd, $platform, $label, $externalId, $defaultBranch, $branchPrefix, $createdAt)`,
   ).run({
-    defaultBranch: null,
-    branchPrefix: null,
     ...row,
+    defaultBranch: row.defaultBranch ?? null,
+    branchPrefix: row.branchPrefix ?? null,
   });
 }
 

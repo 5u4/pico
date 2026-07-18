@@ -111,9 +111,12 @@ export async function renameBranch(input: {
 }): Promise<Result<string, string>> {
   const { baseRepo, from } = input;
   let target = input.to;
-  for (let n = 2; n <= RENAME_COLLISION_LIMIT; n++) {
+  for (let n = 2; ; n++) {
     if (target === from) return ok(from);
     if (!(await branchExists(baseRepo, target))) break;
+    if (n > RENAME_COLLISION_LIMIT) {
+      return err(`could not find an available branch name for ${input.to}`);
+    }
     target = `${input.to}-${n}`;
   }
   const renamed = await git(baseRepo, ["branch", "-m", from, target]);

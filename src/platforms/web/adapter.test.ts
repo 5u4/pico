@@ -10,6 +10,7 @@ import {
 } from "../../engine/conversations";
 import {
   createConversation,
+  createWorkspace,
   getConversation,
   getOrCreateDefaultWorkspace,
   listConversations,
@@ -445,6 +446,30 @@ describe("WebHub.handleCommand updateWorkspaceCwd", () => {
     expect(ws.sent).toEqual([
       { kind: "error", message: "unknown workspace: missing" },
     ]);
+  });
+
+  test("an omitted worktree field preserves existing worktree config", async () => {
+    const { hub, db } = makeHub();
+    const workspace = createWorkspace(db, {
+      cwd: import.meta.dir,
+      platform: "web",
+      label: "wt",
+      defaultBranch: "main",
+      branchPrefix: "feat",
+    });
+    const ws = new FakeSocket();
+
+    await hub.handleCommand(ws, {
+      kind: "updateWorkspaceCwd",
+      workspaceId: workspace.id,
+      cwd: import.meta.dir,
+    });
+
+    const updated = listWorkspaces(db, "web").find(
+      (w) => w.id === workspace.id,
+    );
+    expect(updated?.defaultBranch).toBe("main");
+    expect(updated?.branchPrefix).toBe("feat");
   });
 });
 
