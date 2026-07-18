@@ -55,7 +55,7 @@ function DirectoryDialog({
     initialWorktree ? "worktree" : "regular",
   );
   const [defaultBranch, setDefaultBranch] = useState(
-    initialWorktree?.defaultBranch ?? "HEAD",
+    initialWorktree?.defaultBranch ?? "origin/main",
   );
   const [branchPrefix, setBranchPrefix] = useState(
     initialWorktree?.branchPrefix ?? "",
@@ -91,7 +91,7 @@ function DirectoryDialog({
               onChange={(e) => setCwd(e.target.value)}
               placeholder="/path/to/repo"
               aria-label="Directory"
-              className="w-full rounded-md border border-input bg-background px-2 py-1 text-sm outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
+              className="w-full rounded-md border border-input bg-background px-2 py-1 text-sm outline-none placeholder:text-muted-foreground focus-visible:ring-[3px] focus-visible:ring-ring/50"
             />
           </label>
           <div className="flex gap-2 text-sm">
@@ -123,9 +123,9 @@ function DirectoryDialog({
                 <input
                   value={defaultBranch}
                   onChange={(e) => setDefaultBranch(e.target.value)}
-                  placeholder="main"
+                  placeholder="origin/main"
                   aria-label="Default branch"
-                  className="w-full rounded-md border border-input bg-background px-2 py-1 text-sm outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
+                  className="w-full rounded-md border border-input bg-background px-2 py-1 text-sm outline-none placeholder:text-muted-foreground focus-visible:ring-[3px] focus-visible:ring-ring/50"
                 />
               </label>
               <label className="flex flex-col gap-1 text-sm">
@@ -137,7 +137,7 @@ function DirectoryDialog({
                   onChange={(e) => setBranchPrefix(e.target.value)}
                   placeholder="feat"
                   aria-label="Branch prefix"
-                  className="w-full rounded-md border border-input bg-background px-2 py-1 text-sm outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
+                  className="w-full rounded-md border border-input bg-background px-2 py-1 text-sm outline-none placeholder:text-muted-foreground focus-visible:ring-[3px] focus-visible:ring-ring/50"
                 />
               </label>
             </div>
