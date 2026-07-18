@@ -654,6 +654,29 @@ describe("Engine idle reap", () => {
     expect(sessions.get(conversationId)).toBeUndefined();
   });
 
+  test("overlapping turns keep the session busy until the last finishes", async () => {
+    const { engine, sessions, conversationId } = await opened();
+    const session = sessions.get(conversationId);
+    if (!session) throw new Error("missing session");
+    const first = Promise.withResolvers<boolean>();
+    const second = Promise.withResolvers<boolean>();
+    const pending = [first, second];
+    session.prompt = () => pending.shift()?.promise ?? Promise.resolve(true);
+    const p1 = engine.prompt(conversationId, CWD, "one");
+    const p2 = engine.prompt(conversationId, CWD, "two");
+    await Promise.resolve();
+    first.resolve(true);
+    await p1;
+    engine.sweep(Date.now() + FUTURE);
+    await Promise.resolve();
+    expect(sessions.get(conversationId)).toBeDefined();
+    second.resolve(true);
+    await p2;
+    engine.sweep(Date.now() + FUTURE);
+    await Promise.resolve();
+    expect(sessions.get(conversationId)).toBeUndefined();
+  });
+
   test("release keeps a failed session tracked so sweep retries it", async () => {
     const { engine, sessions, conversationId } = await opened();
     sessions.failClose.add(conversationId);

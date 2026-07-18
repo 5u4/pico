@@ -154,7 +154,7 @@ export class Engine<S extends SessionLike = SessionLike> {
     (conversationId: string) => void
   >();
   private readonly bridgeUnsub = new Map<string, () => void>();
-  private readonly activeTurns = new Set<string>();
+  private readonly activeTurns = new Map<string, number>();
   private readonly lastActivity = new Map<string, number>();
   private sweepTimer: Timer | undefined;
 
@@ -264,7 +264,10 @@ export class Engine<S extends SessionLike = SessionLike> {
       return withContext({ conversationId, workspaceId }, () => {
         logger.info("turn started ({chars} chars)", { chars: text.length });
         const firstTurn = this.seedProvisionalTitle(conversationId, text);
-        this.activeTurns.add(conversationId);
+        this.activeTurns.set(
+          conversationId,
+          (this.activeTurns.get(conversationId) ?? 0) + 1,
+        );
         this.touch(conversationId);
         return ResultAsync.fromPromise(
           session
@@ -282,7 +285,10 @@ export class Engine<S extends SessionLike = SessionLike> {
                 });
             })
             .finally(() => {
-              this.activeTurns.delete(conversationId);
+              const remaining = (this.activeTurns.get(conversationId) ?? 1) - 1;
+              if (remaining > 0)
+                this.activeTurns.set(conversationId, remaining);
+              else this.activeTurns.delete(conversationId);
               this.touch(conversationId);
             }),
           (e) => {
@@ -501,7 +507,7 @@ export class Engine<S extends SessionLike = SessionLike> {
   }
 
   private busy(conversationId: string): boolean {
-    if (this.activeTurns.has(conversationId)) return true;
+    if ((this.activeTurns.get(conversationId) ?? 0) > 0) return true;
     if (this.deps.sessions.isPending(conversationId)) return true;
     const session = this.deps.sessions.get(conversationId);
     if (!session) return false;
