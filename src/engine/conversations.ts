@@ -355,8 +355,10 @@ export class Engine<S extends SessionLike = SessionLike> {
     conversationId: string,
     cwd: string,
   ): ResultAsync<void, string> {
-    if (this.deps.sessions.get(conversationId))
+    if (this.deps.sessions.get(conversationId)) {
+      this.touch(conversationId);
       return okAsync<void, string>(undefined);
+    }
     return new ResultAsync(
       this.deps.sessions.open(conversationId, { cwd }),
     ).andThen((session) => {
@@ -458,11 +460,19 @@ export class Engine<S extends SessionLike = SessionLike> {
 
   async release(conversationId: string): Promise<void> {
     this.bridged.delete(conversationId);
-    this.bridgeUnsub.get(conversationId)?.();
-    this.bridgeUnsub.delete(conversationId);
     this.lastActivity.delete(conversationId);
-    await this.deps.sessions.close(conversationId);
-    logger.info("session released for {conversationId}", { conversationId });
+    const unsubscribe = this.bridgeUnsub.get(conversationId);
+    this.bridgeUnsub.delete(conversationId);
+    try {
+      unsubscribe?.();
+      await this.deps.sessions.close(conversationId);
+      logger.info("session released for {conversationId}", { conversationId });
+    } catch (e) {
+      logger.error("session release failed for {conversationId}: {error}", {
+        conversationId,
+        error: e,
+      });
+    }
   }
 
   async releaseIfIdle(conversationId: string): Promise<void> {

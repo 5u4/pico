@@ -129,6 +129,7 @@ class FakeSessions implements SessionsPort<FakeSession> {
   readonly sessions = new Map<string, FakeSession>();
   readonly failOpen = new Map<string, string>();
   readonly pending = new Set<string>();
+  readonly failClose = new Set<string>();
 
   get(id: string): FakeSession | undefined {
     return this.sessions.get(id);
@@ -139,6 +140,7 @@ class FakeSessions implements SessionsPort<FakeSession> {
   }
 
   close(id: string): Promise<void> {
+    if (this.failClose.has(id)) return Promise.reject(new Error("close boom"));
     this.sessions.delete(id);
     return Promise.resolve();
   }
@@ -650,6 +652,12 @@ describe("Engine idle reap", () => {
     const { engine, sessions, conversationId } = await opened();
     await engine.releaseIfIdle(conversationId);
     expect(sessions.get(conversationId)).toBeUndefined();
+  });
+
+  test("release swallows a close failure instead of rejecting", async () => {
+    const { engine, sessions, conversationId } = await opened();
+    sessions.failClose.add(conversationId);
+    await expect(engine.release(conversationId)).resolves.toBeUndefined();
   });
 
   test("releaseIfIdle spares a busy session", async () => {
