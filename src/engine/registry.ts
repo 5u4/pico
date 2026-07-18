@@ -212,6 +212,21 @@ export function setConversationTitle(
   return result.changes > 0;
 }
 
+export function countActiveWorktreeConversations(
+  db: Database,
+  workspaceId: string,
+): number {
+  const row = db
+    .query(
+      `SELECT COUNT(*) AS n FROM conversations
+       WHERE workspaceId = $workspaceId
+         AND archivedAt IS NULL
+         AND branch IS NOT NULL`,
+    )
+    .get({ workspaceId }) as { n: number };
+  return row.n;
+}
+
 export function archiveConversation(db: Database, id: string): boolean {
   const result = db
     .query(

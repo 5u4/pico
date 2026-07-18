@@ -12,6 +12,7 @@ import {
 } from "../../engine/provision";
 import {
   archiveConversation,
+  countActiveWorktreeConversations,
   createWorkspace,
   getConversation,
   getOrCreateDefaultWorkspace,
@@ -206,6 +207,16 @@ export class WebHub<S extends SessionLike = SessionLike> {
         this.sendError(ws, `not a directory: ${command.cwd}`);
         return;
       }
+      if (
+        isWorktreeWorkspace(target) &&
+        countActiveWorktreeConversations(this.deps.db, target.id) > 0
+      ) {
+        this.sendError(
+          ws,
+          "archive this workspace's worktree conversations before changing its directory or mode",
+        );
+        return;
+      }
       let worktree: { defaultBranch: string; branchPrefix: string } | null =
         null;
       if (command.worktree) {
@@ -236,13 +247,14 @@ export class WebHub<S extends SessionLike = SessionLike> {
         this.sendError(ws, `unknown conversation: ${command.conversationId}`);
         return;
       }
-      archiveConversation(this.deps.db, conversation.id);
       if (isWorktreeWorkspace(target)) {
         const removed = await deprovisionConversation(target, conversation);
         if (removed.isErr()) {
           this.sendError(ws, removed.error);
+          return;
         }
       }
+      archiveConversation(this.deps.db, conversation.id);
       const wasViewing = ws.data.conversationId === conversation.id;
       const otherViewers = [
         ...(this.viewers.get(conversation.id) ?? []),

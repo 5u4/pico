@@ -9,8 +9,8 @@ export const workspaceSchema = z.object({
   platform: platformSchema,
   label: z.string().nullable(),
   externalId: z.string().nullable(),
-  defaultBranch: z.string().nullable(),
-  branchPrefix: z.string().nullable(),
+  defaultBranch: z.string().min(1).nullable(),
+  branchPrefix: z.string().min(1).nullable(),
   createdAt: z.number().int().nonnegative(),
 });
 export type Workspace = z.infer<typeof workspaceSchema>;

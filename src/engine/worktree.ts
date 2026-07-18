@@ -61,16 +61,16 @@ export async function createWorktree(input: {
   const base = await git(baseRepo, [
     "rev-parse",
     "--verify",
+    "--end-of-options",
     `${defaultBranch}^{commit}`,
   ]);
-  if (base.isErr()) {
-    return err(`base branch ${defaultBranch} has no commits`);
-  }
+  if (base.isErr()) return err(base.error);
   const added = await git(baseRepo, [
     "worktree",
     "add",
     "-b",
     branch,
+    "--",
     dest,
     defaultBranch,
   ]);

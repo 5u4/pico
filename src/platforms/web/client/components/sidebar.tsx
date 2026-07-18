@@ -90,6 +90,7 @@ function DirectoryDialog({
               value={cwd}
               onChange={(e) => setCwd(e.target.value)}
               placeholder="/path/to/repo"
+              aria-label="Directory"
               className="w-full rounded-md border border-input bg-background px-2 py-1 text-sm outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
             />
           </label>
@@ -123,6 +124,7 @@ function DirectoryDialog({
                   value={defaultBranch}
                   onChange={(e) => setDefaultBranch(e.target.value)}
                   placeholder="main"
+                  aria-label="Default branch"
                   className="w-full rounded-md border border-input bg-background px-2 py-1 text-sm outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
                 />
               </label>
@@ -134,6 +136,7 @@ function DirectoryDialog({
                   value={branchPrefix}
                   onChange={(e) => setBranchPrefix(e.target.value)}
                   placeholder="feat"
+                  aria-label="Branch prefix"
                   className="w-full rounded-md border border-input bg-background px-2 py-1 text-sm outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
                 />
               </label>
@@ -246,20 +249,22 @@ function WorkspaceItem({
   };
   return (
     <Collapsible open={open} onOpenChange={onOpenChange} className="mb-1">
-      <DirectoryDialog
-        open={dialogOpen}
-        onOpenChange={setDialogOpen}
-        initialCwd={workspace.cwd}
-        initialWorktree={
-          workspace.worktree
-            ? {
-                defaultBranch: workspace.defaultBranch ?? "HEAD",
-                branchPrefix: workspace.branchPrefix ?? "",
-              }
-            : null
-        }
-        onSubmit={(cwd, worktree) => onUpdateCwd(workspace.id, cwd, worktree)}
-      />
+      {dialogOpen && (
+        <DirectoryDialog
+          open
+          onOpenChange={setDialogOpen}
+          initialCwd={workspace.cwd}
+          initialWorktree={
+            workspace.worktree
+              ? {
+                  defaultBranch: workspace.defaultBranch ?? "HEAD",
+                  branchPrefix: workspace.branchPrefix ?? "",
+                }
+              : null
+          }
+          onSubmit={(cwd, worktree) => onUpdateCwd(workspace.id, cwd, worktree)}
+        />
+      )}
       {renaming ? (
         <div className="px-2 py-1">
           <input
