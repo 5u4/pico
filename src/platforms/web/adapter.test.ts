@@ -257,7 +257,7 @@ describe("WebHub.handleOpen", () => {
     }
   });
 
-  test("with an existing conversation sends workspaces without a draft and defers activation to the client", () => {
+  test("with an existing conversation sends workspaces without a draft and defers activation to the client", async () => {
     const { hub, db, workspace } = makeHub();
     createConversation(db, {
       workspaceId: workspace.id,
@@ -266,7 +266,7 @@ describe("WebHub.handleOpen", () => {
     });
     const ws = new FakeSocket();
 
-    hub.handleOpen(ws);
+    await hub.handleOpen(ws);
 
     expect(ws.sent.map((e) => e.kind)).toEqual(["workspaces", "attention"]);
     const event = ws.sent[0];
@@ -852,7 +852,7 @@ describe("WebHub auto-title", () => {
       title: null,
     });
     const ws = new FakeSocket();
-    hub.handleOpen(ws);
+    await hub.handleOpen(ws);
     await hub.handleCommand(ws, {
       kind: "select",
       conversationId: conversation.id,
@@ -914,7 +914,7 @@ describe("WebHub attention on turn settle", () => {
       title: null,
     });
     const ws = new FakeSocket();
-    hub.handleOpen(ws);
+    await hub.handleOpen(ws);
     ws.sent.length = 0;
 
     await engine.prompt(conversation.id, conversation.cwd, "hi");
@@ -933,7 +933,7 @@ describe("WebHub attention on turn settle", () => {
       title: null,
     });
     const ws = new FakeSocket();
-    hub.handleOpen(ws);
+    await hub.handleOpen(ws);
     await hub.handleCommand(ws, {
       kind: "select",
       conversationId: conversation.id,
@@ -954,8 +954,8 @@ describe("WebHub attention on turn settle", () => {
     });
     const viewer = new FakeSocket();
     const other = new FakeSocket();
-    hub.handleOpen(viewer);
-    hub.handleOpen(other);
+    await hub.handleOpen(viewer);
+    await hub.handleOpen(other);
 
     await engine.prompt(conversation.id, conversation.cwd, "hi");
     other.sent.length = 0;

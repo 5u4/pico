@@ -104,6 +104,12 @@ async function branchExists(baseRepo: string, name: string): Promise<boolean> {
   return result.isOk();
 }
 
+export function currentBranch(
+  worktreeCwd: string,
+): Promise<Result<string, string>> {
+  return git(worktreeCwd, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
+}
+
 export async function renameBranch(input: {
   baseRepo: string;
   from: string;

@@ -50,7 +50,6 @@ describe("provisionConversation", () => {
     );
     const conversation = result._unsafeUnwrap();
     expect(conversation.cwd).toBe(repo);
-    expect(conversation.branch).toBeNull();
   });
 
   test("a worktree workspace forks an isolated worktree with a temp branch", async () => {
@@ -71,11 +70,13 @@ describe("provisionConversation", () => {
     expect(conversation.cwd).toBe(
       join(worktreeCwd, workspace.id, conversation.id),
     );
-    expect(conversation.branch).toStartWith("feat/");
     expect(existsSync(conversation.cwd)).toBe(true);
+    const head = await $`git -C ${conversation.cwd} symbolic-ref --short HEAD`
+      .quiet()
+      .text();
+    expect(head.trim()).toBe(`feat/${conversation.id.slice(-8).toLowerCase()}`);
     const persisted = getConversation(db, conversation.id);
     expect(persisted?.cwd).toBe(conversation.cwd);
-    expect(persisted?.branch).toBe(conversation.branch);
   });
 
   test("a bad default branch rolls back the conversation row", async () => {
@@ -113,18 +114,45 @@ describe("renameConversationBranch", () => {
       await provisionConversation(db, workspace, worktreeCwd, null)
     )._unsafeUnwrap();
     const renamed = await renameConversationBranch(
-      db,
       workspace,
       conversation,
       "Add OAuth Login",
     );
     expect(renamed.isOk()).toBe(true);
-    expect(getConversation(db, conversation.id)?.branch).toBe(
-      "feat/add-oauth-login",
-    );
+    const head = await $`git -C ${conversation.cwd} symbolic-ref --short HEAD`
+      .quiet()
+      .text();
+    expect(head.trim()).toBe("feat/add-oauth-login");
     const fmt = "--format=%(refname:short)";
     const branches = await $`git -C ${repo} branch ${fmt}`.quiet().text();
     expect(branches).toContain("feat/add-oauth-login");
+  });
+
+  test("skips the rename when the agent reassigned the branch", async () => {
+    const workspace = createWorkspace(db, {
+      cwd: repo,
+      platform: "web",
+      label: null,
+      defaultBranch: "main",
+      branchPrefix: "feat",
+    });
+    const conversation = (
+      await provisionConversation(db, workspace, worktreeCwd, null)
+    )._unsafeUnwrap();
+    await $`git -C ${conversation.cwd} checkout -b agent-owned`.quiet();
+    const renamed = await renameConversationBranch(
+      workspace,
+      conversation,
+      "Add OAuth Login",
+    );
+    expect(renamed.isOk()).toBe(true);
+    const head = await $`git -C ${conversation.cwd} symbolic-ref --short HEAD`
+      .quiet()
+      .text();
+    expect(head.trim()).toBe("agent-owned");
+    const fmt = "--format=%(refname:short)";
+    const branches = await $`git -C ${repo} branch ${fmt}`.quiet().text();
+    expect(branches).not.toContain("feat/add-oauth-login");
   });
 
   test("is a no-op for a regular workspace", async () => {
@@ -137,13 +165,11 @@ describe("renameConversationBranch", () => {
       await provisionConversation(db, workspace, worktreeCwd, null)
     )._unsafeUnwrap();
     const renamed = await renameConversationBranch(
-      db,
       workspace,
       conversation,
       "anything",
     );
     expect(renamed.isOk()).toBe(true);
-    expect(getConversation(db, conversation.id)?.branch).toBeNull();
   });
 });
 

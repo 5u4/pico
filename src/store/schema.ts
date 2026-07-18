@@ -26,7 +26,6 @@ export const conversationSchema = z.object({
   workspaceId: z.string().min(1),
   cwd: z.string().min(1),
   title: z.string().nullable(),
-  branch: z.string().nullable(),
   externalId: z.string().nullable(),
   createdAt: z.number().int().nonnegative(),
   archivedAt: z.number().int().nonnegative().nullable(),

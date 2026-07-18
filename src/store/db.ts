@@ -112,6 +112,10 @@ const MIGRATIONS: readonly Migration[] = [
         WHERE externalId IS NOT NULL;
     `,
   },
+  {
+    version: 2,
+    up: "ALTER TABLE conversations DROP COLUMN branch;",
+  },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS.reduce(

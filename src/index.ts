@@ -50,7 +50,6 @@ const engine = new Engine({
     const workspace = getWorkspace(db, conversation.workspaceId);
     if (!workspace) return;
     const renamed = await renameConversationBranch(
-      db,
       workspace,
       conversation,
       title,
