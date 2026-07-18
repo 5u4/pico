@@ -81,6 +81,10 @@ export class Sessions {
     return this.live.get(conversationId);
   }
 
+  isPending(conversationId: string): boolean {
+    return this.pending.has(conversationId);
+  }
+
   async close(conversationId: string): Promise<void> {
     const session = this.live.get(conversationId);
     if (!session) return;

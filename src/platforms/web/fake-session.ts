@@ -2,6 +2,7 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent";
 import { ok, type Result } from "neverthrow";
 import type {
+  AsyncJobActivity,
   SessionLike,
   SessionStateLike,
   SessionsPort,
@@ -172,6 +173,10 @@ export class FakeWebSession implements SessionLike {
   getSessionStats(): { cost: number } {
     return { cost: 0.012 };
   }
+
+  getAsyncJobSnapshot(): AsyncJobActivity | null {
+    return { running: [], delivery: { queued: 0 } };
+  }
 }
 
 export class FakeWebSessions implements SessionsPort<FakeWebSession> {
@@ -186,6 +191,15 @@ export class FakeWebSessions implements SessionsPort<FakeWebSession> {
 
   get(id: string): FakeWebSession | undefined {
     return this.live.get(id);
+  }
+
+  isPending(_id: string): boolean {
+    return false;
+  }
+
+  close(id: string): Promise<void> {
+    this.live.delete(id);
+    return Promise.resolve();
   }
 
   open(id: string): Promise<Result<FakeWebSession, string>> {

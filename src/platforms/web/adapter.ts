@@ -85,6 +85,11 @@ export class WebHub<S extends SessionLike = SessionLike> {
     this.broadcastAttention();
   }
 
+  private finalizeArchive(conversationId: string): void {
+    this.clearAttention(conversationId);
+    void this.deps.engine.releaseIfIdle(conversationId);
+  }
+
   handleOpen(ws: HubSocket): void {
     this.allSockets.add(ws);
     const target = getOrCreateDefaultWorkspace(
@@ -292,7 +297,6 @@ export class WebHub<S extends SessionLike = SessionLike> {
         }
       }
       archiveConversation(this.deps.db, conversation.id);
-      this.clearAttention(conversation.id);
       const wasViewing = ws.data.conversationId === conversation.id;
       const otherViewers = [
         ...(this.viewers.get(conversation.id) ?? []),
@@ -307,6 +311,7 @@ export class WebHub<S extends SessionLike = SessionLike> {
         this.detach(viewer);
         this.sendWorkspaces(viewer, target.id);
       }
+      this.finalizeArchive(conversation.id);
       for (const other of this.allSockets)
         if (other !== ws && !otherViewers.includes(other))
           this.sendWorkspaces(other);

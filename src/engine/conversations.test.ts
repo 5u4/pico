@@ -3,6 +3,7 @@ import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent";
 import { err, ok, type Result } from "neverthrow";
 import { openDb } from "../store/db";
 import {
+  type AsyncJobActivity,
   Engine,
   type SessionLike,
   type SessionStateLike,
@@ -110,6 +111,15 @@ class FakeSession implements SessionLike {
     return { cost: this.cost };
   }
 
+  asyncSnapshot: AsyncJobActivity | null = {
+    running: [],
+    delivery: { queued: 0 },
+  };
+
+  getAsyncJobSnapshot(): AsyncJobActivity | null {
+    return this.asyncSnapshot;
+  }
+
   emit(event: AgentSessionEvent): void {
     for (const listener of this.listeners) listener(event);
   }
@@ -118,9 +128,21 @@ class FakeSession implements SessionLike {
 class FakeSessions implements SessionsPort<FakeSession> {
   readonly sessions = new Map<string, FakeSession>();
   readonly failOpen = new Map<string, string>();
+  readonly pending = new Set<string>();
+  readonly failClose = new Set<string>();
 
   get(id: string): FakeSession | undefined {
     return this.sessions.get(id);
+  }
+
+  isPending(id: string): boolean {
+    return this.pending.has(id);
+  }
+
+  close(id: string): Promise<void> {
+    if (this.failClose.has(id)) return Promise.reject(new Error("close boom"));
+    this.sessions.delete(id);
+    return Promise.resolve();
   }
 
   open(id: string): Promise<Result<FakeSession, string>> {
@@ -532,5 +554,153 @@ describe("Engine snapshot windowing", () => {
     const older = engine.loadOlder(conversationId, "m20");
     expect(older?.messages).toHaveLength(20);
     expect(older?.hasMore).toBe(false);
+  });
+});
+
+const FUTURE = 20 * 60_000;
+
+describe("Engine idle reap", () => {
+  async function opened() {
+    const { engine, sessions, conversationId } = makeEngine();
+    const { unsubscribe, opened } = engine.subscribe(
+      conversationId,
+      CWD,
+      "live",
+      () => {},
+    );
+    await opened;
+    unsubscribe();
+    return { engine, sessions, conversationId };
+  }
+
+  test("reaps an idle conversation with no viewers", async () => {
+    const { engine, sessions, conversationId } = await opened();
+    engine.sweep(Date.now() + FUTURE);
+    await Promise.resolve();
+    expect(sessions.get(conversationId)).toBeUndefined();
+  });
+
+  test("does not reap while a turn is active", async () => {
+    const { engine, sessions, conversationId } = await opened();
+    const gate = Promise.withResolvers<boolean>();
+    const session = sessions.get(conversationId);
+    if (!session) throw new Error("missing session");
+    session.prompt = () => gate.promise;
+    void engine.prompt(conversationId, CWD, "run a long task");
+    await Promise.resolve();
+    engine.sweep(Date.now() + FUTURE);
+    expect(sessions.get(conversationId)).toBeDefined();
+    gate.resolve(true);
+  });
+
+  test("does not reap while streaming", async () => {
+    const { engine, sessions, conversationId } = await opened();
+    const session = sessions.get(conversationId);
+    if (!session) throw new Error("missing session");
+    session.state.isStreaming = true;
+    engine.sweep(Date.now() + FUTURE);
+    expect(sessions.get(conversationId)).toBeDefined();
+  });
+
+  test("does not reap while a background async job is running", async () => {
+    const { engine, sessions, conversationId } = await opened();
+    const session = sessions.get(conversationId);
+    if (!session) throw new Error("missing session");
+    session.asyncSnapshot = {
+      running: [{ id: "job-1" }],
+      delivery: { queued: 0 },
+    };
+    engine.sweep(Date.now() + FUTURE);
+    expect(sessions.get(conversationId)).toBeDefined();
+  });
+
+  test("does not reap while an async delivery is queued", async () => {
+    const { engine, sessions, conversationId } = await opened();
+    const session = sessions.get(conversationId);
+    if (!session) throw new Error("missing session");
+    session.asyncSnapshot = { running: [], delivery: { queued: 1 } };
+    engine.sweep(Date.now() + FUTURE);
+    expect(sessions.get(conversationId)).toBeDefined();
+  });
+
+  test("does not reap while a viewer is subscribed", async () => {
+    const { engine, sessions, conversationId } = await opened();
+    engine.subscribe(conversationId, CWD, "live", () => {});
+    engine.sweep(Date.now() + FUTURE);
+    expect(sessions.get(conversationId)).toBeDefined();
+  });
+
+  test("does not reap before the idle threshold", async () => {
+    const { engine, sessions, conversationId } = await opened();
+    engine.sweep(Date.now());
+    expect(sessions.get(conversationId)).toBeDefined();
+  });
+
+  test("a crashed turn does not pin the session forever", async () => {
+    const { engine, sessions, conversationId } = await opened();
+    const session = sessions.get(conversationId);
+    if (!session) throw new Error("missing session");
+    session.prompt = () => Promise.reject(new Error("boom"));
+    const result = await engine.prompt(conversationId, CWD, "explode");
+    expect(result.isErr()).toBe(true);
+    engine.sweep(Date.now() + FUTURE);
+    await Promise.resolve();
+    expect(sessions.get(conversationId)).toBeUndefined();
+  });
+
+  test("releaseIfIdle closes an idle session and unsubscribes the bridge", async () => {
+    const { engine, sessions, conversationId } = await opened();
+    await engine.releaseIfIdle(conversationId);
+    expect(sessions.get(conversationId)).toBeUndefined();
+  });
+
+  test("overlapping turns keep the session busy until the last finishes", async () => {
+    const { engine, sessions, conversationId } = await opened();
+    const session = sessions.get(conversationId);
+    if (!session) throw new Error("missing session");
+    const first = Promise.withResolvers<boolean>();
+    const second = Promise.withResolvers<boolean>();
+    const pending = [first, second];
+    session.prompt = () => pending.shift()?.promise ?? Promise.resolve(true);
+    const p1 = engine.prompt(conversationId, CWD, "one");
+    const p2 = engine.prompt(conversationId, CWD, "two");
+    await Promise.resolve();
+    first.resolve(true);
+    await p1;
+    engine.sweep(Date.now() + FUTURE);
+    await Promise.resolve();
+    expect(sessions.get(conversationId)).toBeDefined();
+    second.resolve(true);
+    await p2;
+    engine.sweep(Date.now() + FUTURE);
+    await Promise.resolve();
+    expect(sessions.get(conversationId)).toBeUndefined();
+  });
+
+  test("release keeps a failed session tracked so sweep retries it", async () => {
+    const { engine, sessions, conversationId } = await opened();
+    sessions.failClose.add(conversationId);
+    await expect(engine.release(conversationId)).resolves.toBeUndefined();
+    expect(sessions.get(conversationId)).toBeDefined();
+    sessions.failClose.delete(conversationId);
+    engine.sweep(Date.now() + FUTURE);
+    await Promise.resolve();
+    expect(sessions.get(conversationId)).toBeUndefined();
+  });
+
+  test("releaseIfIdle spares a session with an attached viewer", async () => {
+    const { engine, sessions, conversationId } = await opened();
+    engine.subscribe(conversationId, CWD, "live", () => {});
+    await engine.releaseIfIdle(conversationId);
+    expect(sessions.get(conversationId)).toBeDefined();
+  });
+
+  test("releaseIfIdle spares a busy session", async () => {
+    const { engine, sessions, conversationId } = await opened();
+    const session = sessions.get(conversationId);
+    if (!session) throw new Error("missing session");
+    session.state.isStreaming = true;
+    await engine.releaseIfIdle(conversationId);
+    expect(sessions.get(conversationId)).toBeDefined();
   });
 });

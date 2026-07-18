@@ -30,6 +30,11 @@ export interface SessionStateLike {
   isStreaming: boolean;
 }
 
+export interface AsyncJobActivity {
+  running: { id: string }[];
+  delivery: { queued: number };
+}
+
 export interface SessionLike {
   readonly state: SessionStateLike;
   prompt(text: string): Promise<boolean>;
@@ -49,6 +54,7 @@ export interface SessionLike {
   getContextUsage(): ContextTokens | undefined;
   getContextBreakdown(): ContextCategoryTokens | undefined;
   getSessionStats(): { cost: number };
+  getAsyncJobSnapshot(): AsyncJobActivity | null;
 }
 
 interface ContextTokens {
@@ -108,6 +114,8 @@ export function computeContextUsage(
 export interface SessionsPort<S extends SessionLike = SessionLike> {
   get(id: string): S | undefined;
   open(id: string, opts: { cwd: string }): Promise<Result<S, string>>;
+  close(id: string): Promise<void>;
+  isPending(id: string): boolean;
 }
 
 export type SubscribeMode = "live" | "settled";
@@ -135,6 +143,9 @@ type Subscriber = {
   listener: (event: TurnEvent) => void;
 };
 
+const IDLE_MS = 10 * 60_000;
+const SWEEP_MS = 60_000;
+
 export class Engine<S extends SessionLike = SessionLike> {
   private readonly deps: EngineDeps<S>;
   private readonly subscribers = new Map<string, Set<Subscriber>>();
@@ -142,6 +153,10 @@ export class Engine<S extends SessionLike = SessionLike> {
   private readonly settleListeners = new Set<
     (conversationId: string) => void
   >();
+  private readonly bridgeUnsub = new Map<string, () => void>();
+  private readonly activeTurns = new Map<string, number>();
+  private readonly lastActivity = new Map<string, number>();
+  private sweepTimer: Timer | undefined;
 
   constructor(deps: EngineDeps<S>) {
     this.deps = deps;
@@ -249,17 +264,33 @@ export class Engine<S extends SessionLike = SessionLike> {
       return withContext({ conversationId, workspaceId }, () => {
         logger.info("turn started ({chars} chars)", { chars: text.length });
         const firstTurn = this.seedProvisionalTitle(conversationId, text);
+        this.activeTurns.set(
+          conversationId,
+          (this.activeTurns.get(conversationId) ?? 0) + 1,
+        );
+        this.touch(conversationId);
         return ResultAsync.fromPromise(
-          session.prompt(text).then(() => {
-            logger.info("turn completed");
-            this.emitSettled(conversationId);
-            if (firstTurn)
-              void this.autoTitleFromReply(conversationId, session, text).catch(
-                (e: unknown) => {
+          session
+            .prompt(text)
+            .then(() => {
+              logger.info("turn completed");
+              this.emitSettled(conversationId);
+              if (firstTurn)
+                void this.autoTitleFromReply(
+                  conversationId,
+                  session,
+                  text,
+                ).catch((e: unknown) => {
                   logger.error("auto-title failed: {error}", { error: e });
-                },
-              );
-          }),
+                });
+            })
+            .finally(() => {
+              const remaining = (this.activeTurns.get(conversationId) ?? 1) - 1;
+              if (remaining > 0)
+                this.activeTurns.set(conversationId, remaining);
+              else this.activeTurns.delete(conversationId);
+              this.touch(conversationId);
+            }),
           (e) => {
             logger.error("turn failed: {error}", { error: e });
             return errMessage(e);
@@ -330,15 +361,21 @@ export class Engine<S extends SessionLike = SessionLike> {
     conversationId: string,
     cwd: string,
   ): ResultAsync<void, string> {
-    if (this.deps.sessions.get(conversationId))
+    if (this.deps.sessions.get(conversationId)) {
+      this.touch(conversationId);
       return okAsync<void, string>(undefined);
+    }
     return new ResultAsync(
       this.deps.sessions.open(conversationId, { cwd }),
     ).andThen((session) => {
       if (!this.bridged.has(conversationId)) {
         this.bridged.add(conversationId);
-        session.subscribe((event) => this.dispatch(conversationId, event));
+        const unsubscribe = session.subscribe((event) =>
+          this.dispatch(conversationId, event),
+        );
+        this.bridgeUnsub.set(conversationId, unsubscribe);
       }
+      this.touch(conversationId);
       return okAsync<void, string>(undefined);
     });
   }
@@ -346,6 +383,7 @@ export class Engine<S extends SessionLike = SessionLike> {
   private dispatch(conversationId: string, event: AgentSessionEvent): void {
     const session = this.deps.sessions.get(conversationId);
     if (!session) return;
+    this.touch(conversationId);
     const state = session.state;
     const streaming = state.isStreaming;
     const targets = this.subscribers.get(conversationId);
@@ -406,5 +444,83 @@ export class Engine<S extends SessionLike = SessionLike> {
         });
     }
     this.broadcastTitle(conversationId, title);
+  }
+
+  start(intervalMs: number = SWEEP_MS): void {
+    if (this.sweepTimer) return;
+    this.sweepTimer = setInterval(() => this.sweep(), intervalMs);
+    this.sweepTimer.unref?.();
+  }
+
+  stop(): void {
+    if (!this.sweepTimer) return;
+    clearInterval(this.sweepTimer);
+    this.sweepTimer = undefined;
+  }
+
+  sweep(now: number = Date.now()): void {
+    for (const conversationId of [...this.bridged]) {
+      if (this.reapable(conversationId, now)) void this.release(conversationId);
+    }
+  }
+
+  async release(conversationId: string): Promise<void> {
+    const unsubscribe = this.bridgeUnsub.get(conversationId);
+    try {
+      unsubscribe?.();
+    } catch (e) {
+      logger.error("bridge unsubscribe failed for {conversationId}: {error}", {
+        conversationId,
+        error: e,
+      });
+    }
+    try {
+      await this.deps.sessions.close(conversationId);
+    } catch (e) {
+      logger.error("session release failed for {conversationId}: {error}", {
+        conversationId,
+        error: e,
+      });
+      return;
+    }
+    this.bridged.delete(conversationId);
+    this.bridgeUnsub.delete(conversationId);
+    this.lastActivity.delete(conversationId);
+    logger.info("session released for {conversationId}", { conversationId });
+  }
+
+  async releaseIfIdle(conversationId: string): Promise<void> {
+    if (this.hasViewers(conversationId)) return;
+    if (this.busy(conversationId)) return;
+    await this.release(conversationId);
+  }
+
+  private reapable(conversationId: string, now: number): boolean {
+    if (this.hasViewers(conversationId)) return false;
+    if (this.busy(conversationId)) return false;
+    const last = this.lastActivity.get(conversationId) ?? 0;
+    return now - last > IDLE_MS;
+  }
+
+  private hasViewers(conversationId: string): boolean {
+    return (this.subscribers.get(conversationId)?.size ?? 0) > 0;
+  }
+
+  private busy(conversationId: string): boolean {
+    if ((this.activeTurns.get(conversationId) ?? 0) > 0) return true;
+    if (this.deps.sessions.isPending(conversationId)) return true;
+    const session = this.deps.sessions.get(conversationId);
+    if (!session) return false;
+    return session.state.isStreaming || this.hasAsyncWake(session);
+  }
+
+  private hasAsyncWake(session: S): boolean {
+    const snap = session.getAsyncJobSnapshot();
+    if (!snap) return false;
+    return snap.running.length > 0 || snap.delivery.queued > 0;
+  }
+
+  private touch(conversationId: string): void {
+    this.lastActivity.set(conversationId, Date.now());
   }
 }

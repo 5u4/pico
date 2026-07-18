@@ -63,6 +63,7 @@ const engine = new Engine({
     }
   },
 });
+engine.start();
 let server: Bun.Server<WsData> | undefined;
 if (config.web.enabled) {
   const hub = new WebHub({
@@ -106,6 +107,7 @@ const shutdown = async (signal: string): Promise<void> => {
   let code = 0;
   try {
     server?.stop();
+    engine.stop();
     await sessions.closeAll();
     db.close();
     await dispose();
