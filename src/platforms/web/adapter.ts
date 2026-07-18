@@ -25,6 +25,7 @@ import {
 import { currentBranch, sanitizeRefSegment } from "../../engine/worktree";
 import { isWorktreeWorkspace, type Platform } from "../../store/schema";
 import { assertNever } from "../../util/assert";
+import { log } from "../../util/log";
 import type {
   ClientCommand,
   CommandCommand,
@@ -34,6 +35,7 @@ import type {
 
 const PLATFORM: Platform = "web";
 const DEFAULT_LABEL = "Default";
+const logger = log(["web"]);
 
 export interface HubSocket {
   data: { conversationId: string | null };
@@ -409,12 +411,11 @@ export class WebHub<S extends SessionLike = SessionLike> {
     };
   }
 
-  private async dispatch(
-    conversationId: string,
-    event: TurnEvent,
-  ): Promise<void> {
+  private dispatch(conversationId: string, event: TurnEvent): void {
     if (event.kind === "title") {
-      await this.broadcastWorkspaces();
+      this.broadcastWorkspaces().catch((error: unknown) => {
+        logger.error("workspace broadcast failed: {error}", { error });
+      });
       return;
     }
     const payload = JSON.stringify(
