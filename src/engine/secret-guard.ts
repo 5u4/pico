@@ -1,7 +1,7 @@
 import { basename } from "node:path";
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
-import { scrub } from "./redact.ts";
+import { scrub } from "./redact";
 
 const SECRET_BASENAMES: ReadonlySet<string> = new Set([
   "id_rsa",
