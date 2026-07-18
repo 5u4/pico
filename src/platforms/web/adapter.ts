@@ -208,9 +208,13 @@ export class WebHub<S extends SessionLike = SessionLike> {
         label: command.label,
       });
       this.detach(ws);
-      await this.sendWorkspaces(ws, created.id);
-      for (const other of this.allSockets)
-        if (other !== ws) await this.sendWorkspaces(other);
+      const items = await this.workspaceTree();
+      for (const other of new Set<HubSocket>([ws, ...this.allSockets]))
+        this.emitWorkspaces(
+          other,
+          items,
+          other === ws ? created.id : undefined,
+        );
       return;
     }
 
@@ -221,7 +225,7 @@ export class WebHub<S extends SessionLike = SessionLike> {
         return;
       }
       renameWorkspace(this.deps.db, target.id, command.label);
-      for (const other of this.allSockets) await this.sendWorkspaces(other);
+      await this.broadcastWorkspaces();
       return;
     }
 
@@ -273,7 +277,7 @@ export class WebHub<S extends SessionLike = SessionLike> {
         };
       }
       updateWorkspaceCwd(this.deps.db, target.id, command.cwd, worktree);
-      for (const other of this.allSockets) await this.sendWorkspaces(other);
+      await this.broadcastWorkspaces();
       return;
     }
 
@@ -301,20 +305,24 @@ export class WebHub<S extends SessionLike = SessionLike> {
       const otherViewers = [
         ...(this.viewers.get(conversation.id) ?? []),
       ].filter((viewer) => viewer !== ws);
+      const drafted = new Set<HubSocket>(otherViewers);
       if (wasViewing) {
         this.detach(ws);
-        await this.sendWorkspaces(ws, target.id);
-      } else {
-        await this.sendWorkspaces(ws);
+        drafted.add(ws);
       }
-      for (const viewer of otherViewers) {
-        this.detach(viewer);
-        await this.sendWorkspaces(viewer, target.id);
-      }
+      for (const viewer of otherViewers) this.detach(viewer);
       this.finalizeArchive(conversation.id);
-      for (const other of this.allSockets)
-        if (other !== ws && !otherViewers.includes(other))
-          await this.sendWorkspaces(other);
+      const items = await this.workspaceTree();
+      for (const other of new Set<HubSocket>([
+        ws,
+        ...otherViewers,
+        ...this.allSockets,
+      ]))
+        this.emitWorkspaces(
+          other,
+          items,
+          drafted.has(other) ? target.id : undefined,
+        );
       return;
     }
 
@@ -340,9 +348,9 @@ export class WebHub<S extends SessionLike = SessionLike> {
       return;
     }
     this.attach(ws, created.id);
-    await this.sendWorkspaces(ws);
-    for (const other of this.allSockets)
-      if (other !== ws) await this.sendWorkspaces(other);
+    const items = await this.workspaceTree();
+    for (const other of new Set<HubSocket>([ws, ...this.allSockets]))
+      this.emitWorkspaces(other, items);
     if (command.prompt) {
       const promptResult = await this.deps.engine.prompt(
         created.id,
@@ -406,7 +414,7 @@ export class WebHub<S extends SessionLike = SessionLike> {
     event: TurnEvent,
   ): Promise<void> {
     if (event.kind === "title") {
-      for (const ws of this.allSockets) await this.sendWorkspaces(ws);
+      await this.broadcastWorkspaces();
       return;
     }
     const payload = JSON.stringify(
@@ -472,17 +480,30 @@ export class WebHub<S extends SessionLike = SessionLike> {
     ws.data.conversationId = null;
   }
 
-  private async sendWorkspaces(
+  private emitWorkspaces(
     ws: HubSocket,
+    items: WorkspaceSummary[],
     draftWorkspaceId?: string,
-  ): Promise<void> {
+  ): void {
     const event: ServerEvent = {
       kind: "workspaces",
-      items: await this.workspaceTree(),
+      items,
       activeId: ws.data.conversationId,
       ...(draftWorkspaceId ? { draftWorkspaceId } : {}),
     };
     ws.send(JSON.stringify(event));
+  }
+
+  private async sendWorkspaces(
+    ws: HubSocket,
+    draftWorkspaceId?: string,
+  ): Promise<void> {
+    this.emitWorkspaces(ws, await this.workspaceTree(), draftWorkspaceId);
+  }
+
+  private async broadcastWorkspaces(): Promise<void> {
+    const items = await this.workspaceTree();
+    for (const ws of this.allSockets) this.emitWorkspaces(ws, items);
   }
 
   private sendError(ws: HubSocket, message: string): void {
