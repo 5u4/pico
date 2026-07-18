@@ -20,7 +20,10 @@ export const clientCommandSchema = z.union([
       workspaceId: z.string().min(1),
       prompt: z.string().min(1).optional(),
     }),
-    z.object({ kind: z.literal("createWorkspace"), label: z.string().min(1) }),
+    z.object({
+      kind: z.literal("createWorkspace"),
+      label: z.string().min(1),
+    }),
     z.object({
       kind: z.literal("renameWorkspace"),
       workspaceId: z.string().min(1),
@@ -30,6 +33,13 @@ export const clientCommandSchema = z.union([
       kind: z.literal("updateWorkspaceCwd"),
       workspaceId: z.string().min(1),
       cwd: z.string().min(1),
+      worktree: z
+        .object({
+          defaultBranch: z.string().min(1),
+          branchPrefix: z.string().min(1),
+        })
+        .nullable()
+        .optional(),
     }),
     z.object({ kind: z.literal("archive"), conversationId: z.string().min(1) }),
     z.object({ kind: z.literal("draft") }),
@@ -50,12 +60,16 @@ export type ConversationSummary = {
   id: string;
   title: string | null;
   cwd: string;
+  branch: string | null;
 };
 
 export type WorkspaceSummary = {
   id: string;
   label: string | null;
   cwd: string;
+  worktree: boolean;
+  defaultBranch: string | null;
+  branchPrefix: string | null;
   conversations: ConversationSummary[];
 };
 

@@ -10,6 +10,7 @@ describe("parseConfig", () => {
     expect(result.isOk()).toBe(true);
     expect(result._unsafeUnwrap()).toEqual({
       workspaceCwd: join(homedir(), ".pico"),
+      worktreeCwd: join(homedir(), ".pico", "worktrees"),
       web: { enabled: true, port: 4141 },
     });
   });
@@ -21,6 +22,7 @@ describe("parseConfig", () => {
     });
     expect(result._unsafeUnwrap()).toEqual({
       workspaceCwd: "/tmp/projects",
+      worktreeCwd: join(homedir(), ".pico", "worktrees"),
       web: { enabled: true, port: 8080 },
     });
   });
@@ -37,6 +39,7 @@ describe("loadConfig", () => {
     );
     expect(result._unsafeUnwrap()).toEqual({
       workspaceCwd: join(homedir(), ".pico"),
+      worktreeCwd: join(homedir(), ".pico", "worktrees"),
       web: { enabled: true, port: 4141 },
     });
   });
@@ -48,6 +51,7 @@ describe("loadConfig", () => {
       const result = await loadConfig(path);
       expect(result._unsafeUnwrap()).toEqual({
         workspaceCwd: join(homedir(), ".pico"),
+        worktreeCwd: join(homedir(), ".pico", "worktrees"),
         web: { enabled: true, port: 5000 },
       });
     } finally {
@@ -62,6 +66,7 @@ describe("loadConfig", () => {
       const result = await loadConfig(path);
       expect(result._unsafeUnwrap()).toEqual({
         workspaceCwd: join(homedir(), ".pico"),
+        worktreeCwd: join(homedir(), ".pico", "worktrees"),
         web: { enabled: true, port: 4141 },
       });
     } finally {
@@ -76,6 +81,7 @@ describe("loadConfig", () => {
       const result = await loadConfig(path);
       expect(result._unsafeUnwrap()).toEqual({
         workspaceCwd: "/tmp/projects",
+        worktreeCwd: join(homedir(), ".pico", "worktrees"),
         web: { enabled: true, port: 4141 },
       });
     } finally {

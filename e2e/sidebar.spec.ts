@@ -50,16 +50,16 @@ test.describe("pico web sidebar", () => {
     await workspace.click({ button: "right" });
     await page.getByRole("menuitem", { name: "Change directory" }).click();
 
-    const field = page.getByLabel("Change workspace directory");
+    const field = page.getByLabel("Directory", { exact: true });
     await expect(field).toHaveValue("/tmp/pico-e2e");
     await field.fill("/tmp");
-    await field.press("Enter");
+    await page.getByRole("button", { name: "Save" }).click();
 
     await expect(page.getByText("not a directory")).toHaveCount(0);
 
     await workspace.click({ button: "right" });
     await page.getByRole("menuitem", { name: "Change directory" }).click();
-    await expect(page.getByLabel("Change workspace directory")).toHaveValue(
+    await expect(page.getByLabel("Directory", { exact: true })).toHaveValue(
       "/tmp",
     );
   });
@@ -72,9 +72,9 @@ test.describe("pico web sidebar", () => {
     await workspace.click({ button: "right" });
     await page.getByRole("menuitem", { name: "Change directory" }).click();
 
-    const field = page.getByLabel("Change workspace directory");
+    const field = page.getByLabel("Directory", { exact: true });
     await field.fill("/no/such/pico/dir");
-    await field.press("Enter");
+    await page.getByRole("button", { name: "Save" }).click();
 
     await expect(page.getByText("not a directory:")).toBeVisible();
   });

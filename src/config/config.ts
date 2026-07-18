@@ -5,6 +5,10 @@ import { z } from "zod";
 
 export const configSchema = z.object({
   workspaceCwd: z.string().min(1).default(join(homedir(), ".pico")),
+  worktreeCwd: z
+    .string()
+    .min(1)
+    .default(join(homedir(), ".pico", "worktrees")),
   web: z
     .object({
       enabled: z.boolean().default(true),

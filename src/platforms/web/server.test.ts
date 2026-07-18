@@ -26,6 +26,7 @@ function startServer(): Harness {
     db,
     engine,
     workspaceCwd: WORKSPACE_CWD,
+    worktreeCwd: WORKSPACE_CWD,
   });
   const server = createServer({
     port: 0,

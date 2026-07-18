@@ -82,23 +82,26 @@ const MIGRATIONS: readonly Migration[] = [
     version: 1,
     up: `
       CREATE TABLE workspaces (
-        id         TEXT PRIMARY KEY CHECK (length(id) > 0),
-        cwd        TEXT NOT NULL CHECK (length(cwd) > 0),
-        platform   TEXT NOT NULL,
-        label      TEXT,
-        externalId TEXT,
-        createdAt  INTEGER NOT NULL CHECK (createdAt >= 0)
+        id            TEXT PRIMARY KEY CHECK (length(id) > 0),
+        cwd           TEXT NOT NULL CHECK (length(cwd) > 0),
+        platform      TEXT NOT NULL,
+        label         TEXT,
+        externalId    TEXT,
+        defaultBranch TEXT,
+        branchPrefix  TEXT,
+        createdAt     INTEGER NOT NULL CHECK (createdAt >= 0),
+        CHECK ((defaultBranch IS NULL) = (branchPrefix IS NULL))
       );
 
       CREATE UNIQUE INDEX workspaces_platform_external
         ON workspaces (platform, externalId)
         WHERE externalId IS NOT NULL;
-
       CREATE TABLE conversations (
         id          TEXT PRIMARY KEY CHECK (length(id) > 0),
         workspaceId TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
         cwd         TEXT NOT NULL CHECK (length(cwd) > 0),
         title       TEXT,
+        branch      TEXT,
         externalId  TEXT,
         createdAt   INTEGER NOT NULL CHECK (createdAt >= 0),
         archivedAt  INTEGER CHECK (archivedAt IS NULL OR archivedAt >= 0)

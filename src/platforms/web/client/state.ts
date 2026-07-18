@@ -42,7 +42,12 @@ export type Action =
   | { type: "create"; workspaceId: string }
   | { type: "createWorkspace"; label: string }
   | { type: "renameWorkspace"; workspaceId: string; label: string }
-  | { type: "updateWorkspaceCwd"; workspaceId: string; cwd: string }
+  | {
+      type: "updateWorkspaceCwd";
+      workspaceId: string;
+      cwd: string;
+      worktree: { defaultBranch: string; branchPrefix: string } | null;
+    }
   | { type: "archive"; conversationId: string }
   | { type: "loadOlder" };
 
@@ -349,6 +354,7 @@ export function reduce(state: ThreadState, action: Action): Reduced {
             kind: "updateWorkspaceCwd",
             workspaceId: action.workspaceId,
             cwd: action.cwd,
+            worktree: action.worktree,
           },
         ],
       };

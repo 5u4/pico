@@ -127,6 +127,7 @@ export type EngineDeps<S extends SessionLike = SessionLike> = {
   db: Database;
   sessions: SessionsPort<S>;
   autoTitle: (session: S, text: string) => Promise<string | null>;
+  onTitleSettled?: (conversationId: string, title: string) => Promise<void>;
 };
 
 type Subscriber = {
@@ -378,6 +379,13 @@ export class Engine<S extends SessionLike = SessionLike> {
     await session.setSessionName(title, "auto").catch((e: unknown) => {
       logger.error("title sync to omp session failed: {error}", { error: e });
     });
+    if (this.deps.onTitleSettled) {
+      await this.deps
+        .onTitleSettled(conversationId, title)
+        .catch((e: unknown) => {
+          logger.error("title-settled hook failed: {error}", { error: e });
+        });
+    }
     this.broadcastTitle(conversationId, title);
   }
 }
