@@ -185,6 +185,7 @@ function makeHub(
     db,
     engine,
     workspaceCwd: WORKSPACE_CWD,
+    worktreeCwd: WORKSPACE_CWD,
   });
   return { db, workspace, sessions, hub };
 }
@@ -217,6 +218,7 @@ describe("WebHub.handleOpen", () => {
       db,
       engine,
       workspaceCwd: WORKSPACE_CWD,
+      worktreeCwd: WORKSPACE_CWD,
     });
     const ws = new FakeSocket();
 

@@ -7,8 +7,11 @@ import type {
   TurnEvent,
 } from "../../engine/conversations";
 import {
+  deprovisionConversation,
+  provisionConversation,
+} from "../../engine/provision";
+import {
   archiveConversation,
-  createConversation,
   createWorkspace,
   getConversation,
   getOrCreateDefaultWorkspace,
@@ -18,7 +21,8 @@ import {
   renameWorkspace,
   updateWorkspaceCwd,
 } from "../../engine/registry";
-import type { Platform } from "../../store/schema";
+import { sanitizeRefSegment } from "../../engine/worktree";
+import { isWorktreeWorkspace, type Platform } from "../../store/schema";
 import { assertNever } from "../../util/assert";
 import type {
   ClientCommand,
@@ -39,6 +43,7 @@ export type WebHubDeps<S extends SessionLike = SessionLike> = {
   db: Database;
   engine: Engine<S>;
   workspaceCwd: string;
+  worktreeCwd: string;
 };
 
 export class WebHub<S extends SessionLike = SessionLike> {
@@ -201,7 +206,20 @@ export class WebHub<S extends SessionLike = SessionLike> {
         this.sendError(ws, `not a directory: ${command.cwd}`);
         return;
       }
-      updateWorkspaceCwd(this.deps.db, target.id, command.cwd);
+      let worktree: { defaultBranch: string; branchPrefix: string } | null =
+        null;
+      if (command.worktree) {
+        const prefix = sanitizeRefSegment(command.worktree.branchPrefix);
+        if (prefix.isErr()) {
+          this.sendError(ws, prefix.error);
+          return;
+        }
+        worktree = {
+          defaultBranch: command.worktree.defaultBranch,
+          branchPrefix: prefix.value,
+        };
+      }
+      updateWorkspaceCwd(this.deps.db, target.id, command.cwd, worktree);
       for (const other of this.allSockets) this.sendWorkspaces(other);
       return;
     }
@@ -219,6 +237,12 @@ export class WebHub<S extends SessionLike = SessionLike> {
         return;
       }
       archiveConversation(this.deps.db, conversation.id);
+      if (isWorktreeWorkspace(target)) {
+        const removed = await deprovisionConversation(target, conversation);
+        if (removed.isErr()) {
+          this.sendError(ws, removed.error);
+        }
+      }
       const wasViewing = ws.data.conversationId === conversation.id;
       const otherViewers = [
         ...(this.viewers.get(conversation.id) ?? []),
@@ -244,11 +268,17 @@ export class WebHub<S extends SessionLike = SessionLike> {
       this.sendError(ws, `unknown workspace: ${command.workspaceId}`);
       return;
     }
-    const created = createConversation(this.deps.db, {
-      workspaceId: target.id,
-      cwd: target.cwd,
-      title: null,
-    });
+    const provisioned = await provisionConversation(
+      this.deps.db,
+      target,
+      this.deps.worktreeCwd,
+      null,
+    );
+    if (provisioned.isErr()) {
+      this.sendError(ws, provisioned.error);
+      return;
+    }
+    const created = provisioned.value;
     const bridged = await this.bridge(created.id, created.cwd);
     if (bridged.isErr()) {
       this.sendError(ws, bridged.error);
@@ -285,10 +315,14 @@ export class WebHub<S extends SessionLike = SessionLike> {
       id: w.id,
       label: w.label,
       cwd: w.cwd,
+      worktree: isWorktreeWorkspace(w),
+      defaultBranch: w.defaultBranch,
+      branchPrefix: w.branchPrefix,
       conversations: listConversations(this.deps.db, w.id).map((c) => ({
         id: c.id,
         title: c.title,
         cwd: c.cwd,
+        branch: c.branch,
       })),
     }));
   }

@@ -2,6 +2,8 @@ import { join } from "node:path";
 import { dispose } from "@logtape/logtape";
 import { loadConfig } from "./config/config";
 import { Engine } from "./engine/conversations";
+import { renameConversationBranch } from "./engine/provision";
+import { getConversation, getWorkspace } from "./engine/registry";
 import { provisionRuntime } from "./engine/runtime";
 import { Sessions } from "./engine/sessions";
 import { autoTitle } from "./engine/title";
@@ -38,13 +40,36 @@ const db = openDb(defaultDbPath());
 const sessions = new Sessions(provisioned.value, {
   identityPath: join(config.workspaceCwd, "identity.md"),
 });
-const engine = new Engine({ db, sessions, autoTitle });
+const engine = new Engine({
+  db,
+  sessions,
+  autoTitle,
+  onTitleSettled: async (conversationId, title) => {
+    const conversation = getConversation(db, conversationId);
+    if (!conversation) return;
+    const workspace = getWorkspace(db, conversation.workspaceId);
+    if (!workspace) return;
+    const renamed = await renameConversationBranch(
+      db,
+      workspace,
+      conversation,
+      title,
+    );
+    if (renamed.isErr()) {
+      boot.warning("branch rename failed for {conversationId}: {error}", {
+        conversationId,
+        error: renamed.error,
+      });
+    }
+  },
+});
 let server: Bun.Server<WsData> | undefined;
 if (config.web.enabled) {
   const hub = new WebHub({
     db,
     engine,
     workspaceCwd: config.workspaceCwd,
+    worktreeCwd: config.worktreeCwd,
   });
   server = createServer({
     port: config.web.port,

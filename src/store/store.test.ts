@@ -22,12 +22,20 @@ function insertWorkspace(row: {
   platform: string;
   label: string | null;
   externalId: string | null;
+  defaultBranch?: string | null;
+  branchPrefix?: string | null;
   createdAt: number;
 }) {
   db.query(
-    `INSERT INTO workspaces (id, cwd, platform, label, externalId, createdAt)
-     VALUES ($id, $cwd, $platform, $label, $externalId, $createdAt)`,
-  ).run(row);
+    `INSERT INTO workspaces
+       (id, cwd, platform, label, externalId, defaultBranch, branchPrefix, createdAt)
+     VALUES
+       ($id, $cwd, $platform, $label, $externalId, $defaultBranch, $branchPrefix, $createdAt)`,
+  ).run({
+    defaultBranch: null,
+    branchPrefix: null,
+    ...row,
+  });
 }
 
 function insertConversation(row: {
@@ -64,6 +72,8 @@ describe("schema <-> DDL round-trip", () => {
       platform: "discord",
       label: "general",
       externalId: "chan1",
+      defaultBranch: null,
+      branchPrefix: null,
       createdAt: 1000,
     });
   });
@@ -215,6 +225,38 @@ describe("value CHECK constraints", () => {
         createdAt: -1,
       }),
     ).toThrow();
+  });
+
+  test("defaultBranch without branchPrefix is rejected", () => {
+    expect(() =>
+      insertWorkspace({
+        id: "w1",
+        cwd: "/a",
+        platform: "discord",
+        label: null,
+        externalId: "chan1",
+        defaultBranch: "main",
+        branchPrefix: null,
+        createdAt: 1,
+      }),
+    ).toThrow();
+  });
+
+  test("a worktree workspace with both fields round-trips", () => {
+    insertWorkspace({
+      id: "w1",
+      cwd: "/repo",
+      platform: "web",
+      label: "feature",
+      externalId: null,
+      defaultBranch: "main",
+      branchPrefix: "feat",
+      createdAt: 1,
+    });
+    const row = db.query("SELECT * FROM workspaces WHERE id = 'w1'").get();
+    const parsed = workspaceSchema.parse(row);
+    expect(parsed.defaultBranch).toBe("main");
+    expect(parsed.branchPrefix).toBe("feat");
   });
 });
 

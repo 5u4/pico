@@ -3,6 +3,7 @@ import {
   ChevronRightIcon,
   FolderIcon,
   FolderInputIcon,
+  GitBranchIcon,
   PencilIcon,
   PlusIcon,
 } from "lucide-react";
@@ -26,6 +27,131 @@ import {
   ContextMenuItem,
   ContextMenuTrigger,
 } from "./ui/context-menu";
+import {
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "./ui/dialog";
+
+type WorktreeFields = { defaultBranch: string; branchPrefix: string };
+
+function DirectoryDialog({
+  open,
+  onOpenChange,
+  initialCwd,
+  initialWorktree,
+  onSubmit,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  initialCwd: string;
+  initialWorktree: WorktreeFields | null;
+  onSubmit: (cwd: string, worktree: WorktreeFields | null) => void;
+}) {
+  const [cwd, setCwd] = useState(initialCwd);
+  const [mode, setMode] = useState<"regular" | "worktree">(
+    initialWorktree ? "worktree" : "regular",
+  );
+  const [defaultBranch, setDefaultBranch] = useState(
+    initialWorktree?.defaultBranch ?? "HEAD",
+  );
+  const [branchPrefix, setBranchPrefix] = useState(
+    initialWorktree?.branchPrefix ?? "",
+  );
+  const trimmedCwd = cwd.trim();
+  const trimmedBranch = defaultBranch.trim();
+  const trimmedPrefix = branchPrefix.trim();
+  const valid =
+    trimmedCwd.length > 0 &&
+    (mode === "regular" ||
+      (trimmedBranch.length > 0 && trimmedPrefix.length > 0));
+  const submit = () => {
+    if (!valid) return;
+    onSubmit(
+      trimmedCwd,
+      mode === "worktree"
+        ? { defaultBranch: trimmedBranch, branchPrefix: trimmedPrefix }
+        : null,
+    );
+    onOpenChange(false);
+  };
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Workspace directory</DialogTitle>
+        </DialogHeader>
+        <div className="flex flex-col gap-3">
+          <label className="flex flex-col gap-1 text-sm">
+            <span className="text-muted-foreground text-xs">Directory</span>
+            <input
+              value={cwd}
+              onChange={(e) => setCwd(e.target.value)}
+              placeholder="/path/to/repo"
+              className="w-full rounded-md border border-input bg-background px-2 py-1 text-sm outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
+            />
+          </label>
+          <div className="flex gap-2 text-sm">
+            <label className="flex items-center gap-1.5">
+              <input
+                type="radio"
+                name="workspace-mode"
+                checked={mode === "regular"}
+                onChange={() => setMode("regular")}
+              />
+              Regular
+            </label>
+            <label className="flex items-center gap-1.5">
+              <input
+                type="radio"
+                name="workspace-mode"
+                checked={mode === "worktree"}
+                onChange={() => setMode("worktree")}
+              />
+              Git worktree
+            </label>
+          </div>
+          {mode === "worktree" && (
+            <div className="flex flex-col gap-3">
+              <label className="flex flex-col gap-1 text-sm">
+                <span className="text-muted-foreground text-xs">
+                  Default branch
+                </span>
+                <input
+                  value={defaultBranch}
+                  onChange={(e) => setDefaultBranch(e.target.value)}
+                  placeholder="main"
+                  className="w-full rounded-md border border-input bg-background px-2 py-1 text-sm outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
+                />
+              </label>
+              <label className="flex flex-col gap-1 text-sm">
+                <span className="text-muted-foreground text-xs">
+                  Branch prefix (required)
+                </span>
+                <input
+                  value={branchPrefix}
+                  onChange={(e) => setBranchPrefix(e.target.value)}
+                  placeholder="feat"
+                  className="w-full rounded-md border border-input bg-background px-2 py-1 text-sm outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
+                />
+              </label>
+            </div>
+          )}
+        </div>
+        <DialogFooter>
+          <Button variant="ghost" size="sm" onClick={() => onOpenChange(false)}>
+            Cancel
+          </Button>
+          <Button size="sm" disabled={!valid} onClick={submit}>
+            Save
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
 
 function ConversationRow({
   conversation,
@@ -48,9 +174,16 @@ function ConversationRow({
       <button
         type="button"
         onClick={() => onSelect(conversation.id)}
-        className="min-w-0 flex-1 truncate px-3 py-1.5 text-left text-sm"
+        className="flex min-w-0 flex-1 flex-col px-3 py-1.5 text-left"
       >
-        {conversation.title ?? "New chat"}
+        <span className="truncate text-sm">
+          {conversation.title ?? "New chat"}
+        </span>
+        {conversation.branch && (
+          <span className="truncate text-muted-foreground text-xs">
+            {conversation.branch}
+          </span>
+        )}
       </button>
       <Button
         variant="ghost"
@@ -84,9 +217,14 @@ function WorkspaceItem({
   onCreate: (workspaceId: string) => void;
   onArchive: (conversationId: string) => void;
   onRename: (workspaceId: string, label: string) => void;
-  onUpdateCwd: (workspaceId: string, cwd: string) => void;
+  onUpdateCwd: (
+    workspaceId: string,
+    cwd: string,
+    worktree: WorktreeFields | null,
+  ) => void;
 }) {
-  const [editing, setEditing] = useState<"none" | "rename" | "cwd">("none");
+  const [renaming, setRenaming] = useState(false);
+  const [dialogOpen, setDialogOpen] = useState(false);
   const [draft, setDraft] = useState("");
   const cancelEdit = useRef(false);
   const activeConversation =
@@ -95,30 +233,34 @@ function WorkspaceItem({
       : workspace.conversations.find((c) => c.id === activeId);
   const startRename = () => {
     setDraft(workspace.label ?? "");
-    setEditing("rename");
+    setRenaming(true);
   };
-  const startUpdateCwd = () => {
-    setDraft(workspace.cwd);
-    setEditing("cwd");
-  };
-  const submitEdit = () => {
-    const mode = editing;
-    setEditing("none");
+  const submitRename = () => {
+    setRenaming(false);
     if (cancelEdit.current) {
       cancelEdit.current = false;
       return;
     }
     const value = draft.trim();
-    if (!value) return;
-    if (mode === "rename") {
-      if (value !== workspace.label) onRename(workspace.id, value);
-    } else if (mode === "cwd") {
-      if (value !== workspace.cwd) onUpdateCwd(workspace.id, value);
-    }
+    if (value && value !== workspace.label) onRename(workspace.id, value);
   };
   return (
     <Collapsible open={open} onOpenChange={onOpenChange} className="mb-1">
-      {editing !== "none" ? (
+      <DirectoryDialog
+        open={dialogOpen}
+        onOpenChange={setDialogOpen}
+        initialCwd={workspace.cwd}
+        initialWorktree={
+          workspace.worktree
+            ? {
+                defaultBranch: workspace.defaultBranch ?? "HEAD",
+                branchPrefix: workspace.branchPrefix ?? "",
+              }
+            : null
+        }
+        onSubmit={(cwd, worktree) => onUpdateCwd(workspace.id, cwd, worktree)}
+      />
+      {renaming ? (
         <div className="px-2 py-1">
           <input
             // biome-ignore lint/a11y/noAutofocus: focus the inline field on open
@@ -132,12 +274,8 @@ function WorkspaceItem({
                 e.currentTarget.blur();
               }
             }}
-            onBlur={submitEdit}
-            aria-label={
-              editing === "cwd"
-                ? "Change workspace directory"
-                : "Rename workspace"
-            }
+            onBlur={submitRename}
+            aria-label="Rename workspace"
             className="w-full rounded-md border border-input bg-background px-2 py-1 text-sm outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
           />
         </div>
@@ -152,7 +290,11 @@ function WorkspaceItem({
                     open && "rotate-90",
                   )}
                 />
-                <FolderIcon className="size-4 shrink-0 text-muted-foreground" />
+                {workspace.worktree ? (
+                  <GitBranchIcon className="size-4 shrink-0 text-muted-foreground" />
+                ) : (
+                  <FolderIcon className="size-4 shrink-0 text-muted-foreground" />
+                )}
                 <span className="truncate">
                   {workspace.label ?? "workspace"}
                 </span>
@@ -173,7 +315,7 @@ function WorkspaceItem({
               <PencilIcon />
               Rename
             </ContextMenuItem>
-            <ContextMenuItem onSelect={startUpdateCwd}>
+            <ContextMenuItem onSelect={() => setDialogOpen(true)}>
               <FolderInputIcon />
               Change directory
             </ContextMenuItem>

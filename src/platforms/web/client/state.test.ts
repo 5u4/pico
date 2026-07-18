@@ -18,7 +18,15 @@ function assistantMessage(id: string): Message {
 }
 
 const workspaces: WorkspaceSummary[] = [
-  { id: "ws-1", label: "Workspace 1", cwd: "/tmp/ws-1", conversations: [] },
+  {
+    id: "ws-1",
+    label: "Workspace 1",
+    cwd: "/tmp/ws-1",
+    worktree: false,
+    defaultBranch: null,
+    branchPrefix: null,
+    conversations: [],
+  },
 ];
 
 describe("reduce / server / workspaces", () => {
@@ -579,15 +587,38 @@ describe("reduce / createWorkspace", () => {
 });
 
 describe("reduce / updateWorkspaceCwd", () => {
-  test("sends an updateWorkspaceCwd command without touching state", () => {
+  test("sends a regular updateWorkspaceCwd command without touching state", () => {
     const { state: next, commands } = reduce(initialState, {
       type: "updateWorkspaceCwd",
       workspaceId: "ws-1",
       cwd: "/tmp/new",
+      worktree: null,
     });
     expect(next).toBe(initialState);
     expect(commands).toEqual([
-      { kind: "updateWorkspaceCwd", workspaceId: "ws-1", cwd: "/tmp/new" },
+      {
+        kind: "updateWorkspaceCwd",
+        workspaceId: "ws-1",
+        cwd: "/tmp/new",
+        worktree: null,
+      },
+    ]);
+  });
+
+  test("forwards worktree fields when present", () => {
+    const { commands } = reduce(initialState, {
+      type: "updateWorkspaceCwd",
+      workspaceId: "ws-1",
+      cwd: "/repo",
+      worktree: { defaultBranch: "main", branchPrefix: "feat" },
+    });
+    expect(commands).toEqual([
+      {
+        kind: "updateWorkspaceCwd",
+        workspaceId: "ws-1",
+        cwd: "/repo",
+        worktree: { defaultBranch: "main", branchPrefix: "feat" },
+      },
     ]);
   });
 });

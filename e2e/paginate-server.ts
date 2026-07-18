@@ -25,7 +25,12 @@ const engine = new Engine<FakeWebSession>({
   sessions,
   autoTitle: async () => null,
 });
-const hub = new WebHub<FakeWebSession>({ db, engine, workspaceCwd: CWD });
+const hub = new WebHub<FakeWebSession>({
+  db,
+  engine,
+  workspaceCwd: CWD,
+  worktreeCwd: CWD,
+});
 
 const workspace = getOrCreateDefaultWorkspace(db, "web", CWD, "seeded");
 const conversation = createConversation(db, {
