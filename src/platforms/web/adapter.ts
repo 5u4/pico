@@ -26,6 +26,8 @@ import {
 import { sanitizeRefSegment } from "../../engine/worktree";
 import { isWorktreeWorkspace, type Platform } from "../../store/schema";
 import { assertNever } from "../../util/assert";
+import { log } from "../../util/log";
+import { errMessage } from "../../util/result";
 import type {
   ClientCommand,
   CommandCommand,
@@ -35,6 +37,7 @@ import type {
 
 const PLATFORM: Platform = "web";
 const DEFAULT_LABEL = "Default";
+const logger = log(["web"]);
 
 export interface HubSocket {
   data: { conversationId: string | null };
@@ -397,7 +400,11 @@ export class WebHub<S extends SessionLike = SessionLike> {
       ws.send(
         JSON.stringify({ kind: "files", seq, matches } satisfies ServerEvent),
       );
-    } catch {
+    } catch (error) {
+      logger.warning("file search failed for {query}: {error}", {
+        query: trimmed,
+        error: errMessage(error),
+      });
       ws.send(
         JSON.stringify({
           kind: "files",
