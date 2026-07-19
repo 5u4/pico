@@ -41,6 +41,7 @@ export function renderAssistant(messages: Message[]): string {
 }
 
 export function splitToBudget(text: string, budget: number): string[] {
+  if (budget <= 0) throw new Error(`split budget must be positive: ${budget}`);
   if (text.length <= budget) return text.length > 0 ? [text] : [];
   const chunks: string[] = [];
   let rest = text;

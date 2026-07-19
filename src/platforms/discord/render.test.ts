@@ -47,6 +47,10 @@ describe("splitToBudget", () => {
     for (const chunk of chunks)
       expect(chunk.length).toBeLessThanOrEqual(DISCORD_MESSAGE_CAP);
   });
+
+  test("throws on a non-positive budget", () => {
+    expect(() => splitToBudget("anything", 0)).toThrow("must be positive");
+  });
 });
 
 describe("renderReply", () => {

@@ -54,27 +54,37 @@ export class DiscordHub<S extends SessionLike = SessionLike> {
     const boundChannel = inThread ? threadParent(channel) : channel.id;
     if (!boundChannel) return;
 
-    const workspace = this.workspaceFor(boundChannel, channelLabel(channel));
+    const workspace = await this.resolveWorkspace(
+      boundChannel,
+      channelLabel(channel),
+    );
 
     if (inThread) {
-      await this.driveThread(api, workspace, channel.id, prompt);
+      await this.lockFor(`t:${channel.id}`).runExclusive(() =>
+        this.driveThread(api, workspace, channel.id, prompt),
+      );
       return;
     }
     await this.openThread(api, workspace, message, prompt);
   }
 
-  private workspaceFor(channelId: string, label: string): Workspace {
-    const existing = getWorkspaceByExternalId(
-      this.deps.db,
-      PLATFORM,
-      channelId,
-    );
-    if (existing) return existing;
-    return createWorkspace(this.deps.db, {
-      cwd: this.deps.workspaceCwd,
-      platform: PLATFORM,
-      label,
-      externalId: channelId,
+  private resolveWorkspace(
+    channelId: string,
+    label: string,
+  ): Promise<Workspace> {
+    return this.lockFor(`w:${channelId}`).runExclusive(() => {
+      const existing = getWorkspaceByExternalId(
+        this.deps.db,
+        PLATFORM,
+        channelId,
+      );
+      if (existing) return existing;
+      return createWorkspace(this.deps.db, {
+        cwd: this.deps.workspaceCwd,
+        platform: PLATFORM,
+        label,
+        externalId: channelId,
+      });
     });
   }
 
