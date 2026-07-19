@@ -22,16 +22,12 @@ import {
   renameWorkspace,
   updateWorkspaceCwd,
 } from "../../engine/registry";
-import { currentBranch, sanitizeRefSegment } from "../../engine/worktree";
+import { sanitizeRefSegment } from "../../engine/worktree";
 import { isWorktreeWorkspace, type Platform } from "../../store/schema";
 import { assertNever } from "../../util/assert";
 import { log } from "../../util/log";
-import type {
-  ClientCommand,
-  CommandCommand,
-  ServerEvent,
-  WorkspaceSummary,
-} from "./protocol";
+import { WorkspaceBroadcaster } from "./broadcaster";
+import type { ClientCommand, CommandCommand, ServerEvent } from "./protocol";
 
 const PLATFORM: Platform = "web";
 const DEFAULT_LABEL = "Default";
@@ -51,7 +47,7 @@ export type WebHubDeps<S extends SessionLike = SessionLike> = {
 
 export class WebHub<S extends SessionLike = SessionLike> {
   private readonly deps: WebHubDeps<S>;
-  private readonly allSockets = new Set<HubSocket>();
+  private readonly broadcaster: WorkspaceBroadcaster;
   private readonly viewers = new Map<string, Set<HubSocket>>();
   private readonly bridges = new Map<
     string,
@@ -61,13 +57,14 @@ export class WebHub<S extends SessionLike = SessionLike> {
 
   constructor(deps: WebHubDeps<S>) {
     this.deps = deps;
+    this.broadcaster = new WorkspaceBroadcaster(deps.db, PLATFORM);
     this.deps.engine.onSettled((conversationId) =>
       this.onSettled(conversationId),
     );
   }
 
   private onSettled(conversationId: string): void {
-    if ((this.viewers.get(conversationId)?.size ?? 0) > 0) return;
+    if (this.deps.engine.isViewed(conversationId)) return;
     if (this.attention.has(conversationId)) return;
     this.attention.add(conversationId);
     this.broadcastAttention();
@@ -79,7 +76,7 @@ export class WebHub<S extends SessionLike = SessionLike> {
       conversationIds: [...this.attention],
     };
     const payload = JSON.stringify(event);
-    for (const ws of this.allSockets) ws.send(payload);
+    for (const ws of this.broadcaster.connections) ws.send(payload);
   }
 
   private clearAttention(conversationId: string): void {
@@ -93,7 +90,7 @@ export class WebHub<S extends SessionLike = SessionLike> {
   }
 
   async handleOpen(ws: HubSocket): Promise<void> {
-    this.allSockets.add(ws);
+    this.broadcaster.add(ws);
     const target = getOrCreateDefaultWorkspace(
       this.deps.db,
       PLATFORM,
@@ -103,7 +100,7 @@ export class WebHub<S extends SessionLike = SessionLike> {
     const hasConversations = listWorkspaces(this.deps.db, PLATFORM).some(
       (w) => listConversations(this.deps.db, w.id).length > 0,
     );
-    await this.sendWorkspaces(ws, hasConversations ? undefined : target.id);
+    await this.broadcaster.sendTo(ws, hasConversations ? undefined : target.id);
     ws.send(
       JSON.stringify({
         kind: "attention",
@@ -113,7 +110,7 @@ export class WebHub<S extends SessionLike = SessionLike> {
   }
 
   handleClose(ws: HubSocket): void {
-    this.allSockets.delete(ws);
+    this.broadcaster.remove(ws);
     this.detach(ws);
   }
 
@@ -166,7 +163,7 @@ export class WebHub<S extends SessionLike = SessionLike> {
 
     if (command.kind === "draft") {
       this.detach(ws);
-      await this.sendWorkspaces(ws);
+      await this.broadcaster.sendTo(ws);
       return;
     }
 
@@ -210,13 +207,7 @@ export class WebHub<S extends SessionLike = SessionLike> {
         label: command.label,
       });
       this.detach(ws);
-      const items = await this.workspaceTree();
-      for (const other of new Set<HubSocket>([ws, ...this.allSockets]))
-        this.emitWorkspaces(
-          other,
-          items,
-          other === ws ? created.id : undefined,
-        );
+      await this.broadcaster.broadcast(new Map([[ws, created.id]]));
       return;
     }
 
@@ -227,7 +218,7 @@ export class WebHub<S extends SessionLike = SessionLike> {
         return;
       }
       renameWorkspace(this.deps.db, target.id, command.label);
-      await this.broadcastWorkspaces();
+      await this.broadcaster.broadcast();
       return;
     }
 
@@ -279,7 +270,7 @@ export class WebHub<S extends SessionLike = SessionLike> {
         };
       }
       updateWorkspaceCwd(this.deps.db, target.id, command.cwd, worktree);
-      await this.broadcastWorkspaces();
+      await this.broadcaster.broadcast();
       return;
     }
 
@@ -314,17 +305,9 @@ export class WebHub<S extends SessionLike = SessionLike> {
       }
       for (const viewer of otherViewers) this.detach(viewer);
       this.finalizeArchive(conversation.id);
-      const items = await this.workspaceTree();
-      for (const other of new Set<HubSocket>([
-        ws,
-        ...otherViewers,
-        ...this.allSockets,
-      ]))
-        this.emitWorkspaces(
-          other,
-          items,
-          drafted.has(other) ? target.id : undefined,
-        );
+      const drafts = new Map<HubSocket, string>();
+      for (const viewer of drafted) drafts.set(viewer, target.id);
+      await this.broadcaster.broadcast(drafts);
       return;
     }
 
@@ -350,9 +333,7 @@ export class WebHub<S extends SessionLike = SessionLike> {
       return;
     }
     this.attach(ws, created.id);
-    const items = await this.workspaceTree();
-    for (const other of new Set<HubSocket>([ws, ...this.allSockets]))
-      this.emitWorkspaces(other, items);
+    await this.broadcaster.broadcast();
     if (command.prompt) {
       const promptResult = await this.deps.engine.prompt(
         created.id,
@@ -375,29 +356,6 @@ export class WebHub<S extends SessionLike = SessionLike> {
     }
   }
 
-  private workspaceTree(): Promise<WorkspaceSummary[]> {
-    return Promise.all(
-      listWorkspaces(this.deps.db, PLATFORM).map(async (w) => ({
-        id: w.id,
-        label: w.label,
-        cwd: w.cwd,
-        worktree: isWorktreeWorkspace(w),
-        defaultBranch: w.defaultBranch,
-        branchPrefix: w.branchPrefix,
-        conversations: await Promise.all(
-          listConversations(this.deps.db, w.id).map(async (c) => ({
-            id: c.id,
-            title: c.title,
-            cwd: c.cwd,
-            branch: isWorktreeWorkspace(w)
-              ? (await currentBranch(c.cwd)).unwrapOr(null)
-              : null,
-          })),
-        ),
-      })),
-    );
-  }
-
   private snapshotEvent(conversationId: string): ServerEvent | undefined {
     const snap = this.deps.engine.snapshot(conversationId);
     if (!snap) return undefined;
@@ -413,7 +371,7 @@ export class WebHub<S extends SessionLike = SessionLike> {
 
   private dispatch(conversationId: string, event: TurnEvent): void {
     if (event.kind === "title") {
-      this.broadcastWorkspaces().catch((error: unknown) => {
+      this.broadcaster.broadcast().catch((error: unknown) => {
         logger.error("workspace broadcast failed: {error}", { error });
       });
       return;
@@ -481,32 +439,6 @@ export class WebHub<S extends SessionLike = SessionLike> {
     ws.data.conversationId = null;
   }
 
-  private emitWorkspaces(
-    ws: HubSocket,
-    items: WorkspaceSummary[],
-    draftWorkspaceId?: string,
-  ): void {
-    const event: ServerEvent = {
-      kind: "workspaces",
-      items,
-      activeId: ws.data.conversationId,
-      ...(draftWorkspaceId ? { draftWorkspaceId } : {}),
-    };
-    ws.send(JSON.stringify(event));
-  }
-
-  private async sendWorkspaces(
-    ws: HubSocket,
-    draftWorkspaceId?: string,
-  ): Promise<void> {
-    this.emitWorkspaces(ws, await this.workspaceTree(), draftWorkspaceId);
-  }
-
-  private async broadcastWorkspaces(): Promise<void> {
-    const items = await this.workspaceTree();
-    for (const ws of this.allSockets) this.emitWorkspaces(ws, items);
-  }
-
   private sendError(ws: HubSocket, message: string): void {
     const event: ServerEvent = { kind: "error", message };
     ws.send(JSON.stringify(event));
@@ -524,7 +456,7 @@ export class WebHub<S extends SessionLike = SessionLike> {
     }
     this.attach(ws, conversationId);
     this.clearAttention(conversationId);
-    await this.sendWorkspaces(ws);
+    await this.broadcaster.sendTo(ws);
     const snap = this.snapshotEvent(conversationId);
     if (snap) ws.send(JSON.stringify(snap));
   }

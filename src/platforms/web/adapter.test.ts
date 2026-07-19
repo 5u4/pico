@@ -325,6 +325,8 @@ describe("WebHub.handleCommand create", () => {
   test("creates a conversation row and broadcasts workspaces to the socket", async () => {
     const { hub, db, workspace } = makeHub();
     const ws = new FakeSocket();
+    await hub.handleOpen(ws);
+    ws.sent.length = 0;
 
     await hub.handleCommand(ws, { kind: "create", workspaceId: workspace.id });
 
@@ -357,6 +359,8 @@ describe("WebHub.handleCommand createWorkspace", () => {
     const { hub, db } = makeHub();
     const ws = new FakeSocket();
     const other = new FakeSocket();
+    await hub.handleOpen(ws);
+    ws.sent.length = 0;
     await hub.handleOpen(other);
     other.sent.length = 0;
 
@@ -513,6 +517,7 @@ describe("WebHub.handleCommand archive", () => {
       title: null,
     });
     const ws = new FakeSocket();
+    await hub.handleOpen(ws);
 
     await hub.handleCommand(ws, {
       kind: "archive",
@@ -534,6 +539,7 @@ describe("WebHub.handleCommand archive", () => {
       title: null,
     });
     const ws = new FakeSocket();
+    await hub.handleOpen(ws);
     await hub.handleCommand(ws, {
       kind: "select",
       conversationId: conversation.id,
@@ -563,6 +569,8 @@ describe("WebHub.handleCommand archive", () => {
     });
     const ws = new FakeSocket();
     const other = new FakeSocket();
+    await hub.handleOpen(ws);
+    await hub.handleOpen(other);
     for (const socket of [ws, other]) {
       await hub.handleCommand(socket, {
         kind: "select",
