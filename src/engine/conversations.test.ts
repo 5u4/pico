@@ -704,3 +704,20 @@ describe("Engine idle reap", () => {
     expect(sessions.get(conversationId)).toBeDefined();
   });
 });
+
+describe("Engine.isViewed", () => {
+  test("tracks the lifetime of viewer subscriptions", async () => {
+    const { engine, conversationId } = makeEngine();
+    expect(engine.isViewed(conversationId)).toBe(false);
+    const { unsubscribe, opened } = engine.subscribe(
+      conversationId,
+      CWD,
+      "live",
+      () => {},
+    );
+    await opened;
+    expect(engine.isViewed(conversationId)).toBe(true);
+    unsubscribe();
+    expect(engine.isViewed(conversationId)).toBe(false);
+  });
+});
