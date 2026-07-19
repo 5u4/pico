@@ -6,7 +6,9 @@ import {
   createConversation,
   createWorkspace,
   getConversation,
+  getConversationByExternalId,
   getOrCreateDefaultWorkspace,
+  getWorkspaceByExternalId,
   listConversations,
   listWorkspaces,
   setConversationTitle,
@@ -178,5 +180,50 @@ describe("conversations", () => {
 
   test("archiveConversation reports no change for an unknown id", () => {
     expect(archiveConversation(db, "missing")).toBe(false);
+  });
+});
+
+describe("externalId lookups", () => {
+  test("getWorkspaceByExternalId matches platform and externalId", () => {
+    const ws = createWorkspace(db, {
+      cwd: "/p",
+      platform: "discord",
+      label: "chan",
+      externalId: "channel-1",
+    });
+    expect(getWorkspaceByExternalId(db, "discord", "channel-1")?.id).toBe(
+      ws.id,
+    );
+    expect(
+      getWorkspaceByExternalId(db, "discord", "channel-2"),
+    ).toBeUndefined();
+    expect(getWorkspaceByExternalId(db, "web", "channel-1")).toBeUndefined();
+  });
+
+  test("getConversationByExternalId is scoped to its workspace", () => {
+    const ws = createWorkspace(db, {
+      cwd: "/p",
+      platform: "discord",
+      label: "chan",
+      externalId: "channel-1",
+    });
+    const other = createWorkspace(db, {
+      cwd: "/q",
+      platform: "discord",
+      label: "chan2",
+      externalId: "channel-2",
+    });
+    const convo = createConversation(db, {
+      workspaceId: ws.id,
+      cwd: "/p",
+      title: null,
+      externalId: "thread-1",
+    });
+    expect(getConversationByExternalId(db, ws.id, "thread-1")?.id).toBe(
+      convo.id,
+    );
+    expect(
+      getConversationByExternalId(db, other.id, "thread-1"),
+    ).toBeUndefined();
   });
 });

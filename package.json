@@ -23,6 +23,9 @@
   "dependencies": {
     "@assistant-ui/react": "^0.14",
     "@assistant-ui/react-markdown": "^0.14.5",
+    "@discordjs/core": "2.6.0",
+    "@discordjs/rest": "2.6.2",
+    "@discordjs/ws": "2.0.4",
     "@logtape/file": "^2.2.4",
     "@logtape/logtape": "^2.2.4",
     "@oh-my-pi/pi-agent-core": "16.5.0",
@@ -40,6 +43,7 @@
     "bun-plugin-tailwind": "^0.1",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "discord-api-types": "0.38.50",
     "lucide-react": "^1.24.0",
     "neverthrow": "^8.2.0",
     "next-themes": "^0.4.6",

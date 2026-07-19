@@ -15,6 +15,11 @@ export const configSchema = z.object({
       port: z.number().int().positive().default(4141),
     })
     .prefault({}),
+  discord: z
+    .object({
+      enabled: z.boolean().default(false),
+    })
+    .prefault({}),
 });
 export type Config = z.infer<typeof configSchema>;
 

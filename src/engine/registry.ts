@@ -69,6 +69,19 @@ export function getOrCreateDefaultWorkspace(
   return createWorkspace(db, { cwd, platform, label });
 }
 
+export function getWorkspaceByExternalId(
+  db: Database,
+  platform: Platform,
+  externalId: string,
+): Workspace | undefined {
+  const row = db
+    .query(
+      "SELECT * FROM workspaces WHERE platform = $platform AND externalId = $externalId",
+    )
+    .get({ platform, externalId });
+  return row ? workspaceSchema.parse(row) : undefined;
+}
+
 export function getWorkspace(db: Database, id: string): Workspace | undefined {
   const row = db.query("SELECT * FROM workspaces WHERE id = $id").get({ id });
   return row ? workspaceSchema.parse(row) : undefined;
@@ -146,6 +159,19 @@ export function getConversation(
   const row = db
     .query("SELECT * FROM conversations WHERE id = $id")
     .get({ id });
+  return row ? conversationSchema.parse(row) : undefined;
+}
+
+export function getConversationByExternalId(
+  db: Database,
+  workspaceId: string,
+  externalId: string,
+): Conversation | undefined {
+  const row = db
+    .query(
+      "SELECT * FROM conversations WHERE workspaceId = $workspaceId AND externalId = $externalId",
+    )
+    .get({ workspaceId, externalId });
   return row ? conversationSchema.parse(row) : undefined;
 }
 

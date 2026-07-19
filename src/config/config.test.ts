@@ -12,6 +12,7 @@ describe("parseConfig", () => {
       workspaceCwd: join(homedir(), ".pico"),
       worktreeCwd: join(homedir(), ".pico", "worktrees"),
       web: { enabled: true, port: 4141 },
+      discord: { enabled: false },
     });
   });
 
@@ -24,6 +25,7 @@ describe("parseConfig", () => {
       workspaceCwd: "/tmp/projects",
       worktreeCwd: join(homedir(), ".pico", "worktrees"),
       web: { enabled: true, port: 8080 },
+      discord: { enabled: false },
     });
   });
 
@@ -41,6 +43,7 @@ describe("loadConfig", () => {
       workspaceCwd: join(homedir(), ".pico"),
       worktreeCwd: join(homedir(), ".pico", "worktrees"),
       web: { enabled: true, port: 4141 },
+      discord: { enabled: false },
     });
   });
 
@@ -53,6 +56,7 @@ describe("loadConfig", () => {
         workspaceCwd: join(homedir(), ".pico"),
         worktreeCwd: join(homedir(), ".pico", "worktrees"),
         web: { enabled: true, port: 5000 },
+        discord: { enabled: false },
       });
     } finally {
       rmSync(path, { force: true });
@@ -68,6 +72,7 @@ describe("loadConfig", () => {
         workspaceCwd: join(homedir(), ".pico"),
         worktreeCwd: join(homedir(), ".pico", "worktrees"),
         web: { enabled: true, port: 4141 },
+        discord: { enabled: false },
       });
     } finally {
       rmSync(path, { force: true });
@@ -83,6 +88,7 @@ describe("loadConfig", () => {
         workspaceCwd: "/tmp/projects",
         worktreeCwd: join(homedir(), ".pico", "worktrees"),
         web: { enabled: true, port: 4141 },
+        discord: { enabled: false },
       });
     } finally {
       rmSync(path, { force: true });

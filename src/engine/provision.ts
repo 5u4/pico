@@ -35,11 +35,13 @@ export async function provisionConversation(
   workspace: Workspace,
   worktreeCwd: string,
   title: string | null,
+  externalId: string | null = null,
 ): Promise<Result<Conversation, string>> {
   const conversation = createConversation(db, {
     workspaceId: workspace.id,
     cwd: workspace.cwd,
     title,
+    externalId,
   });
   if (!isWorktreeWorkspace(workspace)) return ok(conversation);
 
