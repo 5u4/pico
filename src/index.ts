@@ -7,6 +7,9 @@ import { getConversation, getWorkspace } from "./engine/registry";
 import { provisionRuntime } from "./engine/runtime";
 import { Sessions } from "./engine/sessions";
 import { autoTitle } from "./engine/title";
+import { DiscordHub } from "./platforms/discord/adapter";
+import { type Gateway, startGateway } from "./platforms/discord/gateway";
+import { readBotToken } from "./platforms/discord/secret";
 import { WebHub } from "./platforms/web/adapter";
 import index from "./platforms/web/client/index.html";
 import { createServer, type WsData } from "./platforms/web/server";
@@ -84,6 +87,25 @@ boot.info("web: {web} (workspaces in {workspaceCwd})", {
   workspaceCwd: config.workspaceCwd,
 });
 
+let gateway: Gateway | undefined;
+if (config.discord.enabled) {
+  const token = await readBotToken();
+  if (token.isErr()) {
+    boot.error("discord disabled: {error}", { error: token.error });
+  } else {
+    gateway = await startGateway(token.value, (botUserId) => {
+      boot.info("discord gateway connected");
+      return new DiscordHub({
+        db,
+        engine,
+        workspaceCwd: config.workspaceCwd,
+        worktreeCwd: config.worktreeCwd,
+        botUserId,
+      });
+    });
+  }
+}
+
 const supervisorSocket = Bun.env.PICO_SUPERVISOR_SOCKET;
 const readyToken = Bun.env.PICO_READY_TOKEN;
 if (supervisorSocket && readyToken) {
@@ -106,6 +128,7 @@ const shutdown = async (signal: string): Promise<void> => {
   let code = 0;
   try {
     server?.stop();
+    await gateway?.stop();
     engine.stop();
     await sessions.closeAll();
     db.close();
