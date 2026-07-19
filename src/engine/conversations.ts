@@ -490,19 +490,19 @@ export class Engine<S extends SessionLike = SessionLike> {
   }
 
   async releaseIfIdle(conversationId: string): Promise<void> {
-    if (this.hasViewers(conversationId)) return;
+    if (this.isViewed(conversationId)) return;
     if (this.busy(conversationId)) return;
     await this.release(conversationId);
   }
 
   private reapable(conversationId: string, now: number): boolean {
-    if (this.hasViewers(conversationId)) return false;
+    if (this.isViewed(conversationId)) return false;
     if (this.busy(conversationId)) return false;
     const last = this.lastActivity.get(conversationId) ?? 0;
     return now - last > IDLE_MS;
   }
 
-  private hasViewers(conversationId: string): boolean {
+  isViewed(conversationId: string): boolean {
     return (this.subscribers.get(conversationId)?.size ?? 0) > 0;
   }
 
