@@ -9,7 +9,7 @@ description: WAL SQLite 状态数据库 —— 打开、迁移、查询追踪，
 
 ## 打开数据库
 
-`defaultDbPath()` 是 `~/.pico/state.db`（`src/store/db.ts:11-13`）。`openDb(path)`
+`defaultDbPath()` 是 `~/.pico/state.db`（`src/store/db.ts:10-12`）。`openDb(path)`
 （`src/store/db.ts:14-23`）：
 
 - 除非路径为 `:memory:`（测试使用内存形式），否则创建父目录。
@@ -52,7 +52,7 @@ description: WAL SQLite 状态数据库 —— 打开、迁移、查询追踪，
 - `workspaceSchema` / `Workspace`（`src/store/schema.ts:6-16`）—— id、cwd、
   platform、可空的 label/externalId、可空的 `defaultBranch`/`branchPrefix`、
   `createdAt`。
-- `conversationSchema` / `Conversation`（`src/store/schema.ts:24-34`）—— 注意
+- `conversationSchema` / `Conversation`（`src/store/schema.ts:24-33`）—— 注意
   这里**没有 `branch` 字段**；它在迁移 v2 中被删除了。
 - `isWorktreeWorkspace(workspace)`（`src/store/schema.ts:18-22`）—— 类型守卫，
   当且仅当 `defaultBranch` 和 `branchPrefix` 都非空时为真。正是这一个谓词，被

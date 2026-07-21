@@ -12,7 +12,7 @@ WebSocket 以及 `assistant-ui` React 运行时。`connection.ts` 持有
 ## 心智模型：一个归约器，一个漏斗
 
 `reduce(state, action): { state, commands, toasts? }`
-（`src/platforms/web/client/state.ts:321`）是唯一的漏斗。每一次 UI 动作
+（`src/platforms/web/client/state.ts:315`）是唯一的漏斗。每一次 UI 动作
 和每一个入站 `ServerEvent` 都流经它；它返回下一个
 `ThreadState`、一个供运行时**发送**的 `ClientCommand` 列表，以及
 可选的 toast。该归约器是纯的、与框架无关——`runtime.tsx`
@@ -20,7 +20,7 @@ WebSocket 以及 `assistant-ui` React 运行时。`connection.ts` 持有
 
 ### 折叠服务器事件
 
-`reduceServer`（`src/platforms/web/client/state.ts:143-263`）处理下行
+`reduceServer`（`src/platforms/web/client/state.ts:141-245`）处理下行
 方向：
 
 - `workspaces` — 若存在则采用 `activeId`；否则若给出
@@ -34,9 +34,9 @@ WebSocket 以及 `assistant-ui` React 运行时。`connection.ts` 持有
 
 ### 乐观发送
 
-`reducePrompt`（`src/platforms/web/client/state.ts:265-292`）设置一条**乐观的
+`reducePrompt`（`src/platforms/web/client/state.ts:247-271`）设置一条**乐观的
 待处理用户消息**，并在处于草稿时发出 `create{prompt}`，否则发出
-`prompt{text}`。`clearPendingIfResolved`（`:133-141`）在服务器的用户消息计数
+`prompt{text}`。`clearPendingIfResolved`（`:121-139`）在服务器的用户消息计数
 超过所捕获的基线后丢弃那条乐观
 消息——因此占位符恰好在真实消息到达时消失，没有
 闪烁。合并辅助函数 `mergeTail`（`:60-71`）与 `mergeById`（`:73-131`，按
@@ -46,15 +46,15 @@ WebSocket 以及 `assistant-ui` React 运行时。`connection.ts` 持有
 
 `runtime.tsx` 把归约器接到网络和 React。
 
-- **`dispatch(action)`**（`src/platforms/web/client/runtime.tsx:124-137`）=
+- **`dispatch(action)`**（`src/platforms/web/client/runtime.tsx:130-141`）=
   `reduce` → 更新一个 `stateRef`（在套接字回调内同步读取）和
   React 状态 → 通过 `send` `flush` 返回的命令 → 抛出 toast。
 - **`send`** 若套接字为 OPEN 则把命令 JSON 序列化后发往套接字，否则将其排入
-  一个 `outbox` ref（`src/platforms/web/client/runtime.tsx:114-119`）。
+  一个 `outbox` ref（`src/platforms/web/client/runtime.tsx:116-121`）。
 
 ### 连接生命周期
 
-套接字是有韧性的（`src/platforms/web/client/runtime.tsx:139-297`）：
+套接字是有韧性的（`src/platforms/web/client/runtime.tsx:143-263`）：
 
 - `connect()` 打开 `ws(s)://<host>/ws`（scheme 来自 `location.protocol`）。
 - **打开时**：重置退避、以 `select` 重放活跃会话、清空
@@ -74,11 +74,11 @@ WebSocket 以及 `assistant-ui` React 运行时。`connection.ts` 持有
 
 `persist.ts` **通过 Zod** 读写 localStorage：每次 `readPersisted`
 都会针对一个 schema 重新校验并安全回退，因此陈旧或损坏的存储
-永远不会让应用崩溃（`src/platforms/web/client/persist.ts:10-22`）。在首个
+永远不会让应用崩溃（`src/platforms/web/client/persist.ts:10-23`）。在首个
 无活跃会话的 `workspaces` 上，运行时会恢复持久化的
 `activeConversation`（若它仍存在），否则在第一个工作区中创建一个
-（`src/platforms/web/client/runtime.tsx:299-323`）。它还会根据 attention 计数把文档标题
-设为 `(n) pico`（`:330-333`）。
+（`src/platforms/web/client/runtime.tsx:266-290`）。它还会根据 attention 计数把文档标题
+设为 `(n) pico`（`:296-299`）。
 
 ### assistant-ui
 

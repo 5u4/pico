@@ -12,16 +12,16 @@ description: 并发安全的代理会话池、共享的 SDK 运行时，以及 p
 ## 共享运行时
 
 `provisionRuntime(options)`（`src/engine/runtime.ts`）在启动时构建一个 `OmpRuntime`
-并把它交给每个会话。其 `build()`（`src/engine/runtime.ts:66`）：
+并把它交给每个会话。其 `build()`（`src/engine/runtime.ts:68`）：
 
 - 初始化 `Settings` 并**强制 `secrets.enabled = true`**
-  （`src/engine/runtime.ts:78`）——这是 pico 密钥隐私职责的
+  （`src/engine/runtime.ts:75`）——这是 pico 密钥隐私职责的
   运行时层面的那一半（参见 [密钥守卫](carto:secrets)）。
 - 以 `online-if-uncached` 方式刷新模型注册表，**容忍失败**，
-  仅发出一条警告（`src/engine/runtime.ts:82-85`）。
+  仅发出一条警告（`src/engine/runtime.ts:78-81`）。
 - 通过一条回退链解析默认模型：角色选择 `['default']` →
   第一个默认可用 → 第一个可用；仅当一个都不存在时才报错
-  （`src/engine/runtime.ts:47-49`）。
+  （`src/engine/runtime.ts:50-53`）。
 
 整个函数返回一个 `Result`——一个无法解析出模型的运行时是
 硬性启动失败（参见 [启动序列](carto:overview)）。
@@ -38,18 +38,18 @@ description: 并发安全的代理会话池、共享的 SDK 运行时，以及 p
 
 - 一个 `pending` promise 映射对同一 id 的并发 `open()` 调用去重
   （`src/engine/sessions.ts:57-62`）——第二个调用者等待第一个的 promise。
-- 一个单调递增的 `generation` 计数器（`src/engine/sessions.ts:43`）在一次 open
+- 一个单调递增的 `generation` 计数器（`src/engine/sessions.ts:39`）在一次 open
   开始时被捕获；如果 `closeAll()` 在此期间递增了它，那么刚构建好的
   会话会被释放，并且该 open 以 `sessions closed during open` 报错
-  （`src/engine/sessions.ts:70-73`）。
+  （`src/engine/sessions.ts:73-76`）。
 
 ### 构建一个会话
 
-`construct()`（`src/engine/sessions.ts:112`）是会话诞生之处：
+`construct()`（`src/engine/sessions.ts:111`）是会话诞生之处：
 
 - `mkdir ~/.pico/sessions/<id>`，然后**恢复最新的 `*.jsonl` 记录**
   （通过 `latestSessionFile`——过滤 `.jsonl`、排序、取最后一个，
-  `src/engine/sessions.ts:145`），或创建一个全新的。
+  `src/engine/sessions.ts:161`），或创建一个全新的。
 - 用共享运行时调用 `createAgentSession`，其中 `appendSystemPrompt =
   assembleAppendPrompt(loadIdentity(identityPath))`，以及 `extensions:
   [secretGuard]`。

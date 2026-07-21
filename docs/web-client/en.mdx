@@ -13,7 +13,7 @@ localStorage.
 ## Mental model: one reducer, one funnel
 
 `reduce(state, action): { state, commands, toasts? }`
-(`src/platforms/web/client/state.ts:321`) is the single funnel. Every UI action
+(`src/platforms/web/client/state.ts:315`) is the single funnel. Every UI action
 and every inbound `ServerEvent` flows through it; it returns the next
 `ThreadState`, a list of `ClientCommand`s for the runtime to **send**, and
 optional toasts. The reducer is pure and framework-agnostic — `runtime.tsx`
@@ -21,7 +21,7 @@ executes its outputs.
 
 ### Folding server events
 
-`reduceServer` (`src/platforms/web/client/state.ts:143-263`) handles the down
+`reduceServer` (`src/platforms/web/client/state.ts:141-245`) handles the down
 direction:
 
 - `workspaces` — adopt `activeId` if present; else enter a fresh draft if a
@@ -35,9 +35,9 @@ direction:
 
 ### Optimistic sends
 
-`reducePrompt` (`src/platforms/web/client/state.ts:265-292`) sets an **optimistic
+`reducePrompt` (`src/platforms/web/client/state.ts:247-271`) sets an **optimistic
 pending user message** and emits `create{prompt}` when in a draft, else
-`prompt{text}`. `clearPendingIfResolved` (`:133-141`) drops that optimistic
+`prompt{text}`. `clearPendingIfResolved` (`:121-139`) drops that optimistic
 message once the server's user-message count exceeds the captured baseline — so
 the placeholder disappears exactly when the real message arrives, with no
 flicker. Merge helpers `mergeTail` (`:60-71`) and `mergeById` (`:73-131`, ordered
@@ -47,15 +47,15 @@ by a numeric id suffix) keep the message list coherent across snapshot/stream/ol
 
 `runtime.tsx` wires the reducer to the network and to React.
 
-- **`dispatch(action)`** (`src/platforms/web/client/runtime.tsx:124-137`) =
+- **`dispatch(action)`** (`src/platforms/web/client/runtime.tsx:130-141`) =
   `reduce` → update a `stateRef` (synchronous reads inside socket callbacks) and
   React state → `flush` the returned commands via `send` → raise toasts.
 - **`send`** JSON-stringifies a command to the socket if OPEN, else queues it in
-  an `outbox` ref (`src/platforms/web/client/runtime.tsx:114-119`).
+  an `outbox` ref (`src/platforms/web/client/runtime.tsx:116-121`).
 
 ### Connection lifecycle
 
-The socket is resilient (`src/platforms/web/client/runtime.tsx:139-297`):
+The socket is resilient (`src/platforms/web/client/runtime.tsx:143-263`):
 
 - `connect()` opens `ws(s)://<host>/ws` (scheme from `location.protocol`).
 - **On open**: reset backoff, replay the active conversation as a `select`, drain
@@ -75,11 +75,11 @@ The socket is resilient (`src/platforms/web/client/runtime.tsx:139-297`):
 
 `persist.ts` reads/writes localStorage **through Zod**: every `readPersisted`
 re-validates against a schema and falls back safely, so stale or corrupt storage
-never crashes the app (`src/platforms/web/client/persist.ts:10-22`). On first
+never crashes the app (`src/platforms/web/client/persist.ts:10-23`). On first
 `workspaces` with no active conversation, the runtime restores the persisted
 `activeConversation` if it still exists, else creates one in the first workspace
-(`src/platforms/web/client/runtime.tsx:299-323`). It also sets the document title
-to `(n) pico` from the attention count (`:330-333`).
+(`src/platforms/web/client/runtime.tsx:266-290`). It also sets the document title
+to `(n) pico` from the attention count (`:296-299`).
 
 ### assistant-ui
 

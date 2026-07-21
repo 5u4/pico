@@ -11,7 +11,7 @@ directly.
 
 ## Opening the database
 
-`defaultDbPath()` is `~/.pico/state.db` (`src/store/db.ts:11-13`). `openDb(path)`
+`defaultDbPath()` is `~/.pico/state.db` (`src/store/db.ts:10-12`). `openDb(path)`
 (`src/store/db.ts:14-23`):
 
 - Creates the parent directory unless the path is `:memory:` (tests use the
@@ -58,7 +58,7 @@ moment it leaves the DB:
 - `workspaceSchema` / `Workspace` (`src/store/schema.ts:6-16`) — id, cwd,
   platform, nullable label/externalId, nullable `defaultBranch`/`branchPrefix`,
   `createdAt`.
-- `conversationSchema` / `Conversation` (`src/store/schema.ts:24-34`) — note
+- `conversationSchema` / `Conversation` (`src/store/schema.ts:24-33`) — note
   there is **no `branch` field**; it was dropped in migration v2.
 - `isWorktreeWorkspace(workspace)` (`src/store/schema.ts:18-22`) — the type
   guard, true iff both `defaultBranch` and `branchPrefix` are non-null. This

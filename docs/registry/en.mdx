@@ -33,23 +33,23 @@ and `branchPrefix`) — see [Worktrees](carto:worktrees).
 ## Conversation operations
 
 - `listConversations(workspaceId)` — **excludes archived**, ordered `DESC`
-  (`src/engine/registry.ts:126`).
-- `getConversation(id)` (`src/engine/registry.ts:148`),
-  `createConversation(...)` (`src/engine/registry.ts:159`).
+  (`src/engine/registry.ts:128`).
+- `getConversation(id)` (`src/engine/registry.ts:142`),
+  `createConversation(...)` (`src/engine/registry.ts:152`).
 - `countActiveWorktreeConversations(workspaceId)` — joins to count live
-  worktree conversations (`src/engine/registry.ts:216`); the hub uses this to
+  worktree conversations (`src/engine/registry.ts:207`); the hub uses this to
   refuse switching a worktree workspace's cwd while conversations are active.
 - `archiveConversation(id)` — soft-delete, `WHERE archivedAt IS NULL`
-  (`src/engine/registry.ts:230`).
+  (`src/engine/registry.ts:223`).
 
 ### Provisional vs. final titles
 
 Two title setters encode pico's title lifecycle:
 
-- `setProvisionalTitle(id, title)` (`src/engine/registry.ts:191`) updates
+- `setProvisionalTitle(id, title)` (`src/engine/registry.ts:183`) updates
   **only** `WHERE title IS NULL` and returns whether a row changed — so an
   instant provisional title never clobbers a real one.
-- `setConversationTitle(id, title)` (`src/engine/registry.ts:205`) writes
+- `setConversationTitle(id, title)` (`src/engine/registry.ts:196`) writes
   unconditionally — used by the LLM auto-title upgrade.
 
 The `IS NULL` guard is the whole mechanism: provisional titles are best-effort

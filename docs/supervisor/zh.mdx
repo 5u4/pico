@@ -49,7 +49,7 @@ supervisor 的 ack `data` 到达时它 resolve `ok()`，或在超时
 子进程过早退出、或 `health_timeout`（默认 30s）到期。`handle_conn`
 把入站的 `Ready` 路由到 `signal_ready`，后者将 token 与
 `pending_ready` 匹配，触发 oneshot（解除生成的阻塞），并写入 `ReadyAck`
-（`crates/supervisor/src/supervisor.rs:199-208`）。一个从未按时 ack 的 worker
+（`crates/supervisor/src/supervisor.rs:197-206`）。一个从未按时 ack 的 worker
 会被杀死，部署失败。
 
 ## 蓝绿槽位
@@ -73,7 +73,7 @@ worker，并 `spawn_and_validate` 新的那个；成功时 `promote`，
 `config.rs` 读取 `~/.pico/supervisor/supervisor.toml`（若不存在则全部默认）：
 `socket_path`、`bun_path` 和 `health_timeout_secs`（默认 30）。`resolve_bun`
 依次搜索 `$BUN_INSTALL/bin/bun`、`$HOME/.bun/bin/bun`、`PATH`，最后是裸的 `bun`
-（`crates/supervisor/src/config.rs:65-82`）。
+（`crates/supervisor/src/config.rs:66-81`）。
 
 在 `SIGTERM`/`SIGINT` 时 supervisor 取消其 task tracker、清空
 连接，并向 worker 发送 SIGTERM；worker 独立地捕获相同

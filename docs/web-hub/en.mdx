@@ -13,7 +13,7 @@ sidebar tree and holds the full socket roster.
 ## Mental model: three registries
 
 The hub's entire job is bookkeeping over three data structures
-(`src/platforms/web/adapter.ts:52-57`):
+(`src/platforms/web/adapter.ts:51-56`):
 
 - `viewers: Map<conversationId, Set<HubSocket>>` — who is watching what.
 - `bridges: Map<conversationId, { opened, unsubscribe }>` — **one** live Engine
@@ -29,10 +29,10 @@ Two invariants tie them together:
 
 ### Subscription plumbing
 
-- `bridge(convId, cwd)` (`src/platforms/web/adapter.ts:389-410`) idempotently
+- `bridge(convId, cwd)` (`src/platforms/web/adapter.ts:399-416`) idempotently
   opens exactly one `engine.subscribe(convId, cwd, 'live', cb)` and caches it,
   rolling back on open failure.
-- `attach(ws, convId)` (`:412-421`) detaches the socket first, then points it at
+- `attach(ws, convId)` (`:418-427`) detaches the socket first, then points it at
   the new conversation and adds it to the viewer set.
 - `detach(ws)` (`:423-436`) removes the socket and, **when the viewer set
   empties, unsubscribes the bridge** and deletes both map entries — the
@@ -42,10 +42,10 @@ Two invariants tie them together:
 
 ## Command dispatch
 
-`handleCommand(ws, command)` (`src/platforms/web/adapter.ts:115-352`) is an
+`handleCommand(ws, command)` (`src/platforms/web/adapter.ts:117-348`) is an
 exhaustive switch. Highlights:
 
-- `heartbeat` → `heartbeatAck` (`:116-119`).
+- `heartbeat` → `heartbeatAck` (`:118-121`).
 - `prompt` / `abort` → require an active, existing conversation (else `error`),
   then `engine.prompt`/`engine.abort` (`:121-141`).
 - `command('ping')` → runs the command, then `engine.record` with a
@@ -65,7 +65,7 @@ registry access, so the web hub only ever sees web workspaces.
 
 ## Event fan-out
 
-`dispatch(convId, turnEvent)` (`src/platforms/web/adapter.ts:367-388`) maps
+`dispatch(convId, turnEvent)` (`src/platforms/web/adapter.ts:372-397`) maps
 Engine `TurnEvent`s to viewers of that conversation:
 
 - `title` → a workspace-tree rebroadcast (the sidebar shows the new title).
@@ -89,4 +89,4 @@ sidebar: `listWorkspaces` mapped to `WorkspaceSummary`, resolving each
 conversation's `branch` via `currentBranch(cwd)` **only** for worktree
 workspaces (async, because it reads git). `broadcast(...)` builds that tree once
 and emits a per-socket `workspaces` event carrying each socket's own `activeId`
-and optional draft (`src/platforms/web/broadcaster.ts:69-72`).
+and optional draft (`src/platforms/web/broadcaster.ts:71-74`).

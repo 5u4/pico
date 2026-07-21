@@ -12,16 +12,16 @@ prompt (`identity.ts` + `persona.md`).
 ## The shared runtime
 
 `provisionRuntime(options)` (`src/engine/runtime.ts`) builds one `OmpRuntime`
-at startup and hands it to every session. Its `build()` (`src/engine/runtime.ts:66`):
+at startup and hands it to every session. Its `build()` (`src/engine/runtime.ts:68`):
 
 - Initializes `Settings` and **forces `secrets.enabled = true`**
-  (`src/engine/runtime.ts:78`) — the runtime-level half of pico's
+  (`src/engine/runtime.ts:75`) — the runtime-level half of pico's
   secret-privacy duty (see [Secret guard](carto:secrets)).
 - Refreshes the model registry `online-if-uncached`, **tolerating failure** with
-  only a warning (`src/engine/runtime.ts:82-85`).
+  only a warning (`src/engine/runtime.ts:78-81`).
 - Resolves a default model via a fallback chain: role selection `['default']` →
   first default-available → first available; errors only if none exist
-  (`src/engine/runtime.ts:47-49`).
+  (`src/engine/runtime.ts:50-53`).
 
 The whole function returns a `Result` — a runtime that cannot resolve a model is
 a hard boot failure (see the [boot sequence](carto:overview)).
@@ -39,18 +39,18 @@ leak a session opened during shutdown. Two mechanisms guard this:
 
 - A `pending` promise map dedupes concurrent `open()` calls for the same id
   (`src/engine/sessions.ts:57-62`) — the second caller awaits the first's promise.
-- A monotonic `generation` counter (`src/engine/sessions.ts:43`) is captured at
+- A monotonic `generation` counter (`src/engine/sessions.ts:39`) is captured at
   the start of an open; if `closeAll()` bumped it meanwhile, the freshly-built
   session is disposed and the open errors `sessions closed during open`
-  (`src/engine/sessions.ts:70-73`).
+  (`src/engine/sessions.ts:73-76`).
 
 ### Constructing a session
 
-`construct()` (`src/engine/sessions.ts:112`) is where a session comes to life:
+`construct()` (`src/engine/sessions.ts:111`) is where a session comes to life:
 
 - `mkdir ~/.pico/sessions/<id>`, then **resume the newest `*.jsonl` transcript**
   (via `latestSessionFile` — filter `.jsonl`, sort, take last,
-  `src/engine/sessions.ts:145`) or create a fresh one.
+  `src/engine/sessions.ts:161`) or create a fresh one.
 - `createAgentSession` with the shared runtime, `appendSystemPrompt =
   assembleAppendPrompt(loadIdentity(identityPath))`, and `extensions:
   [secretGuard]`.

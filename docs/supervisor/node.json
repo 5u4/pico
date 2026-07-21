@@ -4,37 +4,37 @@
     {
       "file": "src/supervisor/ready.ts",
       "hash": "99903b09ddd1b816",
-      "commit": "6ea39592f9d1296fc3c0bbcaf3c66d3640b3833e"
+      "commit": "0da7ccc381c01b462f5be17b40728bdbd57f4136"
     },
     {
       "file": "crates/supervisor/src/main.rs",
       "hash": "26ed05fba5bdc416",
-      "commit": "6ea39592f9d1296fc3c0bbcaf3c66d3640b3833e"
+      "commit": "0da7ccc381c01b462f5be17b40728bdbd57f4136"
     },
     {
       "file": "crates/supervisor/src/supervisor.rs",
       "hash": "3ec961420a06df6f",
-      "commit": "6ea39592f9d1296fc3c0bbcaf3c66d3640b3833e"
+      "commit": "0da7ccc381c01b462f5be17b40728bdbd57f4136"
     },
     {
       "file": "crates/supervisor/src/client.rs",
       "hash": "5d7eeacf2b5bd5c1",
-      "commit": "6ea39592f9d1296fc3c0bbcaf3c66d3640b3833e"
+      "commit": "0da7ccc381c01b462f5be17b40728bdbd57f4136"
     },
     {
       "file": "crates/supervisor/src/config.rs",
       "hash": "c5e98b6f8f598f95",
-      "commit": "6ea39592f9d1296fc3c0bbcaf3c66d3640b3833e"
+      "commit": "0da7ccc381c01b462f5be17b40728bdbd57f4136"
     },
     {
       "file": "crates/supervisor/src/proto.rs",
       "hash": "af9d439ae8bcb63b",
-      "commit": "6ea39592f9d1296fc3c0bbcaf3c66d3640b3833e"
+      "commit": "0da7ccc381c01b462f5be17b40728bdbd57f4136"
     },
     {
       "file": "crates/supervisor/src/slots.rs",
       "hash": "5f385b4131d6436c",
-      "commit": "6ea39592f9d1296fc3c0bbcaf3c66d3640b3833e"
+      "commit": "0da7ccc381c01b462f5be17b40728bdbd57f4136"
     }
   ]
 }

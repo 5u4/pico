@@ -4,12 +4,12 @@
     {
       "file": "src/platforms/web/adapter.ts",
       "hash": "995434e46c9b3b8d",
-      "commit": "6ea39592f9d1296fc3c0bbcaf3c66d3640b3833e"
+      "commit": "0da7ccc381c01b462f5be17b40728bdbd57f4136"
     },
     {
       "file": "src/platforms/web/broadcaster.ts",
       "hash": "bba999bbd4d8bdf2",
-      "commit": "6ea39592f9d1296fc3c0bbcaf3c66d3640b3833e"
+      "commit": "0da7ccc381c01b462f5be17b40728bdbd57f4136"
     }
   ]
 }

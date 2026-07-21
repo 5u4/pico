@@ -13,7 +13,7 @@ description: 将 WebSocket 套接字映射到 Engine 订阅、路由命令、并
 ## 心智模型：三张注册表
 
 hub 的全部工作就是在三个数据结构上记账
-（`src/platforms/web/adapter.ts:52-57`）：
+（`src/platforms/web/adapter.ts:51-56`）：
 
 - `viewers: Map<conversationId, Set<HubSocket>>` — 谁在看什么。
 - `bridges: Map<conversationId, { opened, unsubscribe }>` — 每个被观看的会话
@@ -29,10 +29,10 @@ hub 的全部工作就是在三个数据结构上记账
 
 ### 订阅管道
 
-- `bridge(convId, cwd)`（`src/platforms/web/adapter.ts:389-410`）幂等地
+- `bridge(convId, cwd)`（`src/platforms/web/adapter.ts:399-416`）幂等地
   打开恰好一个 `engine.subscribe(convId, cwd, 'live', cb)` 并缓存它，
   在打开失败时回滚。
-- `attach(ws, convId)`（`:412-421`）先分离该套接字，再把它指向
+- `attach(ws, convId)`（`:418-427`）先分离该套接字，再把它指向
   新会话并加入观看者集合。
 - `detach(ws)`（`:423-436`）移除该套接字，并在**观看者集合
   清空时取消订阅该桥接**、删除两个 map 条目——即
@@ -42,10 +42,10 @@ hub 的全部工作就是在三个数据结构上记账
 
 ## 命令分发
 
-`handleCommand(ws, command)`（`src/platforms/web/adapter.ts:115-352`）是一个
+`handleCommand(ws, command)`（`src/platforms/web/adapter.ts:117-348`）是一个
 穷尽的 switch。要点：
 
-- `heartbeat` → `heartbeatAck`（`:116-119`）。
+- `heartbeat` → `heartbeatAck`（`:118-121`）。
 - `prompt` / `abort` → 要求存在一个活跃的会话（否则 `error`），
   然后执行 `engine.prompt`/`engine.abort`（`:121-141`）。
 - `command('ping')` → 运行该命令，然后用
@@ -65,7 +65,7 @@ hub 的全部工作就是在三个数据结构上记账
 
 ## 事件扇出
 
-`dispatch(convId, turnEvent)`（`src/platforms/web/adapter.ts:367-388`）把
+`dispatch(convId, turnEvent)`（`src/platforms/web/adapter.ts:372-397`）把
 Engine 的 `TurnEvent` 映射到该会话的观看者：
 
 - `title` → 一次工作区树重新广播（侧边栏显示新标题）。
@@ -89,4 +89,4 @@ Engine 的 `TurnEvent` 映射到该会话的观看者：
 工作区通过 `currentBranch(cwd)` 解析每个
 会话的 `branch`（异步，因为它读取 git）。`broadcast(...)` 构建一次该树
 并发出携带每个套接字自身 `activeId`
-及可选草稿的按套接字 `workspaces` 事件（`src/platforms/web/broadcaster.ts:69-72`）。
+及可选草稿的按套接字 `workspaces` 事件（`src/platforms/web/broadcaster.ts:71-74`）。

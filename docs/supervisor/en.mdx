@@ -49,7 +49,7 @@ with env `NODE_ENV=production`, `PICO_SUPERVISOR_SOCKET=<socket>`, and
 child exiting early, or a `health_timeout` (default 30s) elapsing. `handle_conn`
 routes an inbound `Ready` to `signal_ready`, which matches the token against
 `pending_ready`, fires the oneshot (unblocking the spawn), and writes `ReadyAck`
-(`crates/supervisor/src/supervisor.rs:199-208`). A worker that never acks in time
+(`crates/supervisor/src/supervisor.rs:197-206`). A worker that never acks in time
 is killed and the deploy fails.
 
 ## Blue/green slots
@@ -73,7 +73,7 @@ failure it `recover`s to the previous slot. Only two slots are ever kept.
 `config.rs` reads `~/.pico/supervisor/supervisor.toml` (all-default if absent):
 `socket_path`, `bun_path`, and `health_timeout_secs` (default 30). `resolve_bun`
 searches `$BUN_INSTALL/bin/bun`, `$HOME/.bun/bin/bun`, `PATH`, then bare `bun`
-(`crates/supervisor/src/config.rs:65-82`).
+(`crates/supervisor/src/config.rs:66-81`).
 
 On `SIGTERM`/`SIGINT` the supervisor cancels its task tracker, drains
 connections, and SIGTERMs the worker; the worker independently catches the same
