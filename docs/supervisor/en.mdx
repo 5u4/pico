@@ -1,0 +1,81 @@
+---
+title: Supervisor
+description: The Rust deploy daemon that spawns, health-checks, and hot-swaps the pico worker across blue/green slots.
+---
+
+The supervisor (`crates/supervisor/`) is a small Rust daemon that owns the pico
+**worker process's lifecycle**: it spawns `bun run src/index.ts`, blocks until
+the worker reports ready, and hot-swaps between deploy slots for zero-downtime
+updates and rollback. The TypeScript side of the handshake is `ready.ts`; the
+[boot sequence](carto:overview) calls it near the end.
+
+## Two processes, one handshake
+
+There are two programs: the Rust **supervisor** daemon and the TypeScript
+**worker** it manages. They speak newline-delimited JSON over a Unix socket at
+`~/.pico/supervisor/pico.sock`.
+
+- The supervisor manages **exactly one worker at a time**
+  (`AsyncMutex<Option<WorkerProc>>`, `crates/supervisor/src/supervisor.rs:37-51`).
+- The same socket serves an operator CLI (`client.rs`: `deploy`, `rollback`,
+  `status`, `stop`) and the worker's ready ping.
+
+## The wire protocol
+
+`proto.rs` defines it (`crates/supervisor/src/proto.rs`):
+
+- `Request` (tag `cmd`): `Deploy{path}`, `Rollback`, `Status`, `Stop`,
+  `Ready{token}` (`crates/supervisor/src/proto.rs:7-14`).
+- `Response` (tag `status`): `Ok{detail}`, `Status(StatusReport)`, `Error{message}`
+  (`crates/supervisor/src/proto.rs:17-22`).
+- `ReadyAck{}` serializes to `{}` — the exact ack `ready.ts` awaits
+  (`crates/supervisor/src/proto.rs:25`).
+
+## The ready handshake
+
+This is the join between the two processes.
+
+**Worker side** — `reportReady(socketPath, token)`
+(`src/supervisor/ready.ts:7-35`): connects to the socket, and on connect writes
+a single frame `{"cmd":"ready","token":...}\n` (`src/supervisor/ready.ts:26`). It
+resolves `ok()` when the supervisor's ack `data` arrives, or errors on timeout
+(`READY_TIMEOUT_MS = 10s`), socket error, or a close before ack.
+
+**Supervisor side** — when the worker is spawned, `spawn_and_validate`
+(`crates/supervisor/src/supervisor.rs`) stores a `oneshot` sender keyed by a
+freshly minted token in `pending_ready`, then launches `bun run src/index.ts`
+with env `NODE_ENV=production`, `PICO_SUPERVISOR_SOCKET=<socket>`, and
+`PICO_READY_TOKEN=<token>`. It then `select`s on: the ready oneshot firing, the
+child exiting early, or a `health_timeout` (default 30s) elapsing. `handle_conn`
+routes an inbound `Ready` to `signal_ready`, which matches the token against
+`pending_ready`, fires the oneshot (unblocking the spawn), and writes `ReadyAck`
+(`crates/supervisor/src/supervisor.rs:199-208`). A worker that never acks in time
+is killed and the deploy fails.
+
+## Blue/green slots
+
+`slots.rs` implements deploy/rollback as **symlink swaps** under `<dir>/slots`
+(`crates/supervisor/src/slots.rs`):
+
+- `current` and `previous` symlinks point at slot directories; `current_target()`
+  / `previous_target()` read them (`:17-23`).
+- `promote(slot)` moves `current → previous` and points `current` at the new slot
+  (`:25-30`); `swap()` exchanges the two for rollback (`:32-42`).
+- `set_link` writes a `.tmp` symlink then renames over the target so the swap is
+  **atomic** (`:53-62`).
+
+A deploy validates the target slot contains `src/index.ts`, kills the old
+worker, and `spawn_and_validate`s the new one; on success it `promote`s, on
+failure it `recover`s to the previous slot. Only two slots are ever kept.
+
+## Configuration & shutdown
+
+`config.rs` reads `~/.pico/supervisor/supervisor.toml` (all-default if absent):
+`socket_path`, `bun_path`, and `health_timeout_secs` (default 30). `resolve_bun`
+searches `$BUN_INSTALL/bin/bun`, `$HOME/.bun/bin/bun`, `PATH`, then bare `bun`
+(`crates/supervisor/src/config.rs:65-82`).
+
+On `SIGTERM`/`SIGINT` the supervisor cancels its task tracker, drains
+connections, and SIGTERMs the worker; the worker independently catches the same
+signals and runs its own [graceful shutdown](carto:overview) — the two shutdown
+paths are separate and both required.

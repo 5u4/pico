@@ -1,0 +1,62 @@
+---
+title: 消息与标题
+description: 将 SDK 消息归一化为 UI 形态并进行窗口化处理，同时生成会话标题。
+---
+
+这里有两项相关的工作：将 SDK 的原始 `AgentMessage[]` 转换为浏览器渲染所用的
+紧凑 `Message[]`（`message.ts`），以及为会话命名（`title.ts`）。两者都服务于
+[Engine](carto:engine) —— `message.ts` 构建每一个快照和流帧，`title.ts` 生成
+临时标题和自动标题。
+
+## 消息归一化
+
+SDK 发出的是一份扁平、冗长的事件日志；而 UI 需要的是「运行段」。`message.ts`
+弥合了这一差距。
+
+### UI 消息形态
+
+`Message = { id, role: 'user' | 'assistant' | 'system', parts: MessagePart[] }`，
+其中 `MessagePart` 可以是 `text`、`reasoning`，或一个 `tool-call`
+`{ toolCallId, toolName, args, result?, isError? }`（`src/engine/message.ts`）。
+
+### 合并为运行段
+
+`toMessages`（`src/engine/message.ts:90`）是核心转换：它**将连续的 assistant
+消息及其 tool-call 合并为单个「运行段」**，通过 `toolCallId` 将每个工具结果附加
+到对应的调用上，把 `custom` 展示消息映射为 `system` 角色，并让 user 消息原样通过。
+`collectResults`（`src/engine/message.ts:52`）构建其所用的 `toolCallId → result`
+查找表。
+
+配套导出：
+
+- `assistantReplyText(...)`（`src/engine/message.ts:141`）—— 拼接 assistant 文本
+  作为自动标题的输入。
+- `toStreamMessage(committed, stream)`（`src/engine/message.ts:161`）—— 从流式尾部
+  构建那个进行中的单一运行段，或返回 `null`。
+
+### 窗口化
+
+快照是有界的，而非无限历史：
+
+- `tailWindow(messages, limit)`（`src/engine/message.ts:180`）—— 最后 N 条消息
+  外加一个 `hasMore` 标志。`SNAPSHOT_TAIL = 40`（`src/engine/message.ts:177`）。
+- `olderWindow(messages, beforeId, limit)`（`src/engine/message.ts:190`）—— 为客户端
+  的「加载更早」向后翻页。`OLDER_PAGE = 30`（`src/engine/message.ts:178`）。
+
+## 标题
+
+`title.ts` 在不同时间尺度上生成两种标题：
+
+- `provisionalTitle(text)`（`src/engine/title.ts:41`）—— **即时且同步**：取第一
+  条非空行，截断至 `PROVISIONAL_TITLE_MAX = 60` 并加省略号。用于在会话开始的那一刻
+  立即填充侧边栏。
+- `autoTitle(session, text)`（`src/engine/title.ts:20`）—— **异步 LLM 升级**：
+  调用 SDK 的 `generateSessionTitle`，但在设置了 `PI_NO_TITLE` 或输入信息量过低时
+  返回 `null`（保留临时标题）。
+- `titleContext(prompt, reply)`（`src/engine/title.ts:11`）—— 将 user+assistant
+  这一轮格式化为 `autoTitle` 所消费的上下文字符串。
+
+[Engine](carto:engine) 通过 `EngineDeps` 注入 `autoTitle`，并直接调用
+`provisionalTitle`/`titleContext`；[registry](carto:registry) 中
+`setProvisionalTitle`（带 `WHERE title IS NULL` 守卫）与 `setConversationTitle`
+的拆分，正是让即时标题在无竞态的情况下让位于 LLM 升级的关键。

@@ -1,0 +1,64 @@
+---
+title: 工作树
+description: 每个会话独立的 git 工作树分支——原子化供给、回滚，以及分支重命名。
+---
+
+某些 workspace 把每个会话隔离在其**自己的 git 工作树和
+分支**中，这样并行的代理会话就永远不会争抢同一个工作
+树。本组件供给、重命名并拆除这些工作树。
+`provision.ts` 原子化地编排会话 + 工作树的生命周期；
+`worktree.ts` 是其下方那层薄的、返回 `Result` 的 `git` 封装。
+
+只有**工作树 workspace**——那些同时拥有 `defaultBranch` 和
+`branchPrefix`、符合 `isWorktreeWorkspace`（参见 [注册表](carto:registry) 和
+[store](carto:store)）的——才会得到这种处理。普通 workspace 完全跳过它。
+
+## 供给一个会话
+
+`provisionConversation(db, workspace, worktreeCwd, title)`
+（`src/engine/provision.ts:35`）总是**先**创建会话行，
+然后根据 workspace 类型进行分支：
+
+- **普通 workspace** → 原样返回该会话（`src/engine/provision.ts:44`）。
+- **工作树 workspace** → 计算目标位置和一个初始分支
+  `<branchPrefix>/<last-8-of-id-lowercased>`（`src/engine/provision.ts:24-28`），
+  然后 `createWorktree`。
+
+原子性是关键所在：如果 `createWorktree` 失败，会话行会被
+**删除以回滚**并返回一个错误（`src/engine/provision.ts:51-55`）；
+成功时会话的 `cwd` 被更新为工作树目标位置
+（`src/engine/provision.ts:57`）。
+
+`deprovisionConversation`（`src/engine/provision.ts:63`）移除工作树；
+`renameConversationBranch`（`src/engine/provision.ts:71`）把分支重命名为
+匹配一个已敲定的标题——但**仅当活跃分支仍等于初始
+自动分支时**（`src/engine/provision.ts:82-84`），这样用户的手动重命名
+就永远不会被覆盖。
+
+## git 封装
+
+`worktree.ts` 通过 Bun 的 `$` 封装 `git`，返回 `Result` 而不是
+抛出异常。内部的 `git()` 以 quiet/nothrow 方式运行 `git -C <repo> <args>`，
+并把非零退出码映射为一个携带 stderr 的错误（`src/engine/worktree.ts:9`）。
+
+关键导出：
+
+- `slugify(title)` —— 小写化，非字母数字字符 → `-`，去除首尾，最多 48 个字符
+  （`SLUG_MAX`，`src/engine/worktree.ts:22`）。
+- `sanitizeRefSegment(prefix)` —— 校验一个分支前缀段，拒绝
+  空值、`..`、`.lock` 以及非法字符（`src/engine/worktree.ts:34`）。
+  [WebHub](carto:web-hub) 在持久化一个分支前缀之前会调用它。
+- `createWorktree({ baseRepo, defaultBranch, dest, branch })` —— 校验
+  基提交，然后 `git worktree add -b`（`src/engine/worktree.ts:53`）。
+- `removeWorktree(...)` —— `git worktree remove --force`（`src/engine/worktree.ts:86`）。
+- `currentBranch(cwd)` —— `git symbolic-ref HEAD`（`src/engine/worktree.ts:107`）；
+  [broadcaster](carto:web-hub) 读取它来显示每个会话的分支。
+- `renameBranch({ baseRepo, from, to })` —— 一种避免冲突的重命名，会
+  追加 `-N`，最多到 `RENAME_COLLISION_LIMIT = 50`（`src/engine/worktree.ts:113`）。
+
+:::caution
+`provisionConversation` 在工作树之前创建行，意味着一次失败的
+`git worktree add` 必须撤销该行。那次回滚（`src/engine/provision.ts:51-55`）
+是唯一让数据库与文件系统保持一致的东西——不要重排
+它。
+:::

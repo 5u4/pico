@@ -1,0 +1,60 @@
+---
+title: 持久化存储
+description: WAL SQLite 状态数据库 —— 打开、迁移、查询追踪，以及 Zod 行模式。
+---
+
+存储是 pico 的持久记忆。两个文件：`db.ts` 打开 SQLite 数据库、运行迁移，并用
+追踪包裹查询；`schema.ts` 定义 Zod 模式，它们是从数据库读出的每一行的**解析
+边界**。[Registry](carto:registry) 是唯一直接查询这些表的代码。
+
+## 打开数据库
+
+`defaultDbPath()` 是 `~/.pico/state.db`（`src/store/db.ts:11-13`）。`openDb(path)`
+（`src/store/db.ts:14-23`）：
+
+- 除非路径为 `:memory:`（测试使用内存形式），否则创建父目录。
+- 以 `{ create: true, strict: true }` 打开，随后设置两个 pragma：
+  `journal_mode = WAL`（写入期间可并发读取）和 `foreign_keys = ON`
+  （从而强制执行从 workspace 到 conversation 的 `ON DELETE CASCADE`）。
+- 运行 `migrate(db)`，然后用 `traceDb` 包裹句柄以进行查询日志记录。
+
+### 查询追踪
+
+`traceDb` / `traceStatement` 通过 `Proxy` 包裹数据库的 `query`/`prepare`/`run`，
+使每条执行的语句通过 `db` logger 在 debug 级别记录 `{sql} {params} ({ms}ms)`
+（`src/store/db.ts:44-76`）。`STATEMENT_EXECUTORS` 列出实际运行 SQL 的方法
+（`run`、`get`、`all`、`values`、`iterate`，`src/store/db.ts:25`）。这纯粹是
+可观测性 —— 不改变任何结果。
+
+## 迁移
+
+`MIGRATIONS` 是一个有序的 `{ version, up }` 列表（`src/store/db.ts:80-119`）。
+`migrate(db)` 读取 `PRAGMA user_version`，过滤出比它更新的迁移，并**在单个事务内**
+应用待处理的迁移，每次应用后递增 `user_version`（`src/store/db.ts:126-137`）。
+`LATEST_SCHEMA_VERSION` 是当前存在的最大版本号（`src/store/db.ts:121`）。
+
+- **v1** 创建 `workspaces` 和 `conversations`，带有一个
+  `CHECK ((defaultBranch IS NULL) = (branchPrefix IS NULL))`，强制一个 workspace
+  *要么*完全配置了 worktree，*要么*完全没有配置，此外还有 `(platform, externalId)`
+  和 `(workspaceId, externalId)` 上的部分唯一索引。
+- **v2** 删除现已不再使用的 `conversations.branch` 列。
+
+:::note[快速开发式迁移]
+这里的迁移只向前推进 —— v2 只是删除一列。按照本仓库的快速开发立场，没有向下迁移
+或数据保留路径；如有需要，维护者会手动重建状态。
+:::
+
+## 行模式
+
+`schema.ts` 将表列镜像为 Zod 模式，使得一行在离开数据库的那一刻即被校验：
+
+- `platformSchema = z.enum(['web', 'discord'])`（`src/store/schema.ts:3`）。
+- `workspaceSchema` / `Workspace`（`src/store/schema.ts:6-16`）—— id、cwd、
+  platform、可空的 label/externalId、可空的 `defaultBranch`/`branchPrefix`、
+  `createdAt`。
+- `conversationSchema` / `Conversation`（`src/store/schema.ts:24-34`）—— 注意
+  这里**没有 `branch` 字段**；它在迁移 v2 中被删除了。
+- `isWorktreeWorkspace(workspace)`（`src/store/schema.ts:18-22`）—— 类型守卫，
+  当且仅当 `defaultBranch` 和 `branchPrefix` 都非空时为真。正是这一个谓词，被
+  [Engine](carto:engine)、[Worktrees](carto:worktrees) 和 [WebHub](carto:web-hub)
+  用来判断一个会话是否获得 git worktree。

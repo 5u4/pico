@@ -1,0 +1,25 @@
+{
+  "parent": "web",
+  "sources": [
+    {
+      "file": "src/platforms/web/client/runtime.tsx",
+      "hash": "158c9260be15f4fb",
+      "commit": "6ea39592f9d1296fc3c0bbcaf3c66d3640b3833e"
+    },
+    {
+      "file": "src/platforms/web/client/state.ts",
+      "hash": "7b572774a0bb2fce",
+      "commit": "6ea39592f9d1296fc3c0bbcaf3c66d3640b3833e"
+    },
+    {
+      "file": "src/platforms/web/client/connection.ts",
+      "hash": "f21b29f0761d9827",
+      "commit": "6ea39592f9d1296fc3c0bbcaf3c66d3640b3833e"
+    },
+    {
+      "file": "src/platforms/web/client/persist.ts",
+      "hash": "2b532b4d23645c93",
+      "commit": "6ea39592f9d1296fc3c0bbcaf3c66d3640b3833e"
+    }
+  ]
+}

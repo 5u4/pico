@@ -1,0 +1,88 @@
+---
+title: Web 客户端
+description: React 前端——一个镜像线上协议的纯归约器，绑定到一个自动重连的 WebSocket。
+---
+
+客户端是 [web 传输层](carto:web)的浏览器一半。它的设计是
+一次干净的拆分：`state.ts` 是一个**纯归约器**，是
+线上协议的镜像，而 `runtime.tsx` 将该归约器绑定到一个存活的、自动重连的
+WebSocket 以及 `assistant-ui` React 运行时。`connection.ts` 持有
+重连常量；`persist.ts` 从 localStorage 恢复上一个会话。
+
+## 心智模型：一个归约器，一个漏斗
+
+`reduce(state, action): { state, commands, toasts? }`
+（`src/platforms/web/client/state.ts:321`）是唯一的漏斗。每一次 UI 动作
+和每一个入站 `ServerEvent` 都流经它；它返回下一个
+`ThreadState`、一个供运行时**发送**的 `ClientCommand` 列表，以及
+可选的 toast。该归约器是纯的、与框架无关——`runtime.tsx`
+执行它的输出。
+
+### 折叠服务器事件
+
+`reduceServer`（`src/platforms/web/client/state.ts:143-263`）处理下行
+方向：
+
+- `workspaces` — 若存在则采用 `activeId`；否则若给出
+  `draftWorkspaceId` 则进入一个新草稿；否则仅存储列表（`:144-190`）。
+- `snapshot` / `older` / `stream` — **除非
+  `event.conversationId === state.activeId` 否则忽略**（`:191-231`），因此
+  你刚切走的会话的帧不会污染视图。Snapshot
+  按 id 合并，`older` 前置一页，`stream` 追加最新的一条。
+- `attention` 替换 attention 数组；`heartbeatAck` 是空操作；`error`
+  清除待处理状态并抛出一个 toast（`:232-247`）。
+
+### 乐观发送
+
+`reducePrompt`（`src/platforms/web/client/state.ts:265-292`）设置一条**乐观的
+待处理用户消息**，并在处于草稿时发出 `create{prompt}`，否则发出
+`prompt{text}`。`clearPendingIfResolved`（`:133-141`）在服务器的用户消息计数
+超过所捕获的基线后丢弃那条乐观
+消息——因此占位符恰好在真实消息到达时消失，没有
+闪烁。合并辅助函数 `mergeTail`（`:60-71`）与 `mergeById`（`:73-131`，按
+数字 id 后缀排序）在 snapshot/stream/older 之间保持消息列表连贯。
+
+## 运行时绑定
+
+`runtime.tsx` 把归约器接到网络和 React。
+
+- **`dispatch(action)`**（`src/platforms/web/client/runtime.tsx:124-137`）=
+  `reduce` → 更新一个 `stateRef`（在套接字回调内同步读取）和
+  React 状态 → 通过 `send` `flush` 返回的命令 → 抛出 toast。
+- **`send`** 若套接字为 OPEN 则把命令 JSON 序列化后发往套接字，否则将其排入
+  一个 `outbox` ref（`src/platforms/web/client/runtime.tsx:114-119`）。
+
+### 连接生命周期
+
+套接字是有韧性的（`src/platforms/web/client/runtime.tsx:139-297`）：
+
+- `connect()` 打开 `ws(s)://<host>/ws`（scheme 来自 `location.protocol`）。
+- **打开时**：重置退避、以 `select` 重放活跃会话、清空
+  outbox，并启动一个 15 秒心跳，若在 pong 超时内没有
+  `heartbeatAck` 到达则关闭套接字。
+- **关闭时**：暂存活跃 id、设置 `reconnecting`，并以**带抖动的
+  指数退避**（`backoffDelayMs` × 0.85–1.15，
+  `connection.ts`）安排一次重连。
+- `wake()` 在 `online`/`focus`/`visibilitychange` 时积极复活一个已死的套接字。
+
+`connection.ts` 提供常量——`RECONNECT_BASE_MS = 1000`、
+`RECONNECT_MAX_MS = 15000`、`HEARTBEAT_INTERVAL_MS = 15000`、
+`HEARTBEAT_TIMEOUT_MS = 10000`——以及 `backoffDelayMs(attempt)` =
+`BASE × 2^attempt`，上限为 `MAX`（`src/platforms/web/client/connection.ts:13-17`）。
+
+### 持久化与引导
+
+`persist.ts` **通过 Zod** 读写 localStorage：每次 `readPersisted`
+都会针对一个 schema 重新校验并安全回退，因此陈旧或损坏的存储
+永远不会让应用崩溃（`src/platforms/web/client/persist.ts:10-22`）。在首个
+无活跃会话的 `workspaces` 上，运行时会恢复持久化的
+`activeConversation`（若它仍存在），否则在第一个工作区中创建一个
+（`src/platforms/web/client/runtime.tsx:299-323`）。它还会根据 attention 计数把文档标题
+设为 `(n) pico`（`:330-333`）。
+
+### assistant-ui
+
+`AssistantPane` 接入 `useExternalStoreRuntime`，把引擎的 `Message` 各部分
+映射为 assistant-ui 消息（对 `tool-call` 做特殊处理），把
+`onNew → prompt` 与 `onCancel → cancel` 路由过去，并以 `threadKey` 为 thread 建键，
+使切换会话时能干净地重置它。

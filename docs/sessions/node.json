@@ -1,0 +1,25 @@
+{
+  "parent": "engine",
+  "sources": [
+    {
+      "file": "src/engine/sessions.ts",
+      "hash": "08653aa3e72e4269",
+      "commit": "6ea39592f9d1296fc3c0bbcaf3c66d3640b3833e"
+    },
+    {
+      "file": "src/engine/runtime.ts",
+      "hash": "9a31137a7769fc5f",
+      "commit": "6ea39592f9d1296fc3c0bbcaf3c66d3640b3833e"
+    },
+    {
+      "file": "src/engine/identity.ts",
+      "hash": "09dac567872fb583",
+      "commit": "6ea39592f9d1296fc3c0bbcaf3c66d3640b3833e"
+    },
+    {
+      "file": "src/engine/persona.md",
+      "hash": "4fa582bfaba2146c",
+      "commit": "6ea39592f9d1296fc3c0bbcaf3c66d3640b3833e"
+    }
+  ]
+}

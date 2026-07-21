@@ -1,0 +1,92 @@
+---
+title: WebHub
+description: 将 WebSocket 套接字映射到 Engine 订阅、路由命令、并将事件扇出的中央调度器。
+---
+
+`WebHub`（`src/platforms/web/adapter.ts`）是 [web
+传输层](carto:web)的大脑。它位于无状态的 `server.ts` 管道与
+[引擎](carto:engine)之间，把每个 `ClientCommand` 翻译为 Engine 调用或
+[注册表](carto:registry)变更，并把 Engine 的 `TurnEvent` 转回
+`ServerEvent`。配套的 `broadcaster.ts` 渲染工作区/会话
+侧边栏树，并持有完整的套接字名册。
+
+## 心智模型：三张注册表
+
+hub 的全部工作就是在三个数据结构上记账
+（`src/platforms/web/adapter.ts:52-57`）：
+
+- `viewers: Map<conversationId, Set<HubSocket>>` — 谁在看什么。
+- `bridges: Map<conversationId, { opened, unsubscribe }>` — 每个被观看的会话
+  **唯一**一个存活的 Engine 订阅。
+- `attention: Set<conversationId>` — 在无人观看时结束的
+  会话。
+
+两条不变量把它们绑在一起：
+
+1. **一个套接字最多观看一个会话**（`ws.data.conversationId`）。
+2. **当且仅当某会话有 ≥1 名观看者时该桥接存在**——它按
+   观看者集合大小做引用计数，最后一名观看者离开会拆除它。
+
+### 订阅管道
+
+- `bridge(convId, cwd)`（`src/platforms/web/adapter.ts:389-410`）幂等地
+  打开恰好一个 `engine.subscribe(convId, cwd, 'live', cb)` 并缓存它，
+  在打开失败时回滚。
+- `attach(ws, convId)`（`:412-421`）先分离该套接字，再把它指向
+  新会话并加入观看者集合。
+- `detach(ws)`（`:423-436`）移除该套接字，并在**观看者集合
+  清空时取消订阅该桥接**、删除两个 map 条目——即
+  引用计数拆除。
+- `activate(ws, convId, cwd)`（`:444-462`）是组合操作：bridge + attach +
+  清除 attention + 发送 workspaces + 发送 snapshot。
+
+## 命令分发
+
+`handleCommand(ws, command)`（`src/platforms/web/adapter.ts:115-352`）是一个
+穷尽的 switch。要点：
+
+- `heartbeat` → `heartbeatAck`（`:116-119`）。
+- `prompt` / `abort` → 要求存在一个活跃的会话（否则 `error`），
+  然后执行 `engine.prompt`/`engine.abort`（`:121-141`）。
+- `command('ping')` → 运行该命令，然后用
+  `command:ping` 自定义消息执行 `engine.record`（`:143-162`）。
+- `select` → 校验该会话及其工作区平台为
+  `web`，然后 `activate`（`:188-201`）。
+- `create`（以及默认分支）→ `provisionConversation`、bridge、attach、
+  broadcast，然后要么 `engine.prompt(prompt)` 要么发送 snapshot（`:322-352`）。
+- `archive` → 若有则注销 worktree、`archiveConversation`、分离所有
+  观看者、finalize、重新广播（`:284-320`）。
+- `updateWorkspaceCwd` → 用 `statSync` 检查 cwd 是目录、**拒绝
+  改动含有活跃 worktree 会话的 worktree 工作区**，并对分支前缀
+  执行 `sanitizeRefSegment`（`:214-282`）。
+
+`PLATFORM = 'web'`（`src/platforms/web/adapter.ts:32`）为每一次跨平台
+注册表访问设卡，因此 web hub 永远只看到 web 工作区。
+
+## 事件扇出
+
+`dispatch(convId, turnEvent)`（`src/platforms/web/adapter.ts:367-388`）把
+Engine 的 `TurnEvent` 映射到该会话的观看者：
+
+- `title` → 一次工作区树重新广播（侧边栏显示新标题）。
+- `snapshot` → 一个 `snapshot` `ServerEvent`。
+- 否则（`delta`）→ 一个 `stream` `ServerEvent`。
+
+### Attention（关注提醒）
+
+当一个会话在无人观看时结束，`engine.onSettled` 触发
+`onSettled`（`:68-73`），它将该 id 加入 `attention` 集合并广播
+之。`broadcastAttention`（`:75-81`）向广播器名册中的**每一个**套接字
+发送 `attention` 事件；`clearAttention` 移除并重新广播。
+[客户端](carto:web-client)把它变成 `(n) pico` 浏览器标签页角标。
+
+## 广播器
+
+`WorkspaceBroadcaster`（`src/platforms/web/broadcaster.ts`）拥有**所有**
+已连接套接字的名册——这与 hub 的按会话
+观看者 map 是不同的关注点。它的 `tree()`（`src/platforms/web/broadcaster.ts:30-51`）构建
+侧边栏：将 `listWorkspaces` 映射为 `WorkspaceSummary`，**仅**对 worktree
+工作区通过 `currentBranch(cwd)` 解析每个
+会话的 `branch`（异步，因为它读取 git）。`broadcast(...)` 构建一次该树
+并发出携带每个套接字自身 `activeId`
+及可选草稿的按套接字 `workspaces` 事件（`src/platforms/web/broadcaster.ts:69-72`）。

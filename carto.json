@@ -1,0 +1,6 @@
+{
+  "version": 1,
+  "locales": ["en", "zh"],
+  "defaultLocale": "en",
+  "home": "overview"
+}
