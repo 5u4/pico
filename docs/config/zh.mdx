@@ -1,0 +1,42 @@
+---
+title: 配置
+description: 通过 Zod 解析、带有安全默认值的 TOML 配置加载。
+---
+
+pico 的配置是单个可选的 TOML 文件。`config.ts` 加载它、应用默认值，并以 `Result`
+形式返回一个已校验的 `Config` —— 错误的配置文件是一个被捕获的错误，绝不会导致崩溃。
+[启动序列](carto:overview) 在构造其他任何东西之前，首先读取它。
+
+## 心智模型
+
+**一切皆有默认值；文件是可选的。** 一次没有 `~/.pico/config.toml` 的全新安装
+完全基于默认值运行 —— `loadConfig` 解析一个空对象，而不是失败
+（`src/config/config.ts:37`）。
+
+## 模式及其默认值
+
+`configSchema`（`src/config/config.ts:6-18`）及其确认的默认值：
+
+| 字段 | 默认值 |
+| --- | --- |
+| `workspaceCwd` | `~/.pico` |
+| `worktreeCwd` | `~/.pico/worktrees` |
+| `web.enabled` | `true` |
+| `web.port` | `4141` |
+
+`web` 为 `.prefault({})`，因此整个 `[web]` 表可以省略，同时仍能获得其嵌套默认值。
+`defaultConfigPath()` 是 `~/.pico/config.toml`（`src/config/config.ts:21-23`）。
+
+## 加载
+
+`loadConfig(path = defaultConfigPath())`（`src/config/config.ts:33-44`）：
+
+1. 如果文件不存在 → `parseConfig({})`，即全部默认值
+   （`src/config/config.ts:37`）。
+2. 否则用 `Bun.TOML.parse` 解析 TOML，并包裹在 `Result.fromThrowable` 中，因此
+   格式错误的文件会变为 `err("invalid config toml at <path>: …")`
+   （`src/config/config.ts:39-43`）。
+3. `.andThen(parseConfig)` 根据模式校验解析后的对象。
+
+`parseConfig(raw)`（`src/config/config.ts:25-31`）运行 `safeParse`，并在失败时将
+Zod 的问题消息拼接为单个错误字符串 —— 因此启动日志会精确指出哪个字段有误。

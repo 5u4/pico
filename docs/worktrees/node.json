@@ -1,0 +1,15 @@
+{
+  "parent": "engine",
+  "sources": [
+    {
+      "file": "src/engine/provision.ts",
+      "hash": "8b9cf8534ba81a3b",
+      "commit": "0da7ccc381c01b462f5be17b40728bdbd57f4136"
+    },
+    {
+      "file": "src/engine/worktree.ts",
+      "hash": "3e2692ad6b359bbf",
+      "commit": "0da7ccc381c01b462f5be17b40728bdbd57f4136"
+    }
+  ]
+}

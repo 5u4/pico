@@ -1,0 +1,45 @@
+---
+title: Configuration
+description: TOML config loading with safe defaults, parsed through Zod.
+---
+
+pico's configuration is a single optional TOML file. `config.ts` loads it,
+applies defaults, and returns a validated `Config` as a `Result` — a bad config
+file is a caught error, never a crash. The [boot sequence](carto:overview) reads
+this first, before anything else is constructed.
+
+## Mental model
+
+**Everything has a default; the file is optional.** A fresh install with no
+`~/.pico/config.toml` runs entirely on defaults — `loadConfig` parses an empty
+object rather than failing (`src/config/config.ts:37`).
+
+## The schema and its defaults
+
+`configSchema` (`src/config/config.ts:6-18`) with confirmed defaults:
+
+| Field | Default |
+| --- | --- |
+| `workspaceCwd` | `~/.pico` |
+| `worktreeCwd` | `~/.pico/worktrees` |
+| `web.enabled` | `true` |
+| `web.port` | `4141` |
+
+`web` is `.prefault({})` so the whole `[web]` table can be omitted and still get
+its nested defaults. `defaultConfigPath()` is `~/.pico/config.toml`
+(`src/config/config.ts:21-23`).
+
+## Loading
+
+`loadConfig(path = defaultConfigPath())` (`src/config/config.ts:33-44`):
+
+1. If the file does not exist → `parseConfig({})`, i.e. all defaults
+   (`src/config/config.ts:37`).
+2. Otherwise parse the TOML with `Bun.TOML.parse`, wrapped in
+   `Result.fromThrowable` so a malformed file becomes
+   `err("invalid config toml at <path>: …")` (`src/config/config.ts:39-43`).
+3. `.andThen(parseConfig)` validates the parsed object against the schema.
+
+`parseConfig(raw)` (`src/config/config.ts:25-31`) runs `safeParse` and, on
+failure, joins the Zod issue messages into one error string — so the boot log
+names exactly which field was wrong.

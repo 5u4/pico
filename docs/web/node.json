@@ -1,0 +1,15 @@
+{
+  "parent": "overview",
+  "sources": [
+    {
+      "file": "src/platforms/web/server.ts",
+      "hash": "a351afeff318feb1",
+      "commit": "6ea39592f9d1296fc3c0bbcaf3c66d3640b3833e"
+    },
+    {
+      "file": "src/platforms/web/protocol.ts",
+      "hash": "2ee78bd5a69a5e4b",
+      "commit": "6ea39592f9d1296fc3c0bbcaf3c66d3640b3833e"
+    }
+  ]
+}

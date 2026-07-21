@@ -1,0 +1,102 @@
+---
+title: Engine
+description: The conversation orchestrator — turn lifecycle, subscriber fan-out, titles, and idle reaping.
+---
+
+The `Engine` (`src/engine/conversations.ts`) is pico's beating heart. It sits
+between the [web transport](carto:web) and the `@oh-my-pi/pi-coding-agent` SDK,
+owning the live `conversationId → session` mapping and turning raw SDK events
+into a compact stream its subscribers can render. Everything the browser sees —
+a streaming reply, a snapshot, a title appearing — is an `Engine` decision.
+
+It leans on its sub-modules for the actual work: [Sessions](carto:sessions)
+provisions the agent sessions, [Registry](carto:registry) persists metadata,
+[Messages & titles](carto:messages) normalize and name conversations.
+
+## Mental model
+
+**Lazy, subscribed, self-reaping.** A conversation has no live session until
+someone prompts or subscribes to it; the Engine opens one on demand, bridges its
+SDK event stream once, fans events out to subscribers, and closes it again when
+it has been idle and unwatched for long enough.
+
+### The seam that makes it testable
+
+`Engine<S extends SessionLike>` is generic and depends only on abstractions, not
+on the concrete `Sessions` class:
+
+- `SessionsPort<S>` — `get`/`open`/`close`/`isPending` (`src/engine/conversations.ts:114`).
+- `EngineDeps<S>` — `{ db, sessions, autoTitle, onTitleSettled? }`
+  (`src/engine/conversations.ts:134-139`) injects the session pool, the LLM
+  auto-title function, and the branch-rename hook.
+
+This is why the tests can drive the Engine with fake sessions.
+
+### TurnEvent — the fan-out vocabulary
+
+Subscribers receive one of three events (`src/engine/conversations.ts:123-132`):
+
+- `snapshot` — the full windowed message list + context usage + `hasMore`.
+- `delta` — one in-progress message update while streaming.
+- `title` — a new provisional or final title.
+
+`subscribe(id, cwd, mode, listener)` registers a listener under one of two
+**subscribe modes** (`src/engine/conversations.ts:121`):
+
+- `live` — receives every `delta` as the reply streams.
+- `settled` — receives snapshots only when the turn is **not** streaming, i.e. a
+  coalesced final view.
+
+`dispatch` enforces this: a `message_update` becomes a `delta` sent only to
+`live` subscribers; any other event builds a snapshot sent to `live` always but
+to `settled` only when not streaming (`src/engine/conversations.ts:383-404`).
+
+## The turn lifecycle
+
+`prompt(id, cwd, text)` (`src/engine/conversations.ts:246-299`) is the spine of a
+turn:
+
+1. `ensureOpen` → `get` the session, run inside `withContext({ conversationId,
+   workspaceId })`.
+2. **Seed a provisional title before the turn** (`:266`) so the sidebar updates
+   instantly.
+3. Increment `activeTurns` (`:267`), run the SDK turn.
+4. On success `emitSettled` (`:277`); if it was the first turn,
+   `autoTitleFromReply` upgrades the title via the LLM (`:279`).
+5. `finally` decrement `activeTurns` and `touch` the activity clock (`:288-294`).
+
+`abort()` forwards to `session.abort`. `record()` injects a non-turn custom
+message (e.g. a slash-command result) and rebroadcasts a snapshot.
+
+### Titles
+
+`seedProvisionalTitle` only fires when the stored title is still `null` — it
+computes an instant first-line title and broadcasts a `title` event.
+`autoTitleFromReply` (`:426`) then pulls the assistant reply text, builds a
+title context, calls the injected `autoTitle`, writes the final title, syncs the
+SDK session name, and fires the `onTitleSettled` hook (which renames the git
+branch — see [Worktrees](carto:worktrees)).
+
+## Idle reaping
+
+Sessions are expensive, so the Engine reaps them. `start(SWEEP_MS)` arms an
+unref'd interval (`src/engine/conversations.ts:449`); `sweep` releases every
+**reapable** session. A session is reapable when it is **not viewed AND not busy
+AND idle past `IDLE_MS`** (`:498`):
+
+- `IDLE_MS = 10 minutes`, `SWEEP_MS = 1 minute` (`:146-147`).
+- **viewed** = has ≥1 subscriber (`:505`).
+- **busy** = `activeTurns > 0` OR pending open OR streaming OR has async wake
+  work — running jobs or queued delivery (`:509-517`).
+
+`release` unsubscribes the SDK bridge, closes the session via the port, and
+cleans the maps (`:467`). `releaseIfIdle` is the manual guard used when a viewer
+leaves (see [WebHub](carto:web-hub)).
+
+## Context usage
+
+`computeContextUsage(session)` (`src/engine/conversations.ts:90-108`) reads the
+session's token accounting and produces a `ContextUsageInfo`: total tokens, the
+context window, a percent, a per-category breakdown (system prompt, tools,
+messages, …), and cost. It rides along on every `snapshot` so the client can
+render the context-usage meter.

@@ -1,0 +1,77 @@
+---
+title: Web transport
+description: The Bun WebSocket server and the zod-validated wire protocol between browser and worker.
+---
+
+The web transport is how a browser talks to pico. Two files draw its boundary:
+`server.ts` is the thin Bun WebSocket pipe (origin check, upgrade, frame
+decode), and `protocol.ts` is the single source of truth for the wire contract.
+Everything semantic is delegated inward to the [WebHub](carto:web-hub); the
+browser side is the [web client](carto:web-client).
+
+## The server: a stateless pipe
+
+`createServer(deps)` (`src/platforms/web/server.ts:16`) builds one `Bun.serve`
+instance that serves the HTML bundle at `/` and handles `/ws`. The only
+per-socket state is `WsData = { conversationId: string | null }`, attached at
+upgrade (`src/platforms/web/server.ts:7`). Every semantic decision is delegated
+to the hub.
+
+### Origin enforcement
+
+The `/ws` upgrade enforces **same-origin** (`src/platforms/web/server.ts:30-45`):
+it compares the parsed `origin` header's host to the `host` header; a mismatch
+(or a malformed origin) is rejected `403 forbidden origin`. A **missing** origin
+header skips the check. On success `srv.upgrade` seeds `{ conversationId: null }`;
+a failed upgrade is `400`, and any non-`/ws` path is `404`.
+
+### Frame handling
+
+The websocket handlers delegate straight to the hub: `open → hub.handleOpen`,
+`close → hub.handleClose`, and `message` → JSON-parse then `parseClientCommand`,
+**silently dropping** malformed or unrecognized frames (debug log only) before
+calling `hub.handleCommand` (`src/platforms/web/server.ts:52-74`). Dropping bad
+frames rather than erroring keeps a buggy or hostile client from taking the
+socket down.
+
+## The protocol: two disjoint vocabularies
+
+`protocol.ts` splits the wire into **commands up** (untrusted, zod-validated) and
+**events down** (server-authored, plain TS types).
+
+### ClientCommand — browser → server
+
+`clientCommandSchema` (`src/platforms/web/protocol.ts:13-54`) is a discriminated
+union of application commands plus the slash-`command` schema. The kinds:
+
+- Conversation: `prompt{text}`, `abort`, `select{conversationId}`,
+  `create{workspaceId, prompt?}`, `draft`, `archive{conversationId}`,
+  `loadOlder{conversationId, beforeId}`.
+- Workspace: `createWorkspace{label}`, `renameWorkspace{workspaceId, label}`,
+  `updateWorkspaceCwd{workspaceId, cwd, worktree?}`.
+- Liveness: `heartbeat`.
+- Slash-command: `command{name: 'ping', text?}` (`src/platforms/web/protocol.ts:5-11`).
+
+`parseClientCommand(raw)` (`src/platforms/web/protocol.ts:107`) `safeParse`s and
+returns `undefined` on failure — the exact seam `server.ts` uses to drop junk.
+
+### ServerEvent — server → browser
+
+The `ServerEvent` union (`src/platforms/web/protocol.ts:76-105`):
+
+- `workspaces{items, activeId, draftWorkspaceId?}` — the sidebar tree.
+- `snapshot{conversationId, messages, isStreaming, usage, hasMore}` — full view.
+- `older{conversationId, messages, hasMore}` — a backward page.
+- `stream{conversationId, message, isStreaming}` — one streaming delta.
+- `error{message}`, `attention{conversationIds}`, `heartbeatAck`.
+
+These are trusted TS types, not zod schemas, because the server authors them —
+the validation cost is spent only on the untrusted inbound direction.
+
+## End to end
+
+A prompt round-trip: browser sends a `prompt` frame → `server.ts` validates and
+forwards → [WebHub](carto:web-hub) `handleCommand` → [Engine](carto:engine)
+`prompt` → streaming `TurnEvent`s → hub re-serializes as `stream`/`snapshot`
+`ServerEvent`s → `ws.send` → the [web client](carto:web-client) reduces them into
+React state.

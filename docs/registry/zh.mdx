@@ -1,0 +1,57 @@
+---
+title: 注册表
+description: 针对 workspaces 与 conversations 的 SQLite CRUD——元数据的唯一真相来源，在边界处经过 Zod 解析。
+---
+
+注册表（`src/engine/registry.ts`）是**元数据的唯一真相来源**：一
+组在 `bun:sqlite` 的 `Database` 之上的纯函数，读写
+`workspaces` 和 `conversations` 表。它之上的一切——
+[引擎](carto:engine)、[WebHub](carto:web-hub) 和 [供给](carto:worktrees)——
+都通过这些函数，而不是直接触碰 SQL。
+
+## 心智模型
+
+**一道信任边界，而不仅仅是数据访问层。** SQLite 行是外部
+数据，所以每次读取都在离开注册表之前经过
+`workspaceSchema.parse` / `conversationSchema.parse`（来自 [store](carto:store)）校验。
+一个格式错误的行会抛出异常，而不是传播一个类型不完整的对象。
+
+这两个表构成一棵树：一个 workspace 拥有多个 conversation
+（`workspaceId REFERENCES workspaces(id) ON DELETE CASCADE`）。一个 workspace
+要么是一个普通目录，要么是一个**工作树 workspace**（同时拥有 `defaultBranch`
+和 `branchPrefix`）——参见 [工作树](carto:worktrees)。
+
+## Workspace 操作
+
+- `listWorkspaces(platform)`、`getWorkspace(id)` —— 读取。
+- `createWorkspace(...)`、`getOrCreateDefaultWorkspace(...)` —— 后者支撑
+  web hub 的“Default” workspace，使全新安装有一个可以对话的地方。
+- `renameWorkspace(id, label)`、`updateWorkspaceCwd(id, cwd, worktree)` —— 变更
+  label 与目录；`updateWorkspaceCwd` 还会在普通模式
+  和工作树模式之间切换一个 workspace。
+
+## Conversation 操作
+
+- `listConversations(workspaceId)` —— **排除已归档的**，按 `DESC` 排序
+  （`src/engine/registry.ts:128`）。
+- `getConversation(id)`（`src/engine/registry.ts:142`）、
+  `createConversation(...)`（`src/engine/registry.ts:152`）。
+- `countActiveWorktreeConversations(workspaceId)` —— 通过 join 统计活跃的
+  工作树会话（`src/engine/registry.ts:207`）；hub 用它来
+  在会话仍活跃时拒绝切换一个工作树 workspace 的 cwd。
+- `archiveConversation(id)` —— 软删除，`WHERE archivedAt IS NULL`
+  （`src/engine/registry.ts:223`）。
+
+### 临时标题 vs. 最终标题
+
+两个标题设置器编码了 pico 的标题生命周期：
+
+- `setProvisionalTitle(id, title)`（`src/engine/registry.ts:183`）**仅**
+  在 `WHERE title IS NULL` 时更新，并返回是否有行被改变——因此一个
+  即时的临时标题绝不会覆盖一个真实标题。
+- `setConversationTitle(id, title)`（`src/engine/registry.ts:196`）无条件
+  写入——由 LLM 自动标题升级使用。
+
+`IS NULL` 守卫就是整个机制：临时标题是尽力而为的，
+并让位于任何已存在的标题。参见 [消息与标题](carto:messages)
+了解它们如何产生，以及 [引擎](carto:engine) 了解它们何时触发。

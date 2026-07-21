@@ -1,0 +1,8 @@
+{
+  "$schema": "https://unpkg.com/wrangler/config-schema.json",
+  "name": "pico",
+  "compatibility_date": "2026-07-21",
+  "assets": {
+    "directory": "./dist-site"
+  }
+}

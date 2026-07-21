@@ -1,0 +1,64 @@
+---
+title: Worktrees
+description: Per-conversation git worktree branches — atomic provisioning, rollback, and branch renaming.
+---
+
+Some workspaces isolate every conversation in its **own git worktree and
+branch**, so parallel agent conversations never fight over the same working
+tree. This component provisions, renames, and tears down those worktrees.
+`provision.ts` orchestrates conversation + worktree lifecycle atomically;
+`worktree.ts` is the thin, `Result`-returning `git` wrapper underneath.
+
+Only **worktree workspaces** — those with both `defaultBranch` and
+`branchPrefix`, per `isWorktreeWorkspace` (see [Registry](carto:registry) and
+[store](carto:store)) — get this treatment. Plain workspaces skip it entirely.
+
+## Provisioning a conversation
+
+`provisionConversation(db, workspace, worktreeCwd, title)`
+(`src/engine/provision.ts:33`) always creates the conversation row **first**,
+then branches on workspace type:
+
+- **Plain workspace** → return the conversation as-is (`src/engine/provision.ts:44`).
+- **Worktree workspace** → compute the destination and an initial branch
+  `<branchPrefix>/<last-8-of-id-lowercased>` (`src/engine/provision.ts:26-31`),
+  then `createWorktree`.
+
+The atomicity is the point: if `createWorktree` fails, the conversation row is
+**deleted to roll back** and an error returned (`src/engine/provision.ts:54-58`);
+on success the conversation's `cwd` is updated to the worktree dest
+(`src/engine/provision.ts:60-63`).
+
+`deprovisionConversation` (`src/engine/provision.ts:66`) removes the worktree;
+`renameConversationBranch` (`src/engine/provision.ts:74`) renames the branch to
+match a settled title — but **only if the live branch still equals the initial
+auto-branch** (`src/engine/provision.ts:83-84`), so a user's manual rename is
+never overwritten.
+
+## The git wrapper
+
+`worktree.ts` wraps `git` via Bun's `$`, returning `Result`s instead of
+throwing. The internal `git()` runs `git -C <repo> <args>` quiet/nothrow and
+maps a non-zero exit to an error carrying stderr (`src/engine/worktree.ts:10`).
+
+Key exports:
+
+- `slugify(title)` — lowercase, non-alphanumerics → `-`, trimmed, max 48 chars
+  (`SLUG_MAX`, `src/engine/worktree.ts:26`).
+- `sanitizeRefSegment(prefix)` — validates a branch-prefix segment, rejecting
+  empty, `..`, `.lock`, and invalid characters (`src/engine/worktree.ts:36`).
+  The [WebHub](carto:web-hub) calls this before persisting a branch prefix.
+- `createWorktree({ baseRepo, defaultBranch, dest, branch })` — verifies the
+  base commit, then `git worktree add -b` (`src/engine/worktree.ts:61-76`).
+- `removeWorktree(...)` — `git worktree remove --force` (`src/engine/worktree.ts:82`).
+- `currentBranch(cwd)` — `git symbolic-ref HEAD` (`src/engine/worktree.ts:107`);
+  the [broadcaster](carto:web-hub) reads this to show each conversation's branch.
+- `renameBranch({ baseRepo, from, to })` — collision-avoiding rename that
+  appends `-N` up to `RENAME_COLLISION_LIMIT = 50` (`src/engine/worktree.ts:113`).
+
+:::caution
+`provisionConversation` creating the row before the worktree means a failed
+`git worktree add` must undo the row. That rollback (`src/engine/provision.ts:54-58`)
+is the only thing keeping the DB and the filesystem consistent — do not reorder
+it.
+:::
