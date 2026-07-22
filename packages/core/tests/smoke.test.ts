@@ -7,16 +7,16 @@ import { ulid } from "ulid";
 import { Auth } from "../src/agents/auth.ts";
 import { Catalog } from "../src/agents/catalog.ts";
 import { Chats } from "../src/agents/chats.ts";
-import { layerChatsConfig } from "../src/agents/config.ts";
 import type { ChatEvent } from "../src/agents/schema.ts";
+import { layerPicoConfig } from "../src/config/pico-config.ts";
 
 describe.skipIf(!process.env.PICO_SMOKE)("chat smoke (real LLM)", () => {
   it("streams a turn end-to-end", async () => {
-    const sessionsRoot = mkdtempSync(join(tmpdir(), "pico-smoke-"));
+    const configRoot = mkdtempSync(join(tmpdir(), "pico-smoke-"));
     const smokeLayer = Chats.DefaultWithoutDependencies.pipe(
       Layer.provide(Auth.Default),
       Layer.provide(Catalog.Default),
-      Layer.provide(layerChatsConfig(sessionsRoot)),
+      Layer.provide(layerPicoConfig(configRoot)),
     );
     const program = Effect.gen(function* () {
       const chats = yield* Chats;
@@ -48,7 +48,7 @@ describe.skipIf(!process.env.PICO_SMOKE)("chat smoke (real LLM)", () => {
         Effect.scoped(program).pipe(Effect.provide(smokeLayer)),
       );
     } finally {
-      rmSync(sessionsRoot, { recursive: true, force: true });
+      rmSync(configRoot, { recursive: true, force: true });
     }
   }, 120_000);
 });

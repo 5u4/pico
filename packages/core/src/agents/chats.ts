@@ -2,10 +2,10 @@ import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent";
 import { Duration, Effect, RcMap, type Scope } from "effect";
+import { PicoConfig } from "../config/pico-config.ts";
 import { Auth } from "./auth.ts";
 import { Catalog } from "./catalog.ts";
 import { type Chat, makeChat } from "./chat.ts";
-import { ChatsConfig } from "./config.ts";
 import {
   ChatBusy,
   InvalidChatId,
@@ -24,11 +24,11 @@ export interface GetOrCreateOptions {
 }
 
 export class Chats extends Effect.Service<Chats>()("pico/Chats", {
-  dependencies: [Auth.Default, Catalog.Default, ChatsConfig.Default],
+  dependencies: [Auth.Default, Catalog.Default, PicoConfig.Default],
   scoped: Effect.gen(function* () {
     const auth = yield* Auth;
     const catalog = yield* Catalog;
-    const config = yield* ChatsConfig;
+    const config = yield* PicoConfig;
     const cwdByChat = new Map<string, string>();
 
     const lookup = (
