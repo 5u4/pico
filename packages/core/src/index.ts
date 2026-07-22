@@ -3,7 +3,6 @@ export { Auth } from "./agents/auth.ts";
 export { Catalog } from "./agents/catalog.ts";
 export type { Chat } from "./agents/chat.ts";
 export { Chats, type GetOrCreateOptions } from "./agents/chats.ts";
-export { ChatsConfig, layerChatsConfig } from "./agents/config.ts";
 export {
   AuthUnavailable,
   ChatBusy,
@@ -17,3 +16,8 @@ export {
   ChatRole,
   PromptOutcome,
 } from "./agents/schema.ts";
+export {
+  ConfigFileInvalid,
+  layerPicoConfig,
+  PicoConfig,
+} from "./config/pico-config.ts";
