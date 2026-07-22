@@ -13,9 +13,7 @@ const withRoot = <A, E>(
   root: string,
   program: Effect.Effect<A, E, PicoConfig>,
 ): Promise<A> =>
-  Effect.runPromise(
-    program.pipe(Effect.provide(layerPicoConfig(root))) as Effect.Effect<A, E>,
-  );
+  Effect.runPromise(program.pipe(Effect.provide(layerPicoConfig(root))));
 
 const makeRoot = (): string => mkdtempSync(join(tmpdir(), "pico-config-"));
 
