@@ -100,13 +100,7 @@ describe("PicoConfig", () => {
       const result = await Effect.runPromise(
         Effect.gen(function* () {
           return (yield* PicoConfig).configRoot;
-        }).pipe(
-          Effect.provide(layerPicoConfig(root)),
-          Effect.either,
-        ) as Effect.Effect<
-          | { readonly _tag: "Right"; readonly right: string }
-          | { readonly _tag: "Left"; readonly left: { readonly _tag: string } }
-        >,
+        }).pipe(Effect.provide(layerPicoConfig(root)), Effect.either),
       );
       expect(result._tag).toBe("Left");
       if (result._tag === "Left") {
@@ -121,7 +115,7 @@ describe("PicoConfig", () => {
     const configRoot = await Effect.runPromise(
       Effect.gen(function* () {
         return (yield* PicoConfig).configRoot;
-      }).pipe(Effect.provide(PicoConfig.Default)) as Effect.Effect<string>,
+      }).pipe(Effect.provide(PicoConfig.Default)),
     );
     expect(configRoot).toBe(join(homedir(), ".pico"));
   });
