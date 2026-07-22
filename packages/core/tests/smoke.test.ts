@@ -3,24 +3,41 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Chunk, Effect, Fiber, Layer, Stream } from "effect";
-import { ulid } from "ulid";
 import { Auth } from "../src/agents/auth.ts";
 import { Catalog } from "../src/agents/catalog.ts";
 import { Chats } from "../src/agents/chats.ts";
 import type { ChatEvent } from "../src/agents/schema.ts";
 import { layerPicoConfig } from "../src/config/pico-config.ts";
+import { Store } from "../src/store/store.ts";
 
 describe.skipIf(!process.env.PICO_SMOKE)("chat smoke (real LLM)", () => {
   it("streams a turn end-to-end", async () => {
     const configRoot = mkdtempSync(join(tmpdir(), "pico-smoke-"));
-    const smokeLayer = Chats.DefaultWithoutDependencies.pipe(
+    const config = layerPicoConfig(configRoot);
+    const storeLayer = Store.DefaultWithoutDependencies.pipe(
+      Layer.provide(config),
+    );
+    const chatsLayer = Chats.DefaultWithoutDependencies.pipe(
       Layer.provide(Auth.Default),
       Layer.provide(Catalog.Default),
-      Layer.provide(layerPicoConfig(configRoot)),
+      Layer.provide(config),
+      Layer.provide(storeLayer),
     );
+    const smokeLayer = Layer.merge(chatsLayer, storeLayer);
     const program = Effect.gen(function* () {
+      const store = yield* Store;
       const chats = yield* Chats;
-      const chat = yield* chats.getOrCreate(ulid(), { cwd: process.cwd() });
+      const space = yield* store.spaces.create({
+        defaultCwd: process.cwd(),
+        platform: "web",
+        name: "smoke",
+      });
+      const created = yield* store.chats.create({
+        spaceId: space.id,
+        cwd: process.cwd(),
+        title: "smoke chat",
+      });
+      const chat = yield* chats.getOrCreate(created.id);
 
       const collector = yield* Effect.fork(
         chat.events.pipe(

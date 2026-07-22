@@ -1,16 +1,26 @@
 import { BunRuntime } from "@effect/platform-bun";
-import { Chats } from "@pico/core";
-import { Console, Effect, Stream } from "effect";
-import { ulid } from "ulid";
+import { Chats, Store } from "@pico/core";
+import { Console, Effect, Layer, Stream } from "effect";
 
 const program = Effect.gen(function* () {
+  const store = yield* Store;
   const chats = yield* Chats;
   const prompt = process.argv[2] ?? "Say hello in one short sentence.";
 
-  const chat = yield* chats.getOrCreate(ulid(), { cwd: process.cwd() });
+  const space = yield* store.spaces.create({
+    defaultCwd: process.cwd(),
+    platform: "web",
+    name: "local",
+  });
+  const chat = yield* store.chats.create({
+    spaceId: space.id,
+    cwd: process.cwd(),
+    title: prompt.slice(0, 60),
+  });
+  const session = yield* chats.getOrCreate(chat.id);
 
   const printer = yield* Effect.fork(
-    chat.events.pipe(
+    session.events.pipe(
       Stream.takeUntil((event) => event._tag === "agent_end"),
       Stream.runForEach((event) => {
         switch (event._tag) {
@@ -35,13 +45,13 @@ const program = Effect.gen(function* () {
     ),
   );
 
-  yield* chat.prompt(prompt);
+  yield* session.prompt(prompt);
   yield* printer.await;
 });
 
 BunRuntime.runMain(
   Effect.scoped(program).pipe(
     Effect.tapErrorCause(Console.error),
-    Effect.provide(Chats.Default),
+    Effect.provide(Layer.merge(Chats.Default, Store.Default)),
   ),
 );
