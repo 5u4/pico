@@ -28,15 +28,24 @@
       },
       "performance": {
         "noBarrelFile": "error"
-      },
-      "nursery": {
-        "noFloatingPromises": "error"
       }
     },
     "domains": {
       "react": "recommended"
     }
   },
+  "overrides": [
+    {
+      "includes": ["apps/web/**"],
+      "linter": {
+        "rules": {
+          "nursery": {
+            "noFloatingPromises": "error"
+          }
+        }
+      }
+    }
+  ],
   "javascript": {
     "formatter": {
       "quoteStyle": "double"
