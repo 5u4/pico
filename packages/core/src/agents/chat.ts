@@ -30,7 +30,7 @@ export interface MakeChatOptions {
   readonly modelRegistry: ModelRegistry;
 }
 
-export interface Chat {
+export interface ChatSession {
   readonly chatId: string;
   readonly events: Stream.Stream<ChatEvent>;
   readonly history: Effect.Effect<ReadonlyArray<ChatMessage>>;
@@ -58,7 +58,7 @@ function buildSessionManager(
 
 export function makeChat(
   options: MakeChatOptions,
-): Effect.Effect<Chat, SessionInitFailed, Scope.Scope> {
+): Effect.Effect<ChatSession, SessionInitFailed, Scope.Scope> {
   return Effect.gen(function* () {
     const runtime = yield* Effect.runtime();
     const chatScope = yield* Effect.scope;
