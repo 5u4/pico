@@ -13,6 +13,22 @@ After addressing review comments on a GitHub PR (any reviewer — human, Copilot
 
 Do all replies + resolves in a single batched bash call after the fix is pushed — do not interleave with the code change. The user does not want to manually resolve each thread in the GitHub UI.
 
+## Fix by class, not by comment
+
+A review comment that names a *pattern* (`as`-cast, floating effect, TOCTOU,
+missing `await`, `!`, unexhausted union, …) almost always has sibling instances
+in the same changeset — the reviewer only flagged the one it landed on. Before
+replying "fixed":
+
+1. Extract the pattern and `grep` the whole touched file (and the rest of the
+   diff) for it.
+2. Fix **every** instance in one commit, not just the flagged line.
+3. Then reply, noting you swept the class (e.g. "no `as` casts remain in the
+   file").
+
+Point-fixing the single flagged line turns one comment into a round-trip per
+sibling instance. One reviewer hit = grep the class = one sweep.
+
 ## Discovering thread IDs and comment IDs
 
 ```sh
