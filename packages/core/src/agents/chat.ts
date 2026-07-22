@@ -102,11 +102,15 @@ export function makeChat(
         yield* Effect.forkDaemon(
           Effect.tryPromise(() => session.prompt(text)).pipe(
             Effect.catchAll((cause) =>
-              PubSub.publish(hub, {
-                _tag: "error",
-                reason: "error",
-                message: cause instanceof Error ? cause.message : String(cause),
-              }),
+              Effect.zipRight(
+                PubSub.publish(hub, {
+                  _tag: "error",
+                  reason: "error",
+                  message:
+                    cause instanceof Error ? cause.message : String(cause),
+                }),
+                PubSub.publish(hub, { _tag: "turn_end" }),
+              ),
             ),
           ),
         );

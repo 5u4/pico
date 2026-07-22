@@ -35,10 +35,14 @@ export class Chats extends Effect.Service<Chats>()("pico/Chats", {
       chatId: string,
     ): Effect.Effect<Chat, SessionInitFailed | ModelUnavailable, Scope.Scope> =>
       Effect.gen(function* () {
-        const cwd = cwdByChat.get(chatId) ?? process.cwd();
-        const settings = yield* Effect.promise(() =>
-          Settings.init({ cwd, agentDir: auth.agentDir }),
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => cwdByChat.delete(chatId)),
         );
+        const cwd = cwdByChat.get(chatId) ?? process.cwd();
+        const settings = yield* Effect.tryPromise({
+          try: () => Settings.init({ cwd, agentDir: auth.agentDir }),
+          catch: (cause) => new SessionInitFailed({ chatId, cause }),
+        });
         const model = yield* catalog.resolveDefaultModel(settings);
         const sessionDir = join(config.sessionsRoot, chatId);
         yield* Effect.try({
@@ -71,9 +75,9 @@ export class Chats extends Effect.Service<Chats>()("pico/Chats", {
       Scope.Scope
     > =>
       isValidChatId(chatId)
-        ? Effect.sync(() => cwdByChat.set(chatId, options.cwd)).pipe(
-            Effect.andThen(RcMap.get(chats, chatId)),
-          )
+        ? Effect.sync(() => {
+            if (!cwdByChat.has(chatId)) cwdByChat.set(chatId, options.cwd);
+          }).pipe(Effect.andThen(RcMap.get(chats, chatId)))
         : Effect.fail(new InvalidChatId({ chatId }));
 
     return { getOrCreate };

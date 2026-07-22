@@ -10,14 +10,15 @@ import { Chats } from "../src/agents/chats.ts";
 import { layerChatsConfig } from "../src/agents/config.ts";
 import type { ChatEvent } from "../src/agents/schema.ts";
 
-const smokeLayer = Chats.DefaultWithoutDependencies.pipe(
-  Layer.provide(Auth.Default),
-  Layer.provide(Catalog.Default),
-  Layer.provide(layerChatsConfig(mkdtempSync(join(tmpdir(), "pico-smoke-")))),
-);
-
 describe.skipIf(!process.env.PICO_SMOKE)("chat smoke (real LLM)", () => {
   it("streams a turn end-to-end", async () => {
+    const smokeLayer = Chats.DefaultWithoutDependencies.pipe(
+      Layer.provide(Auth.Default),
+      Layer.provide(Catalog.Default),
+      Layer.provide(
+        layerChatsConfig(mkdtempSync(join(tmpdir(), "pico-smoke-"))),
+      ),
+    );
     const program = Effect.gen(function* () {
       const chats = yield* Chats;
       const chat = yield* chats.getOrCreate(ulid(), { cwd: process.cwd() });

@@ -15,7 +15,11 @@ function contentText(content: string | readonly ContentPart[]): string {
 function stringifyResult(result: unknown): string {
   if (typeof result === "string") return result;
   if (result === null || result === undefined) return "";
-  return JSON.stringify(result);
+  try {
+    return JSON.stringify(result) ?? String(result);
+  } catch {
+    return String(result);
+  }
 }
 
 export function toChatMessage(message: AgentMessage): ChatMessage | null {
