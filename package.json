@@ -8,15 +8,12 @@
     "bun": ">=1.3.14"
   },
   "scripts": {
-    "dev": "bun run src/index.ts",
-    "start": "NODE_ENV=production bun run src/index.ts",
     "typecheck": "tsc --noEmit",
     "lint": "biome check",
     "lint:fix": "biome check --write",
     "format": "biome format --write",
     "lint:comments": "bun run scripts/lint-comments.ts --all",
     "test": "bun test",
-    "test:e2e": "playwright test",
     "check": "bun run typecheck && bun run lint && bun run lint:comments && bun test",
     "prepare": "lefthook install"
   },
@@ -36,15 +33,11 @@
     "@radix-ui/react-popover": "^1.1.19",
     "@radix-ui/react-slot": "^1.3.0",
     "@radix-ui/react-tooltip": "^1.2.12",
-    "async-mutex": "^0.5.0",
     "bun-plugin-tailwind": "^0.1",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "lucide-react": "^1.24.0",
-    "neverthrow": "^8.2.0",
     "next-themes": "^0.4.6",
-    "p-map": "^7.0.5",
-    "p-retry": "^8.0.0",
     "react": "^19",
     "react-dom": "^19",
     "remark-gfm": "^4.0.1",
@@ -54,12 +47,10 @@
     "tailwindcss": "^4",
     "tw-animate-css": "^1.4.0",
     "tw-shimmer": "^0.4.11",
-    "ulid": "^3.0.2",
-    "zod": "^4.4.3"
+    "ulid": "^3.0.2"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.3",
-    "@playwright/test": "^1.61.1",
     "@types/bun": "1.3.14",
     "@types/react": "^19",
     "@types/react-dom": "^19",
