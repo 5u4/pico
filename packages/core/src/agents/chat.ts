@@ -61,6 +61,7 @@ export function makeChat(
 ): Effect.Effect<Chat, SessionInitFailed, Scope.Scope> {
   return Effect.gen(function* () {
     const runtime = yield* Effect.runtime();
+    const chatScope = yield* Effect.scope;
     const hub = yield* PubSub.unbounded<ChatEvent>();
 
     const session = yield* Effect.acquireRelease(
@@ -99,7 +100,7 @@ export function makeChat(
         if (session.isStreaming) {
           return yield* new ChatBusy({ chatId: options.chatId });
         }
-        yield* Effect.forkDaemon(
+        yield* Effect.forkIn(
           Effect.tryPromise(() => session.prompt(text)).pipe(
             Effect.catchAll((cause) =>
               Effect.zipRight(
@@ -113,6 +114,7 @@ export function makeChat(
               ),
             ),
           ),
+          chatScope,
         );
         return started;
       });

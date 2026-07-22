@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Chunk, Effect, Fiber, Layer, Stream } from "effect";
@@ -12,12 +12,11 @@ import type { ChatEvent } from "../src/agents/schema.ts";
 
 describe.skipIf(!process.env.PICO_SMOKE)("chat smoke (real LLM)", () => {
   it("streams a turn end-to-end", async () => {
+    const sessionsRoot = mkdtempSync(join(tmpdir(), "pico-smoke-"));
     const smokeLayer = Chats.DefaultWithoutDependencies.pipe(
       Layer.provide(Auth.Default),
       Layer.provide(Catalog.Default),
-      Layer.provide(
-        layerChatsConfig(mkdtempSync(join(tmpdir(), "pico-smoke-"))),
-      ),
+      Layer.provide(layerChatsConfig(sessionsRoot)),
     );
     const program = Effect.gen(function* () {
       const chats = yield* Chats;
@@ -44,8 +43,12 @@ describe.skipIf(!process.env.PICO_SMOKE)("chat smoke (real LLM)", () => {
       expect(messages.some((m) => m.role === "assistant")).toBe(true);
     });
 
-    await Effect.runPromise(
-      Effect.scoped(program).pipe(Effect.provide(smokeLayer)),
-    );
+    try {
+      await Effect.runPromise(
+        Effect.scoped(program).pipe(Effect.provide(smokeLayer)),
+      );
+    } finally {
+      rmSync(sessionsRoot, { recursive: true, force: true });
+    }
   }, 120_000);
 });
