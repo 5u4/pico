@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { Data, Effect, Layer, type ParseResult, Schema } from "effect";
@@ -20,20 +20,37 @@ export interface PicoConfigShape {
 
 const defaultConfigRoot = (): string => join(homedir(), ".pico");
 
+const TomlTable = Schema.Record({
+  key: Schema.String,
+  value: Schema.Unknown,
+});
+
 const readConfigToml = (
   configRoot: string,
 ): Effect.Effect<Record<string, unknown>, ConfigFileInvalid> =>
   Effect.gen(function* () {
     const path = join(configRoot, "config.toml");
-    if (!existsSync(path)) return {};
     const text = yield* Effect.try({
       try: () => readFileSync(path, "utf8"),
       catch: (cause) => new ConfigFileInvalid({ path, cause }),
-    });
-    return yield* Effect.try({
-      try: () => Bun.TOML.parse(text) as Record<string, unknown>,
+    }).pipe(
+      Effect.catchIf(
+        (error): boolean =>
+          typeof error.cause === "object" &&
+          error.cause !== null &&
+          "code" in error.cause &&
+          error.cause.code === "ENOENT",
+        () => Effect.succeed<string | null>(null),
+      ),
+    );
+    if (text === null) return {};
+    const parsed = yield* Effect.try({
+      try: () => Bun.TOML.parse(text),
       catch: (cause) => new ConfigFileInvalid({ path, cause }),
     });
+    return yield* Schema.decodeUnknown(TomlTable)(parsed).pipe(
+      Effect.mapError((cause) => new ConfigFileInvalid({ path, cause })),
+    );
   });
 
 const make = (
