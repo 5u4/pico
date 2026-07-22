@@ -14,4 +14,4 @@ pre-push:
     - name: typecheck
       run: bun run typecheck
     - name: test
-      run: sh -c 'unset $(git rev-parse --local-env-vars); bun test'
+      run: sh -c 'unset $(git rev-parse --local-env-vars); bun test ./packages ./apps'

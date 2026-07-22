@@ -17,9 +17,9 @@
     "lint:fix": "biome check --write",
     "format": "biome format --write",
     "lint:comments": "bun run scripts/lint-comments.ts --all",
-    "test": "bun test",
-    "check": "bun run typecheck && bun run lint && bun run lint:comments && bun test",
-    "prepare": "lefthook install && effect-tsgo patch"
+    "test": "bun test ./packages ./apps",
+    "check": "bun run typecheck && bun run lint && bun run lint:comments && bun run test",
+    "prepare": "lefthook install && effect-tsgo patch && bun run scripts/vendor-effect.ts"
   },
   "dependencies": {
     "starlight-theme-next": "^0.4.0"

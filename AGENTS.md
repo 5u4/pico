@@ -213,3 +213,23 @@ So: think and write the work in English; address the maintainer in Chinese.
 Zero comments in code — see `rule://no-comments`, always applied. Only
 `// biome-ignore <rule>: <reason>` and SPDX headers are allowed; the
 `scripts/lint-comments.ts` gate enforces this on pre-commit and in CI.
+
+## Vendored Repositories
+
+The Effect v3 source is vendored under `repos/effect/` as read-only reference
+material. It is **git-ignored** and cloned automatically by the `prepare`
+script (`scripts/vendor-effect.ts`) at the exact version installed in
+`node_modules/effect`, so every machine has it without bloating the repo.
+
+- When writing Effect code, inspect `repos/effect/packages/*/src` for idiomatic
+  usage, tests, module structure, and API design. Treat it as the source of
+  truth for Effect v3 patterns — prefer it over guesses or web search.
+- **It is git-ignored, so search/glob tools skip it by default. You MUST opt in
+  to reach it** (e.g. run `grep`/`glob` with `gitignore: false` scoped to
+  `repos/effect`). Do not assume it is absent just because a default search
+  misses it.
+- Do **not** edit anything under `repos/`.
+- Do **not** import from `repos/` — application code imports from the normal
+  `effect` package dependency. `repos/effect` is reference only.
+- If `repos/effect` is missing, run `bun run scripts/vendor-effect.ts` (needs
+  network); it is non-fatal and safe to skip offline.
