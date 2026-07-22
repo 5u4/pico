@@ -50,20 +50,26 @@ export function toChatEvent(event: AgentSessionEvent): ChatEvent | null {
     }
     case "tool_execution_start":
       return {
-        _tag: "tool_start",
+        _tag: "tool_execution_start",
         toolCallId: event.toolCallId,
-        name: event.toolName,
+        toolName: event.toolName,
         args: event.args,
       };
     case "tool_execution_end":
       return {
-        _tag: "tool_end",
+        _tag: "tool_execution_end",
         toolCallId: event.toolCallId,
-        name: event.toolName,
+        toolName: event.toolName,
         result: stringifyResult(event.result),
         isError: event.isError ?? false,
       };
+    case "agent_start":
+      return { _tag: "agent_start" };
     case "agent_end":
+      return { _tag: "agent_end" };
+    case "turn_start":
+      return { _tag: "turn_start" };
+    case "turn_end":
       return { _tag: "turn_end" };
     default:
       return null;

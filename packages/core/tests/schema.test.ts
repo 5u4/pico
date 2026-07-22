@@ -7,14 +7,22 @@ describe("ChatEvent schema", () => {
     const samples: ChatEvent[] = [
       { _tag: "text_delta", delta: "hi" },
       { _tag: "thinking_delta", delta: "hmm" },
-      { _tag: "tool_start", toolCallId: "c1", name: "read", args: { p: 1 } },
       {
-        _tag: "tool_end",
+        _tag: "tool_execution_start",
         toolCallId: "c1",
-        name: "read",
+        toolName: "read",
+        args: { p: 1 },
+      },
+      {
+        _tag: "tool_execution_end",
+        toolCallId: "c1",
+        toolName: "read",
         result: "ok",
         isError: false,
       },
+      { _tag: "agent_start" },
+      { _tag: "agent_end" },
+      { _tag: "turn_start" },
       { _tag: "turn_end" },
       { _tag: "error", reason: "aborted", message: "boom" },
     ];

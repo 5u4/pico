@@ -25,7 +25,7 @@ describe.skipIf(!process.env.PICO_SMOKE)("chat smoke (real LLM)", () => {
 
       const collector = yield* Effect.fork(
         chat.events.pipe(
-          Stream.takeUntil((event: ChatEvent) => event._tag === "turn_end"),
+          Stream.takeUntil((event: ChatEvent) => event._tag === "agent_end"),
           Stream.runCollect,
         ),
       );
@@ -38,7 +38,7 @@ describe.skipIf(!process.env.PICO_SMOKE)("chat smoke (real LLM)", () => {
       const events = Chunk.toReadonlyArray(yield* Fiber.join(collector));
       const textDeltas = events.filter((e) => e._tag === "text_delta");
       expect(textDeltas.length).toBeGreaterThan(0);
-      expect(events.some((e) => e._tag === "turn_end")).toBe(true);
+      expect(events.some((e) => e._tag === "agent_end")).toBe(true);
 
       const messages = yield* chat.history;
       expect(messages.some((m) => m.role === "assistant")).toBe(true);

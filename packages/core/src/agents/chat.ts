@@ -109,7 +109,7 @@ export function makeChat(
                   message:
                     cause instanceof Error ? cause.message : String(cause),
                 }),
-                PubSub.publish(hub, { _tag: "turn_end" }),
+                PubSub.publish(hub, { _tag: "agent_end" }),
               ),
             ),
           ),

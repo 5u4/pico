@@ -60,9 +60,9 @@ describe("toChatEvent", () => {
       args: { path: "x" },
     } as unknown as AgentSessionEvent;
     expect(toChatEvent(start)).toEqual({
-      _tag: "tool_start",
+      _tag: "tool_execution_start",
       toolCallId: "c1",
-      name: "read",
+      toolName: "read",
       args: { path: "x" },
     });
 
@@ -74,20 +74,28 @@ describe("toChatEvent", () => {
       isError: false,
     } as unknown as AgentSessionEvent;
     expect(toChatEvent(end)).toEqual({
-      _tag: "tool_end",
+      _tag: "tool_execution_end",
       toolCallId: "c1",
-      name: "read",
+      toolName: "read",
       result: "file contents",
       isError: false,
     });
   });
 
-  it("maps agent_end to turn_end", () => {
-    const event = {
-      type: "agent_end",
-      messages: [],
-    } as unknown as AgentSessionEvent;
-    expect(toChatEvent(event)).toEqual({ _tag: "turn_end" });
+  it("maps the agent and turn lifecycle events", () => {
+    const lifecycle: Array<[string, string]> = [
+      ["agent_start", "agent_start"],
+      ["agent_end", "agent_end"],
+      ["turn_start", "turn_start"],
+      ["turn_end", "turn_end"],
+    ];
+    for (const [piType, tag] of lifecycle) {
+      const event = {
+        type: piType,
+        messages: [],
+      } as unknown as AgentSessionEvent;
+      expect(toChatEvent(event)).toEqual({ _tag: tag });
+    }
   });
 
   it("stringifies a non-string tool result", () => {
@@ -99,9 +107,9 @@ describe("toChatEvent", () => {
       isError: true,
     } as unknown as AgentSessionEvent;
     expect(toChatEvent(end)).toEqual({
-      _tag: "tool_end",
+      _tag: "tool_execution_end",
       toolCallId: "c2",
-      name: "eval",
+      toolName: "eval",
       result: '{"value":42}',
       isError: true,
     });
@@ -109,8 +117,14 @@ describe("toChatEvent", () => {
 
   it("drops events outside the narrow contract", () => {
     const dropped: AgentSessionEvent[] = [
-      { type: "agent_start" } as unknown as AgentSessionEvent,
-      { type: "turn_start" } as unknown as AgentSessionEvent,
+      { type: "message_start" } as unknown as AgentSessionEvent,
+      { type: "message_end" } as unknown as AgentSessionEvent,
+      { type: "tool_execution_update" } as unknown as AgentSessionEvent,
+      {
+        type: "notice",
+        level: "info",
+        message: "x",
+      } as unknown as AgentSessionEvent,
       {
         type: "message_update",
         message: { role: "assistant", content: [] },
