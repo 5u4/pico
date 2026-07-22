@@ -12,6 +12,7 @@
     "@pico/core": "workspace:*",
     "@pico/web-protocol": "workspace:*",
     "assistant-stream": "^0.3.26",
-    "effect": "^3.22.0"
+    "effect": "^3.22.0",
+    "ulid": "^3.0.2"
   }
 }
