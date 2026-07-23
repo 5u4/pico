@@ -86,7 +86,10 @@ export class Chats extends Effect.Service<Chats>()("pico/Chats", {
         ? RcMap.get(chats, chatId)
         : Effect.fail(new InvalidChatId({ chatId }));
 
-    return { getOrCreate };
+    const invalidate = (chatId: string): Effect.Effect<void> =>
+      RcMap.invalidate(chats, chatId);
+
+    return { getOrCreate, invalidate };
   }),
 }) {}
 

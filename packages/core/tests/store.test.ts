@@ -125,7 +125,7 @@ describe("spaces", () => {
         const store = yield* Store;
         yield* webSpace("one");
         yield* webSpace("two");
-        const all = yield* store.spaces.list();
+        const all = yield* store.spaces.list(["web"]);
         return all.length;
       }),
     );

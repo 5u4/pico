@@ -9,7 +9,7 @@ import {
   SpaceNotFound,
 } from "./errors.ts";
 import { runMigrations } from "./migrations.ts";
-import { Chat, Space } from "./schema.ts";
+import { Chat, type Platform, Space } from "./schema.ts";
 
 export interface CreateSpaceInput {
   readonly defaultCwd: string;
@@ -33,7 +33,16 @@ export interface StoreApi {
       input: CreateSpaceInput,
     ) => Effect.Effect<Space, DuplicateExternalId | DbError>;
     readonly get: (id: string) => Effect.Effect<Option.Option<Space>, DbError>;
-    readonly list: () => Effect.Effect<ReadonlyArray<Space>, DbError>;
+    readonly list: (
+      platforms: ReadonlyArray<Platform>,
+    ) => Effect.Effect<ReadonlyArray<Space>, DbError>;
+    readonly updateCwd: (
+      id: string,
+      cwd: string,
+    ) => Effect.Effect<Space, SpaceNotFound | DbError>;
+    readonly delete: (
+      id: string,
+    ) => Effect.Effect<void, SpaceNotFound | DbError>;
   };
   readonly chats: {
     readonly create: (
@@ -125,15 +134,53 @@ const make = (dbPath: string): Effect.Effect<StoreApi, never, Scope.Scope> =>
           },
           catch: (cause): DbError => new DbError({ op: "spaces.get", cause }),
         }),
-      list: () =>
+      list: (platforms) =>
         Effect.try({
-          try: () =>
-            db
-              .query("SELECT * FROM spaces ORDER BY createdAt")
-              .all()
-              .map((row) => decodeSpace(row)),
+          try: () => {
+            if (platforms.length === 0) return [];
+            const placeholders = platforms.map(() => "?").join(", ");
+            return db
+              .query(
+                `SELECT * FROM spaces WHERE platform IN (${placeholders}) ORDER BY createdAt`,
+              )
+              .all(...platforms)
+              .map((row) => decodeSpace(row));
+          },
           catch: (cause): DbError => new DbError({ op: "spaces.list", cause }),
         }),
+      updateCwd: (id, cwd) =>
+        Effect.try({
+          try: () => {
+            const row = db
+              .query(
+                "UPDATE spaces SET defaultCwd = ? WHERE id = ? RETURNING *",
+              )
+              .get(cwd, id);
+            return row === null ? Option.none() : Option.some(decodeSpace(row));
+          },
+          catch: (cause): DbError =>
+            new DbError({ op: "spaces.updateCwd", cause }),
+        }).pipe(
+          Effect.flatMap(
+            Option.match({
+              onNone: () => Effect.fail(new SpaceNotFound({ spaceId: id })),
+              onSome: (space) => Effect.succeed(space),
+            }),
+          ),
+        ),
+      delete: (id) =>
+        Effect.try({
+          try: () =>
+            db.query("DELETE FROM spaces WHERE id = ?").run(id).changes,
+          catch: (cause): DbError =>
+            new DbError({ op: "spaces.delete", cause }),
+        }).pipe(
+          Effect.flatMap((changes) =>
+            changes === 0
+              ? Effect.fail(new SpaceNotFound({ spaceId: id }))
+              : Effect.void,
+          ),
+        ),
     };
 
     const chats: StoreApi["chats"] = {
@@ -182,7 +229,9 @@ const make = (dbPath: string): Effect.Effect<StoreApi, never, Scope.Scope> =>
         Effect.try({
           try: () =>
             db
-              .query("SELECT * FROM chats WHERE spaceId = ? ORDER BY createdAt")
+              .query(
+                "SELECT * FROM chats WHERE spaceId = ? AND archivedAt IS NULL ORDER BY createdAt",
+              )
               .all(spaceId)
               .map((row) => decodeChat(row)),
           catch: (cause): DbError => new DbError({ op: "chats.list", cause }),

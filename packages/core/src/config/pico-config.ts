@@ -12,6 +12,7 @@ export interface PicoConfigShape {
   readonly configRoot: string;
   readonly sessionsRoot: string;
   readonly dbPath: string;
+  readonly defaultCwd: string;
   readonly section: <A, I>(
     name: string,
     schema: Schema.Schema<A, I>,
@@ -67,6 +68,10 @@ const make = (
       configRoot,
       sessionsRoot: join(configRoot, "sessions"),
       dbPath: join(configRoot, "pico2.db"),
+      defaultCwd:
+        typeof raw.defaultCwd === "string" && raw.defaultCwd.length > 0
+          ? raw.defaultCwd
+          : homedir(),
       section,
     };
   });
