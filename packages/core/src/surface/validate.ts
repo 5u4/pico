@@ -1,12 +1,12 @@
 import { type Stats, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, normalize } from "node:path";
+import { isAbsolute, join, normalize } from "node:path";
 import { Effect } from "effect";
 import { CwdNotFound, InvalidCwd, NotADirectory } from "./errors.ts";
 
 const expandTilde = (input: string): string => {
   if (input === "~") return homedir();
-  if (input.startsWith("~/")) return `${homedir()}/${input.slice(2)}`;
+  if (input.startsWith("~/")) return join(homedir(), input.slice(2));
   return input;
 };
 
