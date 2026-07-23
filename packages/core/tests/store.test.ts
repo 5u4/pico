@@ -125,7 +125,7 @@ describe("spaces", () => {
         const store = yield* Store;
         yield* webSpace("one");
         yield* webSpace("two");
-        const all = yield* store.spaces.list();
+        const all = yield* store.spaces.list(["web"]);
         return all.length;
       }),
     );
@@ -277,5 +277,28 @@ describe("chats", () => {
     );
     expect(Exit.isFailure(exit)).toBe(true);
     if (Exit.isFailure(exit)) expect(Cause.isDie(exit.cause)).toBe(true);
+  });
+
+  it("persists cwd normalized: expands ~ and collapses . segments", async () => {
+    const cwds = await run(
+      Effect.gen(function* () {
+        const space = yield* webSpace("s");
+        const store = yield* Store;
+        const tilde = yield* store.chats.create({
+          spaceId: space.id,
+          cwd: "~/projects",
+          title: "tilde",
+        });
+        const dotty = yield* store.chats.create({
+          spaceId: space.id,
+          cwd: "/tmp/work/./sub/../here",
+          title: "dotty",
+        });
+        return { tilde: tilde.cwd, dotty: dotty.cwd };
+      }),
+    );
+    expect(cwds.tilde.startsWith("~")).toBe(false);
+    expect(cwds.tilde.endsWith("/projects")).toBe(true);
+    expect(cwds.dotty).toBe("/tmp/work/here");
   });
 });

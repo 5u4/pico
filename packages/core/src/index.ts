@@ -35,3 +35,16 @@ export {
   Store,
   type StoreApi,
 } from "./store/store.ts";
+export {
+  CwdNotFound,
+  InvalidChatTitle,
+  InvalidCwd,
+  InvalidSpaceName,
+  NotADirectory,
+  SpaceHasActiveChats,
+} from "./surface/errors.ts";
+export {
+  type ChatHandle,
+  makeSurface,
+  type Surface,
+} from "./surface/surface.ts";

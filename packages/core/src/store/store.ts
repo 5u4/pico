@@ -9,7 +9,8 @@ import {
   SpaceNotFound,
 } from "./errors.ts";
 import { runMigrations } from "./migrations.ts";
-import { Chat, Space } from "./schema.ts";
+import { normalizeCwd } from "./paths.ts";
+import { Chat, type Platform, Space } from "./schema.ts";
 
 export interface CreateSpaceInput {
   readonly defaultCwd: string;
@@ -33,7 +34,16 @@ export interface StoreApi {
       input: CreateSpaceInput,
     ) => Effect.Effect<Space, DuplicateExternalId | DbError>;
     readonly get: (id: string) => Effect.Effect<Option.Option<Space>, DbError>;
-    readonly list: () => Effect.Effect<ReadonlyArray<Space>, DbError>;
+    readonly list: (
+      platforms: ReadonlyArray<Platform>,
+    ) => Effect.Effect<ReadonlyArray<Space>, DbError>;
+    readonly updateCwd: (
+      id: string,
+      cwd: string,
+    ) => Effect.Effect<Space, SpaceNotFound | DbError>;
+    readonly delete: (
+      id: string,
+    ) => Effect.Effect<void, SpaceNotFound | DbError>;
   };
   readonly chats: {
     readonly create: (
@@ -46,6 +56,7 @@ export interface StoreApi {
     readonly archive: (
       id: string,
     ) => Effect.Effect<void, ChatNotFound | DbError>;
+    readonly delete: (id: string) => Effect.Effect<void, DbError>;
   };
 }
 
@@ -92,7 +103,7 @@ const make = (dbPath: string): Effect.Effect<StoreApi, never, Scope.Scope> =>
               )
               .get(
                 id,
-                input.defaultCwd,
+                normalizeCwd(input.defaultCwd),
                 input.platform,
                 name,
                 externalId,
@@ -125,15 +136,53 @@ const make = (dbPath: string): Effect.Effect<StoreApi, never, Scope.Scope> =>
           },
           catch: (cause): DbError => new DbError({ op: "spaces.get", cause }),
         }),
-      list: () =>
+      list: (platforms) =>
         Effect.try({
-          try: () =>
-            db
-              .query("SELECT * FROM spaces ORDER BY createdAt")
-              .all()
-              .map((row) => decodeSpace(row)),
+          try: () => {
+            if (platforms.length === 0) return [];
+            const placeholders = platforms.map(() => "?").join(", ");
+            return db
+              .query(
+                `SELECT * FROM spaces WHERE platform IN (${placeholders}) ORDER BY createdAt`,
+              )
+              .all(...platforms)
+              .map((row) => decodeSpace(row));
+          },
           catch: (cause): DbError => new DbError({ op: "spaces.list", cause }),
         }),
+      updateCwd: (id, cwd) =>
+        Effect.try({
+          try: () => {
+            const row = db
+              .query(
+                "UPDATE spaces SET defaultCwd = ? WHERE id = ? RETURNING *",
+              )
+              .get(normalizeCwd(cwd), id);
+            return row === null ? Option.none() : Option.some(decodeSpace(row));
+          },
+          catch: (cause): DbError =>
+            new DbError({ op: "spaces.updateCwd", cause }),
+        }).pipe(
+          Effect.flatMap(
+            Option.match({
+              onNone: () => Effect.fail(new SpaceNotFound({ spaceId: id })),
+              onSome: (space) => Effect.succeed(space),
+            }),
+          ),
+        ),
+      delete: (id) =>
+        Effect.try({
+          try: () =>
+            db.query("DELETE FROM spaces WHERE id = ?").run(id).changes,
+          catch: (cause): DbError =>
+            new DbError({ op: "spaces.delete", cause }),
+        }).pipe(
+          Effect.flatMap((changes) =>
+            changes === 0
+              ? Effect.fail(new SpaceNotFound({ spaceId: id }))
+              : Effect.void,
+          ),
+        ),
     };
 
     const chats: StoreApi["chats"] = {
@@ -150,7 +199,14 @@ const make = (dbPath: string): Effect.Effect<StoreApi, never, Scope.Scope> =>
                 (id, spaceId, cwd, title, externalId, createdAt, archivedAt)
                VALUES (?, ?, ?, ?, ?, ?, NULL) RETURNING *`,
               )
-              .get(id, input.spaceId, input.cwd, title, externalId, createdAt);
+              .get(
+                id,
+                input.spaceId,
+                normalizeCwd(input.cwd),
+                title,
+                externalId,
+                createdAt,
+              );
             return decodeChat(row);
           },
           catch: (cause): DuplicateExternalId | SpaceNotFound | DbError => {
@@ -182,7 +238,9 @@ const make = (dbPath: string): Effect.Effect<StoreApi, never, Scope.Scope> =>
         Effect.try({
           try: () =>
             db
-              .query("SELECT * FROM chats WHERE spaceId = ? ORDER BY createdAt")
+              .query(
+                "SELECT * FROM chats WHERE spaceId = ? AND archivedAt IS NULL ORDER BY createdAt",
+              )
               .all(spaceId)
               .map((row) => decodeChat(row)),
           catch: (cause): DbError => new DbError({ op: "chats.list", cause }),
@@ -202,6 +260,13 @@ const make = (dbPath: string): Effect.Effect<StoreApi, never, Scope.Scope> =>
               : Effect.void,
           ),
         ),
+      delete: (id) =>
+        Effect.try({
+          try: () => {
+            db.query("DELETE FROM chats WHERE id = ?").run(id);
+          },
+          catch: (cause): DbError => new DbError({ op: "chats.delete", cause }),
+        }),
     };
 
     return { spaces, chats };

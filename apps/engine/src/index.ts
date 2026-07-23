@@ -1,23 +1,16 @@
 import { BunRuntime } from "@effect/platform-bun";
-import { Chats, Store } from "@pico/core";
+import { Chats, makeSurface, PicoConfig, Store } from "@pico/core";
 import { Console, Effect, Layer, Stream } from "effect";
 
 const program = Effect.gen(function* () {
-  const store = yield* Store;
-  const chats = yield* Chats;
+  const surface = yield* makeSurface("web");
   const prompt = process.argv[2] ?? "Say hello in one short sentence.";
 
-  const space = yield* store.spaces.create({
-    defaultCwd: process.cwd(),
-    platform: "web",
+  const space = yield* surface.createSpace({
     name: "local",
-  });
-  const chat = yield* store.chats.create({
-    spaceId: space.id,
     cwd: process.cwd(),
-    title: prompt.slice(0, 60),
   });
-  const session = yield* chats.getOrCreate(chat.id);
+  const { session } = yield* surface.createChat(space.id, prompt.slice(0, 60));
 
   const printer = yield* Effect.fork(
     session.events.pipe(
@@ -52,6 +45,8 @@ const program = Effect.gen(function* () {
 BunRuntime.runMain(
   Effect.scoped(program).pipe(
     Effect.tapErrorCause(Console.error),
-    Effect.provide(Layer.merge(Chats.Default, Store.Default)),
+    Effect.provide(
+      Layer.mergeAll(Chats.Default, Store.Default, PicoConfig.Default),
+    ),
   ),
 );
