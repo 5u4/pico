@@ -9,6 +9,7 @@ import {
   SpaceNotFound,
 } from "./errors.ts";
 import { runMigrations } from "./migrations.ts";
+import { normalizeCwd } from "./paths.ts";
 import { Chat, type Platform, Space } from "./schema.ts";
 
 export interface CreateSpaceInput {
@@ -102,7 +103,7 @@ const make = (dbPath: string): Effect.Effect<StoreApi, never, Scope.Scope> =>
               )
               .get(
                 id,
-                input.defaultCwd,
+                normalizeCwd(input.defaultCwd),
                 input.platform,
                 name,
                 externalId,
@@ -156,7 +157,7 @@ const make = (dbPath: string): Effect.Effect<StoreApi, never, Scope.Scope> =>
               .query(
                 "UPDATE spaces SET defaultCwd = ? WHERE id = ? RETURNING *",
               )
-              .get(cwd, id);
+              .get(normalizeCwd(cwd), id);
             return row === null ? Option.none() : Option.some(decodeSpace(row));
           },
           catch: (cause): DbError =>
@@ -198,7 +199,14 @@ const make = (dbPath: string): Effect.Effect<StoreApi, never, Scope.Scope> =>
                 (id, spaceId, cwd, title, externalId, createdAt, archivedAt)
                VALUES (?, ?, ?, ?, ?, ?, NULL) RETURNING *`,
               )
-              .get(id, input.spaceId, input.cwd, title, externalId, createdAt);
+              .get(
+                id,
+                input.spaceId,
+                normalizeCwd(input.cwd),
+                title,
+                externalId,
+                createdAt,
+              );
             return decodeChat(row);
           },
           catch: (cause): DuplicateExternalId | SpaceNotFound | DbError => {
