@@ -161,7 +161,11 @@ export const makeSurface = (
           const chat = yield* store.chats
             .create({ spaceId, cwd, title: trimmed })
             .pipe(Effect.catchTag("DuplicateExternalId", Effect.die));
-          const session = yield* chats.getOrCreate(chat.id);
+          const session = yield* chats
+            .getOrCreate(chat.id)
+            .pipe(
+              Effect.onError(() => Effect.ignore(store.chats.delete(chat.id))),
+            );
           return { chat, session };
         }),
 

@@ -55,6 +55,7 @@ export interface StoreApi {
     readonly archive: (
       id: string,
     ) => Effect.Effect<void, ChatNotFound | DbError>;
+    readonly delete: (id: string) => Effect.Effect<void, DbError>;
   };
 }
 
@@ -251,6 +252,13 @@ const make = (dbPath: string): Effect.Effect<StoreApi, never, Scope.Scope> =>
               : Effect.void,
           ),
         ),
+      delete: (id) =>
+        Effect.try({
+          try: () => {
+            db.query("DELETE FROM chats WHERE id = ?").run(id);
+          },
+          catch: (cause): DbError => new DbError({ op: "chats.delete", cause }),
+        }),
     };
 
     return { spaces, chats };
