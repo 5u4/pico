@@ -15,7 +15,11 @@ describe("toChatEvent", () => {
         partial: { role: "assistant", content: [] },
       },
     } as unknown as AgentSessionEvent;
-    expect(toChatEvent(event)).toEqual({ _tag: "text_delta", delta: "hello" });
+    expect(toChatEvent(event, 3)).toEqual({
+      _tag: "text_delta",
+      index: 3,
+      delta: "hello",
+    });
   });
 
   it("maps a thinking_delta assistant event", () => {
@@ -29,8 +33,9 @@ describe("toChatEvent", () => {
         partial: { role: "assistant", content: [] },
       },
     } as unknown as AgentSessionEvent;
-    expect(toChatEvent(event)).toEqual({
+    expect(toChatEvent(event, 5)).toEqual({
       _tag: "thinking_delta",
+      index: 5,
       delta: "pondering",
     });
   });
@@ -45,7 +50,7 @@ describe("toChatEvent", () => {
         error: { role: "assistant", content: [{ type: "text", text: "boom" }] },
       },
     } as unknown as AgentSessionEvent;
-    expect(toChatEvent(event)).toEqual({
+    expect(toChatEvent(event, 0)).toEqual({
       _tag: "error",
       reason: "aborted",
       message: "boom",
@@ -59,7 +64,7 @@ describe("toChatEvent", () => {
       toolName: "read",
       args: { path: "x" },
     } as unknown as AgentSessionEvent;
-    expect(toChatEvent(start)).toEqual({
+    expect(toChatEvent(start, 0)).toEqual({
       _tag: "tool_execution_start",
       toolCallId: "c1",
       toolName: "read",
@@ -73,7 +78,7 @@ describe("toChatEvent", () => {
       result: "file contents",
       isError: false,
     } as unknown as AgentSessionEvent;
-    expect(toChatEvent(end)).toEqual({
+    expect(toChatEvent(end, 0)).toEqual({
       _tag: "tool_execution_end",
       toolCallId: "c1",
       toolName: "read",
@@ -94,7 +99,7 @@ describe("toChatEvent", () => {
         type: piType,
         messages: [],
       } as unknown as AgentSessionEvent;
-      expect(toChatEvent(event)).toEqual({ _tag: tag });
+      expect(toChatEvent(event, 0)).toEqual({ _tag: tag });
     }
   });
 
@@ -106,7 +111,7 @@ describe("toChatEvent", () => {
       result: { value: 42 },
       isError: true,
     } as unknown as AgentSessionEvent;
-    expect(toChatEvent(end)).toEqual({
+    expect(toChatEvent(end, 0)).toEqual({
       _tag: "tool_execution_end",
       toolCallId: "c2",
       toolName: "eval",
@@ -136,7 +141,7 @@ describe("toChatEvent", () => {
       } as unknown as AgentSessionEvent,
     ];
     for (const event of dropped) {
-      expect(toChatEvent(event)).toBeNull();
+      expect(toChatEvent(event, 0)).toBeNull();
     }
   });
 });

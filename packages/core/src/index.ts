@@ -1,7 +1,7 @@
 // biome-ignore lint/performance/noBarrelFile: package public API aggregation entry
 export { Auth } from "./agents/auth.ts";
 export { Catalog } from "./agents/catalog.ts";
-export type { ChatSession } from "./agents/chat.ts";
+export type { ChatConnection, ChatSession } from "./agents/chat.ts";
 export { Chats } from "./agents/chats.ts";
 export {
   AuthUnavailable,
@@ -14,6 +14,7 @@ export {
   ChatEvent,
   ChatMessage,
   ChatRole,
+  InFlight,
   PromptOutcome,
 } from "./agents/schema.ts";
 export {

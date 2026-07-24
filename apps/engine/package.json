@@ -4,15 +4,14 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "bun run src/index.ts"
+    "start": "bun run src/index.ts",
+    "smoke": "bun run scripts/smoke.ts"
   },
   "dependencies": {
     "@effect/platform": "^0.97.0",
     "@effect/platform-bun": "^0.91.0",
     "@pico/core": "workspace:*",
     "@pico/web-protocol": "workspace:*",
-    "assistant-stream": "^0.3.26",
-    "effect": "^3.22.0",
-    "ulid": "^3.0.2"
+    "effect": "^3.22.0"
   }
 }
