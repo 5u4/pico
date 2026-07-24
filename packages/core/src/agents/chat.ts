@@ -9,12 +9,13 @@ import {
   SessionManager,
   type Settings,
 } from "@oh-my-pi/pi-coding-agent";
-import { Effect, PubSub, Runtime, type Scope, Stream } from "effect";
+import { Effect, Option, PubSub, Runtime, type Scope, Stream } from "effect";
 import { ChatBusy, SessionInitFailed } from "./errors.ts";
 import { toChatEvent, toChatMessage } from "./mapping.ts";
 import {
   type ChatEvent,
   type ChatMessage,
+  type InFlight,
   type PromptOutcome,
   started,
 } from "./schema.ts";
@@ -30,10 +31,16 @@ export interface MakeChatOptions {
   readonly modelRegistry: ModelRegistry;
 }
 
+export interface ChatConnection {
+  readonly messages: ReadonlyArray<ChatMessage>;
+  readonly inFlight: Option.Option<InFlight>;
+  readonly live: Stream.Stream<ChatEvent>;
+}
+
 export interface ChatSession {
   readonly chatId: string;
-  readonly events: Stream.Stream<ChatEvent>;
   readonly history: Effect.Effect<ReadonlyArray<ChatMessage>>;
+  readonly connect: Effect.Effect<ChatConnection, never, Scope.Scope>;
   readonly prompt: (text: string) => Effect.Effect<PromptOutcome, ChatBusy>;
 }
 
@@ -90,7 +97,7 @@ export function makeChat(
     );
 
     const unsubscribe = session.subscribe((event) => {
-      const mapped = toChatEvent(event);
+      const mapped = toChatEvent(event, session.state.messages.length);
       if (mapped) Runtime.runFork(runtime)(PubSub.publish(hub, mapped));
     });
     yield* Effect.addFinalizer(() => Effect.sync(unsubscribe));
@@ -119,14 +126,32 @@ export function makeChat(
         return started;
       });
 
+    const snapshotMessages = (): ReadonlyArray<ChatMessage> =>
+      session.state.messages
+        .map(toChatMessage)
+        .filter((message): message is ChatMessage => message !== null);
+
+    const currentInFlight = (): Option.Option<InFlight> => {
+      const stream = session.state.streamMessage;
+      if (stream === null) return Option.none();
+      const message = toChatMessage(stream);
+      if (message === null) return Option.none();
+      return Option.some({ index: session.state.messages.length, message });
+    };
+
+    const connect = Effect.gen(function* () {
+      const subscription = yield* PubSub.subscribe(hub);
+      return {
+        messages: snapshotMessages(),
+        inFlight: currentInFlight(),
+        live: Stream.fromQueue(subscription),
+      };
+    });
+
     return {
       chatId: options.chatId,
-      events: Stream.fromPubSub(hub),
-      history: Effect.sync(() =>
-        session.state.messages
-          .map(toChatMessage)
-          .filter((message): message is ChatMessage => message !== null),
-      ),
+      history: Effect.sync(snapshotMessages),
+      connect,
       prompt,
     };
   });

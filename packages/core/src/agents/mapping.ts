@@ -29,15 +29,18 @@ export function toChatMessage(message: AgentMessage): ChatMessage | null {
   return { role: chatRole, text: contentText(message.content) };
 }
 
-export function toChatEvent(event: AgentSessionEvent): ChatEvent | null {
+export function toChatEvent(
+  event: AgentSessionEvent,
+  index: number,
+): ChatEvent | null {
   switch (event.type) {
     case "message_update": {
       const inner = event.assistantMessageEvent;
       switch (inner.type) {
         case "text_delta":
-          return { _tag: "text_delta", delta: inner.delta };
+          return { _tag: "text_delta", index, delta: inner.delta };
         case "thinking_delta":
-          return { _tag: "thinking_delta", delta: inner.delta };
+          return { _tag: "thinking_delta", index, delta: inner.delta };
         case "error":
           return {
             _tag: "error",

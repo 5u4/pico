@@ -5,8 +5,8 @@ import { ChatEvent, ChatMessage } from "../src/agents/schema.ts";
 describe("ChatEvent schema", () => {
   it("encodes and decodes each variant round-trip", async () => {
     const samples: ChatEvent[] = [
-      { _tag: "text_delta", delta: "hi" },
-      { _tag: "thinking_delta", delta: "hmm" },
+      { _tag: "text_delta", index: 0, delta: "hi" },
+      { _tag: "thinking_delta", index: 1, delta: "hmm" },
       {
         _tag: "tool_execution_start",
         toolCallId: "c1",

@@ -39,8 +39,9 @@ describe.skipIf(!process.env.PICO_SMOKE)("chat smoke (real LLM)", () => {
       });
       const chat = yield* chats.getOrCreate(created.id);
 
+      const connection = yield* chat.connect;
       const collector = yield* Effect.fork(
-        chat.events.pipe(
+        connection.live.pipe(
           Stream.takeUntil((event: ChatEvent) => event._tag === "agent_end"),
           Stream.runCollect,
         ),

@@ -9,11 +9,19 @@ export const ChatMessage = Schema.Struct({
 });
 export type ChatMessage = typeof ChatMessage.Type;
 
+export const InFlight = Schema.Struct({
+  index: Schema.Number,
+  message: ChatMessage,
+});
+export type InFlight = typeof InFlight.Type;
+
 export const TextDelta = Schema.TaggedStruct("text_delta", {
+  index: Schema.Number,
   delta: Schema.String,
 });
 
 export const ThinkingDelta = Schema.TaggedStruct("thinking_delta", {
+  index: Schema.Number,
   delta: Schema.String,
 });
 

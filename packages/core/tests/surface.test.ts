@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { homedir } from "node:os";
-import { Effect, Layer, Stream } from "effect";
+import { Effect, Layer, Option, Stream } from "effect";
 import type { ChatSession } from "../src/agents/chat.ts";
 import { Chats } from "../src/agents/chats.ts";
 import { SessionInitFailed } from "../src/agents/errors.ts";
@@ -24,8 +24,12 @@ const fakeSession = (
   onPrompt?: (chatId: string) => void,
 ): ChatSession => ({
   chatId,
-  events: Stream.empty,
   history: Effect.succeed([]),
+  connect: Effect.succeed({
+    messages: [],
+    inFlight: Option.none(),
+    live: Stream.empty,
+  }),
   prompt: (): Effect.Effect<PromptOutcome> =>
     Effect.sync(() => {
       onPrompt?.(chatId);

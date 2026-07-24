@@ -1,6 +1,11 @@
-import type { ThreadState } from "@pico/web-protocol";
+import type { WireChat, WireSpace } from "@pico/web-protocol";
 
-export const emptyThreadState: ThreadState = {
-  threadId: null,
-  messages: [],
+export interface WebState {
+  readonly spaces: ReadonlyArray<WireSpace>;
+  readonly chats: ReadonlyArray<WireChat>;
+}
+
+export const emptyWebState: WebState = {
+  spaces: [],
+  chats: [],
 };
