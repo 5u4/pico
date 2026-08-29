@@ -1,0 +1,12 @@
+{
+  "name": "@pico/contract",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./config/path": "./src/config/path.ts",
+    "./config/error": "./src/config/error.ts"
+  },
+  "dependencies": {
+    "effect": "catalog:"
+  }
+}

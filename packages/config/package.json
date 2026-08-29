@@ -1,0 +1,16 @@
+{
+  "name": "@pico/config",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./root": "./src/root.ts"
+  },
+  "dependencies": {
+    "@pico/contract": "workspace:*",
+    "effect": "catalog:"
+  },
+  "devDependencies": {
+    "@effect/platform-bun": "catalog:",
+    "@effect/vitest": "catalog:"
+  }
+}

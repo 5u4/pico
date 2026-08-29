@@ -22,14 +22,21 @@
         "vitest": "catalog:",
       },
     },
+    "packages/config": {
+      "name": "@pico/config",
+      "dependencies": {
+        "@pico/contract": "workspace:*",
+        "effect": "catalog:",
+      },
+      "devDependencies": {
+        "@effect/platform-bun": "catalog:",
+        "@effect/vitest": "catalog:",
+      },
+    },
     "packages/contract": {
       "name": "@pico/contract",
       "dependencies": {
         "effect": "catalog:",
-      },
-      "devDependencies": {
-        "typescript": "catalog:",
-        "vitest": "catalog:",
       },
     },
   },
@@ -405,6 +412,8 @@
     "@pagefind/windows-arm64": ["@pagefind/windows-arm64@1.5.2", "", { "os": "win32", "cpu": "arm64" }, "sha512-hN9Nh90fNW61nNRCW9ZyQrAj/mD0eRvmJ8NlTUzkbuW8kIzGJUi3cxjFkEcMZ5h/8FsKWD/VcouZl4yo1F7B6g=="],
 
     "@pagefind/windows-x64": ["@pagefind/windows-x64@1.5.2", "", { "os": "win32", "cpu": "x64" }, "sha512-Fa2Iyw7kaDRzGMfNYNUXNW2zbL5FQVDgSOcbDHdzBrDEdpqOqg8TcZ68F22ol6NJ9IGzvUdmeyZypLW5dyhqsg=="],
+
+    "@pico/config": ["@pico/config@workspace:packages/config"],
 
     "@pico/contract": ["@pico/contract@workspace:packages/contract"],
 
