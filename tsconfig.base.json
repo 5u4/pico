@@ -1,0 +1,43 @@
+{
+	"compilerOptions": {
+		"target": "ESNext",
+		"lib": ["ESNext"],
+		"types": ["bun"],
+		"module": "NodeNext",
+		"moduleResolution": "NodeNext",
+		"moduleDetection": "force",
+		"noEmit": true,
+		"allowImportingTsExtensions": true,
+		"rewriteRelativeImportExtensions": true,
+		"erasableSyntaxOnly": true,
+		"verbatimModuleSyntax": true,
+		"isolatedModules": true,
+		"strict": true,
+		"noUncheckedIndexedAccess": true,
+		"exactOptionalPropertyTypes": true,
+		"noImplicitOverride": true,
+		"noFallthroughCasesInSwitch": true,
+		"useDefineForClassFields": true,
+		"skipLibCheck": true,
+		"plugins": [
+			{
+				"name": "@effect/language-service",
+				"namespaceImportPackages": ["effect"],
+				"diagnostics": {
+					"importFromBarrel": "error",
+					"leakingRequirements": "error",
+					"missingEffectServiceDependency": "error",
+					"preferSchemaOverJson": "error",
+					"nodeBuiltinImport": "error",
+					"globalDate": "error",
+					"globalConsole": "error",
+					"globalRandom": "error",
+					"globalTimers": "error",
+					"globalFetch": "error",
+					"globalFetchInEffect": "error",
+					"cryptoRandomUUID": "error"
+				}
+			}
+		]
+	}
+}

@@ -1,0 +1,77 @@
+- use effect v4 as much as possible
+- use effect vitest
+- we should use omp sdk; no ui mode
+- omp sdk function provides the chat driving functionality; pico should use those instead of self inventing
+- reference omp cli if unsure
+- omp session jsonl file is the source of truth
+- set omp session async:false; this is because currently cannot support multiple omp sdk agents run async
+- share omp auth/model registry
+- workspace is like folder
+- chat is like file; one chat = one omp session
+- one workspace can have multiple chats
+- put interface / effect types / abstractions in @pico/contract
+- for other components, draw clear boundary (both packages and files); a clear boundary fundation would make future development easier and precise
+- pico root is the important params; this makes smoke/integration testing easier
+- pico root default to `~/.pico`
+- put pico stuff under pico root
+  - ~/.pico/sessions # omp session files
+  - ~/.pico/store.db # pico sqlite db
+  - ~/.pico/config.toml # pico configs (one config file is enough)
+  - ~/.pico/secrets/* # secrets
+  - ~/.pico/worktrees/* # the worktrees
+  - ~/.pico/logs/* # the logs
+- each workspace can only belong to one platform (native | discord | ...)
+- platform = null means it's native -> created through the native pico app, not from the other chat apps
+- db workspace schema
+  - id: bun uuidv7 primary
+  - name: workspace name; not null
+  - platform: null | discord
+  - external_id: nullable, the discord or other chat app id
+  - default_cwd: the current workspace cwd; not null
+  - worktree_branch: the worktree source branch; nullable
+  - worktree_prefix: the worktree new branch name prefix; nullable
+  - created_at: ms integer; not null
+- db chat schema
+  - id: bun uuidv7 primary
+  - workspace_id: the workspace id; not null
+  - cwd: the chat cwd; not null
+  - external_id: nullable, the discord or other chat app id
+  - created_at: ms integer; not null
+  - archived_at: ms integer; nullable
+- a workspace in discord is a channel
+- a chat in discord is a thread
+- when creating the chat, write workspace.default_cwd to chat.cwd
+  - when workspace.default_cwd is changed, chat.cwd remains the same
+  - changing workspace.default_cwd only affect later new chats; not the old chats
+  - resumt chat use chat.cwd, not workspace.default_cwd
+- a workspace can be a regular workspace (worktree_* = null) or a worktree workspace (worktree_* != null)
+  - regular workspace new chats with workspace.default_cwd
+  - worktree workspace new chats with new worktree from worktree_branch, creating `{worktree_prefix}/{chat.id}` to `{picoHome}/worktrees/{chat.id}`
+- MVP make happy path work; errors no need to be so specific
+  - I mean we can define very generic boundary errors that contains just a `message: string` which can be used for the errors; until we need to pattern match and handle some specific errors, we split it out from the generic error
+- errors should be grouped by boundary and mostly defined in contract unless the error would not go out the boundary
+- apps/pico would be the daemon that serves as a backend of the app
+- need a packages/controller or something that groups the available application logics for multi platform reusability
+- apps/web | apps/desktop | apps/mobile use packages/rpc for communication with daemon
+- MVP forward a selected set of agent event, agent message
+  - write these selected set of agent event, agent message in our own language to contract
+  - omp package should be kept in boundary, not exposed
+- daemon can drive multiple chats in the same time
+- to prevent memory leak, need to recycle unused stale chats (omp sessions)
+- web <-> daemon connection, each page just one rpc/ws; different chats data are aggregated enveloped
+  - pico event = agent event | some other events I don't know yet
+- daemon rpc should be flexible; only push events that the subscriber requests
+- daemon <-> omp sessions, each omp session is a connection
+- I like well split files / packages. don't group packages / files if they will make architecture clearer
+- front end
+  - need a logic layer + state management library - put in to a packages/*
+  - logic should be split out from UI component (unless that's component local state); make UI component generic, well split
+- logging - 30d retention, 1d rotation, write to file and console
+- config.toml controls configs
+- daemon always serve web; when config.toml configures discord + secret loads, serve discord as well
+- phases
+  - spike critical parts, define packages
+  - write critical packages
+  - design make web style / layout / etc
+  - make the daemon
+  - make discord
