@@ -39,6 +39,18 @@
         "effect": "catalog:",
       },
     },
+    "packages/persistence": {
+      "name": "@pico/persistence",
+      "dependencies": {
+        "@effect/sql-sqlite-bun": "catalog:",
+        "@pico/contract": "workspace:*",
+        "effect": "catalog:",
+      },
+      "devDependencies": {
+        "@effect/platform-bun": "catalog:",
+        "@effect/vitest": "catalog:",
+      },
+    },
   },
   "catalog": {
     "@biomejs/biome": "2.5.8",
@@ -416,6 +428,8 @@
     "@pico/config": ["@pico/config@workspace:packages/config"],
 
     "@pico/contract": ["@pico/contract@workspace:packages/contract"],
+
+    "@pico/persistence": ["@pico/persistence@workspace:packages/persistence"],
 
     "@protobufjs/aspromise": ["@protobufjs/aspromise@1.1.2", "", {}, "sha512-j+gKExEuLmKwvz3OgROXtrJ2UG2x8Ch2YZUxahh+s1F2HZ+wAceUNLkvy6zKCPVRkU++ZWQrdxsUeQXmcg4uoQ=="],
 

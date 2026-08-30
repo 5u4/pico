@@ -4,7 +4,10 @@
   "type": "module",
   "exports": {
     "./config/path": "./src/config/path.ts",
-    "./config/error": "./src/config/error.ts"
+    "./config/error": "./src/config/error.ts",
+    "./workspace": "./src/workspace.ts",
+    "./chat": "./src/chat.ts",
+    "./persistence/error": "./src/persistence/error.ts"
   },
   "dependencies": {
     "effect": "catalog:"
