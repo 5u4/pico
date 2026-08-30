@@ -2,10 +2,12 @@ import { Database } from "bun:sqlite";
 import * as BunFileSystem from "@effect/platform-bun/BunFileSystem";
 import * as BunPath from "@effect/platform-bun/BunPath";
 import { assert, describe, it } from "@effect/vitest";
-import * as Chat from "@pico/contract/chat";
-import { AbsolutePath } from "@pico/contract/config/path";
-import { PersistenceError } from "@pico/contract/persistence/error";
-import * as Workspace from "@pico/contract/workspace";
+import * as Chat from "@pico/contract/chat-model";
+import { ChatRepository } from "@pico/contract/chat-repository";
+import { PersistenceError } from "@pico/contract/errors";
+import { AbsolutePath } from "@pico/contract/path";
+import * as Workspace from "@pico/contract/workspace-model";
+import { WorkspaceRepository } from "@pico/contract/workspace-repository";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -66,8 +68,8 @@ describe("Persistence.layer", () => {
       const storeFile = AbsolutePath.make(path.join(temporaryDirectory, "store.db"));
 
       yield* Effect.gen(function* () {
-        const workspaces = yield* Workspace.WorkspaceRepository;
-        const chats = yield* Chat.ChatRepository;
+        const workspaces = yield* WorkspaceRepository;
+        const chats = yield* ChatRepository;
 
         assert.deepStrictEqual(yield* workspaces.create(regularWorkspace), regularWorkspace);
         assert.deepStrictEqual(yield* workspaces.create(secondWorkspace), secondWorkspace);
@@ -202,8 +204,8 @@ describe("Persistence.layer", () => {
       });
 
       yield* Effect.gen(function* () {
-        const workspaces = yield* Workspace.WorkspaceRepository;
-        const chats = yield* Chat.ChatRepository;
+        const workspaces = yield* WorkspaceRepository;
+        const chats = yield* ChatRepository;
         assert.strictEqual(
           Option.getOrThrow(yield* workspaces.findById(regularWorkspaceId)).defaultCwd,
           cwdB,

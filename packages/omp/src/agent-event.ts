@@ -1,5 +1,6 @@
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session-events";
-import type * as Agent from "@pico/contract/agent";
+import type { AgentEvent } from "@pico/contract/agent-event";
+import type * as Agent from "@pico/contract/agent-message";
 
 type SessionMessage = Extract<AgentSessionEvent, { readonly type: "message_end" }>["message"];
 type UserMessage = Extract<SessionMessage, { readonly role: "user" }>;
@@ -156,7 +157,7 @@ export const normalizeTranscript = (
 
 const normalizeMessageUpdate = (
   event: Extract<AgentSessionEvent, { readonly type: "message_update" }>,
-): Agent.AgentEvent | undefined => {
+): AgentEvent | undefined => {
   switch (event.assistantMessageEvent.type) {
     case "text_delta":
       return {
@@ -202,7 +203,7 @@ const runOutcome = (
   return "completed";
 };
 
-export const normalizeAgentEvent = (event: AgentSessionEvent): Agent.AgentEvent | undefined => {
+export const normalizeAgentEvent = (event: AgentSessionEvent): AgentEvent | undefined => {
   switch (event.type) {
     case "agent_start":
       return { type: "run-started" };

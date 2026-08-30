@@ -1,24 +1,10 @@
-import { ConfigError } from "@pico/contract/config/error";
-import {
-  AbsolutePath,
-  type AbsolutePath as AbsolutePathType,
-  PicoRoot,
-  type PicoRoot as PicoRootType,
-} from "@pico/contract/config/path";
+import { type PicoPaths, PicoRoot, type PicoRoot as PicoRootType } from "@pico/contract/config";
+import { ConfigError } from "@pico/contract/errors";
+import { AbsolutePath } from "@pico/contract/path";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import type * as PlatformError from "effect/PlatformError";
-
-export interface PicoPaths {
-  readonly root: PicoRootType;
-  readonly configFile: AbsolutePathType;
-  readonly storeFile: AbsolutePathType;
-  readonly sessionsDir: AbsolutePathType;
-  readonly secretsDir: AbsolutePathType;
-  readonly worktreesDir: AbsolutePathType;
-  readonly logsDir: AbsolutePathType;
-}
 
 const configError = (error: PlatformError.PlatformError) =>
   new ConfigError({ message: error.message });

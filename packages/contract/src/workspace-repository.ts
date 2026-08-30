@@ -1,0 +1,22 @@
+import * as Context from "effect/Context";
+import type * as Effect from "effect/Effect";
+import type * as Option from "effect/Option";
+import type { PersistenceError } from "./errors.ts";
+import type { AbsolutePath } from "./path.ts";
+import type { Workspace, WorkspaceId } from "./workspace-model.ts";
+
+export class WorkspaceRepository extends Context.Service<
+  WorkspaceRepository,
+  {
+    readonly create: (workspace: Workspace) => Effect.Effect<Workspace, PersistenceError>;
+
+    readonly findById: (
+      id: WorkspaceId,
+    ) => Effect.Effect<Option.Option<Workspace>, PersistenceError>;
+
+    readonly changeDefaultCwd: (
+      id: WorkspaceId,
+      cwd: AbsolutePath,
+    ) => Effect.Effect<Workspace, PersistenceError>;
+  }
+>()("@pico/contract/workspace/WorkspaceRepository") {}

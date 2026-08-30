@@ -3,12 +3,16 @@
   "private": true,
   "type": "module",
   "exports": {
-    "./config/path": "./src/config/path.ts",
-    "./agent": "./src/agent.ts",
-    "./config/error": "./src/config/error.ts",
-    "./workspace": "./src/workspace.ts",
-    "./chat": "./src/chat.ts",
-    "./persistence/error": "./src/persistence/error.ts"
+    "./path": "./src/path.ts",
+    "./config": "./src/config.ts",
+    "./errors": "./src/errors.ts",
+    "./workspace-model": "./src/workspace-model.ts",
+    "./workspace-repository": "./src/workspace-repository.ts",
+    "./chat-model": "./src/chat-model.ts",
+    "./chat-repository": "./src/chat-repository.ts",
+    "./agent-message": "./src/agent-message.ts",
+    "./agent-event": "./src/agent-event.ts",
+    "./agent-runtime": "./src/agent-runtime.ts"
   },
   "dependencies": {
     "effect": "catalog:"

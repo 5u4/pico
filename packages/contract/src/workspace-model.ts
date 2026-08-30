@@ -1,9 +1,5 @@
-import * as Context from "effect/Context";
-import type * as Effect from "effect/Effect";
-import type * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
-import { AbsolutePath, type AbsolutePath as AbsolutePathType } from "./config/path.ts";
-import type { PersistenceError } from "./persistence/error.ts";
+import { AbsolutePath } from "./path.ts";
 
 export const WorkspaceId = Schema.String.check(Schema.isUUID(7)).pipe(
   Schema.brand("@pico/contract/WorkspaceId"),
@@ -34,19 +30,3 @@ export const Workspace = Schema.Struct({
   createdAt: Schema.Natural,
 });
 export type Workspace = typeof Workspace.Type;
-
-export class WorkspaceRepository extends Context.Service<
-  WorkspaceRepository,
-  {
-    readonly create: (workspace: Workspace) => Effect.Effect<Workspace, PersistenceError>;
-
-    readonly findById: (
-      id: WorkspaceId,
-    ) => Effect.Effect<Option.Option<Workspace>, PersistenceError>;
-
-    readonly changeDefaultCwd: (
-      id: WorkspaceId,
-      cwd: AbsolutePathType,
-    ) => Effect.Effect<Workspace, PersistenceError>;
-  }
->()("@pico/contract/workspace/WorkspaceRepository") {}

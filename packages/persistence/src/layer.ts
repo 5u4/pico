@@ -1,9 +1,9 @@
 import * as SqliteClient from "@effect/sql-sqlite-bun/SqliteClient";
 import * as SqliteMigrator from "@effect/sql-sqlite-bun/SqliteMigrator";
-import type * as Chat from "@pico/contract/chat";
-import type { AbsolutePath } from "@pico/contract/config/path";
-import { PersistenceError } from "@pico/contract/persistence/error";
-import type * as Workspace from "@pico/contract/workspace";
+import type { ChatRepository } from "@pico/contract/chat-repository";
+import { PersistenceError } from "@pico/contract/errors";
+import type { AbsolutePath } from "@pico/contract/path";
+import type { WorkspaceRepository } from "@pico/contract/workspace-repository";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
@@ -27,5 +27,5 @@ const readySqlLayer = (storeFile: AbsolutePath) =>
 
 export const layer = (
   storeFile: AbsolutePath,
-): Layer.Layer<Workspace.WorkspaceRepository | Chat.ChatRepository, PersistenceError> =>
+): Layer.Layer<WorkspaceRepository | ChatRepository, PersistenceError> =>
   Layer.merge(WorkspaceSql.layer, ChatSql.layer).pipe(Layer.provide(readySqlLayer(storeFile)));

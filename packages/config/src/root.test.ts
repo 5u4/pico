@@ -1,8 +1,8 @@
 import * as BunFileSystem from "@effect/platform-bun/BunFileSystem";
 import * as BunPath from "@effect/platform-bun/BunPath";
 import { assert, describe, it } from "@effect/vitest";
-import { ConfigError } from "@pico/contract/config/error";
-import { PicoRoot } from "@pico/contract/config/path";
+import { PicoRoot } from "@pico/contract/config";
+import { ConfigError } from "@pico/contract/errors";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";

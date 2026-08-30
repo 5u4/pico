@@ -1,5 +1,7 @@
-import * as Agent from "@pico/contract/agent";
-import type * as Chat from "@pico/contract/chat";
+import type * as AgentEvent from "@pico/contract/agent-event";
+import type * as AgentMessage from "@pico/contract/agent-message";
+import type * as Chat from "@pico/contract/chat-model";
+import { AgentError } from "@pico/contract/errors";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -11,7 +13,7 @@ import type * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 
 export interface SessionHandle {
-  readonly sendUserMessage: (prompt: Agent.AgentPrompt) => Promise<void>;
+  readonly sendUserMessage: (prompt: AgentMessage.AgentPrompt) => Promise<void>;
   readonly settleInFlightMessagePersistence: () => Promise<void>;
   readonly abort: (options?: {
     readonly goalReason?: "interrupted" | "internal";
@@ -29,20 +31,20 @@ export interface OpenedSession {
 export interface SessionFactory {
   readonly open: (
     chatId: Chat.ChatId,
-    emit: (event: Agent.AgentEvent) => void,
-  ) => Effect.Effect<OpenedSession, Agent.AgentError>;
+    emit: (event: AgentEvent.AgentEvent) => void,
+  ) => Effect.Effect<OpenedSession, AgentError>;
 }
 
 export interface SessionPool {
-  readonly events: Stream.Stream<Agent.AgentEventEnvelope>;
+  readonly events: Stream.Stream<AgentEvent.AgentEventEnvelope>;
   readonly transcript: (
     chatId: Chat.ChatId,
-  ) => Effect.Effect<Agent.AgentTranscript, Agent.AgentError>;
+  ) => Effect.Effect<AgentMessage.AgentTranscript, AgentError>;
   readonly send: (
     chatId: Chat.ChatId,
-    prompt: Agent.AgentPrompt,
-  ) => Effect.Effect<void, Agent.AgentError>;
-  readonly abort: (chatId: Chat.ChatId) => Effect.Effect<void, Agent.AgentError>;
+    prompt: AgentMessage.AgentPrompt,
+  ) => Effect.Effect<void, AgentError>;
+  readonly abort: (chatId: Chat.ChatId) => Effect.Effect<void, AgentError>;
 }
 
 interface OpenLifecycle {
@@ -62,7 +64,7 @@ type LiveLifecycle = OpenLifecycle | ClosingLifecycle | ClosedLifecycle;
 
 interface LiveEntry {
   readonly session: SessionHandle;
-  readonly events: Queue.Queue<Agent.AgentEvent, Cause.Done>;
+  readonly events: Queue.Queue<AgentEvent.AgentEvent, Cause.Done>;
   readonly forwarder: Fiber.Fiber<void>;
   readonly lifecycle: MutableRef.MutableRef<LiveLifecycle>;
 }
@@ -71,13 +73,13 @@ interface MakeOptions {
   readonly factory: SessionFactory;
   readonly loadTranscript: (
     chatId: Chat.ChatId,
-  ) => Effect.Effect<Agent.AgentTranscript, Agent.AgentError>;
+  ) => Effect.Effect<AgentMessage.AgentTranscript, AgentError>;
 }
 
 const boundary = <A>(message: string, evaluate: () => Promise<A>) =>
   Effect.tryPromise({
     try: evaluate,
-    catch: () => new Agent.AgentError({ message }),
+    catch: () => new AgentError({ message }),
   });
 
 const attemptCleanup = <A, E, R>(message: string, effect: Effect.Effect<A, E, R>) =>
@@ -113,10 +115,10 @@ const releaseEntry = Effect.fn("SessionPool.releaseEntry")(function* (entry: Liv
 
 const acquireEntry = Effect.fn("SessionPool.acquireEntry")(function* (
   factory: SessionFactory,
-  output: Queue.Queue<Agent.AgentEventEnvelope, Cause.Done>,
+  output: Queue.Queue<AgentEvent.AgentEventEnvelope, Cause.Done>,
   chatId: Chat.ChatId,
 ) {
-  const events = yield* Queue.unbounded<Agent.AgentEvent, Cause.Done>();
+  const events = yield* Queue.unbounded<AgentEvent.AgentEvent, Cause.Done>();
   const opened = yield* factory.open(chatId, (event) => {
     Queue.offerUnsafe(events, event);
   });
@@ -137,10 +139,7 @@ const acquireEntry = Effect.fn("SessionPool.acquireEntry")(function* (
   } satisfies LiveEntry;
 }, Effect.uninterruptible);
 
-const retain = (
-  sessions: RcMap.RcMap<Chat.ChatId, LiveEntry, Agent.AgentError>,
-  chatId: Chat.ChatId,
-) =>
+const retain = (sessions: RcMap.RcMap<Chat.ChatId, LiveEntry, AgentError>, chatId: Chat.ChatId) =>
   RcMap.get(sessions, chatId).pipe(
     Effect.catch((error) =>
       RcMap.invalidate(sessions, chatId).pipe(Effect.andThen(Effect.fail(error))),
@@ -148,7 +147,7 @@ const retain = (
   );
 
 const retainOption = (
-  sessions: RcMap.RcMap<Chat.ChatId, LiveEntry, Agent.AgentError>,
+  sessions: RcMap.RcMap<Chat.ChatId, LiveEntry, AgentError>,
   chatId: Chat.ChatId,
 ) =>
   RcMap.getOption(sessions, chatId).pipe(
@@ -161,7 +160,7 @@ export const makeSessionPool = Effect.fn("SessionPool.make")(function* (
   options: MakeOptions,
 ): Effect.fn.Return<SessionPool, never, Scope.Scope> {
   const output = yield* Effect.acquireRelease(
-    Queue.unbounded<Agent.AgentEventEnvelope, Cause.Done>(),
+    Queue.unbounded<AgentEvent.AgentEventEnvelope, Cause.Done>(),
     (queue) => Queue.end(queue).pipe(Effect.asVoid),
   );
   const sessions = yield* RcMap.make({
@@ -186,7 +185,7 @@ export const makeSessionPool = Effect.fn("SessionPool.make")(function* (
 
   const send = Effect.fn("AgentRuntime.send")(function* (
     chatId: Chat.ChatId,
-    prompt: Agent.AgentPrompt,
+    prompt: AgentMessage.AgentPrompt,
   ) {
     yield* Effect.scoped(
       Effect.gen(function* () {

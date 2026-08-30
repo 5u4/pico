@@ -1,10 +1,6 @@
-import * as Context from "effect/Context";
-import type * as Effect from "effect/Effect";
-import type * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
-import { AbsolutePath } from "./config/path.ts";
-import type { PersistenceError } from "./persistence/error.ts";
-import { WorkspaceId } from "./workspace.ts";
+import { AbsolutePath } from "./path.ts";
+import { WorkspaceId } from "./workspace-model.ts";
 
 export const ChatId = Schema.String.check(Schema.isUUID(7)).pipe(
   Schema.brand("@pico/contract/ChatId"),
@@ -37,14 +33,3 @@ export const NewWorktreeChat = Schema.Struct({
   createdAt: Schema.Natural,
 });
 export type NewWorktreeChat = typeof NewWorktreeChat.Type;
-
-export class ChatRepository extends Context.Service<
-  ChatRepository,
-  {
-    readonly createRegular: (chat: NewRegularChat) => Effect.Effect<Chat, PersistenceError>;
-
-    readonly createWorktree: (chat: NewWorktreeChat) => Effect.Effect<Chat, PersistenceError>;
-
-    readonly findById: (id: ChatId) => Effect.Effect<Option.Option<Chat>, PersistenceError>;
-  }
->()("@pico/contract/chat/ChatRepository") {}

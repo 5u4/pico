@@ -1,6 +1,7 @@
-import { AbsolutePath } from "@pico/contract/config/path";
-import { PersistenceError } from "@pico/contract/persistence/error";
-import * as Workspace from "@pico/contract/workspace";
+import { PersistenceError } from "@pico/contract/errors";
+import { AbsolutePath } from "@pico/contract/path";
+import * as Workspace from "@pico/contract/workspace-model";
+import { WorkspaceRepository } from "@pico/contract/workspace-repository";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -158,7 +159,7 @@ const make = Effect.fn("WorkspaceRepository.make")(function* () {
     Effect.mapError(failure("Failed to change workspace cwd")),
   );
 
-  return Workspace.WorkspaceRepository.of({ create, findById, changeDefaultCwd });
+  return WorkspaceRepository.of({ create, findById, changeDefaultCwd });
 });
 
-export const layer = Layer.effect(Workspace.WorkspaceRepository, make());
+export const layer = Layer.effect(WorkspaceRepository, make());

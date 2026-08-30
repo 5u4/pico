@@ -1,5 +1,6 @@
-import * as Chat from "@pico/contract/chat";
-import { PersistenceError } from "@pico/contract/persistence/error";
+import * as Chat from "@pico/contract/chat-model";
+import { ChatRepository } from "@pico/contract/chat-repository";
+import { PersistenceError } from "@pico/contract/errors";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
@@ -97,7 +98,7 @@ const make = Effect.fn("ChatRepository.make")(function* () {
     Effect.mapError(failure("Failed to find chat")),
   );
 
-  return Chat.ChatRepository.of({ createRegular, createWorktree, findById });
+  return ChatRepository.of({ createRegular, createWorktree, findById });
 });
 
-export const layer = Layer.effect(Chat.ChatRepository, make());
+export const layer = Layer.effect(ChatRepository, make());

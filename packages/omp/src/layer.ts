@@ -5,9 +5,11 @@ import * as OmpSdk from "@oh-my-pi/pi-coding-agent/sdk";
 import type * as OmpAgentSession from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import * as OmpSessionLoader from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import * as OmpSessionManager from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import * as Agent from "@pico/contract/agent";
-import * as Chat from "@pico/contract/chat";
-import type { AbsolutePath } from "@pico/contract/config/path";
+import { AgentRuntime } from "@pico/contract/agent-runtime";
+import type * as Chat from "@pico/contract/chat-model";
+import { ChatRepository } from "@pico/contract/chat-repository";
+import { AgentError } from "@pico/contract/errors";
+import type { AbsolutePath } from "@pico/contract/path";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -18,7 +20,7 @@ import { normalizeAgentEvent, normalizeTranscript } from "./agent-event.ts";
 import { makeSessionPool, type OpenedSession, type SessionFactory } from "./session-pool.ts";
 
 const agentError = (message: string, cause: unknown) =>
-  new Agent.AgentError({
+  new AgentError({
     message: cause instanceof Error ? `${message}: ${cause.message}` : message,
   });
 
@@ -40,19 +42,13 @@ const ignoreCleanupFailure = <A, E, R>(message: string, effect: Effect.Effect<A,
     Effect.catchCause((cause) => Effect.logError(message, Cause.pretty(cause))),
   );
 
-const closeManagerAfterFailure = (
-  manager: OmpSessionManager.SessionManager,
-  error: Agent.AgentError,
-) =>
+const closeManagerAfterFailure = (manager: OmpSessionManager.SessionManager, error: AgentError) =>
   ignoreCleanupFailure(
     "Failed to close OMP session manager after startup failure",
     promiseBoundary("Failed to close OMP session manager", () => manager.close()),
   ).pipe(Effect.andThen(Effect.fail(error)));
 
-const disposeSessionAfterFailure = (
-  session: OmpAgentSession.AgentSession,
-  error: Agent.AgentError,
-) =>
+const disposeSessionAfterFailure = (session: OmpAgentSession.AgentSession, error: AgentError) =>
   ignoreCleanupFailure(
     "Failed to dispose OMP session after subscription failure",
     promiseBoundary("Failed to dispose OMP session", () => session.dispose()),
@@ -61,7 +57,7 @@ const disposeSessionAfterFailure = (
 const makeFactory = (
   sessionsDir: AbsolutePath,
   path: Path.Path,
-  chats: Chat.ChatRepository["Service"],
+  chats: ChatRepository["Service"],
   authStorage: Awaited<ReturnType<typeof OmpSdk.discoverAuthStorage>>,
   modelRegistry: OmpModelRegistry.ModelRegistry,
 ): SessionFactory => ({
@@ -70,7 +66,7 @@ const makeFactory = (
       .findById(chatId)
       .pipe(Effect.mapError((error) => agentError("Failed to resolve chat", error)));
     if (Option.isNone(maybeChat)) {
-      return yield* new Agent.AgentError({ message: "Chat not found" });
+      return yield* new AgentError({ message: "Chat not found" });
     }
 
     const chat = maybeChat.value;
@@ -118,7 +114,7 @@ const makeFactory = (
 export const make = Effect.fn("AgentRuntime.make")(function* (sessionsDir: AbsolutePath) {
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const chats = yield* Chat.ChatRepository;
+  const chats = yield* ChatRepository;
 
   yield* fileSystem
     .makeDirectory(sessionsDir, { recursive: true, mode: 0o700 })
@@ -153,7 +149,7 @@ export const make = Effect.fn("AgentRuntime.make")(function* (sessionsDir: Absol
     loadTranscript,
   });
 
-  return Agent.AgentRuntime.of({
+  return AgentRuntime.of({
     events: pool.events,
     transcript: pool.transcript,
     send: pool.send,
@@ -161,5 +157,4 @@ export const make = Effect.fn("AgentRuntime.make")(function* (sessionsDir: Absol
   });
 });
 
-export const layer = (sessionsDir: AbsolutePath) =>
-  Layer.effect(Agent.AgentRuntime, make(sessionsDir));
+export const layer = (sessionsDir: AbsolutePath) => Layer.effect(AgentRuntime, make(sessionsDir));
