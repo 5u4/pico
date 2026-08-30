@@ -39,6 +39,19 @@
         "effect": "catalog:",
       },
     },
+    "packages/omp": {
+      "name": "@pico/omp",
+      "dependencies": {
+        "@oh-my-pi/pi-coding-agent": "catalog:",
+        "@pico/contract": "workspace:*",
+        "effect": "catalog:",
+      },
+      "devDependencies": {
+        "@effect/platform-bun": "catalog:",
+        "@effect/vitest": "catalog:",
+        "@pico/persistence": "workspace:*",
+      },
+    },
     "packages/persistence": {
       "name": "@pico/persistence",
       "dependencies": {
@@ -428,6 +441,8 @@
     "@pico/config": ["@pico/config@workspace:packages/config"],
 
     "@pico/contract": ["@pico/contract@workspace:packages/contract"],
+
+    "@pico/omp": ["@pico/omp@workspace:packages/omp"],
 
     "@pico/persistence": ["@pico/persistence@workspace:packages/persistence"],
 

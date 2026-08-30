@@ -1,0 +1,18 @@
+{
+  "name": "@pico/omp",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./layer": "./src/layer.ts"
+  },
+  "dependencies": {
+    "@oh-my-pi/pi-coding-agent": "catalog:",
+    "@pico/contract": "workspace:*",
+    "effect": "catalog:"
+  },
+  "devDependencies": {
+    "@effect/platform-bun": "catalog:",
+    "@pico/persistence": "workspace:*",
+    "@effect/vitest": "catalog:"
+  }
+}
