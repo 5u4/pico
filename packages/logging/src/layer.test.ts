@@ -1,0 +1,94 @@
+import * as BunFileSystem from "@effect/platform-bun/BunFileSystem";
+import * as BunPath from "@effect/platform-bun/BunPath";
+import { assert, describe, it } from "@effect/vitest";
+import { AbsolutePath } from "@pico/contract/path";
+import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Layer from "effect/Layer";
+import * as Path from "effect/Path";
+import * as Schema from "effect/Schema";
+import * as TestClock from "effect/testing/TestClock";
+import * as TestConsole from "effect/testing/TestConsole";
+import { layer } from "./layer.ts";
+
+const platformLayer = Layer.merge(BunFileSystem.layer, BunPath.layer);
+const beforeMidnight = DateTime.toEpochMillis(DateTime.makeUnsafe("2026-03-31T23:59:59.750Z"));
+const afterMidnight = DateTime.toEpochMillis(DateTime.makeUnsafe("2026-04-01T00:00:00.250Z"));
+const decodeLogEntry = Schema.decodeUnknownSync(
+  Schema.fromJsonString(
+    Schema.Struct({
+      message: Schema.String,
+      level: Schema.String,
+      timestamp: Schema.String,
+    }),
+  ),
+);
+
+describe("Logging.layer", () => {
+  it.effect(
+    "writes console and daily JSONL logs, prunes on UTC day changes, and flushes on scope close",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const picoRoot = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-logging-" });
+        const logsDir = AbsolutePath.make(path.join(picoRoot, "logs"));
+        const expired = path.join(logsDir, "pico-2026-03-01.log");
+        const cutoff = path.join(logsDir, "pico-2026-03-02.log");
+        const malformed = path.join(logsDir, "pico-2026-02-30.log");
+        const unrelated = path.join(logsDir, "daemon.log");
+        const matchingDirectory = path.join(logsDir, "pico-2026-01-01.log");
+        const symlinkTarget = path.join(logsDir, "symlink-target.log");
+        const matchingSymlink = path.join(logsDir, "pico-2026-01-02.log");
+        const firstLog = path.join(logsDir, "pico-2026-03-31.log");
+        const secondLog = path.join(logsDir, "pico-2026-04-01.log");
+
+        yield* TestClock.setTime(beforeMidnight);
+        yield* fileSystem.makeDirectory(logsDir, { recursive: true });
+        yield* fileSystem.writeFileString(expired, "expired\n");
+        yield* fileSystem.writeFileString(cutoff, "cutoff\n");
+        yield* fileSystem.writeFileString(malformed, "malformed\n");
+        yield* fileSystem.writeFileString(unrelated, "unrelated\n");
+        yield* fileSystem.makeDirectory(matchingDirectory);
+        yield* fileSystem.writeFileString(symlinkTarget, "target\n");
+        yield* fileSystem.symlink(symlinkTarget, matchingSymlink);
+
+        yield* Effect.gen(function* () {
+          assert.isFalse(yield* fileSystem.exists(expired));
+          assert.strictEqual(yield* fileSystem.readFileString(cutoff), "cutoff\n");
+          assert.strictEqual(yield* fileSystem.readFileString(malformed), "malformed\n");
+          assert.strictEqual(yield* fileSystem.readFileString(unrelated), "unrelated\n");
+          assert.strictEqual((yield* fileSystem.stat(matchingDirectory)).type, "Directory");
+          assert.strictEqual(yield* fileSystem.readLink(matchingSymlink), symlinkTarget);
+
+          yield* Effect.logInfo("before-midnight");
+          yield* TestClock.setTime(afterMidnight);
+          yield* Effect.logInfo("after-midnight");
+        }).pipe(Effect.provide(layer(logsDir)), Effect.scoped);
+
+        const firstEntry = decodeLogEntry(yield* fileSystem.readFileString(firstLog));
+        const secondEntry = decodeLogEntry(yield* fileSystem.readFileString(secondLog));
+        assert.deepInclude(firstEntry, {
+          message: "before-midnight",
+          level: "INFO",
+          timestamp: "2026-03-31T23:59:59.750Z",
+        });
+        assert.deepInclude(secondEntry, {
+          message: "after-midnight",
+          level: "INFO",
+          timestamp: "2026-04-01T00:00:00.250Z",
+        });
+
+        const consoleLines = (yield* TestConsole.logLines).map(String);
+        assert.isTrue(consoleLines.some((line) => line.includes("before-midnight")));
+        assert.isTrue(consoleLines.some((line) => line.includes("after-midnight")));
+
+        assert.isFalse(yield* fileSystem.exists(cutoff));
+        assert.strictEqual(yield* fileSystem.readFileString(malformed), "malformed\n");
+        assert.strictEqual(yield* fileSystem.readFileString(unrelated), "unrelated\n");
+        assert.strictEqual((yield* fileSystem.stat(matchingDirectory)).type, "Directory");
+        assert.strictEqual(yield* fileSystem.readLink(matchingSymlink), symlinkTarget);
+      }).pipe(Effect.provide(platformLayer)),
+  );
+});
