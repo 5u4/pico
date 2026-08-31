@@ -17,20 +17,11 @@ export const Chat = Schema.Struct({
 });
 export type Chat = typeof Chat.Type;
 
-export const NewRegularChat = Schema.Struct({
+export const NewChat = Schema.Struct({
   id: ChatId,
   workspaceId: WorkspaceId,
   cwd: AbsolutePath,
   externalId: Schema.NullOr(Schema.NonEmptyString),
   createdAt: Schema.Natural,
 });
-export type NewRegularChat = typeof NewRegularChat.Type;
-
-export const NewWorktreeChat = Schema.Struct({
-  id: ChatId,
-  workspaceId: WorkspaceId,
-  cwd: AbsolutePath,
-  externalId: Schema.NullOr(Schema.NonEmptyString),
-  createdAt: Schema.Natural,
-});
-export type NewWorktreeChat = typeof NewWorktreeChat.Type;
+export type NewChat = typeof NewChat.Type;

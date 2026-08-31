@@ -58,7 +58,7 @@ const worktreeWorkspace: Workspace.Workspace = {
 };
 
 describe("Persistence.layer", () => {
-  it.effect("persists workspace and chat metadata with enforced modes and identities", () =>
+  it.effect("persists workspace and chat metadata with foreign keys and identities", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
@@ -99,7 +99,7 @@ describe("Persistence.layer", () => {
           PersistenceError,
         );
 
-        const firstRegular = yield* chats.createRegular({
+        const firstRegular = yield* chats.create({
           id: chatId(1),
           workspaceId: regularWorkspaceId,
           cwd: cwdA,
@@ -111,20 +111,16 @@ describe("Persistence.layer", () => {
         const changed = yield* workspaces.changeDefaultCwd(regularWorkspaceId, cwdB);
         assert.strictEqual(changed.defaultCwd, cwdB);
 
-        assert.instanceOf(
-          yield* Effect.flip(
-            chats.createRegular({
-              id: chatId(10),
-              workspaceId: regularWorkspaceId,
-              cwd: cwdA,
-              externalId: null,
-              createdAt: 11,
-            }),
-          ),
-          PersistenceError,
-        );
+        const staleDefaultCwd = yield* chats.create({
+          id: chatId(10),
+          workspaceId: regularWorkspaceId,
+          cwd: cwdA,
+          externalId: null,
+          createdAt: 11,
+        });
+        assert.strictEqual(staleDefaultCwd.cwd, cwdA);
 
-        const secondRegular = yield* chats.createRegular({
+        const secondRegular = yield* chats.create({
           id: chatId(2),
           workspaceId: regularWorkspaceId,
           cwd: cwdB,
@@ -135,7 +131,7 @@ describe("Persistence.layer", () => {
         assert.strictEqual(Option.getOrThrow(yield* chats.findById(firstRegular.id)).cwd, cwdA);
         assert.strictEqual(Option.getOrThrow(yield* chats.findById(secondRegular.id)).cwd, cwdB);
 
-        const explicit = yield* chats.createWorktree({
+        const explicit = yield* chats.create({
           id: chatId(3),
           workspaceId: worktreeWorkspaceId,
           cwd: worktreeCwd,
@@ -145,33 +141,26 @@ describe("Persistence.layer", () => {
         assert.strictEqual(explicit.cwd, worktreeCwd);
         assert.deepStrictEqual(Option.getOrThrow(yield* chats.findById(explicit.id)), explicit);
 
+        const regularCwdInWorktreeWorkspace = yield* chats.create({
+          id: chatId(4),
+          workspaceId: worktreeWorkspaceId,
+          cwd: cwdA,
+          externalId: null,
+          createdAt: 13,
+        });
+        assert.strictEqual(regularCwdInWorktreeWorkspace.cwd, cwdA);
+
+        const worktreeCwdInRegularWorkspace = yield* chats.create({
+          id: chatId(5),
+          workspaceId: regularWorkspaceId,
+          cwd: worktreeCwd,
+          externalId: null,
+          createdAt: 14,
+        });
+        assert.strictEqual(worktreeCwdInRegularWorkspace.cwd, worktreeCwd);
         assert.instanceOf(
           yield* Effect.flip(
-            chats.createRegular({
-              id: chatId(4),
-              workspaceId: worktreeWorkspaceId,
-              cwd: cwdA,
-              externalId: null,
-              createdAt: 13,
-            }),
-          ),
-          PersistenceError,
-        );
-        assert.instanceOf(
-          yield* Effect.flip(
-            chats.createWorktree({
-              id: chatId(5),
-              workspaceId: regularWorkspaceId,
-              cwd: worktreeCwd,
-              externalId: null,
-              createdAt: 14,
-            }),
-          ),
-          PersistenceError,
-        );
-        assert.instanceOf(
-          yield* Effect.flip(
-            chats.createWorktree({
+            chats.create({
               id: chatId(6),
               workspaceId: missingWorkspaceId,
               cwd: worktreeCwd,
@@ -182,7 +171,7 @@ describe("Persistence.layer", () => {
           PersistenceError,
         );
 
-        yield* chats.createRegular({
+        yield* chats.create({
           id: chatId(7),
           workspaceId: regularWorkspaceId,
           cwd: cwdB,
@@ -191,7 +180,7 @@ describe("Persistence.layer", () => {
         });
         assert.instanceOf(
           yield* Effect.flip(
-            chats.createRegular({
+            chats.create({
               id: chatId(8),
               workspaceId: regularWorkspaceId,
               cwd: cwdB,
@@ -201,7 +190,7 @@ describe("Persistence.layer", () => {
           ),
           PersistenceError,
         );
-        yield* chats.createRegular({
+        yield* chats.create({
           id: chatId(9),
           workspaceId: secondWorkspaceId,
           cwd: cwdA,

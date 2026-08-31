@@ -1,7 +1,6 @@
-import type { ChatId } from "@pico/contract/chat-model";
 import { GitError } from "@pico/contract/errors";
 import { AbsolutePath } from "@pico/contract/path";
-import type { WorktreeSettings } from "@pico/contract/workspace-model";
+import type { CreateWorktree, CreateWorktreeOptions } from "@pico/contract/worktree";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -10,13 +9,6 @@ import * as Path from "effect/Path";
 import * as Stream from "effect/Stream";
 import * as ChildProcess from "effect/unstable/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
-
-export interface CreateOptions {
-  readonly chatId: ChatId;
-  readonly repositoryCwd: AbsolutePath;
-  readonly worktreesDir: AbsolutePath;
-  readonly settings: WorktreeSettings;
-}
 
 interface CreatedWorktree {
   readonly repositoryCwd: AbsolutePath;
@@ -50,11 +42,14 @@ const runGit = Effect.fn("GitWorktree.runGit")(function* (
   if (exitCode !== 0) return yield* gitError(action);
 });
 
-const acquire = Effect.fn("GitWorktree.create.acquire")(function* (options: CreateOptions) {
-  const fileSystem = yield* FileSystem.FileSystem;
-  const path = yield* Path.Path;
-  const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-  const cwd = AbsolutePath.make(path.join(options.worktreesDir, options.chatId));
+const acquire = Effect.fn("GitWorktree.create.acquire")(function* (
+  fileSystem: FileSystem.FileSystem,
+  path: Path.Path,
+  spawner: Spawner,
+  worktreesDir: AbsolutePath,
+  options: CreateWorktreeOptions,
+) {
+  const cwd = AbsolutePath.make(path.join(worktreesDir, options.chatId));
   const worktree: CreatedWorktree = {
     repositoryCwd: options.repositoryCwd,
     cwd,
@@ -62,7 +57,7 @@ const acquire = Effect.fn("GitWorktree.create.acquire")(function* (options: Crea
   };
 
   yield* fileSystem
-    .makeDirectory(options.worktreesDir, { recursive: true, mode: 0o700 })
+    .makeDirectory(worktreesDir, { recursive: true, mode: 0o700 })
     .pipe(Effect.mapError(() => gitError("create worktrees directory")));
   yield* runGit(spawner, worktree.repositoryCwd, "create worktree", [
     "worktree",
@@ -83,9 +78,10 @@ const ignoreCleanupFailure = <A, E, R>(message: string, effect: Effect.Effect<A,
     Effect.catchCause((cause) => Effect.logError(message, Cause.pretty(cause))),
   );
 
-const rollback = Effect.fn("GitWorktree.create.rollback")(function* (worktree: CreatedWorktree) {
-  const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-
+const rollback = Effect.fn("GitWorktree.create.rollback")(function* (
+  spawner: Spawner,
+  worktree: CreatedWorktree,
+) {
   yield* ignoreCleanupFailure(
     "Failed to roll back Git worktree",
     runGit(spawner, worktree.repositoryCwd, "remove worktree", [
@@ -107,19 +103,27 @@ const rollback = Effect.fn("GitWorktree.create.rollback")(function* (worktree: C
   );
 });
 
-export const create = Effect.fn("GitWorktree.create")(function* <A, E, R>(
-  options: CreateOptions,
-  commit: (cwd: AbsolutePath) => Effect.Effect<A, E, R>,
+export const make = Effect.fn("GitWorktree.make")(function* (
+  worktreesDir: AbsolutePath,
 ): Effect.fn.Return<
-  A,
-  GitError | E,
-  FileSystem.FileSystem | Path.Path | ChildProcessSpawner.ChildProcessSpawner | R
+  CreateWorktree,
+  never,
+  FileSystem.FileSystem | Path.Path | ChildProcessSpawner.ChildProcessSpawner
 > {
-  return yield* Effect.uninterruptible(
-    Effect.acquireUseRelease(
-      acquire(options),
-      (worktree) => commit(worktree.cwd),
-      (worktree, exit) => (Exit.isFailure(exit) ? rollback(worktree) : Effect.void),
-    ),
-  );
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+
+  const create: CreateWorktree = Effect.fn("GitWorktree.create")(function* <A, E>(
+    options: CreateWorktreeOptions,
+    use: (cwd: AbsolutePath) => Effect.Effect<A, E>,
+  ): Effect.fn.Return<A, GitError | E> {
+    return yield* Effect.acquireUseRelease(
+      acquire(fileSystem, path, spawner, worktreesDir, options),
+      (worktree) => use(worktree.cwd),
+      (worktree, exit) => (Exit.isFailure(exit) ? rollback(spawner, worktree) : Effect.void),
+    );
+  });
+
+  return create;
 });

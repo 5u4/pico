@@ -3,7 +3,7 @@ import { assert, describe, it } from "@effect/vitest";
 import * as Chat from "@pico/contract/chat-model";
 import { GitError, PersistenceError } from "@pico/contract/errors";
 import { AbsolutePath } from "@pico/contract/path";
-import { create } from "@pico/git/worktree";
+import { make } from "@pico/git/worktree";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
@@ -60,10 +60,9 @@ const makeRepository = Effect.fn("GitWorktreeTest.makeRepository")(function* () 
 
 const settings = { branch: "main", prefix: "chat/" };
 
-const options = (id: Chat.ChatId, repositoryCwd: AbsolutePath, worktreesDir: AbsolutePath) => ({
+const options = (id: Chat.ChatId, repositoryCwd: AbsolutePath) => ({
   chatId: id,
   repositoryCwd,
-  worktreesDir,
   settings,
 });
 
@@ -73,11 +72,12 @@ describe("GitWorktree.create", () => {
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const { repositoryCwd, worktreesDir } = yield* makeRepository();
+      const create = yield* make(worktreesDir);
       const id = chatId(1);
       const cwd = AbsolutePath.make(path.join(worktreesDir, id));
       const committed = {};
 
-      const result = yield* create(options(id, repositoryCwd, worktreesDir), (createdCwd) =>
+      const result = yield* create(options(id, repositoryCwd), (createdCwd) =>
         Effect.gen(function* () {
           assert.strictEqual(createdCwd, cwd);
           assert.isTrue(yield* fileSystem.exists(createdCwd));
@@ -100,12 +100,13 @@ describe("GitWorktree.create", () => {
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const { repositoryCwd, worktreesDir } = yield* makeRepository();
+      const create = yield* make(worktreesDir);
       const id = chatId(2);
       const cwd = AbsolutePath.make(path.join(worktreesDir, id));
       const branch = `chat/${id}`;
       const primary = new PersistenceError({ message: "commit failed" });
 
-      const error = yield* create(options(id, repositoryCwd, worktreesDir), (createdCwd) =>
+      const error = yield* create(options(id, repositoryCwd), (createdCwd) =>
         Effect.gen(function* () {
           assert.isTrue(yield* fileSystem.exists(createdCwd));
           return yield* primary;
@@ -127,13 +128,14 @@ describe("GitWorktree.create", () => {
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const { repositoryCwd, worktreesDir } = yield* makeRepository();
+      const create = yield* make(worktreesDir);
       const id = chatId(3);
       const cwd = AbsolutePath.make(path.join(worktreesDir, id));
       const branch = `chat/${id}`;
       let callbackRan = false;
 
       yield* git(repositoryCwd, ["branch", branch]);
-      const error = yield* create(options(id, repositoryCwd, worktreesDir), () =>
+      const error = yield* create(options(id, repositoryCwd), () =>
         Effect.sync(() => {
           callbackRan = true;
         }),

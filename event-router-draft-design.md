@@ -41,7 +41,7 @@ live event path
 AgentRuntime.events -> EventRouter -> per-connection stream -> web or Discord
 
 subscription update
-Application.createRegularChat -> Chat.id -> EventRouter.setSelection
+Application.createChat -> Chat.id -> EventRouter.setSelection
 ```
 
 Web and Discord own protocol decoding, event encoding, connection writes, and connection failure

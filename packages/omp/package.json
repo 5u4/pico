@@ -3,7 +3,8 @@
   "private": true,
   "type": "module",
   "exports": {
-    "./layer": "./src/layer.ts"
+    "./layer": "./src/layer.ts",
+    "./agent-session-store": "./src/agent-session-store.ts"
   },
   "dependencies": {
     "@oh-my-pi/pi-coding-agent": "catalog:",

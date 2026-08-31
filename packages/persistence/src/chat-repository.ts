@@ -11,47 +11,18 @@ const failure = (message: string) => () => new PersistenceError({ message });
 const make = Effect.fn("ChatRepository.make")(function* () {
   const sql = yield* SqlClient.SqlClient;
 
-  const insertRegular = SqlSchema.findOne({
-    Request: Chat.NewRegularChat,
+  const insert = SqlSchema.findOne({
+    Request: Chat.NewChat,
     Result: Chat.Chat,
     execute: (chat) => sql`
       INSERT INTO chats (id, workspace_id, cwd, external_id, created_at)
-      SELECT
+      VALUES (
         ${chat.id},
-        id,
+        ${chat.workspaceId},
         ${chat.cwd},
         ${chat.externalId},
         ${chat.createdAt}
-      FROM workspaces
-      WHERE id = ${chat.workspaceId}
-        AND default_cwd = ${chat.cwd}
-        AND worktree_branch IS NULL
-        AND worktree_prefix IS NULL
-      RETURNING
-        id,
-        workspace_id AS "workspaceId",
-        cwd,
-        external_id AS "externalId",
-        created_at AS "createdAt",
-        archived_at AS "archivedAt"
-    `,
-  });
-
-  const insertWorktree = SqlSchema.findOne({
-    Request: Chat.NewWorktreeChat,
-    Result: Chat.Chat,
-    execute: (chat) => sql`
-      INSERT INTO chats (id, workspace_id, cwd, external_id, created_at)
-      SELECT
-        ${chat.id},
-        id,
-        ${chat.cwd},
-        ${chat.externalId},
-        ${chat.createdAt}
-      FROM workspaces
-      WHERE id = ${chat.workspaceId}
-        AND worktree_branch IS NOT NULL
-        AND worktree_prefix IS NOT NULL
+      )
       RETURNING
         id,
         workspace_id AS "workspaceId",
@@ -78,18 +49,11 @@ const make = Effect.fn("ChatRepository.make")(function* () {
     `,
   });
 
-  const createRegular = Effect.fn("ChatRepository.createRegular")(
-    function* (chat: Chat.NewRegularChat) {
-      return yield* insertRegular(chat);
+  const create = Effect.fn("ChatRepository.create")(
+    function* (chat: Chat.NewChat) {
+      return yield* insert(chat);
     },
-    Effect.mapError(failure("Failed to create regular chat")),
-  );
-
-  const createWorktree = Effect.fn("ChatRepository.createWorktree")(
-    function* (chat: Chat.NewWorktreeChat) {
-      return yield* insertWorktree(chat);
-    },
-    Effect.mapError(failure("Failed to create worktree chat")),
+    Effect.mapError(failure("Failed to create chat")),
   );
 
   const findById = Effect.fn("ChatRepository.findById")(
@@ -99,7 +63,7 @@ const make = Effect.fn("ChatRepository.make")(function* () {
     Effect.mapError(failure("Failed to find chat")),
   );
 
-  return ChatRepository.of({ createRegular, createWorktree, findById });
+  return ChatRepository.of({ create, findById });
 });
 
 export const layer = Layer.effect(ChatRepository, make());

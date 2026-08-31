@@ -19,11 +19,11 @@ export const CreateWorkspace = Schema.Struct({
 });
 export type CreateWorkspace = typeof CreateWorkspace.Type;
 
-export const CreateRegularChat = Schema.Struct({
+export const CreateChat = Schema.Struct({
   workspaceId: WorkspaceId,
   externalId: Schema.NullOr(Schema.NonEmptyString),
 });
-export type CreateRegularChat = typeof CreateRegularChat.Type;
+export type CreateChat = typeof CreateChat.Type;
 
 export class Application extends Context.Service<
   Application,
@@ -32,6 +32,6 @@ export class Application extends Context.Service<
       input: CreateWorkspace,
     ) => Effect.Effect<Workspace, ApplicationError>;
 
-    readonly createRegularChat: (input: CreateRegularChat) => Effect.Effect<Chat, ApplicationError>;
+    readonly createChat: (input: CreateChat) => Effect.Effect<Chat, ApplicationError>;
   }
 >()("@pico/contract/application/Application") {}

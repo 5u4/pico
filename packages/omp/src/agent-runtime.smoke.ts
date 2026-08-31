@@ -48,7 +48,7 @@ const smoke = Effect.fn("AgentRuntime.smoke")(function* () {
       worktree: null,
       createdAt: 0,
     });
-    yield* chats.createRegular({
+    yield* chats.create({
       id: chatId,
       workspaceId,
       cwd,
