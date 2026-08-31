@@ -8,6 +8,10 @@ export class PersistenceError extends Schema.TaggedError<PersistenceError>()("Pe
   message: Schema.String,
 }) {}
 
+export class GitError extends Schema.TaggedError<GitError>()("GitError", {
+  message: Schema.String,
+}) {}
+
 export class LoggingError extends Schema.TaggedError<LoggingError>()("LoggingError", {
   message: Schema.String,
 }) {}

@@ -1,0 +1,16 @@
+{
+  "name": "@pico/git",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./worktree": "./src/worktree.ts"
+  },
+  "dependencies": {
+    "@pico/contract": "workspace:*",
+    "effect": "catalog:"
+  },
+  "devDependencies": {
+    "@effect/platform-bun": "catalog:",
+    "@effect/vitest": "catalog:"
+  }
+}

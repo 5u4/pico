@@ -39,6 +39,17 @@
         "effect": "catalog:",
       },
     },
+    "packages/git": {
+      "name": "@pico/git",
+      "dependencies": {
+        "@pico/contract": "workspace:*",
+        "effect": "catalog:",
+      },
+      "devDependencies": {
+        "@effect/platform-bun": "catalog:",
+        "@effect/vitest": "catalog:",
+      },
+    },
     "packages/logging": {
       "name": "@pico/logging",
       "dependencies": {
@@ -452,6 +463,8 @@
     "@pico/config": ["@pico/config@workspace:packages/config"],
 
     "@pico/contract": ["@pico/contract@workspace:packages/contract"],
+
+    "@pico/git": ["@pico/git@workspace:packages/git"],
 
     "@pico/logging": ["@pico/logging@workspace:packages/logging"],
 

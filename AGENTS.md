@@ -213,7 +213,7 @@ packages/
 ├── application/       Workspace 和 Chat 的 use case 与跨 port 排序
 ├── omp/               OMP 18.0.10 adapter 与内存 SessionPool
 ├── persistence/       SQLite schema、migration、repository 实现
-├── worktree/          Git worktree 创建与本次操作的 rollback
+├── git/               Git 操作，包括 worktree 创建与本次操作的 rollback
 ├── rpc/               Effect RPC WebSocket client 和 server transport
 ├── frontend-state/    Effect Atom state、action、selector
 ├── config/            pico root、config.toml、secret reference、root lock
