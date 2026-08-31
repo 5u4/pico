@@ -1,0 +1,17 @@
+{
+  "name": "@pico/application",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./layer": "./src/layer.ts"
+  },
+  "dependencies": {
+    "@pico/contract": "workspace:*",
+    "effect": "catalog:"
+  },
+  "devDependencies": {
+    "@effect/platform-bun": "catalog:",
+    "@effect/vitest": "catalog:",
+    "@pico/persistence": "workspace:*"
+  }
+}

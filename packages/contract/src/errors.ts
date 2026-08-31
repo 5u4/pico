@@ -4,6 +4,10 @@ export class ConfigError extends Schema.TaggedError<ConfigError>()("ConfigError"
   message: Schema.String,
 }) {}
 
+export class ApplicationError extends Schema.TaggedError<ApplicationError>()("ApplicationError", {
+  message: Schema.String,
+}) {}
+
 export class PersistenceError extends Schema.TaggedError<PersistenceError>()("PersistenceError", {
   message: Schema.String,
 }) {}

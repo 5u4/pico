@@ -19,11 +19,12 @@ const make = Effect.fn("ChatRepository.make")(function* () {
       SELECT
         ${chat.id},
         id,
-        default_cwd,
+        ${chat.cwd},
         ${chat.externalId},
         ${chat.createdAt}
       FROM workspaces
       WHERE id = ${chat.workspaceId}
+        AND default_cwd = ${chat.cwd}
         AND worktree_branch IS NULL
         AND worktree_prefix IS NULL
       RETURNING

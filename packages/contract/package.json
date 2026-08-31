@@ -6,6 +6,7 @@
     "./path": "./src/path.ts",
     "./config": "./src/config.ts",
     "./errors": "./src/errors.ts",
+    "./application": "./src/application.ts",
     "./workspace-model": "./src/workspace-model.ts",
     "./workspace-repository": "./src/workspace-repository.ts",
     "./chat-model": "./src/chat-model.ts",

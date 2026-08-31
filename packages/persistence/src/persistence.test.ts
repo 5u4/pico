@@ -102,6 +102,7 @@ describe("Persistence.layer", () => {
         const firstRegular = yield* chats.createRegular({
           id: chatId(1),
           workspaceId: regularWorkspaceId,
+          cwd: cwdA,
           externalId: null,
           createdAt: 10,
         });
@@ -110,9 +111,23 @@ describe("Persistence.layer", () => {
         const changed = yield* workspaces.changeDefaultCwd(regularWorkspaceId, cwdB);
         assert.strictEqual(changed.defaultCwd, cwdB);
 
+        assert.instanceOf(
+          yield* Effect.flip(
+            chats.createRegular({
+              id: chatId(10),
+              workspaceId: regularWorkspaceId,
+              cwd: cwdA,
+              externalId: null,
+              createdAt: 11,
+            }),
+          ),
+          PersistenceError,
+        );
+
         const secondRegular = yield* chats.createRegular({
           id: chatId(2),
           workspaceId: regularWorkspaceId,
+          cwd: cwdB,
           externalId: null,
           createdAt: 11,
         });
@@ -135,6 +150,7 @@ describe("Persistence.layer", () => {
             chats.createRegular({
               id: chatId(4),
               workspaceId: worktreeWorkspaceId,
+              cwd: cwdA,
               externalId: null,
               createdAt: 13,
             }),
@@ -169,6 +185,7 @@ describe("Persistence.layer", () => {
         yield* chats.createRegular({
           id: chatId(7),
           workspaceId: regularWorkspaceId,
+          cwd: cwdB,
           externalId: "thread-1",
           createdAt: 16,
         });
@@ -177,6 +194,7 @@ describe("Persistence.layer", () => {
             chats.createRegular({
               id: chatId(8),
               workspaceId: regularWorkspaceId,
+              cwd: cwdB,
               externalId: "thread-1",
               createdAt: 17,
             }),
@@ -186,6 +204,7 @@ describe("Persistence.layer", () => {
         yield* chats.createRegular({
           id: chatId(9),
           workspaceId: secondWorkspaceId,
+          cwd: cwdA,
           externalId: "thread-1",
           createdAt: 18,
         });

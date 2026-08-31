@@ -20,6 +20,7 @@ export type Chat = typeof Chat.Type;
 export const NewRegularChat = Schema.Struct({
   id: ChatId,
   workspaceId: WorkspaceId,
+  cwd: AbsolutePath,
   externalId: Schema.NullOr(Schema.NonEmptyString),
   createdAt: Schema.Natural,
 });
