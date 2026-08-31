@@ -51,6 +51,16 @@
         "effect": "catalog:",
       },
     },
+    "packages/event-router": {
+      "name": "@pico/event-router",
+      "dependencies": {
+        "@pico/contract": "workspace:*",
+        "effect": "catalog:",
+      },
+      "devDependencies": {
+        "@effect/vitest": "catalog:",
+      },
+    },
     "packages/git": {
       "name": "@pico/git",
       "dependencies": {
@@ -477,6 +487,8 @@
     "@pico/config": ["@pico/config@workspace:packages/config"],
 
     "@pico/contract": ["@pico/contract@workspace:packages/contract"],
+
+    "@pico/event-router": ["@pico/event-router@workspace:packages/event-router"],
 
     "@pico/git": ["@pico/git@workspace:packages/git"],
 

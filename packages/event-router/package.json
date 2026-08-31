@@ -1,0 +1,15 @@
+{
+  "name": "@pico/event-router",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./layer": "./src/layer.ts"
+  },
+  "dependencies": {
+    "@pico/contract": "workspace:*",
+    "effect": "catalog:"
+  },
+  "devDependencies": {
+    "@effect/vitest": "catalog:"
+  }
+}
