@@ -22,6 +22,21 @@
         "vitest": "catalog:",
       },
     },
+    "apps/daemon": {
+      "name": "@pico/daemon",
+      "dependencies": {
+        "@effect/platform-bun": "catalog:",
+        "@pico/application": "workspace:*",
+        "@pico/config": "workspace:*",
+        "@pico/contract": "workspace:*",
+        "@pico/event-router": "workspace:*",
+        "@pico/git": "workspace:*",
+        "@pico/logging": "workspace:*",
+        "@pico/omp": "workspace:*",
+        "@pico/persistence": "workspace:*",
+        "effect": "catalog:",
+      },
+    },
     "packages/application": {
       "name": "@pico/application",
       "dependencies": {
@@ -487,6 +502,8 @@
     "@pico/config": ["@pico/config@workspace:packages/config"],
 
     "@pico/contract": ["@pico/contract@workspace:packages/contract"],
+
+    "@pico/daemon": ["@pico/daemon@workspace:apps/daemon"],
 
     "@pico/event-router": ["@pico/event-router@workspace:packages/event-router"],
 

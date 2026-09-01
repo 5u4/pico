@@ -1,0 +1,17 @@
+{
+  "name": "@pico/daemon",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@effect/platform-bun": "catalog:",
+    "@pico/application": "workspace:*",
+    "@pico/config": "workspace:*",
+    "@pico/contract": "workspace:*",
+    "@pico/event-router": "workspace:*",
+    "@pico/git": "workspace:*",
+    "@pico/logging": "workspace:*",
+    "@pico/omp": "workspace:*",
+    "@pico/persistence": "workspace:*",
+    "effect": "catalog:"
+  }
+}
