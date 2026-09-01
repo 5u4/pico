@@ -29,6 +29,7 @@
         "@pico/application": "workspace:*",
         "@pico/config": "workspace:*",
         "@pico/contract": "workspace:*",
+        "@pico/discord": "workspace:*",
         "@pico/event-router": "workspace:*",
         "@pico/git": "workspace:*",
         "@pico/logging": "workspace:*",
@@ -63,6 +64,15 @@
     "packages/contract": {
       "name": "@pico/contract",
       "dependencies": {
+        "effect": "catalog:",
+      },
+    },
+    "packages/discord": {
+      "name": "@pico/discord",
+      "dependencies": {
+        "@pico/config": "workspace:*",
+        "@pico/contract": "workspace:*",
+        "discordeno": "catalog:",
         "effect": "catalog:",
       },
     },
@@ -502,8 +512,8 @@
     "@pico/config": ["@pico/config@workspace:packages/config"],
 
     "@pico/contract": ["@pico/contract@workspace:packages/contract"],
-
     "@pico/daemon": ["@pico/daemon@workspace:apps/daemon"],
+    "@pico/discord": ["@pico/discord@workspace:packages/discord"],
 
     "@pico/event-router": ["@pico/event-router@workspace:packages/event-router"],
 

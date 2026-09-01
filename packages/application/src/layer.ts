@@ -1,3 +1,4 @@
+import { AgentRuntime } from "@pico/contract/agent-runtime";
 import { AgentSessionStore } from "@pico/contract/agent-session-store";
 import { Application, type CreateChat, type CreateWorkspace } from "@pico/contract/application";
 import * as Chat from "@pico/contract/chat-model";
@@ -18,6 +19,7 @@ const make = Effect.fn("Application.make")(function* (createWorktree: CreateWork
   const workspaces = yield* WorkspaceRepository;
   const chats = yield* ChatRepository;
   const sessions = yield* AgentSessionStore;
+  const runtime = yield* AgentRuntime;
   const crypto = yield* Crypto.Crypto;
 
   const createWorkspace = Effect.fn("Application.createWorkspace")(
@@ -64,7 +66,45 @@ const make = Effect.fn("Application.make")(function* (createWorktree: CreateWork
     Effect.mapError(failure("Failed to create chat")),
   );
 
-  return Application.of({ createWorkspace, createChat });
+  const findWorkspaceByPlatformId = Effect.fn("Application.findWorkspaceByPlatformId")(
+    function* (platform: Workspace.WorkspacePlatform, workspaceExternalId: string) {
+      return yield* workspaces.findByBinding({ platform, externalId: workspaceExternalId });
+    },
+    Effect.mapError(failure("Failed to find workspace")),
+  );
+
+  const findChatByPlatformId = Effect.fn("Application.findChatByPlatformId")(
+    function* (
+      platform: Workspace.WorkspacePlatform,
+      workspaceExternalId: string,
+      chatExternalId: string,
+    ) {
+      const workspace = yield* workspaces.findByBinding({
+        platform,
+        externalId: workspaceExternalId,
+      });
+      if (Option.isNone(workspace)) {
+        return Option.none<Chat.Chat>();
+      }
+      return yield* chats.findByExternalId(workspace.value.id, chatExternalId);
+    },
+    Effect.mapError(failure("Failed to find chat")),
+  );
+
+  const sendMessage = Effect.fn("Application.sendMessage")(
+    function* (chatId: Chat.ChatId, content: string) {
+      yield* runtime.send(chatId, content);
+    },
+    Effect.mapError(failure("Failed to send message")),
+  );
+
+  return Application.of({
+    createWorkspace,
+    createChat,
+    findWorkspaceByPlatformId,
+    findChatByPlatformId,
+    sendMessage,
+  });
 });
 
 export const layer = (createWorktree: CreateWorktree) =>

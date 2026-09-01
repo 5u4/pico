@@ -3,6 +3,7 @@ import type * as Effect from "effect/Effect";
 import type * as Option from "effect/Option";
 import type { Chat, ChatId, NewChat } from "./chat-model.ts";
 import type { PersistenceError } from "./errors.ts";
+import type { WorkspaceId } from "./workspace-model.ts";
 
 export class ChatRepository extends Context.Service<
   ChatRepository,
@@ -11,5 +12,10 @@ export class ChatRepository extends Context.Service<
     readonly create: (chat: NewChat) => Effect.Effect<Chat, PersistenceError>;
 
     readonly findById: (id: ChatId) => Effect.Effect<Option.Option<Chat>, PersistenceError>;
+
+    readonly findByExternalId: (
+      workspaceId: WorkspaceId,
+      externalId: string,
+    ) => Effect.Effect<Option.Option<Chat>, PersistenceError>;
   }
 >()("@pico/contract/chat/ChatRepository") {}

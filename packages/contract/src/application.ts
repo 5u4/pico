@@ -1,13 +1,15 @@
 import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
+import type * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
-import type { Chat } from "./chat-model.ts";
+import type { Chat, ChatId } from "./chat-model.ts";
 import type { ApplicationError } from "./errors.ts";
 import { AbsolutePath } from "./path.ts";
 import {
   type Workspace,
   WorkspaceBinding,
   WorkspaceId,
+  type WorkspacePlatform,
   WorktreeSettings,
 } from "./workspace-model.ts";
 
@@ -33,5 +35,21 @@ export class Application extends Context.Service<
     ) => Effect.Effect<Workspace, ApplicationError>;
 
     readonly createChat: (input: CreateChat) => Effect.Effect<Chat, ApplicationError>;
+
+    readonly findWorkspaceByPlatformId: (
+      platform: WorkspacePlatform,
+      workspaceExternalId: string,
+    ) => Effect.Effect<Option.Option<Workspace>, ApplicationError>;
+
+    readonly findChatByPlatformId: (
+      platform: WorkspacePlatform,
+      workspaceExternalId: string,
+      chatExternalId: string,
+    ) => Effect.Effect<Option.Option<Chat>, ApplicationError>;
+
+    readonly sendMessage: (
+      chatId: ChatId,
+      content: string,
+    ) => Effect.Effect<void, ApplicationError>;
   }
 >()("@pico/contract/application/Application") {}

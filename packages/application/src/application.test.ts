@@ -2,10 +2,11 @@ import * as BunCrypto from "@effect/platform-bun/BunCrypto";
 import * as BunFileSystem from "@effect/platform-bun/BunFileSystem";
 import * as BunPath from "@effect/platform-bun/BunPath";
 import { assert, describe, it } from "@effect/vitest";
+import { AgentRuntime } from "@pico/contract/agent-runtime";
 import { AgentSessionStore, type CreateAgentSession } from "@pico/contract/agent-session-store";
 import { Application } from "@pico/contract/application";
 import { ChatRepository } from "@pico/contract/chat-repository";
-import { ApplicationError } from "@pico/contract/errors";
+import { AgentError, ApplicationError } from "@pico/contract/errors";
 import { AbsolutePath } from "@pico/contract/path";
 import * as Workspace from "@pico/contract/workspace-model";
 import type { CreateWorktree, CreateWorktreeOptions } from "@pico/contract/worktree";
@@ -15,6 +16,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 import * as ApplicationLayer from "./layer.ts";
 
@@ -28,7 +30,7 @@ const assertApplicationError = (error: ApplicationError, message: string) => {
 };
 
 describe("Application", () => {
-  it.effect("creates regular and worktree chats after their sessions", () =>
+  it.effect("creates chats, resolves platform identities, and delegates messages", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
@@ -40,6 +42,7 @@ describe("Application", () => {
       const worktreeCwd = AbsolutePath.make(path.join(temporaryDirectory, "worktree"));
       const createdSessions: Array<CreateAgentSession> = [];
       const createdWorktrees: Array<CreateWorktreeOptions> = [];
+      const sentMessages: Array<{ readonly chatId: string; readonly content: string }> = [];
       const persistenceLayer = Persistence.layer(storeFile);
       const sessionsLayer = Layer.effect(
         AgentSessionStore,
@@ -56,6 +59,20 @@ describe("Application", () => {
           });
         }),
       ).pipe(Layer.provide(persistenceLayer));
+      const runtimeLayer = Layer.succeed(
+        AgentRuntime,
+        AgentRuntime.of({
+          events: Stream.empty,
+          transcript: () => Effect.succeed([]),
+          send: (chatId, content) =>
+            content === "fail"
+              ? Effect.fail(new AgentError({ message: "runtime failed" }))
+              : Effect.sync(() => {
+                  sentMessages.push({ chatId, content });
+                }),
+          abort: () => Effect.void,
+        }),
+      );
       const createWorktree: CreateWorktree = (options, use) =>
         Effect.sync(() => {
           createdWorktrees.push(options);
@@ -114,18 +131,63 @@ describe("Application", () => {
           cwd: worktreeCwd,
         });
 
+        yield* TestClock.setTime(5_000);
+        const discordWorkspace = yield* application.createWorkspace({
+          name: "discord",
+          binding: { platform: "discord", externalId: "channel-1" },
+          defaultCwd,
+          worktree: null,
+        });
+        yield* TestClock.setTime(6_000);
+        const discordChat = yield* application.createChat({
+          workspaceId: discordWorkspace.id,
+          externalId: "thread-1",
+        });
+
+        assert.deepStrictEqual(
+          Option.getOrThrow(yield* application.findWorkspaceByPlatformId("discord", "channel-1")),
+          discordWorkspace,
+        );
+        assert.isTrue(
+          Option.isNone(yield* application.findWorkspaceByPlatformId("discord", "missing")),
+        );
+        assert.deepStrictEqual(
+          Option.getOrThrow(
+            yield* application.findChatByPlatformId("discord", "channel-1", "thread-1"),
+          ),
+          discordChat,
+        );
+        assert.isTrue(
+          Option.isNone(yield* application.findChatByPlatformId("discord", "channel-1", "missing")),
+        );
+        assert.isTrue(
+          Option.isNone(yield* application.findChatByPlatformId("discord", "missing", "thread-1")),
+        );
+
+        yield* application.sendMessage(discordChat.id, "hello");
+        yield* application.sendMessage(discordChat.id, "");
+        assert.deepStrictEqual(sentMessages, [
+          { chatId: discordChat.id, content: "hello" },
+          { chatId: discordChat.id, content: "" },
+        ]);
+        assertApplicationError(
+          yield* application.sendMessage(discordChat.id, "fail").pipe(Effect.flip),
+          "Failed to send message",
+        );
+
         assertApplicationError(
           yield* application
             .createChat({ workspaceId: missingWorkspaceId, externalId: null })
             .pipe(Effect.flip),
           "Failed to create chat",
         );
-        assert.strictEqual(createdSessions.length, 2);
+        assert.strictEqual(createdSessions.length, 3);
         assert.strictEqual(createdWorktrees.length, 1);
       }).pipe(
         Effect.provide(ApplicationLayer.layer(createWorktree)),
         Effect.provide(sessionsLayer),
         Effect.provide(persistenceLayer),
+        Effect.provide(runtimeLayer),
         Effect.provide(BunCrypto.layer),
         Effect.scoped,
       );

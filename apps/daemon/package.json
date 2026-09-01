@@ -7,6 +7,7 @@
     "@pico/application": "workspace:*",
     "@pico/config": "workspace:*",
     "@pico/contract": "workspace:*",
+    "@pico/discord": "workspace:*",
     "@pico/event-router": "workspace:*",
     "@pico/git": "workspace:*",
     "@pico/logging": "workspace:*",

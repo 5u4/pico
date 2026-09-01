@@ -78,6 +78,17 @@ describe("Persistence.layer", () => {
           Option.getOrThrow(yield* workspaces.findById(worktreeWorkspaceId)),
           worktreeWorkspace,
         );
+        assert.deepStrictEqual(
+          Option.getOrThrow(
+            yield* workspaces.findByBinding({ platform: "discord", externalId: "channel-1" }),
+          ),
+          worktreeWorkspace,
+        );
+        assert.isTrue(
+          Option.isNone(
+            yield* workspaces.findByBinding({ platform: "discord", externalId: "missing" }),
+          ),
+        );
         assert.isTrue(Option.isNone(yield* workspaces.findById(missingWorkspaceId)));
         assert.isTrue(Option.isNone(yield* chats.findById(missingChatId)));
 
@@ -171,13 +182,18 @@ describe("Persistence.layer", () => {
           PersistenceError,
         );
 
-        yield* chats.create({
+        const externalChat = yield* chats.create({
           id: chatId(7),
           workspaceId: regularWorkspaceId,
           cwd: cwdB,
           externalId: "thread-1",
           createdAt: 16,
         });
+        assert.deepStrictEqual(
+          Option.getOrThrow(yield* chats.findByExternalId(regularWorkspaceId, "thread-1")),
+          externalChat,
+        );
+        assert.isTrue(Option.isNone(yield* chats.findByExternalId(regularWorkspaceId, "missing")));
         assert.instanceOf(
           yield* Effect.flip(
             chats.create({
@@ -190,13 +206,17 @@ describe("Persistence.layer", () => {
           ),
           PersistenceError,
         );
-        yield* chats.create({
+        const secondExternalChat = yield* chats.create({
           id: chatId(9),
           workspaceId: secondWorkspaceId,
           cwd: cwdA,
           externalId: "thread-1",
           createdAt: 18,
         });
+        assert.deepStrictEqual(
+          Option.getOrThrow(yield* chats.findByExternalId(secondWorkspaceId, "thread-1")),
+          secondExternalChat,
+        );
       }).pipe(Effect.provide(layer(storeFile)), Effect.scoped);
 
       yield* Effect.sync(() => {
@@ -219,6 +239,23 @@ describe("Persistence.layer", () => {
           cwdB,
         );
         assert.strictEqual(Option.getOrThrow(yield* chats.findById(chatId(1))).cwd, cwdA);
+        assert.deepStrictEqual(
+          Option.getOrThrow(
+            yield* workspaces.findByBinding({ platform: "discord", externalId: "channel-1" }),
+          ),
+          worktreeWorkspace,
+        );
+        assert.deepStrictEqual(
+          Option.getOrThrow(yield* chats.findByExternalId(regularWorkspaceId, "thread-1")),
+          {
+            id: chatId(7),
+            workspaceId: regularWorkspaceId,
+            cwd: cwdB,
+            externalId: "thread-1",
+            createdAt: 16,
+            archivedAt: null,
+          },
+        );
       }).pipe(Effect.provide(layer(storeFile)), Effect.scoped);
     }).pipe(Effect.provide(platformLayer)),
   );

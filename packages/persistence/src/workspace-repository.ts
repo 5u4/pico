@@ -115,6 +115,24 @@ const make = Effect.fn("WorkspaceRepository.make")(function* () {
     `,
   });
 
+  const selectByBinding = SqlSchema.findOneOption({
+    Request: Workspace.WorkspaceBinding,
+    Result: WorkspaceRow,
+    execute: ({ platform, externalId }) => sql`
+      SELECT
+        id,
+        name,
+        platform,
+        external_id AS "externalId",
+        default_cwd AS "defaultCwd",
+        worktree_branch AS "worktreeBranch",
+        worktree_prefix AS "worktreePrefix",
+        created_at AS "createdAt"
+      FROM workspaces
+      WHERE platform = ${platform} AND external_id = ${externalId}
+    `,
+  });
+
   const updateDefaultCwd = SqlSchema.findOne({
     Request: ChangeDefaultCwd,
     Result: WorkspaceRow,
@@ -152,6 +170,17 @@ const make = Effect.fn("WorkspaceRepository.make")(function* () {
     Effect.mapError(failure("Failed to find workspace")),
   );
 
+  const findByBinding = Effect.fn("WorkspaceRepository.findByBinding")(
+    function* (binding: Workspace.WorkspaceBinding) {
+      const row = yield* selectByBinding(binding);
+      if (Option.isNone(row)) {
+        return Option.none<Workspace.Workspace>();
+      }
+      return Option.some(yield* decodeWorkspace(row.value));
+    },
+    Effect.mapError(failure("Failed to find workspace")),
+  );
+
   const changeDefaultCwd = Effect.fn("WorkspaceRepository.changeDefaultCwd")(
     function* (id: Workspace.WorkspaceId, cwd: typeof AbsolutePath.Type) {
       return yield* decodeWorkspace(yield* updateDefaultCwd({ id, cwd }));
@@ -159,7 +188,7 @@ const make = Effect.fn("WorkspaceRepository.make")(function* () {
     Effect.mapError(failure("Failed to change workspace cwd")),
   );
 
-  return WorkspaceRepository.of({ create, findById, changeDefaultCwd });
+  return WorkspaceRepository.of({ create, findById, findByBinding, changeDefaultCwd });
 });
 
 export const layer = Layer.effect(WorkspaceRepository, make());

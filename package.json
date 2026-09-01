@@ -29,8 +29,7 @@
     "fmt": "biome check --write",
     "lint": "biome check",
     "test": "bun --bun x vitest run",
-    "smoke": "bun --bun x vitest run --config vitest.smoke.config.ts",
-    "smoke:discord": "PICO_SMOKE_DISCORD=1 bun --env-file=.env.smoke node_modules/vitest/vitest.mjs run --config vitest.smoke.config.ts smoke/discord.smoke.ts",
+    "smoke": "bun --env-file=.env.smoke node_modules/vitest/vitest.mjs run --config vitest.smoke.config.ts",
     "daemon": "bun apps/daemon/src/main.ts",
     "vendor:effect": "bun scripts/vendor-effect.ts"
   },

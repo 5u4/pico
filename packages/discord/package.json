@@ -1,0 +1,14 @@
+{
+  "name": "@pico/discord",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./layer": "./src/layer.ts"
+  },
+  "dependencies": {
+    "@pico/config": "workspace:*",
+    "@pico/contract": "workspace:*",
+    "discordeno": "catalog:",
+    "effect": "catalog:"
+  }
+}

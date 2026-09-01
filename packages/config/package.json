@@ -3,7 +3,8 @@
   "private": true,
   "type": "module",
   "exports": {
-    "./root": "./src/root.ts"
+    "./root": "./src/root.ts",
+    "./config": "./src/config.ts"
   },
   "dependencies": {
     "@pico/contract": "workspace:*",

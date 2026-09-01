@@ -1,5 +1,6 @@
 import * as BunRuntime from "@effect/platform-bun/BunRuntime";
 import * as BunServices from "@effect/platform-bun/BunServices";
+import * as Config from "@pico/config/config";
 import * as ConfigRoot from "@pico/config/root";
 import { PicoRoot } from "@pico/contract/config";
 import * as LoggingLayer from "@pico/logging/layer";
@@ -35,10 +36,14 @@ const main = Effect.gen(function* () {
   const root = yield* selectRoot();
   const daemon = Layer.unwrap(
     ConfigRoot.open(root).pipe(
-      Effect.map((paths) =>
-        layer(paths).pipe(
-          Layer.tap(() => Effect.logInfo(`pico.daemon.ready root=${paths.root}`)),
-          Layer.provide(LoggingLayer.layer(paths.logsDir)),
+      Effect.flatMap((paths) =>
+        Config.load(paths).pipe(
+          Effect.map((config) =>
+            layer(paths, config).pipe(
+              Layer.tap(() => Effect.logInfo(`pico.daemon.ready root=${paths.root}`)),
+              Layer.provide(LoggingLayer.layer(paths.logsDir)),
+            ),
+          ),
         ),
       ),
     ),
