@@ -13,7 +13,6 @@ import type * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 
 export interface SessionHandle {
-  readonly sendUserMessage: (prompt: AgentMessage.AgentPrompt) => Promise<void>;
   readonly settleInFlightMessagePersistence: () => Promise<void>;
   readonly abort: (options?: {
     readonly goalReason?: "interrupted" | "internal";
@@ -25,6 +24,7 @@ export interface SessionHandle {
 
 export interface OpenedSession {
   readonly session: SessionHandle;
+  readonly sendPrompt: (prompt: AgentMessage.AgentPrompt) => Promise<void>;
   readonly unsubscribe: () => void;
 }
 
@@ -64,6 +64,7 @@ type LiveLifecycle = OpenLifecycle | ClosingLifecycle | ClosedLifecycle;
 
 interface LiveEntry {
   readonly session: SessionHandle;
+  readonly sendPrompt: (prompt: AgentMessage.AgentPrompt) => Promise<void>;
   readonly events: Queue.Queue<AgentEvent.AgentEvent, Cause.Done>;
   readonly forwarder: Fiber.Fiber<void>;
   readonly lifecycle: MutableRef.MutableRef<LiveLifecycle>;
@@ -130,6 +131,7 @@ const acquireEntry = Effect.fn("SessionPool.acquireEntry")(function* (
 
   return {
     session: opened.session,
+    sendPrompt: opened.sendPrompt,
     events,
     forwarder,
     lifecycle: MutableRef.make<LiveLifecycle>({
@@ -190,7 +192,7 @@ export const makeSessionPool = Effect.fn("SessionPool.make")(function* (
     yield* Effect.scoped(
       Effect.gen(function* () {
         const entry = yield* retain(sessions, chatId);
-        yield* boundary("Failed to send OMP prompt", () => entry.session.sendUserMessage(prompt));
+        yield* boundary("Failed to send OMP prompt", () => entry.sendPrompt(prompt));
       }),
     );
   });

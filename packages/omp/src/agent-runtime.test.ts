@@ -5,6 +5,7 @@ import * as OmpSessionLoader from "@oh-my-pi/pi-coding-agent/session/session-loa
 import * as OmpSessionManager from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import * as Agent from "@pico/contract/agent-message";
 import * as Chat from "@pico/contract/chat-model";
+import { AgentError } from "@pico/contract/errors";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -50,12 +51,6 @@ describe("AgentRuntime", () => {
             yield* Deferred.await(allowOpen);
             return {
               session: {
-                sendUserMessage: (value) => {
-                  if (value !== "acquire") {
-                    emit({ type: "notice", level: "info", message: value });
-                  }
-                  return Promise.resolve();
-                },
                 settleInFlightMessagePersistence: () => Promise.resolve(),
                 abort: () => Promise.resolve(),
                 beginDispose: () => {
@@ -65,6 +60,12 @@ describe("AgentRuntime", () => {
                   lifecycle.push("dispose");
                   return Promise.resolve();
                 },
+              },
+              sendPrompt: (value) => {
+                if (value !== "acquire") {
+                  emit({ type: "notice", level: "info", message: value });
+                }
+                return Promise.resolve();
               },
               unsubscribe: () => {
                 lifecycle.push("unsubscribe");
@@ -139,5 +140,32 @@ describe("AgentRuntime", () => {
         (manager) => Effect.promise(() => manager.close()),
       );
     }).pipe(Effect.provide(platformLayer)),
+  );
+
+  it.effect("maps prompt sender rejection at the pool boundary", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const factory: SessionFactory = {
+          open: () =>
+            Effect.succeed({
+              session: {
+                settleInFlightMessagePersistence: () => Promise.resolve(),
+                abort: () => Promise.resolve(),
+                beginDispose: () => {},
+                dispose: () => Promise.resolve(),
+              },
+              sendPrompt: () => Promise.reject(new Error("sender rejected")),
+              unsubscribe: () => {},
+            }),
+        };
+        const pool = yield* makeSessionPool({
+          factory,
+          loadTranscript: () => Effect.succeed([]),
+        });
+        const failure = yield* pool.send(chatId, prompt("reject")).pipe(Effect.flip);
+        assert.instanceOf(failure, AgentError);
+        assert.strictEqual(failure.message, "Failed to send OMP prompt");
+      }),
+    ),
   );
 });

@@ -17,6 +17,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import { normalizeAgentEvent, normalizeTranscript } from "./agent-event.ts";
+import { makeOmpPromptSender } from "./omp-prompt-sender.ts";
 import { makeSessionPool, type OpenedSession, type SessionFactory } from "./session-pool.ts";
 
 export const make = Effect.fn("AgentRuntime.make")(function* (sessionsDir: AbsolutePath) {
@@ -153,6 +154,7 @@ const makeFactory = (
 
     const opened: OpenedSession = {
       session: created.session,
+      sendPrompt: makeOmpPromptSender(created.session),
       unsubscribe,
     };
     return opened;
