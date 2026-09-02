@@ -1,6 +1,8 @@
 import { Database } from "bun:sqlite";
 import * as BunServices from "@effect/platform-bun/BunServices";
 import { describe, it } from "@effect/vitest";
+import { PicoRoot } from "@pico/contract/config";
+import * as Daemon from "@pico/daemon";
 import { createBot, type RecursivePartial, type TransformersDesiredProperties } from "discordeno";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -40,11 +42,8 @@ const smoke = Effect.fn("Discord.smoke")(function* () {
   const secretsDir = path.join(canonicalRoot, "secrets");
   const tokenFile = path.join(secretsDir, "discord_bot_token");
   const storeFile = path.join(canonicalRoot, "store.db");
-  const mainFile = path.join(process.cwd(), "apps/daemon/src/main.ts");
-  const readiness = `pico.daemon.ready root=${canonicalRoot}`;
   const firstMarker = "PICO_DISCORD_SMOKE_FIRST";
   const secondMarker = "PICO_DISCORD_SMOKE_SECOND";
-  let output = "";
   let sourceMessageId: bigint | undefined;
   let threadId: bigint | undefined;
 
@@ -64,148 +63,110 @@ const smoke = Effect.fn("Discord.smoke")(function* () {
   } satisfies RecursivePartial<TransformersDesiredProperties>;
   const sender = createBot({ token: senderToken, desiredProperties });
   const pico = createBot({ token: picoToken, desiredProperties });
-  const diagnostics = () => `\nDaemon output:\n${output || "<empty>"}`;
 
-  yield* Effect.acquireUseRelease(
-    Effect.sync(() => {
-      const handle = Bun.spawn([process.execPath, mainFile, canonicalRoot], {
-        stdout: "pipe",
-        stderr: "inherit",
-      });
-      const reader = handle.stdout.getReader();
-      const decoder = new TextDecoder();
-      let finished = false;
-      const done = (async () => {
-        try {
-          while (true) {
-            const chunk = await reader.read();
-            if (chunk.done) return;
-            output += decoder.decode(chunk.value, { stream: true });
-          }
-        } finally {
-          finished = true;
-          reader.releaseLock();
-        }
-      })();
-      const closeOutput = async () => {
-        if (!finished) await reader.cancel();
-        await done;
-      };
-      return { handle, closeOutput };
+  yield* Effect.scoped(
+    Effect.gen(function* () {
+      yield* Daemon.open(PicoRoot.make(canonicalRoot));
+
+      yield* Effect.acquireUseRelease(
+        Effect.void,
+        () =>
+          Effect.gen(function* () {
+            const source = yield* Effect.tryPromise(() =>
+              sender.helpers.sendMessage(channelId, {
+                content: `Use the read tool to read emoji.txt, then reply with exactly ${firstMarker}.`,
+                allowedMentions: { parse: [], repliedUser: false },
+              }),
+            );
+            sourceMessageId = source.id;
+            threadId = source.id;
+
+            yield* Effect.tryPromise(() =>
+              poll("Pico Discord thread", async () => {
+                const channel = await sender.helpers.getChannel(source.id);
+                return channel.id === source.id ? channel : undefined;
+              }),
+            );
+            yield* Effect.tryPromise(() =>
+              poll("Pico Discord read tool emoji", async () => {
+                const messages = (
+                  await sender.helpers.getMessages(source.id, { limit: 100 })
+                ).filter((message) => message.author.id === pico.id);
+                return messages.find((message) =>
+                  /^📖 Read (?:.*\/)?emoji\.txt$/u.test(message.content),
+                );
+              }),
+            );
+
+            const firstReply = yield* Effect.tryPromise(() =>
+              poll("first Pico reply", async () => {
+                const messages = await sender.helpers.getMessages(source.id, { limit: 100 });
+                return messages.find(
+                  (message) =>
+                    message.author.id === pico.id && message.content.includes(firstMarker),
+                );
+              }),
+            );
+
+            yield* Effect.tryPromise(() =>
+              sender.helpers.sendMessage(source.id, {
+                content: `Do not use tools. Reply with exactly ${secondMarker}.`,
+                allowedMentions: { parse: [], repliedUser: false },
+              }),
+            );
+
+            yield* Effect.tryPromise(() =>
+              poll("second Pico reply", async () => {
+                const messages = await sender.helpers.getMessages(source.id, { limit: 100 });
+                return messages.find(
+                  (message) =>
+                    message.id !== firstReply.id &&
+                    message.author.id === pico.id &&
+                    message.content.includes(secondMarker),
+                );
+              }),
+            );
+
+            yield* Effect.sync(() => {
+              const database = new Database(storeFile, { readonly: true });
+              try {
+                const workspaces = database
+                  .query<{ count: number }, []>("SELECT count(*) AS count FROM workspaces")
+                  .get();
+                const chats = database
+                  .query<{ count: number }, []>("SELECT count(*) AS count FROM chats")
+                  .get();
+                assert.strictEqual(workspaces?.count, 1);
+                assert.strictEqual(chats?.count, 1);
+              } finally {
+                database.close();
+              }
+            });
+          }).pipe(
+            Effect.mapError(
+              (error) => new Error(`Discord smoke failed: ${String(error)}`, { cause: error }),
+            ),
+          ),
+        () =>
+          Effect.gen(function* () {
+            const currentThreadId = threadId;
+            const removeThread =
+              currentThreadId === undefined
+                ? Effect.void
+                : Effect.tryPromise(() => pico.helpers.deleteChannel(currentThreadId));
+            const currentSourceMessageId = sourceMessageId;
+            const removeSource =
+              currentSourceMessageId === undefined
+                ? Effect.void
+                : Effect.tryPromise(() =>
+                    sender.helpers.deleteMessage(channelId, currentSourceMessageId),
+                  );
+
+            yield* removeThread.pipe(Effect.ignore);
+            yield* removeSource.pipe(Effect.ignore);
+          }),
+      );
     }),
-    (child) =>
-      Effect.gen(function* () {
-        yield* Effect.tryPromise(() =>
-          poll("daemon readiness", async () => {
-            if (output.includes(readiness)) return true;
-            if (child.handle.exitCode !== null) {
-              throw new Error(`Daemon exited with code ${child.handle.exitCode}${diagnostics()}`);
-            }
-            return undefined;
-          }),
-        );
-
-        const source = yield* Effect.tryPromise(() =>
-          sender.helpers.sendMessage(channelId, {
-            content: `Use the read tool to read emoji.txt, then reply with exactly ${firstMarker}.`,
-            allowedMentions: { parse: [], repliedUser: false },
-          }),
-        );
-        sourceMessageId = source.id;
-        threadId = source.id;
-
-        yield* Effect.tryPromise(() =>
-          poll("Pico Discord thread", async () => {
-            const channel = await sender.helpers.getChannel(source.id);
-            return channel.id === source.id ? channel : undefined;
-          }),
-        );
-        yield* Effect.tryPromise(() =>
-          poll("Pico Discord read tool emoji", async () => {
-            const messages = (await sender.helpers.getMessages(source.id, { limit: 100 })).filter(
-              (message) => message.author.id === pico.id,
-            );
-            return messages.find((message) =>
-              /^📖 Read (?:.*\/)?emoji\.txt$/u.test(message.content),
-            );
-          }),
-        );
-
-        const firstReply = yield* Effect.tryPromise(() =>
-          poll("first Pico reply", async () => {
-            const messages = await sender.helpers.getMessages(source.id, { limit: 100 });
-            return messages.find(
-              (message) => message.author.id === pico.id && message.content.includes(firstMarker),
-            );
-          }),
-        );
-
-        yield* Effect.tryPromise(() =>
-          sender.helpers.sendMessage(source.id, {
-            content: `Do not use tools. Reply with exactly ${secondMarker}.`,
-            allowedMentions: { parse: [], repliedUser: false },
-          }),
-        );
-
-        yield* Effect.tryPromise(() =>
-          poll("second Pico reply", async () => {
-            const messages = await sender.helpers.getMessages(source.id, { limit: 100 });
-            return messages.find(
-              (message) =>
-                message.id !== firstReply.id &&
-                message.author.id === pico.id &&
-                message.content.includes(secondMarker),
-            );
-          }),
-        );
-
-        yield* Effect.sync(() => {
-          const database = new Database(storeFile, { readonly: true });
-          try {
-            const workspaces = database
-              .query<{ count: number }, []>("SELECT count(*) AS count FROM workspaces")
-              .get();
-            const chats = database
-              .query<{ count: number }, []>("SELECT count(*) AS count FROM chats")
-              .get();
-            assert.strictEqual(workspaces?.count, 1);
-            assert.strictEqual(chats?.count, 1);
-          } finally {
-            database.close();
-          }
-        });
-      }).pipe(
-        Effect.mapError(
-          (error) =>
-            new Error(`Discord smoke failed: ${String(error)}${diagnostics()}`, {
-              cause: error,
-            }),
-        ),
-      ),
-    (child) =>
-      Effect.gen(function* () {
-        const currentThreadId = threadId;
-        const removeThread =
-          currentThreadId === undefined
-            ? Effect.void
-            : Effect.tryPromise(() => pico.helpers.deleteChannel(currentThreadId));
-        const currentSourceMessageId = sourceMessageId;
-        const removeSource =
-          currentSourceMessageId === undefined
-            ? Effect.void
-            : Effect.tryPromise(() =>
-                sender.helpers.deleteMessage(channelId, currentSourceMessageId),
-              );
-        const stopDaemon = Effect.gen(function* () {
-          if (child.handle.exitCode === null) child.handle.kill("SIGTERM");
-          yield* Effect.promise(() => child.handle.exited);
-          yield* Effect.tryPromise(() => child.closeOutput()).pipe(Effect.timeout("5 seconds"));
-        });
-
-        yield* removeThread.pipe(Effect.ignore);
-        yield* removeSource.pipe(Effect.ignore);
-        yield* stopDaemon;
-      }),
   );
 });
 

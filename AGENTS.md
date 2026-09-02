@@ -38,6 +38,10 @@ fixture.
 
 - `packages/contract` — cross-package schemas, branded values, errors, interfaces, and service tags;
   never implementations.
+- `packages/daemon` — reusable scoped daemon composition. It opens one pico root and owns startup,
+  readiness, and cleanup. It never reads process arguments or runs a Bun main.
+- `packages/cli` — the sole process entry. Effect v4 CLI parses commands and runs the daemon in the
+  foreground.
 - `repos/` — vendored read-only reference. Never edit or import from it.
 
 ## Effect
@@ -218,9 +222,8 @@ packages/
 ├── frontend-state/    Effect Atom state、action、selector
 ├── config/            pico root、config.toml、secret reference、root lock
 ├── logging/           Effect logger、console/file sink、rotation、retention
-└── discord/           Discordeno adapter，MVP 后实现
-
-apps/
-├── daemon/            组装 Layer，启动进程，处理 shutdown
-└── web/               组装 browser client，React route 和 component
+├── discord/           Discordeno adapter，MVP 后实现
+├── daemon/            scoped daemon 组装、启动、readiness 和 cleanup
+├── cli/               Effect v4 CLI 和 Bun process entry
+└── web/               browser client、React route 和 component
 ```

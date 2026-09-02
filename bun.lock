@@ -13,6 +13,8 @@
         "@effect/vitest": "catalog:",
         "@oh-my-pi/pi-ai": "catalog:",
         "@oh-my-pi/pi-coding-agent": "catalog:",
+        "@pico/contract": "workspace:*",
+        "@pico/daemon": "workspace:*",
         "@types/bun": "catalog:",
         "discordeno": "catalog:",
         "effect": "catalog:",
@@ -20,22 +22,6 @@
         "starlight-theme-next": "^0.4.0",
         "typescript": "catalog:",
         "vitest": "catalog:",
-      },
-    },
-    "apps/daemon": {
-      "name": "@pico/daemon",
-      "dependencies": {
-        "@effect/platform-bun": "catalog:",
-        "@pico/application": "workspace:*",
-        "@pico/config": "workspace:*",
-        "@pico/contract": "workspace:*",
-        "@pico/discord": "workspace:*",
-        "@pico/event-router": "workspace:*",
-        "@pico/git": "workspace:*",
-        "@pico/logging": "workspace:*",
-        "@pico/omp": "workspace:*",
-        "@pico/persistence": "workspace:*",
-        "effect": "catalog:",
       },
     },
     "packages/application": {
@@ -48,6 +34,15 @@
         "@effect/platform-bun": "catalog:",
         "@effect/vitest": "catalog:",
         "@pico/persistence": "workspace:*",
+      },
+    },
+    "packages/cli": {
+      "name": "@pico/cli",
+      "dependencies": {
+        "@effect/platform-bun": "catalog:",
+        "@pico/contract": "workspace:*",
+        "@pico/daemon": "workspace:*",
+        "effect": "catalog:",
       },
     },
     "packages/config": {
@@ -64,6 +59,21 @@
     "packages/contract": {
       "name": "@pico/contract",
       "dependencies": {
+        "effect": "catalog:",
+      },
+    },
+    "packages/daemon": {
+      "name": "@pico/daemon",
+      "dependencies": {
+        "@pico/application": "workspace:*",
+        "@pico/config": "workspace:*",
+        "@pico/contract": "workspace:*",
+        "@pico/discord": "workspace:*",
+        "@pico/event-router": "workspace:*",
+        "@pico/git": "workspace:*",
+        "@pico/logging": "workspace:*",
+        "@pico/omp": "workspace:*",
+        "@pico/persistence": "workspace:*",
         "effect": "catalog:",
       },
     },
@@ -520,11 +530,13 @@
 
     "@pico/application": ["@pico/application@workspace:packages/application"],
 
+    "@pico/cli": ["@pico/cli@workspace:packages/cli"],
+
     "@pico/config": ["@pico/config@workspace:packages/config"],
 
     "@pico/contract": ["@pico/contract@workspace:packages/contract"],
 
-    "@pico/daemon": ["@pico/daemon@workspace:apps/daemon"],
+    "@pico/daemon": ["@pico/daemon@workspace:packages/daemon"],
 
     "@pico/discord": ["@pico/discord@workspace:packages/discord"],
 

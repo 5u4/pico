@@ -4,8 +4,7 @@
   "type": "module",
   "workspaces": {
     "packages": [
-      "packages/*",
-      "apps/*"
+      "packages/*"
     ],
     "catalog": {
       "@biomejs/biome": "2.5.8",
@@ -30,7 +29,7 @@
     "lint": "biome check",
     "test": "bun --bun x vitest run",
     "smoke": "bun --env-file=.env.smoke node_modules/vitest/vitest.mjs run --config vitest.smoke.config.ts",
-    "daemon": "bun apps/daemon/src/main.ts",
+    "pico": "bun packages/cli/src/main.ts",
     "vendor:effect": "bun scripts/vendor-effect.ts"
   },
   "devDependencies": {
@@ -42,6 +41,8 @@
     "@effect/vitest": "catalog:",
     "effect": "catalog:",
     "@oh-my-pi/pi-coding-agent": "catalog:",
+    "@pico/contract": "workspace:*",
+    "@pico/daemon": "workspace:*",
     "@oh-my-pi/pi-ai": "catalog:",
     "@types/bun": "catalog:",
     "discordeno": "catalog:",

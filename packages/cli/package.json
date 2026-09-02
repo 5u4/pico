@@ -1,0 +1,11 @@
+{
+  "name": "@pico/cli",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@effect/platform-bun": "catalog:",
+    "@pico/contract": "workspace:*",
+    "@pico/daemon": "workspace:*",
+    "effect": "catalog:"
+  }
+}

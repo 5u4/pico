@@ -2,8 +2,10 @@
   "name": "@pico/daemon",
   "private": true,
   "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
   "dependencies": {
-    "@effect/platform-bun": "catalog:",
     "@pico/application": "workspace:*",
     "@pico/config": "workspace:*",
     "@pico/contract": "workspace:*",
