@@ -1,10 +1,11 @@
 import { Database } from "bun:sqlite";
 import * as BunServices from "@effect/platform-bun/BunServices";
-import { assert, describe, it } from "@effect/vitest";
+import { describe, it } from "@effect/vitest";
 import { createBot, type RecursivePartial, type TransformersDesiredProperties } from "discordeno";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
+import { assert } from "vitest";
 
 const required = (name: string) => {
   const value = Bun.env[name]?.trim();
@@ -50,6 +51,7 @@ const smoke = Effect.fn("Discord.smoke")(function* () {
   yield* fileSystem.makeDirectory(workspaceCwd, { recursive: true });
   yield* fileSystem.makeDirectory(secretsDir, { recursive: true, mode: 0o700 });
   yield* fileSystem.writeFileString(tokenFile, picoToken, { mode: 0o600 });
+  yield* fileSystem.writeFileString(path.join(workspaceCwd, "emoji.txt"), "emoji");
   yield* fileSystem.writeFileString(
     path.join(canonicalRoot, "config.toml"),
     `[discord]\nallowed_guild = [${JSON.stringify(guildId)}]\ndefault_cwd = ${JSON.stringify(workspaceCwd)}\n`,
@@ -105,7 +107,7 @@ const smoke = Effect.fn("Discord.smoke")(function* () {
 
         const source = yield* Effect.tryPromise(() =>
           sender.helpers.sendMessage(channelId, {
-            content: `Do not use tools. Reply with exactly ${firstMarker}.`,
+            content: `Use the read tool to read emoji.txt, then reply with exactly ${firstMarker}.`,
             allowedMentions: { parse: [], repliedUser: false },
           }),
         );
@@ -116,6 +118,16 @@ const smoke = Effect.fn("Discord.smoke")(function* () {
           poll("Pico Discord thread", async () => {
             const channel = await sender.helpers.getChannel(source.id);
             return channel.id === source.id ? channel : undefined;
+          }),
+        );
+        yield* Effect.tryPromise(() =>
+          poll("Pico Discord read tool emoji", async () => {
+            const messages = (await sender.helpers.getMessages(source.id, { limit: 100 })).filter(
+              (message) => message.author.id === pico.id,
+            );
+            return messages.find((message) =>
+              /^📖 Read (?:.*\/)?emoji\.txt$/u.test(message.content),
+            );
           }),
         );
 

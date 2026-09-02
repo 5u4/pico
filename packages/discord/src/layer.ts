@@ -1,10 +1,9 @@
 import type { DiscordConfig } from "@pico/config/config";
-import type { AgentEventEnvelope } from "@pico/contract/agent-event";
 import { Application } from "@pico/contract/application";
 import type * as Chat from "@pico/contract/chat-model";
 import { EventRouter } from "@pico/contract/event-router";
 import type * as Workspace from "@pico/contract/workspace-model";
-import { ChannelTypes, createBot, GatewayIntents } from "discordeno";
+import { ChannelTypes, createBot, GatewayIntents, MessageFlags } from "discordeno";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as FiberSet from "effect/FiberSet";
@@ -12,20 +11,14 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
+import * as Scope from "effect/Scope";
+import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
+import * as DiscordOutput from "./discord-output.ts";
 
 class DiscordError extends Schema.TaggedError<DiscordError>()("DiscordError", {
   message: Schema.String,
 }) {}
-
-interface RenderedChunk {
-  id: bigint;
-  content: string;
-}
-interface RenderState {
-  chatId: Chat.ChatId;
-  message: RenderedChunk | undefined;
-}
 
 const discordError = (message: string, cause: unknown) =>
   new DiscordError({
@@ -55,6 +48,7 @@ const start = Effect.fn("Discord.start")(function* (config: DiscordConfig) {
   const allowedGuildIds = new Set(config.allowedGuildIds);
   const workspaceIds = new Map<bigint, Workspace.WorkspaceId>();
   const chatIds = new Map<bigint, Chat.ChatId>();
+  const channelLocks = new Map<bigint, Semaphore.Semaphore>();
   const allowedMentions = { parse: [], repliedUser: false };
 
   const bot = yield* Effect.try({
@@ -78,6 +72,7 @@ const start = Effect.fn("Discord.start")(function* (config: DiscordConfig) {
             guildId: true,
             id: true,
             webhookId: true,
+            attachments: true,
           },
           user: {
             id: true,
@@ -95,76 +90,37 @@ const start = Effect.fn("Discord.start")(function* (config: DiscordConfig) {
   };
 
   const route = yield* eventRouter.open((envelope) => findThreadId(envelope.chatId) !== undefined);
-  let renderState: RenderState | undefined;
-
-  const appendText = Effect.fn("Discord.render.appendText")(function* (
-    threadId: bigint,
-    state: RenderState,
-    text: string,
-  ) {
-    let remaining = text;
-    const last = state.message;
-
-    if (last !== undefined && last.content.length < 2_000 && remaining.length > 0) {
-      const appended = remaining.slice(0, 2_000 - last.content.length);
-      const content = last.content + appended;
-      yield* promiseBoundary("Failed to edit Discord message", () =>
-        bot.helpers.editMessage(threadId, last.id, { content, allowedMentions }),
-      );
-      last.content = content;
-      remaining = remaining.slice(appended.length);
-    }
-
-    while (remaining.length > 0) {
-      const content = remaining.slice(0, 2_000);
-      const message = yield* promiseBoundary("Failed to send Discord message", () =>
-        bot.helpers.sendMessage(threadId, { content, allowedMentions }),
-      );
-      state.message = { id: message.id, content };
-      remaining = remaining.slice(content.length);
-    }
-  });
-
-  const render = Effect.fn("Discord.render")(function* (envelope: AgentEventEnvelope) {
-    const threadId = findThreadId(envelope.chatId);
-    if (threadId === undefined) return;
-
-    if (envelope.event.type === "run-started") {
-      renderState = { chatId: envelope.chatId, message: undefined };
-      return;
-    }
-
-    if (envelope.event.type === "text-delta") {
-      if (renderState === undefined || renderState.chatId !== envelope.chatId) {
-        renderState = { chatId: envelope.chatId, message: undefined };
-      }
-      yield* appendText(threadId, renderState, envelope.event.text);
-      return;
-    }
-
-    if (envelope.event.type !== "message-settled" || envelope.event.message.role !== "assistant") {
-      return;
-    }
-
-    if (renderState === undefined || renderState.chatId !== envelope.chatId) {
-      renderState = { chatId: envelope.chatId, message: undefined };
-    }
-    if (renderState.message === undefined) {
-      const text = envelope.event.message.content
-        .filter((content) => content.type === "text")
-        .map((content) => content.text)
-        .join("");
-      yield* appendText(threadId, renderState, text);
-    }
-    renderState = undefined;
-  });
+  const scope = yield* Scope.Scope;
+  const dispatch = DiscordOutput.make(
+    {
+      send: (threadId, message) =>
+        promiseBoundary("Failed to send Discord message", () =>
+          bot.helpers.sendMessage(threadId, {
+            content: message.content,
+            allowedMentions,
+            ...(message.silent ? { flags: MessageFlags.SuppressNotifications } : {}),
+          }),
+        ).pipe(Effect.map((sent) => sent.id)),
+      edit: (threadId, messageId, content) =>
+        promiseBoundary("Failed to edit Discord message", () =>
+          bot.helpers.editMessage(threadId, messageId, { content, allowedMentions }),
+        ).pipe(Effect.asVoid),
+      triggerTyping: (threadId) =>
+        promiseBoundary("Failed to trigger Discord typing indicator", () =>
+          bot.helpers.triggerTypingIndicator(threadId),
+        ),
+    },
+    scope,
+  );
 
   yield* route.events.pipe(
-    Stream.runForEach((envelope) =>
-      render(envelope).pipe(
+    Stream.runForEach((envelope) => {
+      const threadId = findThreadId(envelope.chatId);
+      if (threadId === undefined) return Effect.void;
+      return dispatch(threadId, envelope).pipe(
         Effect.catchCause((cause) => Effect.logError("Discord output failed", Cause.pretty(cause))),
-      ),
-    ),
+      );
+    }),
     Effect.forkScoped({ startImmediately: true }),
   );
 
@@ -186,6 +142,18 @@ const start = Effect.fn("Discord.start")(function* (config: DiscordConfig) {
       message.webhookId !== undefined ||
       message.author.id === bot.id
     ) {
+      return;
+    }
+    const rejection =
+      message.attachments !== undefined && message.attachments.length > 0
+        ? "Attachments are not supported yet. Send the request as text."
+        : message.content.trim().length === 0
+          ? "Send a text message to start or continue a chat."
+          : undefined;
+    if (rejection !== undefined) {
+      yield* promiseBoundary("Failed to reject unsupported Discord message", () =>
+        bot.helpers.sendMessage(message.channelId, { content: rejection, allowedMentions }),
+      );
       return;
     }
 
@@ -246,10 +214,16 @@ const start = Effect.fn("Discord.start")(function* (config: DiscordConfig) {
   });
 
   bot.events.messageCreate = (message) => {
+    const lock = channelLocks.get(message.channelId) ?? Semaphore.makeUnsafe(1);
+    channelLocks.set(message.channelId, lock);
     run(
-      handleMessage(message).pipe(
-        Effect.catchCause((cause) => Effect.logError("Discord input failed", Cause.pretty(cause))),
-      ),
+      lock
+        .withPermit(handleMessage(message))
+        .pipe(
+          Effect.catchCause((cause) =>
+            Effect.logError("Discord input failed", Cause.pretty(cause)),
+          ),
+        ),
     );
   };
 
