@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "exports": {
-    "./layer": "./src/layer.ts"
+    "./layer": "./src/application.ts"
   },
   "dependencies": {
     "@pico/contract": "workspace:*",

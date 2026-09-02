@@ -19,6 +19,54 @@ import * as Path from "effect/Path";
 import { normalizeAgentEvent, normalizeTranscript } from "./agent-event.ts";
 import { makeSessionPool, type OpenedSession, type SessionFactory } from "./session-pool.ts";
 
+export const make = Effect.fn("AgentRuntime.make")(function* (sessionsDir: AbsolutePath) {
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const chats = yield* ChatRepository;
+
+  yield* fileSystem
+    .makeDirectory(sessionsDir, { recursive: true, mode: 0o700 })
+    .pipe(Effect.mapError((error) => agentError("Failed to create OMP sessions directory", error)));
+
+  const authStorage = yield* Effect.acquireRelease(
+    promiseBoundary("Failed to initialize OMP authentication", OmpSdk.discoverAuthStorage),
+    (storage) =>
+      ignoreCleanupFailure(
+        "Failed to close OMP authentication",
+        Effect.sync(() => storage.close()),
+      ),
+  );
+  const modelRegistry = yield* syncBoundary(
+    "Failed to initialize OMP model registry",
+    () => new OmpModelRegistry.ModelRegistry(authStorage),
+  );
+  yield* promiseBoundary("Failed to load OMP model registry", () => modelRegistry.refresh());
+
+  const loadTranscript = Effect.fn("OmpSession.loadTranscript")(function* (chatId: Chat.ChatId) {
+    const sessionFile = path.join(sessionsDir, `${chatId}.jsonl`);
+    const messages = yield* promiseBoundary("Failed to read OMP transcript", () =>
+      OmpSessionLoader.loadSessionMessagesReadOnly(sessionFile),
+    );
+    return yield* syncBoundary("Failed to normalize OMP transcript", () =>
+      normalizeTranscript(messages),
+    );
+  });
+
+  const pool = yield* makeSessionPool({
+    factory: makeFactory(sessionsDir, path, chats, authStorage, modelRegistry),
+    loadTranscript,
+  });
+
+  return AgentRuntime.of({
+    events: pool.events,
+    transcript: pool.transcript,
+    send: pool.send,
+    abort: pool.abort,
+  });
+});
+
+export const layer = (sessionsDir: AbsolutePath) => Layer.effect(AgentRuntime, make(sessionsDir));
+
 const agentError = (message: string, cause: unknown) =>
   new AgentError({
     message: cause instanceof Error ? `${message}: ${cause.message}` : message,
@@ -110,51 +158,3 @@ const makeFactory = (
     return opened;
   }),
 });
-
-export const make = Effect.fn("AgentRuntime.make")(function* (sessionsDir: AbsolutePath) {
-  const fileSystem = yield* FileSystem.FileSystem;
-  const path = yield* Path.Path;
-  const chats = yield* ChatRepository;
-
-  yield* fileSystem
-    .makeDirectory(sessionsDir, { recursive: true, mode: 0o700 })
-    .pipe(Effect.mapError((error) => agentError("Failed to create OMP sessions directory", error)));
-
-  const authStorage = yield* Effect.acquireRelease(
-    promiseBoundary("Failed to initialize OMP authentication", OmpSdk.discoverAuthStorage),
-    (storage) =>
-      ignoreCleanupFailure(
-        "Failed to close OMP authentication",
-        Effect.sync(() => storage.close()),
-      ),
-  );
-  const modelRegistry = yield* syncBoundary(
-    "Failed to initialize OMP model registry",
-    () => new OmpModelRegistry.ModelRegistry(authStorage),
-  );
-  yield* promiseBoundary("Failed to load OMP model registry", () => modelRegistry.refresh());
-
-  const loadTranscript = Effect.fn("OmpSession.loadTranscript")(function* (chatId: Chat.ChatId) {
-    const sessionFile = path.join(sessionsDir, `${chatId}.jsonl`);
-    const messages = yield* promiseBoundary("Failed to read OMP transcript", () =>
-      OmpSessionLoader.loadSessionMessagesReadOnly(sessionFile),
-    );
-    return yield* syncBoundary("Failed to normalize OMP transcript", () =>
-      normalizeTranscript(messages),
-    );
-  });
-
-  const pool = yield* makeSessionPool({
-    factory: makeFactory(sessionsDir, path, chats, authStorage, modelRegistry),
-    loadTranscript,
-  });
-
-  return AgentRuntime.of({
-    events: pool.events,
-    transcript: pool.transcript,
-    send: pool.send,
-    abort: pool.abort,
-  });
-});
-
-export const layer = (sessionsDir: AbsolutePath) => Layer.effect(AgentRuntime, make(sessionsDir));

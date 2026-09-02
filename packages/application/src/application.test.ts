@@ -18,7 +18,7 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
-import * as ApplicationLayer from "./layer.ts";
+import * as ApplicationLayer from "./application.ts";
 
 const platformLayer = Layer.merge(BunFileSystem.layer, BunPath.layer);
 const uuidV7 = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
