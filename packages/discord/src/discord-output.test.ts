@@ -49,7 +49,10 @@ describe("Discord output", () => {
     );
 
     assert.deepStrictEqual(rendered[0], { content: "🧠 checking", silent: true });
-    assert.deepStrictEqual(rendered[1], { content: "- **x**\n  - **B:** y", silent: false });
+    assert.deepStrictEqual(rendered[1], {
+      content: "- **Row 1**\n  - **A:** x\n  - **B:** y",
+      silent: false,
+    });
     assert.isTrue(
       renderAssistant(completed("tool-use", [{ type: "text", text: "working" }]))[0]?.silent,
     );
@@ -65,6 +68,19 @@ describe("Discord output", () => {
       completed("stop", [{ type: "thinking", text: "x".repeat(1_000) }]),
     )[0];
     assert.strictEqual(Array.from(thinking?.content ?? "").length, 800);
+  });
+
+  it("does not render absent, empty, or whitespace-only thinking", () => {
+    assert.deepStrictEqual(renderAssistant(completed("stop", [])), []);
+    assert.deepStrictEqual(
+      renderAssistant(
+        completed("stop", [
+          { type: "thinking", text: "" },
+          { type: "thinking", text: " \n\t" },
+        ]),
+      ),
+      [],
+    );
   });
 
   it.effect("isolates tool correlation, renews typing, and claims terminal output once", () =>

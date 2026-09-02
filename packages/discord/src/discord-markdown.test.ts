@@ -25,34 +25,48 @@ const assertLiteral = (content: string) => {
 };
 
 describe("Discord Markdown", () => {
-  it("converts tables to titled nested lists while retaining inline cells", () => {
+  it("preserves ordered header/value pairs, alignment, escaped pipes, and inline Markdown", () => {
     const source = [
       "before __untouched__  ",
       "",
       "| Name | Detail | Link |",
-      "| --- | --- | --- |",
+      "| :--- | :---: | ---: |",
       "| **Ada** | `a\\|b` | [site](https://example.com) |",
       "| | 空 | 😀 |",
       "",
       "after ||untouched||\r\n",
     ].join("\n");
-    const transformed = Markdown.transformTables(source);
 
-    assert.isTrue(transformed.startsWith("before __untouched__  \n\n"));
-    assert.include(transformed, "Ada");
-    assert.include(transformed, "**Detail:** `a|b`");
-    assert.include(transformed, "[site](https://example.com)");
-    assert.include(transformed, "**空**");
-    assert.include(transformed, "**Name:**");
-    assert.include(transformed, "**Link:** 😀");
-    assert.isTrue(transformed.endsWith("\n\nafter ||untouched||\r\n"));
-    assert.notInclude(transformed, "| --- | --- | --- |");
+    assert.strictEqual(
+      Markdown.transformTables(source),
+      [
+        "before __untouched__  ",
+        "",
+        "- **Row 1**",
+        "  - **Name:** **Ada**",
+        "  - **Detail:** `a|b`",
+        "  - **Link:** [site](https://example.com)",
+        "- **Row 2**",
+        "  - **Name:**",
+        "  - **Detail:** 空",
+        "  - **Link:** 😀",
+        "",
+        "after ||untouched||\r\n",
+      ].join("\n"),
+    );
   });
 
-  it("keeps table rows and fields compact", () => {
+  it("keeps row boundaries and labels every value by its header", () => {
     assert.strictEqual(
       Markdown.transformTables("| A | B |\n| --- | --- |\n| x | y |\n| z | w |"),
-      "- **x**\n  - **B:** y\n- **z**\n  - **B:** w",
+      [
+        "- **Row 1**",
+        "  - **A:** x",
+        "  - **B:** y",
+        "- **Row 2**",
+        "  - **A:** z",
+        "  - **B:** w",
+      ].join("\n"),
     );
     assert.strictEqual(
       Markdown.transformTables("| A | B |\n| --- | --- |"),
@@ -60,19 +74,29 @@ describe("Discord Markdown", () => {
     );
   });
 
-  it("uses Row N and Column N fallbacks for empty, ragged, extra, and header-only tables", () => {
-    const emptyRow = Markdown.transformTables("| | H |\n| --- | --- |\n| | |\n| title | | extra |");
-    assert.include(emptyRow, "**Row 1**");
-    assert.include(emptyRow, "**Column 1:**");
-    assert.include(emptyRow, "**H:**");
-    assert.include(emptyRow, "**title**");
-    assert.include(emptyRow, "**Column 3:** extra");
+  it("retains blank, missing, and extra cells in uneven rows", () => {
+    assert.strictEqual(
+      Markdown.transformTables(
+        "| | H |\n| --- | --- |\n| | |\n| title |\n| value | detail | extra |",
+      ),
+      [
+        "- **Row 1**",
+        "  - **Column 1:**",
+        "  - **H:**",
+        "- **Row 2**",
+        "  - **Column 1:** title",
+        "  - **H:**",
+        "- **Row 3**",
+        "  - **Column 1:** value",
+        "  - **H:** detail",
+        "  - **Column 3:** extra",
+      ].join("\n"),
+    );
 
-    const headerOnly = Markdown.transformTables("| A | | A |\n| --- | --- | --- |");
-    assert.include(headerOnly, "**Columns**");
-    assert.include(headerOnly, "**Column 1:** A");
-    assert.include(headerOnly, "**Column 2:**");
-    assert.include(headerOnly, "**Column 3:** A");
+    assert.strictEqual(
+      Markdown.transformTables("| A | | A |\n| --- | --- | --- |"),
+      "- **Columns**\n  - **Column 1:** A\n  - **Column 2:**\n  - **Column 3:** A",
+    );
   });
 
   it("copies every non-table byte exactly across multiple replacements", () => {

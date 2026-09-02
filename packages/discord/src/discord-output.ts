@@ -181,6 +181,7 @@ export const renderAssistant = (
   for (let index = 0; index < message.content.length; index++) {
     const content = message.content[index];
     if (content?.type === "thinking") {
+      if (content.text.trim().length === 0) continue;
       const thinking = Markdown.truncate(`🧠 ${content.text}`, Markdown.THINKING_LIMIT);
       if (thinking !== undefined) rendered.push({ content: thinking, silent: SILENT });
       continue;

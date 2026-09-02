@@ -108,17 +108,18 @@ const rowItem = (
   cells: ReadonlyArray<TableCell>,
   rowNumber: number,
 ): ListItem => {
-  const titleIndex = cells.findIndex(nonEmpty);
-  const titleCell = titleIndex < 0 ? undefined : cells[titleIndex];
-  const title = titleCell?.children ?? [text(`Row ${rowNumber}`)];
-  const titleContent = title.length === 1 && title[0]?.type === "strong" ? title : [strong(title)];
   const width = Math.max(headers.length, cells.length);
   const fields: ListItem[] = [];
   for (let index = 0; index < width; index++) {
-    if (index !== titleIndex) fields.push(field(headers[index], cells[index], index + 1));
+    fields.push(field(headers[index], cells[index], index + 1));
   }
 
-  const item: ListItem = { type: "listItem", spread: false, children: [paragraph(titleContent)] };
+  const item: ListItem = {
+    type: "listItem",
+    spread: false,
+    children: [paragraph([strong([text(`Row ${rowNumber}`)])])],
+  };
+
   if (fields.length > 0) {
     const nested: List = { type: "list", ordered: false, spread: false, children: fields };
     item.children.push(nested);
