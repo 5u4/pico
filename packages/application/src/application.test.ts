@@ -8,9 +8,10 @@ import { AgentSessionStore, type CreateAgentSession } from "@pico/contract/agent
 import { Application } from "@pico/contract/application";
 import * as Chat from "@pico/contract/chat-model";
 import { ChatRepository } from "@pico/contract/chat-repository";
-import { AgentError, ApplicationError } from "@pico/contract/errors";
+import { AgentError, ApplicationError, WorkspaceCwdInvalid } from "@pico/contract/errors";
 import { AbsolutePath } from "@pico/contract/path";
 import * as Workspace from "@pico/contract/workspace-model";
+import { WorkspaceRepository } from "@pico/contract/workspace-repository";
 import type { CreateWorktree, CreateWorktreeOptions } from "@pico/contract/worktree";
 import * as Persistence from "@pico/persistence/layer";
 import * as Effect from "effect/Effect";
@@ -18,6 +19,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as PlatformError from "effect/PlatformError";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 import * as ApplicationLayer from "./application.ts";
@@ -232,6 +234,186 @@ describe("Application", () => {
         Effect.provide(ApplicationLayer.layer(createWorktree)),
         Effect.provide(sessionsLayer),
         Effect.provide(persistenceLayer),
+        Effect.provide(runtimeLayer),
+        Effect.provide(BunCrypto.layer),
+        Effect.scoped,
+      );
+    }).pipe(Effect.provide(platformLayer)),
+  );
+
+  it.effect("validates and binds workspace cwd without rewriting existing chats", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const temporaryDirectory = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "pico-application-bind-",
+      });
+      const storeFile = AbsolutePath.make(path.join(temporaryDirectory, "store.db"));
+      const firstCwd = path.join(temporaryDirectory, "first");
+      const secondCwd = path.join(temporaryDirectory, "second");
+      const unreadableCwd = path.join(temporaryDirectory, "unreadable");
+      const file = path.join(temporaryDirectory, "file");
+      yield* fileSystem.makeDirectory(firstCwd);
+      yield* fileSystem.makeDirectory(secondCwd);
+      yield* fileSystem.makeDirectory(unreadableCwd);
+      yield* fileSystem.writeFileString(file, "fixture");
+      const applicationFileSystem = FileSystem.FileSystem.of({
+        ...fileSystem,
+        access: (candidate, options) =>
+          candidate === unreadableCwd
+            ? Effect.fail(
+                new PlatformError.PlatformError(
+                  new PlatformError.SystemError({
+                    _tag: "PermissionDenied",
+                    module: "FileSystem",
+                    method: "access",
+                    pathOrDescriptor: candidate,
+                  }),
+                ),
+              )
+            : fileSystem.access(candidate, options),
+      });
+      const applicationFileSystemLayer = Layer.succeed(
+        FileSystem.FileSystem,
+        applicationFileSystem,
+      );
+
+      const persistenceLayer = Persistence.layer(storeFile);
+      let cwdChanges = 0;
+      const observedWorkspaces = Layer.effect(
+        WorkspaceRepository,
+        Effect.gen(function* () {
+          const repository = yield* WorkspaceRepository;
+          return WorkspaceRepository.of({
+            ...repository,
+            changeDefaultCwd: (workspaceId, cwd) =>
+              Effect.sync(() => {
+                cwdChanges += 1;
+              }).pipe(Effect.andThen(repository.changeDefaultCwd(workspaceId, cwd))),
+          });
+        }),
+      ).pipe(Layer.provide(persistenceLayer));
+      const repositories = Layer.merge(persistenceLayer, observedWorkspaces);
+      const createdSessions: Array<CreateAgentSession> = [];
+      const sessionsLayer = Layer.succeed(
+        AgentSessionStore,
+        AgentSessionStore.of({
+          create: (input) =>
+            Effect.sync(() => {
+              createdSessions.push(input);
+            }),
+        }),
+      );
+      const runtimeLayer = Layer.succeed(
+        AgentRuntime,
+        AgentRuntime.of({
+          events: Stream.empty,
+          transcript: () => Effect.die("unexpected transcript read"),
+          send: () => Effect.die("unexpected runtime send"),
+          abort: () => Effect.die("unexpected runtime abort"),
+        }),
+      );
+      const createWorktree: CreateWorktree = () => Effect.die("unexpected worktree creation");
+
+      yield* Effect.gen(function* () {
+        const application = yield* Application;
+        const chats = yield* ChatRepository;
+        const binding = { platform: "discord", externalId: "channel-1" } as const;
+
+        const created = yield* application.bindWorkspace({
+          binding,
+          workspaceName: "general",
+          cwd: `${firstCwd}/.`,
+        });
+        assert.strictEqual(created.name, "general");
+        assert.strictEqual(created.defaultCwd, firstCwd);
+        assert.strictEqual(cwdChanges, 0);
+
+        const oldChat = yield* application.createChat({
+          workspaceId: created.id,
+          externalId: "thread-old",
+        });
+        const repeated = yield* application.bindWorkspace({
+          binding,
+          workspaceName: "ignored rename",
+          cwd: `${firstCwd}/.`,
+        });
+        assert.deepStrictEqual(repeated, created);
+        assert.strictEqual(cwdChanges, 0);
+
+        const rebound = yield* application.bindWorkspace({
+          binding,
+          workspaceName: "still ignored",
+          cwd: `${temporaryDirectory}/first/../second`,
+        });
+        assert.strictEqual(rebound.name, "general");
+        assert.strictEqual(rebound.defaultCwd, secondCwd);
+        assert.strictEqual(cwdChanges, 1);
+
+        const newChat = yield* application.createChat({
+          workspaceId: created.id,
+          externalId: "thread-new",
+        });
+        assert.strictEqual(oldChat.cwd, firstCwd);
+        assert.strictEqual(
+          Option.getOrThrow(yield* chats.findById(oldChat.id).pipe(Effect.orDie)).cwd,
+          firstCwd,
+        );
+        assert.strictEqual(newChat.cwd, secondCwd);
+        assert.deepStrictEqual(
+          createdSessions.map(({ cwd }) => cwd),
+          [firstCwd, secondCwd],
+        );
+
+        const invalidInputs = [
+          { externalId: "whitespace", cwd: ` ${firstCwd}`, reason: "surrounding-whitespace" },
+          { externalId: "relative", cwd: "relative/project", reason: "not-absolute" },
+          { externalId: "home", cwd: "~/project", reason: "not-absolute" },
+          {
+            externalId: "missing",
+            cwd: path.join(temporaryDirectory, "missing"),
+            reason: "not-found",
+          },
+          { externalId: "file", cwd: file, reason: "not-directory" },
+        ] as const;
+        for (const input of invalidInputs) {
+          const error = yield* application
+            .bindWorkspace({
+              binding: { platform: "discord", externalId: input.externalId },
+              workspaceName: input.externalId,
+              cwd: input.cwd,
+            })
+            .pipe(Effect.flip);
+          if (!(error instanceof WorkspaceCwdInvalid)) {
+            return yield* Effect.die(`Unexpected bind failure: ${error._tag}`);
+          }
+          assert.strictEqual(error.reason, input.reason);
+          assert.isTrue(
+            Option.isNone(
+              yield* application.findWorkspaceByPlatformId("discord", input.externalId),
+            ),
+          );
+        }
+
+        const unreadable = yield* application
+          .bindWorkspace({
+            binding: { platform: "discord", externalId: "unreadable" },
+            workspaceName: "unreadable",
+            cwd: unreadableCwd,
+          })
+          .pipe(Effect.flip);
+        if (!(unreadable instanceof WorkspaceCwdInvalid)) {
+          return yield* Effect.die(`Unexpected bind failure: ${unreadable._tag}`);
+        }
+        assert.strictEqual(unreadable.reason, "unreadable");
+        assert.isTrue(
+          Option.isNone(yield* application.findWorkspaceByPlatformId("discord", "unreadable")),
+        );
+      }).pipe(
+        Effect.provide(ApplicationLayer.layer(createWorktree)),
+        Effect.provide(applicationFileSystemLayer),
+        Effect.provide(repositories),
+        Effect.provide(sessionsLayer),
         Effect.provide(runtimeLayer),
         Effect.provide(BunCrypto.layer),
         Effect.scoped,

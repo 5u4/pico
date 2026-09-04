@@ -1,14 +1,74 @@
 import type { DiscordConfig } from "@pico/config/config";
 import { EventRouter } from "@pico/contract/event-router";
-import { createBot, GatewayIntents, MessageFlags } from "discordeno";
+import { type CreateApplicationCommand, createBot, GatewayIntents, MessageFlags } from "discordeno";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Redacted from "effect/Redacted";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
+import * as DiscordCommand from "./discord-command.ts";
 import * as DiscordInput from "./discord-input.ts";
 import * as DiscordOutput from "./discord-output.ts";
+
+export interface DiscordStartupBot {
+  readonly helpers: {
+    readonly upsertGlobalApplicationCommands: (
+      commands: Array<CreateApplicationCommand>,
+    ) => Promise<unknown>;
+    readonly upsertGuildApplicationCommands: (
+      guildId: string | bigint,
+      commands: Array<CreateApplicationCommand>,
+    ) => Promise<unknown>;
+  };
+  readonly start: () => Promise<void>;
+  readonly shutdown: () => Promise<void>;
+}
+
+const stopBot = (bot: DiscordStartupBot) =>
+  DiscordInput.promiseBoundary("Failed to stop Discord bot", () => bot.shutdown()).pipe(
+    Effect.catch((error) => Effect.logError("Discord shutdown failed", error.message)),
+  );
+
+export const openBot = Effect.fn("Discord.openBot")(function* (
+  bot: DiscordStartupBot,
+  config: DiscordConfig,
+  joinedGuildIds: ReadonlySet<string>,
+) {
+  const acquire = Effect.gen(function* () {
+    yield* DiscordInput.promiseBoundary("Failed to start Discord bot", () => bot.start());
+    const allowedGuildIdSet = new Set(config.allowedGuildIds);
+    const allowedGuildIds = Array.from(allowedGuildIdSet);
+    const missingGuildIds = allowedGuildIds.filter((guildId) => !joinedGuildIds.has(guildId));
+    if (missingGuildIds.length > 0) {
+      return yield* Effect.fail(
+        DiscordInput.discordError(
+          `Discord bot is not a member of allowed guild(s): ${missingGuildIds.join(", ")}`,
+          undefined,
+        ),
+      );
+    }
+
+    yield* DiscordInput.promiseBoundary("Failed to clear global Discord commands", () =>
+      bot.helpers.upsertGlobalApplicationCommands([]),
+    );
+    yield* Effect.forEach(allowedGuildIds, (guildId) =>
+      DiscordInput.promiseBoundary("Failed to register Discord commands", () =>
+        bot.helpers.upsertGuildApplicationCommands(guildId, DiscordCommand.applicationCommands),
+      ),
+    );
+    yield* Effect.forEach(
+      Array.from(joinedGuildIds).filter((guildId) => !allowedGuildIdSet.has(guildId)),
+      (guildId) =>
+        DiscordInput.promiseBoundary("Failed to clear disallowed guild Discord commands", () =>
+          bot.helpers.upsertGuildApplicationCommands(guildId, []),
+        ),
+    );
+    return bot;
+  }).pipe(Effect.tapError(() => stopBot(bot)));
+
+  return yield* Effect.acquireRelease(acquire, () => stopBot(bot));
+});
 
 const start = Effect.fn("Discord.start")(function* (config: DiscordConfig) {
   const eventRouter = yield* EventRouter;
@@ -40,10 +100,22 @@ const start = Effect.fn("Discord.start")(function* (config: DiscordConfig) {
           user: {
             id: true,
           },
+          interaction: {
+            channelId: true,
+            data: true,
+            guildId: true,
+            id: true,
+            token: true,
+            type: true,
+          },
         },
       }),
     catch: (cause) => DiscordInput.discordError("Failed to create Discord bot", cause),
   });
+  const joinedGuildIds = new Set<string>();
+  bot.events.ready = ({ guilds }) => {
+    for (const guildId of guilds) joinedGuildIds.add(guildId.toString());
+  };
 
   const findThreadId = yield* DiscordInput.install(bot, config);
   const route = yield* eventRouter.open((envelope) => findThreadId(envelope.chatId) !== undefined);
@@ -81,16 +153,7 @@ const start = Effect.fn("Discord.start")(function* (config: DiscordConfig) {
     Effect.forkScoped({ startImmediately: true }),
   );
 
-  yield* Effect.acquireRelease(
-    DiscordInput.promiseBoundary("Failed to start Discord bot", async () => {
-      await bot.start();
-      return bot;
-    }),
-    () =>
-      DiscordInput.promiseBoundary("Failed to stop Discord bot", () => bot.shutdown()).pipe(
-        Effect.catch((error) => Effect.logError("Discord shutdown failed", error.message)),
-      ),
-  );
+  yield* openBot(bot, config, joinedGuildIds);
 });
 
 export const layer = (config: DiscordConfig) => Layer.effectDiscard(start(config));

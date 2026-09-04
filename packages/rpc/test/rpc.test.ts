@@ -56,6 +56,7 @@ describe("RPC", () => {
 
       const application = Application.of({
         createWorkspace: () => Effect.die("unexpected workspace creation"),
+        bindWorkspace: () => Effect.die("unexpected workspace binding"),
         createChat: () => Effect.die("unexpected chat creation"),
         findWorkspaceByPlatformId: () => Effect.die("unexpected workspace lookup"),
         findChatByPlatformId: () => Effect.die("unexpected chat lookup"),

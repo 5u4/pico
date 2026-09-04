@@ -8,6 +8,23 @@ export class ApplicationError extends Schema.TaggedError<ApplicationError>()("Ap
   message: Schema.String,
 }) {}
 
+export const WorkspaceCwdInvalidReason = Schema.Literals([
+  "surrounding-whitespace",
+  "not-absolute",
+  "not-found",
+  "not-directory",
+  "unreadable",
+]);
+export type WorkspaceCwdInvalidReason = typeof WorkspaceCwdInvalidReason.Type;
+
+export class WorkspaceCwdInvalid extends Schema.TaggedError<WorkspaceCwdInvalid>()(
+  "WorkspaceCwdInvalid",
+  {
+    cwd: Schema.String,
+    reason: WorkspaceCwdInvalidReason,
+  },
+) {}
+
 export class PersistenceError extends Schema.TaggedError<PersistenceError>()("PersistenceError", {
   message: Schema.String,
 }) {}

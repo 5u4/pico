@@ -1,14 +1,16 @@
 import type { DiscordConfig } from "@pico/config/config";
 import { Application } from "@pico/contract/application";
 import type * as Chat from "@pico/contract/chat-model";
+import type { WorkspaceCwdInvalid } from "@pico/contract/errors";
 import type * as Workspace from "@pico/contract/workspace-model";
-import { ChannelTypes } from "discordeno";
+import { ChannelTypes, InteractionTypes } from "discordeno";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as FiberSet from "effect/FiberSet";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
+import * as DiscordCommand from "./discord-command.ts";
 
 class DiscordError extends Schema.TaggedError<DiscordError>()("DiscordError", {
   message: Schema.String,
@@ -37,15 +39,35 @@ export interface DiscordMessage {
 
 export interface DiscordChannel {
   readonly id: bigint;
+  readonly guildId?: bigint;
   readonly type: ChannelTypes;
   readonly parentId?: bigint;
   readonly name?: string;
 }
 
-export interface DiscordInputBot<Message extends DiscordMessage = DiscordMessage> {
+export interface DiscordInteraction {
+  readonly type: InteractionTypes;
+  readonly guildId?: bigint;
+  readonly channelId?: bigint;
+  readonly data?: {
+    readonly name: string;
+    readonly options?: ReadonlyArray<DiscordCommand.CommandOption>;
+  };
+  readonly defer: (isPrivate?: boolean) => Promise<unknown>;
+  readonly edit: (options: {
+    readonly content: string;
+    readonly allowedMentions: { readonly parse: []; readonly repliedUser: false };
+  }) => Promise<unknown>;
+}
+
+export interface DiscordInputBot<
+  Message extends DiscordMessage = DiscordMessage,
+  Interaction extends DiscordInteraction = DiscordInteraction,
+> {
   readonly id: bigint;
   readonly events: {
     messageCreate?: (message: Message) => unknown;
+    interactionCreate?: (interaction: Interaction) => unknown;
   };
   readonly helpers: {
     readonly getChannel: (channelId: bigint) => Promise<DiscordChannel>;
@@ -71,10 +93,10 @@ const isThread = (type: ChannelTypes) =>
 
 const threadName = (content: string) => content.trim().replace(/\s+/g, " ").slice(0, 100);
 
-export const install = Effect.fn("DiscordInput.install")(function* <Message extends DiscordMessage>(
-  bot: DiscordInputBot<Message>,
-  config: DiscordConfig,
-) {
+export const install = Effect.fn("DiscordInput.install")(function* <
+  Message extends DiscordMessage,
+  Interaction extends DiscordInteraction,
+>(bot: DiscordInputBot<Message, Interaction>, config: DiscordConfig) {
   const application = yield* Application;
   const run = yield* FiberSet.makeRuntime();
   const allowedGuildIds = new Set(config.allowedGuildIds);
@@ -180,6 +202,82 @@ export const install = Effect.fn("DiscordInput.install")(function* <Message exte
     yield* application.sendMessage(chat.id, message.content);
   });
 
+  const cwdFailureCopy = (reason: WorkspaceCwdInvalid["reason"]) => {
+    switch (reason) {
+      case "surrounding-whitespace":
+        return "The working directory cannot start or end with whitespace.";
+      case "not-absolute":
+        return "The working directory must be an absolute path.";
+      case "not-found":
+        return "That working directory does not exist.";
+      case "not-directory":
+        return "That path is not a directory.";
+      case "unreadable":
+        return "That working directory cannot be inspected.";
+    }
+  };
+
+  const bindResponse = Effect.fn("Discord.bindResponse")(function* (
+    interaction: Interaction,
+    command: DiscordCommand.Command,
+  ) {
+    const guildId = interaction.guildId;
+    const channelId = interaction.channelId;
+    if (
+      guildId === undefined ||
+      channelId === undefined ||
+      !allowedGuildIds.has(guildId.toString())
+    ) {
+      return "This command can only be used in a configured server text channel.";
+    }
+
+    const channel = yield* promiseBoundary("Failed to resolve Discord interaction channel", () =>
+      bot.helpers.getChannel(channelId),
+    );
+    if (channel.guildId !== guildId || channel.type !== ChannelTypes.GuildText) {
+      return "This command can only be used in a configured server text channel.";
+    }
+
+    switch (command.kind) {
+      case "malformed":
+        return "The /bind set command requires one cwd value.";
+      case "bindSetCwd": {
+        const workspace = yield* application.bindWorkspace({
+          binding: { platform: "discord", externalId: channel.id.toString() },
+          workspaceName: channel.name ?? channel.id.toString(),
+          cwd: command.cwd,
+        });
+        workspaceIds.set(channel.id, workspace.id);
+        return `Workspace binding updated to ${workspace.defaultCwd}.`;
+      }
+      default: {
+        const exhaustive: never = command;
+        return exhaustive;
+      }
+    }
+  });
+
+  const handleInteraction = Effect.fn("Discord.handleInteraction")(function* (
+    interaction: Interaction,
+    command: DiscordCommand.Command,
+  ) {
+    const content = yield* bindResponse(interaction, command).pipe(
+      Effect.catchTag("WorkspaceCwdInvalid", (error) =>
+        Effect.succeed(cwdFailureCopy(error.reason)),
+      ),
+      Effect.catchCause((cause) =>
+        Effect.logError("Discord interaction failed", Cause.pretty(cause)).pipe(
+          Effect.as("pico could not update this workspace."),
+        ),
+      ),
+    );
+    yield* promiseBoundary("Failed to edit Discord interaction", () =>
+      interaction.edit({ content, allowedMentions }),
+    ).pipe(
+      Effect.catch((error) => Effect.logError("Discord interaction edit failed", error.message)),
+    );
+  });
+
   bot.events.messageCreate = (message) => {
     const lock = channelLocks.get(message.channelId) ?? Semaphore.makeUnsafe(1);
     channelLocks.set(message.channelId, lock);
@@ -191,6 +289,37 @@ export const install = Effect.fn("DiscordInput.install")(function* <Message exte
             Effect.logError("Discord input failed", Cause.pretty(cause)),
           ),
         ),
+    );
+  };
+
+  bot.events.interactionCreate = (interaction) => {
+    if (
+      interaction.type !== InteractionTypes.ApplicationCommand ||
+      interaction.data?.name !== "bind"
+    ) {
+      return;
+    }
+
+    void interaction.defer(true).then(
+      () => {
+        const command = DiscordCommand.parse(interaction.data?.options);
+        const channelId = interaction.channelId;
+        if (channelId === undefined) {
+          run(handleInteraction(interaction, command));
+          return;
+        }
+        const lock = channelLocks.get(channelId) ?? Semaphore.makeUnsafe(1);
+        channelLocks.set(channelId, lock);
+        run(lock.withPermit(handleInteraction(interaction, command)));
+      },
+      (cause: unknown) => {
+        run(
+          Effect.logError(
+            "Discord interaction defer failed",
+            discordError("Failed to defer Discord interaction", cause).message,
+          ),
+        );
+      },
     );
   };
 

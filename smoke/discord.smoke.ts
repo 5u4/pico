@@ -3,7 +3,14 @@ import * as BunServices from "@effect/platform-bun/BunServices";
 import { describe, it } from "@effect/vitest";
 import { PicoRoot } from "@pico/contract/config";
 import * as Daemon from "@pico/daemon";
-import { createBot, type RecursivePartial, type TransformersDesiredProperties } from "discordeno";
+import {
+  ApplicationCommandOptionTypes,
+  ApplicationCommandTypes,
+  type CreateApplicationCommand,
+  createBot,
+  type RecursivePartial,
+  type TransformersDesiredProperties,
+} from "discordeno";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
@@ -13,6 +20,26 @@ const required = (name: string) => {
   const value = Bun.env[name]?.trim();
   if (value === undefined || value.length === 0) throw new Error(`Missing ${name}`);
   return value;
+};
+
+const staleCommands = {
+  global: [
+    {
+      name: "stale-global",
+      description: "Stale global command",
+      type: ApplicationCommandTypes.ChatInput,
+    },
+  ],
+  guild: [
+    {
+      name: "stale-guild",
+      description: "Stale guild command",
+      type: ApplicationCommandTypes.ChatInput,
+    },
+  ],
+} satisfies {
+  readonly global: Array<CreateApplicationCommand>;
+  readonly guild: Array<CreateApplicationCommand>;
 };
 
 const poll = async <A>(description: string, evaluate: () => Promise<A | undefined>) => {
@@ -64,9 +91,41 @@ const smoke = Effect.fn("Discord.smoke")(function* () {
   const sender = createBot({ token: senderToken, desiredProperties });
   const pico = createBot({ token: picoToken, desiredProperties });
 
+  yield* Effect.tryPromise(() =>
+    Promise.all([
+      pico.helpers.upsertGlobalApplicationCommands(staleCommands.global),
+      pico.helpers.upsertGuildApplicationCommands(guildId, staleCommands.guild),
+    ]),
+  );
+
   yield* Effect.scoped(
     Effect.gen(function* () {
       yield* Daemon.open(PicoRoot.make(canonicalRoot));
+
+      const [globalCommands, guildCommands] = yield* Effect.tryPromise(() =>
+        Promise.all([
+          pico.helpers.getGlobalApplicationCommands(),
+          pico.helpers.getGuildApplicationCommands(guildId),
+        ]),
+      );
+      assert.strictEqual(globalCommands.length, 0);
+      assert.strictEqual(guildCommands.length, 1);
+
+      const bindCommand = guildCommands[0];
+      assert.strictEqual(bindCommand?.name, "bind");
+      assert.strictEqual(bindCommand?.type, ApplicationCommandTypes.ChatInput);
+      assert.strictEqual(bindCommand?.defaultMemberPermissions, undefined);
+      assert.strictEqual(bindCommand?.options?.length, 1);
+
+      const setCommand = bindCommand?.options?.[0];
+      assert.strictEqual(setCommand?.name, "set");
+      assert.strictEqual(setCommand?.type, ApplicationCommandOptionTypes.SubCommand);
+      assert.strictEqual(setCommand?.options?.length, 1);
+
+      const cwdOption = setCommand?.options?.[0];
+      assert.strictEqual(cwdOption?.name, "cwd");
+      assert.strictEqual(cwdOption?.type, ApplicationCommandOptionTypes.String);
+      assert.strictEqual(cwdOption?.required, true);
 
       yield* Effect.acquireUseRelease(
         Effect.void,
@@ -171,7 +230,7 @@ const smoke = Effect.fn("Discord.smoke")(function* () {
 });
 
 describe("Discord adapter", () => {
-  it.effect("creates one thread-backed chat and continues it", () =>
+  it.effect("reconciles commands, creates one thread-backed chat, and continues it", () =>
     smoke().pipe(Effect.provide(BunServices.layer), Effect.scoped),
   );
 });
