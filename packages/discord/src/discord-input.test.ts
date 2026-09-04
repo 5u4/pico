@@ -98,6 +98,7 @@ describe("Discord input", () => {
               return Option.none();
             }),
           findChatByPlatformId: () => Effect.succeed(Option.none()),
+          transcript: () => Effect.die("unexpected transcript read"),
           sendMessage: (_chatId, content) =>
             Effect.gen(function* () {
               order.push("send");
@@ -105,6 +106,7 @@ describe("Discord input", () => {
               assert.strictEqual(threadIdForChat?.(chatId), 20n);
               yield* Deferred.succeed(sent.length === 1 ? firstSent : secondSent, undefined);
             }),
+          abort: () => Effect.die("unexpected chat abort"),
         });
 
         threadIdForChat = yield* install(bot, config).pipe(
@@ -158,7 +160,9 @@ describe("Discord input", () => {
           createChat: () => Effect.die("unexpected chat creation"),
           findWorkspaceByPlatformId: () => Effect.die("unexpected workspace lookup"),
           findChatByPlatformId: () => Effect.die("unexpected chat lookup"),
+          transcript: () => Effect.die("unexpected transcript read"),
           sendMessage: () => Effect.die("unexpected message send"),
+          abort: () => Effect.die("unexpected chat abort"),
         });
 
         yield* install(bot, config).pipe(Effect.provideService(Application, application));

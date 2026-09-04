@@ -11,6 +11,7 @@
       "@effect/atom-react": "4.0.0-rc.112",
       "@effect/language-service": "0.87.2",
       "@effect/platform-bun": "4.0.0-rc.112",
+      "@effect/platform-node": "4.0.0-rc.112",
       "@effect/sql-sqlite-bun": "4.0.0-rc.112",
       "@effect/vitest": "4.0.0-rc.112",
       "@oh-my-pi/pi-coding-agent": "18.0.10",

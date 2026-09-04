@@ -2,6 +2,7 @@ import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
 import type * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
+import type { AgentPrompt, AgentTranscript } from "./agent-message.ts";
 import type { Chat, ChatId } from "./chat-model.ts";
 import type { ApplicationError } from "./errors.ts";
 import { AbsolutePath } from "./path.ts";
@@ -47,9 +48,13 @@ export class Application extends Context.Service<
       chatExternalId: string,
     ) => Effect.Effect<Option.Option<Chat>, ApplicationError>;
 
+    readonly transcript: (chatId: ChatId) => Effect.Effect<AgentTranscript, ApplicationError>;
+
     readonly sendMessage: (
       chatId: ChatId,
-      content: string,
+      prompt: AgentPrompt,
     ) => Effect.Effect<void, ApplicationError>;
+
+    readonly abort: (chatId: ChatId) => Effect.Effect<void, ApplicationError>;
   }
 >()("@pico/contract/application/Application") {}

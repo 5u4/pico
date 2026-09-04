@@ -2,9 +2,11 @@ import * as BunCrypto from "@effect/platform-bun/BunCrypto";
 import * as BunFileSystem from "@effect/platform-bun/BunFileSystem";
 import * as BunPath from "@effect/platform-bun/BunPath";
 import { assert, describe, it } from "@effect/vitest";
+import type * as AgentMessage from "@pico/contract/agent-message";
 import { AgentRuntime } from "@pico/contract/agent-runtime";
 import { AgentSessionStore, type CreateAgentSession } from "@pico/contract/agent-session-store";
 import { Application } from "@pico/contract/application";
+import * as Chat from "@pico/contract/chat-model";
 import { ChatRepository } from "@pico/contract/chat-repository";
 import { AgentError, ApplicationError } from "@pico/contract/errors";
 import { AbsolutePath } from "@pico/contract/path";
@@ -23,6 +25,14 @@ import * as ApplicationLayer from "./application.ts";
 const platformLayer = Layer.merge(BunFileSystem.layer, BunPath.layer);
 const uuidV7 = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const missingWorkspaceId = Workspace.WorkspaceId.make("018f47a0-0000-7000-8000-000000000099");
+const missingChatId = Chat.ChatId.make("018f47a0-0000-7000-8000-000000000098");
+const runtimeTranscript: AgentMessage.AgentTranscript = [
+  {
+    role: "user",
+    content: [{ type: "text", text: "hello" }],
+    timestamp: 7,
+  },
+];
 
 const assertApplicationError = (error: ApplicationError, message: string) => {
   assert.instanceOf(error, ApplicationError);
@@ -30,7 +40,7 @@ const assertApplicationError = (error: ApplicationError, message: string) => {
 };
 
 describe("Application", () => {
-  it.effect("creates chats, resolves platform identities, and delegates messages", () =>
+  it.effect("creates chats, resolves platform identities, and delegates agent operations", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
@@ -43,6 +53,8 @@ describe("Application", () => {
       const createdSessions: Array<CreateAgentSession> = [];
       const createdWorktrees: Array<CreateWorktreeOptions> = [];
       const sentMessages: Array<{ readonly chatId: string; readonly content: string }> = [];
+      const transcriptChatIds: Array<Chat.ChatId> = [];
+      const abortedChatIds: Array<Chat.ChatId> = [];
       const persistenceLayer = Persistence.layer(storeFile);
       const sessionsLayer = Layer.effect(
         AgentSessionStore,
@@ -63,14 +75,32 @@ describe("Application", () => {
         AgentRuntime,
         AgentRuntime.of({
           events: Stream.empty,
-          transcript: () => Effect.succeed([]),
+          transcript: (chatId) =>
+            Effect.sync(() => {
+              transcriptChatIds.push(chatId);
+            }).pipe(
+              Effect.andThen(
+                chatId === missingChatId
+                  ? Effect.fail(new AgentError({ message: "runtime failed" }))
+                  : Effect.succeed(runtimeTranscript),
+              ),
+            ),
           send: (chatId, content) =>
             content === "fail"
               ? Effect.fail(new AgentError({ message: "runtime failed" }))
               : Effect.sync(() => {
                   sentMessages.push({ chatId, content });
                 }),
-          abort: () => Effect.void,
+          abort: (chatId) =>
+            Effect.sync(() => {
+              abortedChatIds.push(chatId);
+            }).pipe(
+              Effect.andThen(
+                chatId === missingChatId
+                  ? Effect.fail(new AgentError({ message: "runtime failed" }))
+                  : Effect.void,
+              ),
+            ),
         }),
       );
       const createWorktree: CreateWorktree = (options, use) =>
@@ -164,6 +194,14 @@ describe("Application", () => {
           Option.isNone(yield* application.findChatByPlatformId("discord", "missing", "thread-1")),
         );
 
+        assert.deepStrictEqual(yield* application.transcript(discordChat.id), runtimeTranscript);
+        assert.deepStrictEqual(transcriptChatIds, [discordChat.id]);
+        assertApplicationError(
+          yield* application.transcript(missingChatId).pipe(Effect.flip),
+          "Failed to read transcript",
+        );
+        assert.deepStrictEqual(transcriptChatIds, [discordChat.id, missingChatId]);
+
         yield* application.sendMessage(discordChat.id, "hello");
         yield* application.sendMessage(discordChat.id, "");
         assert.deepStrictEqual(sentMessages, [
@@ -174,6 +212,13 @@ describe("Application", () => {
           yield* application.sendMessage(discordChat.id, "fail").pipe(Effect.flip),
           "Failed to send message",
         );
+        yield* application.abort(discordChat.id);
+        assert.deepStrictEqual(abortedChatIds, [discordChat.id]);
+        assertApplicationError(
+          yield* application.abort(missingChatId).pipe(Effect.flip),
+          "Failed to abort chat",
+        );
+        assert.deepStrictEqual(abortedChatIds, [discordChat.id, missingChatId]);
 
         assertApplicationError(
           yield* application

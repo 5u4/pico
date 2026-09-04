@@ -1,3 +1,4 @@
+import type * as AgentMessage from "@pico/contract/agent-message";
 import { AgentRuntime } from "@pico/contract/agent-runtime";
 import { AgentSessionStore } from "@pico/contract/agent-session-store";
 import { Application, type CreateChat, type CreateWorkspace } from "@pico/contract/application";
@@ -91,11 +92,25 @@ const make = Effect.fn("Application.make")(function* (createWorktree: CreateWork
     Effect.mapError(failure("Failed to find chat")),
   );
 
+  const transcript = Effect.fn("Application.transcript")(
+    function* (chatId: Chat.ChatId) {
+      return yield* runtime.transcript(chatId);
+    },
+    Effect.mapError(failure("Failed to read transcript")),
+  );
+
   const sendMessage = Effect.fn("Application.sendMessage")(
-    function* (chatId: Chat.ChatId, content: string) {
-      yield* runtime.send(chatId, content);
+    function* (chatId: Chat.ChatId, prompt: AgentMessage.AgentPrompt) {
+      yield* runtime.send(chatId, prompt);
     },
     Effect.mapError(failure("Failed to send message")),
+  );
+
+  const abort = Effect.fn("Application.abort")(
+    function* (chatId: Chat.ChatId) {
+      yield* runtime.abort(chatId);
+    },
+    Effect.mapError(failure("Failed to abort chat")),
   );
 
   return Application.of({
@@ -103,7 +118,9 @@ const make = Effect.fn("Application.make")(function* (createWorktree: CreateWork
     createChat,
     findWorkspaceByPlatformId,
     findChatByPlatformId,
+    transcript,
     sendMessage,
+    abort,
   });
 });
 
