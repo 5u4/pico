@@ -75,6 +75,8 @@ describe("RPC", () => {
             abortInputs.push(chatId);
             yield* Deferred.succeed(aborted, undefined);
           }),
+        contextUsage: () => Effect.die("unexpected context read"),
+        shake: () => Effect.die("unexpected chat shake"),
       });
       const eventRouter = EventRouter.of({
         open: (filter) =>

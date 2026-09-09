@@ -1,6 +1,6 @@
 import * as BunFileSystem from "@effect/platform-bun/BunFileSystem";
 import * as BunPath from "@effect/platform-bun/BunPath";
-import { describe, it } from "@effect/vitest";
+import { assert, describe, it } from "@effect/vitest";
 import type * as AgentEvent from "@pico/contract/agent-event";
 import * as AgentMessage from "@pico/contract/agent-message";
 import { AgentRuntime } from "@pico/contract/agent-runtime";
@@ -93,6 +93,18 @@ const smoke = Effect.fn("AgentRuntime.smoke")(function* () {
       return yield* Effect.fail(
         new Error("OMP smoke response did not contain the expected marker"),
       );
+    }
+
+    const contextUsage = yield* runtime.contextUsage(chatId);
+    assert.strictEqual(contextUsage.kind, "available");
+    if (contextUsage.kind === "available") {
+      assert.isAbove(contextUsage.contextWindow, 0);
+      assert.isAbove(contextUsage.usedTokens, 0);
+      assert.isAtLeast(contextUsage.systemPromptTokens, 0);
+      assert.isAtLeast(contextUsage.systemToolsTokens, 0);
+      assert.isAtLeast(contextUsage.systemContextTokens, 0);
+      assert.isAtLeast(contextUsage.skillsTokens, 0);
+      assert.isAbove(contextUsage.messagesTokens, 0);
     }
 
     yield* Effect.logInfo(`result=${marker} sessionsDir=${sessionsDir}`);

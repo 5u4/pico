@@ -4,6 +4,7 @@ import { assert, describe, it } from "@effect/vitest";
 import * as OmpSessionLoader from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import * as OmpSessionManager from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import * as Agent from "@pico/contract/agent-message";
+import type { ContextUsage, ShakeMode, ShakeResult } from "@pico/contract/agent-runtime";
 import * as Chat from "@pico/contract/chat-model";
 import { AgentError } from "@pico/contract/errors";
 import * as Deferred from "effect/Deferred";
@@ -19,6 +20,21 @@ import { makeSessionPool, type SessionFactory } from "./session-pool.ts";
 const platformLayer = Layer.merge(BunFileSystem.layer, BunPath.layer);
 const chatId = Chat.ChatId.make("018f47a0-0000-7000-8000-000000000001");
 const prompt = Agent.AgentPrompt.make;
+
+const shakeResult = (mode: ShakeMode): ShakeResult => {
+  switch (mode) {
+    case "elide":
+      return { mode, toolResultsDropped: 1, blocksDropped: 2, tokensFreed: 300 };
+    case "images":
+      return { mode, imagesDropped: 3, tokensFreed: 0 };
+    case "thinking":
+      return { mode, thinkingBlocksDropped: 4, tokensFreed: 500 };
+    default: {
+      const exhaustive: never = mode;
+      return exhaustive;
+    }
+  }
+};
 
 describe("AgentRuntime", () => {
   it.effect("owns normalized events and one ordered session lifecycle", () =>
@@ -67,6 +83,8 @@ describe("AgentRuntime", () => {
                 }
                 return Promise.resolve();
               },
+              shake: async (mode) => shakeResult(mode),
+              contextUsage: () => ({ kind: "unavailable" }),
               unsubscribe: () => {
                 lifecycle.push("unsubscribe");
               },
@@ -142,29 +160,105 @@ describe("AgentRuntime", () => {
     }).pipe(Effect.provide(platformLayer)),
   );
 
-  it.effect("maps prompt sender rejection at the pool boundary", () =>
+  it.effect("acquires idle sessions, reads context, forwards shake, and maps failures", () =>
     Effect.scoped(
       Effect.gen(function* () {
+        const shakenModes: Array<ShakeMode> = [];
+        let acquisitions = 0;
+        let sends = 0;
+        let contextReads = 0;
+        let throwContext = false;
+        let contextValue: ContextUsage = {
+          kind: "available",
+          contextWindow: 200_000,
+          usedTokens: 12_345,
+          systemPromptTokens: 1_000,
+          systemToolsTokens: 2_000,
+          systemContextTokens: 3_000,
+          skillsTokens: 4_000,
+          messagesTokens: 2_345,
+        };
         const factory: SessionFactory = {
-          open: () =>
-            Effect.succeed({
+          open: () => {
+            acquisitions += 1;
+            return Effect.succeed({
               session: {
                 settleInFlightMessagePersistence: () => Promise.resolve(),
                 abort: () => Promise.resolve(),
                 beginDispose: () => {},
                 dispose: () => Promise.resolve(),
               },
-              sendPrompt: () => Promise.reject(new Error("sender rejected")),
+              sendPrompt: () => {
+                sends += 1;
+                return Promise.reject(new Error("sender rejected"));
+              },
+              shake: (mode) => {
+                shakenModes.push(mode);
+                return mode === "thinking"
+                  ? Promise.reject(new Error("shake rejected"))
+                  : Promise.resolve(shakeResult(mode));
+              },
+              contextUsage: () => {
+                contextReads += 1;
+                if (throwContext) throw new Error("context failed");
+                return contextValue;
+              },
               unsubscribe: () => {},
-            }),
+            });
+          },
         };
         const pool = yield* makeSessionPool({
           factory,
           loadTranscript: () => Effect.succeed([]),
         });
-        const failure = yield* pool.send(chatId, prompt("reject")).pipe(Effect.flip);
-        assert.instanceOf(failure, AgentError);
-        assert.strictEqual(failure.message, "Failed to send OMP prompt");
+
+        assert.deepStrictEqual(yield* pool.contextUsage(chatId), {
+          kind: "available",
+          contextWindow: 200_000,
+          usedTokens: 12_345,
+          systemPromptTokens: 1_000,
+          systemToolsTokens: 2_000,
+          systemContextTokens: 3_000,
+          skillsTokens: 4_000,
+          messagesTokens: 2_345,
+        });
+        assert.strictEqual(acquisitions, 1);
+        assert.strictEqual(sends, 0);
+        assert.strictEqual(contextReads, 1);
+
+        assert.deepStrictEqual(yield* pool.shake(chatId, "images"), {
+          mode: "images",
+          imagesDropped: 3,
+          tokensFreed: 0,
+        });
+        assert.strictEqual(acquisitions, 1);
+        assert.strictEqual(sends, 0);
+        assert.deepStrictEqual(shakenModes, ["images"]);
+
+        contextValue = { kind: "unavailable" };
+        assert.deepStrictEqual(yield* pool.contextUsage(chatId), { kind: "unavailable" });
+        assert.strictEqual(acquisitions, 1);
+        assert.strictEqual(sends, 0);
+        assert.strictEqual(contextReads, 2);
+
+        throwContext = true;
+        const contextFailure = yield* pool.contextUsage(chatId).pipe(Effect.flip);
+        assert.instanceOf(contextFailure, AgentError);
+        assert.strictEqual(contextFailure.message, "Failed to read OMP context");
+        assert.strictEqual(acquisitions, 1);
+        assert.strictEqual(sends, 0);
+        assert.strictEqual(contextReads, 3);
+
+        const sendFailure = yield* pool.send(chatId, prompt("reject")).pipe(Effect.flip);
+        assert.instanceOf(sendFailure, AgentError);
+        assert.strictEqual(sendFailure.message, "Failed to send OMP prompt");
+
+        const shakeFailure = yield* pool.shake(chatId, "thinking").pipe(Effect.flip);
+        assert.instanceOf(shakeFailure, AgentError);
+        assert.strictEqual(shakeFailure.message, "Failed to shake OMP session");
+        assert.strictEqual(acquisitions, 1);
+        assert.strictEqual(sends, 1);
+        assert.deepStrictEqual(shakenModes, ["images", "thinking"]);
       }),
     ),
   );

@@ -3,7 +3,12 @@ import * as BunFileSystem from "@effect/platform-bun/BunFileSystem";
 import * as BunPath from "@effect/platform-bun/BunPath";
 import { assert, describe, it } from "@effect/vitest";
 import type * as AgentMessage from "@pico/contract/agent-message";
-import { AgentRuntime } from "@pico/contract/agent-runtime";
+import {
+  AgentRuntime,
+  type ContextUsage,
+  type ShakeMode,
+  type ShakeResult,
+} from "@pico/contract/agent-runtime";
 import { AgentSessionStore, type CreateAgentSession } from "@pico/contract/agent-session-store";
 import { Application } from "@pico/contract/application";
 import * as Chat from "@pico/contract/chat-model";
@@ -57,6 +62,8 @@ describe("Application", () => {
       const sentMessages: Array<{ readonly chatId: string; readonly content: string }> = [];
       const transcriptChatIds: Array<Chat.ChatId> = [];
       const abortedChatIds: Array<Chat.ChatId> = [];
+      const shakeInputs: Array<{ readonly chatId: Chat.ChatId; readonly mode: ShakeMode }> = [];
+      const contextChatIds: Array<Chat.ChatId> = [];
       const persistenceLayer = Persistence.layer(storeFile);
       const sessionsLayer = Layer.effect(
         AgentSessionStore,
@@ -101,6 +108,39 @@ describe("Application", () => {
                 chatId === missingChatId
                   ? Effect.fail(new AgentError({ message: "runtime failed" }))
                   : Effect.void,
+              ),
+            ),
+          contextUsage: (chatId) =>
+            Effect.sync(() => {
+              contextChatIds.push(chatId);
+            }).pipe(
+              Effect.andThen(
+                chatId === missingChatId
+                  ? Effect.fail(new AgentError({ message: "runtime failed" }))
+                  : Effect.succeed<ContextUsage>({
+                      kind: "available",
+                      contextWindow: 200_000,
+                      usedTokens: 12_345,
+                      systemPromptTokens: 1_000,
+                      systemToolsTokens: 2_000,
+                      systemContextTokens: 3_000,
+                      skillsTokens: 4_000,
+                      messagesTokens: 2_345,
+                    }),
+              ),
+            ),
+          shake: (chatId, mode) =>
+            Effect.sync(() => {
+              shakeInputs.push({ chatId, mode });
+            }).pipe(
+              Effect.andThen(
+                chatId === missingChatId
+                  ? Effect.fail(new AgentError({ message: "runtime failed" }))
+                  : Effect.succeed<ShakeResult>({
+                      mode: "images",
+                      imagesDropped: 2,
+                      tokensFreed: 512,
+                    }),
               ),
             ),
         }),
@@ -221,6 +261,36 @@ describe("Application", () => {
           "Failed to abort chat",
         );
         assert.deepStrictEqual(abortedChatIds, [discordChat.id, missingChatId]);
+        assert.deepStrictEqual(yield* application.contextUsage(discordChat.id), {
+          kind: "available",
+          contextWindow: 200_000,
+          usedTokens: 12_345,
+          systemPromptTokens: 1_000,
+          systemToolsTokens: 2_000,
+          systemContextTokens: 3_000,
+          skillsTokens: 4_000,
+          messagesTokens: 2_345,
+        });
+        assert.deepStrictEqual(contextChatIds, [discordChat.id]);
+        assertApplicationError(
+          yield* application.contextUsage(missingChatId).pipe(Effect.flip),
+          "Failed to read chat context",
+        );
+        assert.deepStrictEqual(contextChatIds, [discordChat.id, missingChatId]);
+        assert.deepStrictEqual(yield* application.shake(discordChat.id, "images"), {
+          mode: "images",
+          imagesDropped: 2,
+          tokensFreed: 512,
+        });
+        assert.deepStrictEqual(shakeInputs, [{ chatId: discordChat.id, mode: "images" }]);
+        assertApplicationError(
+          yield* application.shake(missingChatId, "elide").pipe(Effect.flip),
+          "Failed to shake chat",
+        );
+        assert.deepStrictEqual(shakeInputs, [
+          { chatId: discordChat.id, mode: "images" },
+          { chatId: missingChatId, mode: "elide" },
+        ]);
 
         assertApplicationError(
           yield* application
@@ -311,6 +381,8 @@ describe("Application", () => {
           transcript: () => Effect.die("unexpected transcript read"),
           send: () => Effect.die("unexpected runtime send"),
           abort: () => Effect.die("unexpected runtime abort"),
+          contextUsage: () => Effect.die("unexpected runtime context read"),
+          shake: () => Effect.die("unexpected runtime shake"),
         }),
       );
       const createWorktree: CreateWorktree = () => Effect.die("unexpected worktree creation");

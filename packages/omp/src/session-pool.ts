@@ -1,5 +1,6 @@
 import type * as AgentEvent from "@pico/contract/agent-event";
 import type * as AgentMessage from "@pico/contract/agent-message";
+import type { ContextUsage, ShakeMode, ShakeResult } from "@pico/contract/agent-runtime";
 import type * as Chat from "@pico/contract/chat-model";
 import { AgentError } from "@pico/contract/errors";
 import * as Cause from "effect/Cause";
@@ -25,6 +26,8 @@ export interface SessionHandle {
 export interface OpenedSession {
   readonly session: SessionHandle;
   readonly sendPrompt: (prompt: AgentMessage.AgentPrompt) => Promise<void>;
+  readonly shake: (mode: ShakeMode) => Promise<ShakeResult>;
+  readonly contextUsage: () => ContextUsage;
   readonly unsubscribe: () => void;
 }
 
@@ -45,6 +48,8 @@ export interface SessionPool {
     prompt: AgentMessage.AgentPrompt,
   ) => Effect.Effect<void, AgentError>;
   readonly abort: (chatId: Chat.ChatId) => Effect.Effect<void, AgentError>;
+  readonly contextUsage: (chatId: Chat.ChatId) => Effect.Effect<ContextUsage, AgentError>;
+  readonly shake: (chatId: Chat.ChatId, mode: ShakeMode) => Effect.Effect<ShakeResult, AgentError>;
 }
 
 interface OpenLifecycle {
@@ -65,6 +70,8 @@ type LiveLifecycle = OpenLifecycle | ClosingLifecycle | ClosedLifecycle;
 interface LiveEntry {
   readonly session: SessionHandle;
   readonly sendPrompt: (prompt: AgentMessage.AgentPrompt) => Promise<void>;
+  readonly shake: (mode: ShakeMode) => Promise<ShakeResult>;
+  readonly contextUsage: () => ContextUsage;
   readonly events: Queue.Queue<AgentEvent.AgentEvent, Cause.Done>;
   readonly forwarder: Fiber.Fiber<void>;
   readonly lifecycle: MutableRef.MutableRef<LiveLifecycle>;
@@ -132,6 +139,8 @@ const acquireEntry = Effect.fn("SessionPool.acquireEntry")(function* (
   return {
     session: opened.session,
     sendPrompt: opened.sendPrompt,
+    shake: opened.shake,
+    contextUsage: opened.contextUsage,
     events,
     forwarder,
     lifecycle: MutableRef.make<LiveLifecycle>({
@@ -197,6 +206,27 @@ export const makeSessionPool = Effect.fn("SessionPool.make")(function* (
     );
   });
 
+  const contextUsage = Effect.fn("AgentRuntime.contextUsage")(function* (chatId: Chat.ChatId) {
+    return yield* Effect.scoped(
+      Effect.gen(function* () {
+        const entry = yield* retain(sessions, chatId);
+        return yield* Effect.try({
+          try: entry.contextUsage,
+          catch: () => new AgentError({ message: "Failed to read OMP context" }),
+        });
+      }),
+    );
+  });
+
+  const shake = Effect.fn("AgentRuntime.shake")(function* (chatId: Chat.ChatId, mode: ShakeMode) {
+    return yield* Effect.scoped(
+      Effect.gen(function* () {
+        const entry = yield* retain(sessions, chatId);
+        return yield* boundary("Failed to shake OMP session", () => entry.shake(mode));
+      }),
+    );
+  });
+
   const abort = Effect.fn("AgentRuntime.abort")(function* (chatId: Chat.ChatId) {
     yield* Effect.scoped(
       Effect.gen(function* () {
@@ -218,5 +248,7 @@ export const makeSessionPool = Effect.fn("SessionPool.make")(function* (
     transcript,
     send,
     abort,
+    contextUsage,
+    shake,
   } satisfies SessionPool;
 });

@@ -1,5 +1,5 @@
 import type * as AgentMessage from "@pico/contract/agent-message";
-import { AgentRuntime } from "@pico/contract/agent-runtime";
+import { AgentRuntime, type ShakeMode } from "@pico/contract/agent-runtime";
 import { AgentSessionStore } from "@pico/contract/agent-session-store";
 import {
   Application,
@@ -176,6 +176,20 @@ const make = Effect.fn("Application.make")(function* (createWorktree: CreateWork
     Effect.mapError(failure("Failed to abort chat")),
   );
 
+  const contextUsage = Effect.fn("Application.contextUsage")(
+    function* (chatId: Chat.ChatId) {
+      return yield* runtime.contextUsage(chatId);
+    },
+    Effect.mapError(failure("Failed to read chat context")),
+  );
+
+  const shake = Effect.fn("Application.shake")(
+    function* (chatId: Chat.ChatId, mode: ShakeMode) {
+      return yield* runtime.shake(chatId, mode);
+    },
+    Effect.mapError(failure("Failed to shake chat")),
+  );
+
   return Application.of({
     createWorkspace,
     bindWorkspace,
@@ -185,6 +199,8 @@ const make = Effect.fn("Application.make")(function* (createWorktree: CreateWork
     transcript,
     sendMessage,
     abort,
+    contextUsage,
+    shake,
   });
 });
 

@@ -109,9 +109,9 @@ const smoke = Effect.fn("Discord.smoke")(function* () {
         ]),
       );
       assert.strictEqual(globalCommands.length, 0);
-      assert.strictEqual(guildCommands.length, 1);
+      assert.strictEqual(guildCommands.length, 3);
 
-      const bindCommand = guildCommands[0];
+      const bindCommand = guildCommands.find((command) => command.name === "bind");
       assert.strictEqual(bindCommand?.name, "bind");
       assert.strictEqual(bindCommand?.type, ApplicationCommandTypes.ChatInput);
       assert.strictEqual(bindCommand?.defaultMemberPermissions, undefined);
@@ -126,6 +126,29 @@ const smoke = Effect.fn("Discord.smoke")(function* () {
       assert.strictEqual(cwdOption?.name, "cwd");
       assert.strictEqual(cwdOption?.type, ApplicationCommandOptionTypes.String);
       assert.strictEqual(cwdOption?.required, true);
+
+      const shakeCommand = guildCommands.find((command) => command.name === "shake");
+      assert.strictEqual(shakeCommand?.type, ApplicationCommandTypes.ChatInput);
+      assert.strictEqual(shakeCommand?.defaultMemberPermissions, undefined);
+      assert.strictEqual(shakeCommand?.options?.length, 1);
+
+      const modeOption = shakeCommand?.options?.[0];
+      assert.strictEqual(modeOption?.name, "mode");
+      assert.strictEqual(modeOption?.type, ApplicationCommandOptionTypes.String);
+      assert.notStrictEqual(modeOption?.required, true);
+      assert.deepStrictEqual(
+        modeOption?.choices?.map(({ name, value }) => ({ name, value })),
+        [
+          { name: "Tool results and large blocks", value: "elide" },
+          { name: "Images", value: "images" },
+          { name: "Thinking", value: "thinking" },
+        ],
+      );
+
+      const contextCommand = guildCommands.find((command) => command.name === "context");
+      assert.strictEqual(contextCommand?.type, ApplicationCommandTypes.ChatInput);
+      assert.strictEqual(contextCommand?.defaultMemberPermissions, undefined);
+      assert.strictEqual(contextCommand?.options?.length ?? 0, 0);
 
       yield* Effect.acquireUseRelease(
         Effect.void,

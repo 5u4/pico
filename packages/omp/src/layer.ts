@@ -5,7 +5,8 @@ import * as OmpSdk from "@oh-my-pi/pi-coding-agent/sdk";
 import type * as OmpAgentSession from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import * as OmpSessionLoader from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import * as OmpSessionManager from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { AgentRuntime } from "@pico/contract/agent-runtime";
+import type * as OmpShake from "@oh-my-pi/pi-coding-agent/session/shake-types";
+import { AgentRuntime, type ContextUsage, type ShakeResult } from "@pico/contract/agent-runtime";
 import type * as Chat from "@pico/contract/chat-model";
 import { ChatRepository } from "@pico/contract/chat-repository";
 import { AgentError } from "@pico/contract/errors";
@@ -63,6 +64,8 @@ export const make = Effect.fn("AgentRuntime.make")(function* (sessionsDir: Absol
     transcript: pool.transcript,
     send: pool.send,
     abort: pool.abort,
+    contextUsage: pool.contextUsage,
+    shake: pool.shake,
   });
 });
 
@@ -102,6 +105,52 @@ const disposeSessionAfterFailure = (session: OmpAgentSession.AgentSession, error
     "Failed to dispose OMP session after subscription failure",
     promiseBoundary("Failed to dispose OMP session", () => session.dispose()),
   ).pipe(Effect.andThen(Effect.fail(error)));
+
+const normalizeShakeResult = (result: OmpShake.ShakeResult): ShakeResult => {
+  switch (result.mode) {
+    case "elide":
+      return {
+        mode: result.mode,
+        toolResultsDropped: result.toolResultsDropped,
+        blocksDropped: result.blocksDropped,
+        tokensFreed: result.tokensFreed,
+      };
+    case "images":
+      return {
+        mode: result.mode,
+        imagesDropped: result.imagesDropped ?? 0,
+        tokensFreed: result.tokensFreed,
+      };
+    case "thinking":
+      return {
+        mode: result.mode,
+        thinkingBlocksDropped: result.thinkingBlocksDropped ?? 0,
+        tokensFreed: result.tokensFreed,
+      };
+    default: {
+      const exhaustive: never = result.mode;
+      return exhaustive;
+    }
+  }
+};
+
+const normalizeContextUsage = (
+  result: ReturnType<OmpAgentSession.AgentSession["getContextBreakdown"]>,
+): ContextUsage => {
+  if (result === undefined || !Number.isFinite(result.contextWindow) || result.contextWindow <= 0) {
+    return { kind: "unavailable" };
+  }
+  return {
+    kind: "available",
+    contextWindow: result.contextWindow,
+    usedTokens: result.usedTokens,
+    systemPromptTokens: result.systemPromptTokens,
+    systemToolsTokens: result.systemToolsTokens,
+    systemContextTokens: result.systemContextTokens,
+    skillsTokens: result.skillsTokens,
+    messagesTokens: result.messagesTokens,
+  };
+};
 
 const makeFactory = (
   sessionsDir: AbsolutePath,
@@ -155,6 +204,8 @@ const makeFactory = (
     const opened: OpenedSession = {
       session: created.session,
       sendPrompt: makeOmpPromptSender(created.session),
+      shake: (mode) => created.session.shake(mode).then(normalizeShakeResult),
+      contextUsage: () => normalizeContextUsage(created.session.getContextBreakdown()),
       unsubscribe,
     };
     return opened;

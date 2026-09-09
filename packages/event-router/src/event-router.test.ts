@@ -40,6 +40,8 @@ describe("EventRouter", () => {
           transcript: () => Effect.die("unused"),
           send: () => Effect.die("unused"),
           abort: () => Effect.die("unused"),
+          contextUsage: () => Effect.die("unused"),
+          shake: () => Effect.die("unused"),
         }),
       );
       const routerScope = yield* Scope.make();
