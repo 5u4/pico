@@ -18,6 +18,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import { normalizeAgentEvent, normalizeTranscript } from "./agent-event.ts";
+import { makeExchangeTitleFlow } from "./exchange-title.ts";
 import { makeOmpPromptSender } from "./omp-prompt-sender.ts";
 import { makeSessionPool, type OpenedSession, type SessionFactory } from "./session-pool.ts";
 
@@ -172,9 +173,10 @@ const makeFactory = (
     const settings = yield* promiseBoundary("Failed to load OMP settings", () =>
       OmpSettings.Settings.loadIsolated({ cwd: chat.cwd }),
     );
-    yield* syncBoundary("Failed to isolate OMP async settings", () =>
-      settings.override("async.enabled", false),
-    );
+    yield* syncBoundary("Failed to isolate OMP session settings", () => {
+      settings.override("async.enabled", false);
+      settings.override("title.refreshOnReplan", false);
+    });
 
     const manager = yield* promiseBoundary("Failed to open OMP session journal", () =>
       OmpSessionManager.SessionManager.open(sessionFile, sessionsDir, undefined, {
@@ -194,16 +196,29 @@ const makeFactory = (
       }),
     ).pipe(Effect.catch((error) => closeManagerAfterFailure(manager, error)));
 
+    const titleFlow = makeExchangeTitleFlow({
+      history: created.session.messages,
+      sendPrompt: makeOmpPromptSender(created.session),
+      generateTitle: (exchange, systemPrompt) =>
+        created.session.generateTitle(exchange, systemPrompt),
+      getTitleSource: () => created.session.sessionManager.titleSource,
+      setSessionName: (title, source) => created.session.setSessionName(title, source),
+      getSessionName: () => created.session.sessionName,
+      emitTitleChanged: (title) => emit({ type: "title-changed", title }),
+    });
+
     const unsubscribe = yield* syncBoundary("Failed to subscribe to OMP session events", () =>
       created.session.subscribe((event) => {
         const normalized = normalizeAgentEvent(event);
-        if (normalized !== undefined) emit(normalized);
+        if (normalized === undefined) return;
+        emit(normalized);
+        titleFlow.observe(normalized);
       }),
     ).pipe(Effect.catch((error) => disposeSessionAfterFailure(created.session, error)));
 
     const opened: OpenedSession = {
       session: created.session,
-      sendPrompt: makeOmpPromptSender(created.session),
+      sendPrompt: titleFlow.sendPrompt,
       shake: (mode) => created.session.shake(mode).then(normalizeShakeResult),
       contextUsage: () => normalizeContextUsage(created.session.getContextBreakdown()),
       unsubscribe,

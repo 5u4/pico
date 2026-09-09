@@ -27,6 +27,7 @@ export interface DiscordOutputClient {
     messageId: bigint,
     content: string,
   ) => Effect.Effect<void, unknown>;
+  readonly renameThread: (threadId: bigint, title: string) => Effect.Effect<void, unknown>;
   readonly triggerTyping: (threadId: bigint) => Effect.Effect<void, unknown>;
 }
 
@@ -308,6 +309,20 @@ export const make = (client: DiscordOutputClient, scope: Scope.Scope) => {
       case "thinking-delta":
       case "notice":
         return;
+      case "title-changed": {
+        yield* Effect.forkIn(
+          client
+            .renameThread(threadId, event.title)
+            .pipe(
+              Effect.catchCause((cause) =>
+                Effect.logWarning("Discord thread rename failed", Cause.pretty(cause)),
+              ),
+            ),
+          scope,
+          { startImmediately: true },
+        );
+        return;
+      }
       case "tool-started": {
         if (state.tools.has(event.toolCallId) || state.finishedTools.has(event.toolCallId)) return;
         const presentation = toolPresentation(

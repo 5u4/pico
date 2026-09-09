@@ -34,7 +34,7 @@ const firstEvent: AgentEvent.AgentEventEnvelope = {
 };
 const secondEvent: AgentEvent.AgentEventEnvelope = {
   chatId: secondChatId,
-  event: { type: "run-finished", outcome: "completed" },
+  event: { type: "title-changed", title: "Ship exchange titles" },
 };
 
 describe("RPC", () => {

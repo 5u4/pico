@@ -106,6 +106,7 @@ describe("Discord output", () => {
               Effect.sync(() => {
                 edited.push({ threadId, messageId, content });
               }),
+            renameThread: () => Effect.void,
             triggerTyping: (threadId) =>
               Effect.sync(() => {
                 typing.push(threadId);
@@ -267,6 +268,7 @@ describe("Discord output", () => {
               Effect.sync(() => {
                 edited.push(content);
               }),
+            renameThread: () => Effect.void,
             triggerTyping: () => Effect.void,
           },
           scope,
@@ -347,6 +349,7 @@ describe("Discord output", () => {
                 return 1n;
               }),
             edit: () => Effect.fail("edit failed"),
+            renameThread: () => Effect.void,
             triggerTyping: () => Effect.void,
           },
           scope,
@@ -381,6 +384,64 @@ describe("Discord output", () => {
         );
         assert.strictEqual(sent.length, 2);
         assert.deepStrictEqual(sent[1], { content: "💻 Ran command", silent: true });
+      }),
+    ),
+  );
+
+  it.effect("renames threads without stalling or failing later output", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const renamed: Array<{ readonly threadId: bigint; readonly title: string }> = [];
+        const sent: Array<{ readonly threadId: bigint; readonly message: RenderedMessage }> = [];
+        const scope = yield* Scope.Scope;
+        const dispatch = make(
+          {
+            send: (threadId, message) =>
+              Effect.sync(() => {
+                sent.push({ threadId, message });
+                return 1n;
+              }),
+            edit: () => Effect.void,
+            renameThread: (threadId, title) =>
+              Effect.gen(function* () {
+                renamed.push({ threadId, title });
+                if (title === "Stalled rename") return yield* Effect.never;
+                if (title === "Failed rename") return yield* Effect.fail("rename failed");
+              }),
+            triggerTyping: () => Effect.void,
+          },
+          scope,
+        );
+
+        yield* dispatch(11n, envelope(chatA, { type: "title-changed", title: "Stalled rename" }));
+        yield* dispatch(
+          11n,
+          envelope(chatA, {
+            type: "message-settled",
+            message: completed("tool-use", [{ type: "text", text: "after stall" }]),
+          }),
+        );
+        yield* dispatch(22n, envelope(chatB, { type: "title-changed", title: "Failed rename" }));
+        yield* Effect.yieldNow;
+        yield* dispatch(
+          22n,
+          envelope(chatB, {
+            type: "message-settled",
+            message: completed("tool-use", [{ type: "text", text: "after failure" }]),
+          }),
+        );
+
+        assert.deepStrictEqual(renamed, [
+          { threadId: 11n, title: "Stalled rename" },
+          { threadId: 22n, title: "Failed rename" },
+        ]);
+        assert.deepStrictEqual(
+          sent.map(({ threadId, message }) => [threadId, message.content]),
+          [
+            [11n, "after stall"],
+            [22n, "after failure"],
+          ],
+        );
       }),
     ),
   );

@@ -70,6 +70,7 @@ const smoke = Effect.fn("Discord.smoke")(function* () {
   const tokenFile = path.join(secretsDir, "discord_bot_token");
   const storeFile = path.join(canonicalRoot, "store.db");
   const firstMarker = "PICO_DISCORD_SMOKE_FIRST";
+  const firstPrompt = `Use the read tool to read emoji.txt, then reply with exactly ${firstMarker}.`;
   const secondMarker = "PICO_DISCORD_SMOKE_SECOND";
   let sourceMessageId: bigint | undefined;
   let threadId: bigint | undefined;
@@ -84,7 +85,7 @@ const smoke = Effect.fn("Discord.smoke")(function* () {
   );
 
   const desiredProperties = {
-    channel: { id: true, type: true },
+    channel: { id: true, name: true, type: true },
     message: { author: true, content: true, id: true },
     user: { id: true },
   } satisfies RecursivePartial<TransformersDesiredProperties>;
@@ -156,7 +157,7 @@ const smoke = Effect.fn("Discord.smoke")(function* () {
           Effect.gen(function* () {
             const source = yield* Effect.tryPromise(() =>
               sender.helpers.sendMessage(channelId, {
-                content: `Use the read tool to read emoji.txt, then reply with exactly ${firstMarker}.`,
+                content: firstPrompt,
                 allowedMentions: { parse: [], repliedUser: false },
               }),
             );
@@ -189,6 +190,14 @@ const smoke = Effect.fn("Discord.smoke")(function* () {
                 );
               }),
             );
+            const title = yield* Effect.tryPromise(() =>
+              poll("Pico Discord thread title", async () => {
+                const channel = await sender.helpers.getChannel(source.id);
+                return channel.name !== firstPrompt ? channel.name : undefined;
+              }),
+            );
+            assert.isAtLeast(title.length, 1);
+            assert.isAtMost(Array.from(title).length, 80);
 
             yield* Effect.tryPromise(() =>
               sender.helpers.sendMessage(source.id, {

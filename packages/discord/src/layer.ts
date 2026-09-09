@@ -134,6 +134,10 @@ const start = Effect.fn("Discord.start")(function* (config: DiscordConfig) {
         DiscordInput.promiseBoundary("Failed to edit Discord message", () =>
           bot.helpers.editMessage(threadId, messageId, { content, allowedMentions }),
         ).pipe(Effect.asVoid),
+      renameThread: (threadId, title) =>
+        DiscordInput.promiseBoundary("Failed to rename Discord thread", () =>
+          bot.helpers.editChannel(threadId, { name: title }),
+        ).pipe(Effect.asVoid),
       triggerTyping: (threadId) =>
         DiscordInput.promiseBoundary("Failed to trigger Discord typing indicator", () =>
           bot.helpers.triggerTypingIndicator(threadId),

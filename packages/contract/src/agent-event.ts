@@ -48,6 +48,11 @@ export const AgentRunFinished = Schema.Struct({
   outcome: Schema.Literals(["completed", "failed", "aborted"]),
 });
 
+export const AgentTitleChanged = Schema.Struct({
+  type: Schema.Literal("title-changed"),
+  title: Schema.NonEmptyString,
+});
+
 export const AgentEvent = Schema.Union([
   AgentRunStarted,
   AgentTextDelta,
@@ -57,6 +62,7 @@ export const AgentEvent = Schema.Union([
   AgentToolFinished,
   AgentNotice,
   AgentRunFinished,
+  AgentTitleChanged,
 ]);
 export type AgentEvent = typeof AgentEvent.Type;
 
