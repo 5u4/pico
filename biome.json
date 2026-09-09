@@ -18,6 +18,9 @@
       "arrowParentheses": "always"
     }
   },
+  "css": {
+    "parser": { "tailwindDirectives": true }
+  },
   "assist": {
     "enabled": true,
     "actions": { "source": { "organizeImports": "on" } }
@@ -53,6 +56,10 @@
   "overrides": [
     {
       "includes": ["vitest.config.ts", "vitest.smoke.config.ts"],
+      "linter": { "rules": { "style": { "noDefaultExport": "off" } } }
+    },
+    {
+      "includes": ["packages/web/vite.config.ts"],
       "linter": { "rules": { "style": { "noDefaultExport": "off" } } }
     },
     {

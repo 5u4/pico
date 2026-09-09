@@ -8,6 +8,8 @@
     ],
     "catalog": {
       "@biomejs/biome": "2.5.8",
+      "@phosphor-icons/react": "2.1.10",
+      "@tailwindcss/vite": "4.3.3",
       "@effect/atom-react": "4.0.0-rc.112",
       "@effect/language-service": "0.87.2",
       "@effect/platform-bun": "4.0.0-rc.112",
@@ -17,10 +19,16 @@
       "@oh-my-pi/pi-coding-agent": "18.0.10",
       "@oh-my-pi/pi-ai": "18.0.10",
       "@types/bun": "1.3.14",
+      "@types/react": "19.2.18",
+      "@types/react-dom": "19.2.7",
+      "@vitejs/plugin-react": "6.1.1",
       "effect": "4.0.0-rc.112",
       "discordeno": "21.0.0",
       "react": "19.2.8",
+      "react-dom": "19.2.8",
+      "tailwindcss": "4.3.3",
       "typescript": "7.0.2",
+      "vite": "8.2.2",
       "vitest": "4.1.10"
     }
   },
@@ -31,7 +39,10 @@
     "test": "bun --bun x vitest run",
     "smoke": "bun --env-file=.env.smoke node_modules/vitest/vitest.mjs run --config vitest.smoke.config.ts",
     "pico": "bun packages/cli/src/main.ts",
-    "vendor:effect": "bun scripts/vendor-effect.ts"
+    "vendor:effect": "bun scripts/vendor-effect.ts",
+    "web:dev": "bun run --cwd packages/web dev",
+    "web:build": "bun run --cwd packages/web build",
+    "web:preview": "bun run --cwd packages/web preview"
   },
   "devDependencies": {
     "@biomejs/biome": "catalog:",
