@@ -16,6 +16,14 @@ const validOptions = [
   },
 ] as const;
 
+const worktreeOptions = (options: ReadonlyArray<DiscordCommand.CommandOption>) => [
+  {
+    name: "worktree",
+    type: ApplicationCommandOptionTypes.SubCommand,
+    options,
+  },
+];
+
 describe("Discord command", () => {
   it("registers bind, shake, and context commands exactly", () => {
     assert.deepStrictEqual(DiscordCommand.applicationCommands, [
@@ -31,6 +39,31 @@ describe("Discord command", () => {
               {
                 name: "cwd",
                 description: "Absolute working directory path",
+                type: ApplicationCommandOptionTypes.String,
+                required: true,
+              },
+            ],
+          },
+          {
+            name: "worktree",
+            description: "Configure worktrees for new chats",
+            type: ApplicationCommandOptionTypes.SubCommand,
+            options: [
+              {
+                name: "repository",
+                description: "Absolute Git repository path",
+                type: ApplicationCommandOptionTypes.String,
+                required: true,
+              },
+              {
+                name: "branch",
+                description: "Commit-ish starting ref",
+                type: ApplicationCommandOptionTypes.String,
+                required: true,
+              },
+              {
+                name: "prefix",
+                description: "Branch prefix for new chats",
                 type: ApplicationCommandOptionTypes.String,
                 required: true,
               },
@@ -63,9 +96,39 @@ describe("Discord command", () => {
 
   it("parses bind without rewriting cwd", () => {
     assert.deepStrictEqual(DiscordCommand.parseBind(validOptions), {
-      kind: "bindSetCwd",
+      kind: "bindDirect",
       cwd: "  /raw/path  ",
     });
+  });
+
+  it("parses worktree options independently of their order", () => {
+    const repository = {
+      name: "repository",
+      type: ApplicationCommandOptionTypes.String,
+      value: "/repo",
+    } as const;
+    const branch = {
+      name: "branch",
+      type: ApplicationCommandOptionTypes.String,
+      value: "main",
+    } as const;
+    const prefix = {
+      name: "prefix",
+      type: ApplicationCommandOptionTypes.String,
+      value: "chat/",
+    } as const;
+    for (const options of [
+      [repository, branch, prefix],
+      [prefix, repository, branch],
+      [branch, prefix, repository],
+    ]) {
+      assert.deepStrictEqual(DiscordCommand.parseBind(worktreeOptions(options)), {
+        kind: "bindWorktree",
+        repository: "/repo",
+        branch: "main",
+        prefix: "chat/",
+      });
+    }
   });
 
   it("rejects every malformed bind shape", () => {
@@ -98,6 +161,31 @@ describe("Discord command", () => {
           options: [{ ...validOptions[0].options[0], value: 42 }],
         },
       ],
+    ]) {
+      assert.deepStrictEqual(DiscordCommand.parseBind(options), { kind: "malformedBind" });
+    }
+
+    for (const options of [
+      worktreeOptions([]),
+      worktreeOptions([
+        { name: "repository", type: ApplicationCommandOptionTypes.String, value: "/repo" },
+        { name: "branch", type: ApplicationCommandOptionTypes.String, value: "main" },
+      ]),
+      worktreeOptions([
+        { name: "repository", type: ApplicationCommandOptionTypes.String, value: "/repo" },
+        { name: "branch", type: ApplicationCommandOptionTypes.String, value: "main" },
+        { name: "branch", type: ApplicationCommandOptionTypes.String, value: "other" },
+      ]),
+      worktreeOptions([
+        { name: "repository", type: ApplicationCommandOptionTypes.String, value: "/repo" },
+        { name: "branch", type: ApplicationCommandOptionTypes.String, value: "main" },
+        { name: "other", type: ApplicationCommandOptionTypes.String, value: "chat/" },
+      ]),
+      worktreeOptions([
+        { name: "repository", type: ApplicationCommandOptionTypes.String, value: "/repo" },
+        { name: "branch", type: ApplicationCommandOptionTypes.String, value: "main" },
+        { name: "prefix", type: ApplicationCommandOptionTypes.Integer, value: "chat/" },
+      ]),
     ]) {
       assert.deepStrictEqual(DiscordCommand.parseBind(options), { kind: "malformedBind" });
     }

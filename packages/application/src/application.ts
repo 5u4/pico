@@ -9,11 +9,11 @@ import {
 } from "@pico/contract/application";
 import * as Chat from "@pico/contract/chat-model";
 import { ChatRepository } from "@pico/contract/chat-repository";
-import { ApplicationError, WorkspaceCwdInvalid } from "@pico/contract/errors";
+import { ApplicationError, WorkspaceBindingInvalid } from "@pico/contract/errors";
 import { AbsolutePath } from "@pico/contract/path";
 import * as Workspace from "@pico/contract/workspace-model";
 import { WorkspaceRepository } from "@pico/contract/workspace-repository";
-import type { CreateWorktree } from "@pico/contract/worktree";
+import type { GitWorktree } from "@pico/contract/worktree";
 import * as Clock from "effect/Clock";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
@@ -24,7 +24,7 @@ import * as Path from "effect/Path";
 
 const failure = (message: string) => () => new ApplicationError({ message });
 
-const make = Effect.fn("Application.make")(function* (createWorktree: CreateWorktree) {
+const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) {
   const workspaces = yield* WorkspaceRepository;
   const chats = yield* ChatRepository;
   const sessions = yield* AgentSessionStore;
@@ -42,41 +42,80 @@ const make = Effect.fn("Application.make")(function* (createWorktree: CreateWork
     Effect.mapError(failure("Failed to create workspace")),
   );
 
-  const resolveWorkspaceCwd = Effect.fn("Application.resolveWorkspaceCwd")(function* (cwd: string) {
-    if (cwd.trim() !== cwd) {
-      return yield* Effect.fail(new WorkspaceCwdInvalid({ cwd, reason: "surrounding-whitespace" }));
+  type WorkspacePathInvalidReason = Extract<
+    WorkspaceBindingInvalid["issue"],
+    { readonly field: "cwd" }
+  >["reason"];
+
+  const workspacePathInvalid = (field: "cwd" | "repository", reason: WorkspacePathInvalidReason) =>
+    new WorkspaceBindingInvalid({
+      issue: field === "cwd" ? { field: "cwd", reason } : { field: "repository", reason },
+    });
+
+  const resolveWorkspacePath = Effect.fn("Application.resolveWorkspacePath")(function* (
+    field: "cwd" | "repository",
+    input: string,
+  ) {
+    if (input.trim() !== input) {
+      return yield* Effect.fail(workspacePathInvalid(field, "surrounding-whitespace"));
     }
-    if (!path.isAbsolute(cwd)) {
-      return yield* Effect.fail(new WorkspaceCwdInvalid({ cwd, reason: "not-absolute" }));
+    if (!path.isAbsolute(input)) {
+      return yield* Effect.fail(workspacePathInvalid(field, "not-absolute"));
     }
 
-    const normalized = path.normalize(cwd);
-    const info = yield* fileSystem.stat(normalized).pipe(
-      Effect.mapError(
-        (error) =>
-          new WorkspaceCwdInvalid({
-            cwd,
-            reason: error.reason._tag === "NotFound" ? "not-found" : "unreadable",
-          }),
-      ),
-    );
+    const normalized = path.normalize(input);
+    const info = yield* fileSystem
+      .stat(normalized)
+      .pipe(
+        Effect.mapError((error) =>
+          workspacePathInvalid(
+            field,
+            error.reason._tag === "NotFound" ? "not-found" : "unreadable",
+          ),
+        ),
+      );
     if (info.type !== "Directory") {
-      return yield* Effect.fail(new WorkspaceCwdInvalid({ cwd, reason: "not-directory" }));
+      return yield* Effect.fail(workspacePathInvalid(field, "not-directory"));
     }
-    yield* fileSystem.access(normalized, { readable: true }).pipe(
-      Effect.mapError(
-        (error) =>
-          new WorkspaceCwdInvalid({
-            cwd,
-            reason: error.reason._tag === "NotFound" ? "not-found" : "unreadable",
-          }),
-      ),
-    );
+    yield* fileSystem
+      .access(normalized, { readable: true })
+      .pipe(
+        Effect.mapError((error) =>
+          workspacePathInvalid(
+            field,
+            error.reason._tag === "NotFound" ? "not-found" : "unreadable",
+          ),
+        ),
+      );
     return AbsolutePath.make(normalized);
   });
 
+  const resolveConfiguration = Effect.fn("Application.resolveWorkspaceConfiguration")(function* (
+    configuration: BindWorkspace["configuration"],
+  ) {
+    switch (configuration.kind) {
+      case "direct":
+        return {
+          defaultCwd: yield* resolveWorkspacePath("cwd", configuration.cwd),
+          worktree: null,
+        } satisfies Workspace.WorkspaceConfiguration;
+      case "worktree": {
+        const repositoryCwd = yield* resolveWorkspacePath("repository", configuration.repository);
+        yield* gitWorktree.validate({ repositoryCwd, settings: configuration.settings });
+        return {
+          defaultCwd: repositoryCwd,
+          worktree: configuration.settings,
+        } satisfies Workspace.WorkspaceConfiguration;
+      }
+      default: {
+        const exhaustive: never = configuration;
+        return exhaustive;
+      }
+    }
+  });
+
   const bindWorkspace = Effect.fn("Application.bindWorkspace")(function* (input: BindWorkspace) {
-    const cwd = yield* resolveWorkspaceCwd(input.cwd);
+    const configuration = yield* resolveConfiguration(input.configuration);
     const existing = yield* workspaces
       .findByBinding(input.binding)
       .pipe(Effect.mapError(failure("Failed to bind workspace")));
@@ -85,13 +124,21 @@ const make = Effect.fn("Application.make")(function* (createWorktree: CreateWork
       return yield* createWorkspace({
         name: input.workspaceName,
         binding: input.binding,
-        defaultCwd: cwd,
-        worktree: null,
+        ...configuration,
       });
     }
-    if (existing.value.defaultCwd === cwd) return existing.value;
+    if (
+      existing.value.defaultCwd === configuration.defaultCwd &&
+      ((existing.value.worktree === null && configuration.worktree === null) ||
+        (existing.value.worktree !== null &&
+          configuration.worktree !== null &&
+          existing.value.worktree.branch === configuration.worktree.branch &&
+          existing.value.worktree.prefix === configuration.worktree.prefix))
+    ) {
+      return existing.value;
+    }
     return yield* workspaces
-      .changeDefaultCwd(existing.value.id, cwd)
+      .replaceConfiguration(existing.value.id, configuration)
       .pipe(Effect.mapError(failure("Failed to bind workspace")));
   });
 
@@ -116,7 +163,7 @@ const make = Effect.fn("Application.make")(function* (createWorktree: CreateWork
         });
       }
 
-      const cwd = yield* createWorktree(
+      const cwd = yield* gitWorktree.create(
         {
           chatId: id,
           repositoryCwd: workspace.defaultCwd,
@@ -204,5 +251,4 @@ const make = Effect.fn("Application.make")(function* (createWorktree: CreateWork
   });
 });
 
-export const layer = (createWorktree: CreateWorktree) =>
-  Layer.effect(Application, make(createWorktree));
+export const layer = (gitWorktree: GitWorktree) => Layer.effect(Application, make(gitWorktree));

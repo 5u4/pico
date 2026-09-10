@@ -21,9 +21,9 @@ const WorkspaceRow = Schema.Struct({
 });
 type WorkspaceRow = typeof WorkspaceRow.Type;
 
-const ChangeDefaultCwd = Schema.Struct({
+const ReplaceConfiguration = Schema.Struct({
   id: Workspace.WorkspaceId,
-  cwd: AbsolutePath,
+  configuration: Workspace.WorkspaceConfiguration,
 });
 
 const failure = (message: string) => () => new PersistenceError({ message });
@@ -133,12 +133,15 @@ const make = Effect.fn("WorkspaceRepository.make")(function* () {
     `,
   });
 
-  const updateDefaultCwd = SqlSchema.findOne({
-    Request: ChangeDefaultCwd,
+  const replaceStoredConfiguration = SqlSchema.findOne({
+    Request: ReplaceConfiguration,
     Result: WorkspaceRow,
-    execute: ({ id, cwd }) => sql`
+    execute: ({ id, configuration }) => sql`
       UPDATE workspaces
-      SET default_cwd = ${cwd}
+      SET
+        default_cwd = ${configuration.defaultCwd},
+        worktree_branch = ${configuration.worktree?.branch ?? null},
+        worktree_prefix = ${configuration.worktree?.prefix ?? null}
       WHERE id = ${id}
       RETURNING
         id,
@@ -181,14 +184,14 @@ const make = Effect.fn("WorkspaceRepository.make")(function* () {
     Effect.mapError(failure("Failed to find workspace")),
   );
 
-  const changeDefaultCwd = Effect.fn("WorkspaceRepository.changeDefaultCwd")(
-    function* (id: Workspace.WorkspaceId, cwd: typeof AbsolutePath.Type) {
-      return yield* decodeWorkspace(yield* updateDefaultCwd({ id, cwd }));
+  const replaceConfiguration = Effect.fn("WorkspaceRepository.replaceConfiguration")(
+    function* (id: Workspace.WorkspaceId, configuration: Workspace.WorkspaceConfiguration) {
+      return yield* decodeWorkspace(yield* replaceStoredConfiguration({ id, configuration }));
     },
-    Effect.mapError(failure("Failed to change workspace cwd")),
+    Effect.mapError(failure("Failed to replace workspace configuration")),
   );
 
-  return WorkspaceRepository.of({ create, findById, findByBinding, changeDefaultCwd });
+  return WorkspaceRepository.of({ create, findById, findByBinding, replaceConfiguration });
 });
 
 export const layer = Layer.effect(WorkspaceRepository, make());

@@ -5,7 +5,7 @@ import * as Schema from "effect/Schema";
 import type { AgentPrompt, AgentTranscript } from "./agent-message.ts";
 import type { ContextUsage, ShakeMode, ShakeResult } from "./agent-runtime.ts";
 import type { Chat, ChatId } from "./chat-model.ts";
-import type { ApplicationError, WorkspaceCwdInvalid } from "./errors.ts";
+import type { ApplicationError, GitError, WorkspaceBindingInvalid } from "./errors.ts";
 import { AbsolutePath } from "./path.ts";
 import {
   type Workspace,
@@ -23,10 +23,20 @@ export const CreateWorkspace = Schema.Struct({
 });
 export type CreateWorkspace = typeof CreateWorkspace.Type;
 
+export const WorkspaceBindingConfiguration = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("direct"), cwd: Schema.String }),
+  Schema.Struct({
+    kind: Schema.Literal("worktree"),
+    repository: Schema.String,
+    settings: WorktreeSettings,
+  }),
+]);
+export type WorkspaceBindingConfiguration = typeof WorkspaceBindingConfiguration.Type;
+
 export const BindWorkspace = Schema.Struct({
   binding: WorkspaceBinding,
   workspaceName: Schema.NonEmptyString,
-  cwd: Schema.String,
+  configuration: WorkspaceBindingConfiguration,
 });
 export type BindWorkspace = typeof BindWorkspace.Type;
 
@@ -45,7 +55,7 @@ export class Application extends Context.Service<
 
     readonly bindWorkspace: (
       input: BindWorkspace,
-    ) => Effect.Effect<Workspace, ApplicationError | WorkspaceCwdInvalid>;
+    ) => Effect.Effect<Workspace, ApplicationError | GitError | WorkspaceBindingInvalid>;
 
     readonly createChat: (input: CreateChat) => Effect.Effect<Chat, ApplicationError>;
 

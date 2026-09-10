@@ -19,6 +19,31 @@ export const applicationCommands = [
           },
         ],
       },
+      {
+        name: "worktree",
+        description: "Configure worktrees for new chats",
+        type: ApplicationCommandOptionTypes.SubCommand,
+        options: [
+          {
+            name: "repository",
+            description: "Absolute Git repository path",
+            type: ApplicationCommandOptionTypes.String,
+            required: true,
+          },
+          {
+            name: "branch",
+            description: "Commit-ish starting ref",
+            type: ApplicationCommandOptionTypes.String,
+            required: true,
+          },
+          {
+            name: "prefix",
+            description: "Branch prefix for new chats",
+            type: ApplicationCommandOptionTypes.String,
+            required: true,
+          },
+        ],
+      },
     ],
   },
   {
@@ -51,7 +76,13 @@ export interface CommandOption {
 }
 
 export type BindCommand =
-  | { readonly kind: "bindSetCwd"; readonly cwd: string }
+  | { readonly kind: "bindDirect"; readonly cwd: string }
+  | {
+      readonly kind: "bindWorktree";
+      readonly repository: string;
+      readonly branch: string;
+      readonly prefix: string;
+    }
   | { readonly kind: "malformedBind" };
 
 export type ShakeCommand =
@@ -65,24 +96,50 @@ export type Command = BindCommand | ShakeCommand | { readonly kind: "context" };
 
 export const parseBind = (options: ReadonlyArray<CommandOption> | undefined): BindCommand => {
   if (options?.length !== 1) return { kind: "malformedBind" };
-  const set = options[0];
-  if (
-    set?.name !== "set" ||
-    set.type !== ApplicationCommandOptionTypes.SubCommand ||
-    set.options?.length !== 1
-  ) {
+  const subcommand = options[0];
+  if (subcommand?.type !== ApplicationCommandOptionTypes.SubCommand) {
     return { kind: "malformedBind" };
   }
 
-  const cwd = set.options[0];
+  if (subcommand.name === "set") {
+    if (subcommand.options?.length !== 1) return { kind: "malformedBind" };
+    const cwd = subcommand.options[0];
+    if (
+      cwd?.name !== "cwd" ||
+      cwd.type !== ApplicationCommandOptionTypes.String ||
+      typeof cwd.value !== "string" ||
+      cwd.options !== undefined
+    ) {
+      return { kind: "malformedBind" };
+    }
+    return { kind: "bindDirect", cwd: cwd.value };
+  }
+
+  if (subcommand.name !== "worktree" || subcommand.options?.length !== 3) {
+    return { kind: "malformedBind" };
+  }
+  const repository = subcommand.options.find(({ name }) => name === "repository");
+  const branch = subcommand.options.find(({ name }) => name === "branch");
+  const prefix = subcommand.options.find(({ name }) => name === "prefix");
   if (
-    cwd?.name !== "cwd" ||
-    cwd.type !== ApplicationCommandOptionTypes.String ||
-    typeof cwd.value !== "string"
+    repository?.type !== ApplicationCommandOptionTypes.String ||
+    typeof repository.value !== "string" ||
+    repository.options !== undefined ||
+    branch?.type !== ApplicationCommandOptionTypes.String ||
+    typeof branch.value !== "string" ||
+    branch.options !== undefined ||
+    prefix?.type !== ApplicationCommandOptionTypes.String ||
+    typeof prefix.value !== "string" ||
+    prefix.options !== undefined
   ) {
     return { kind: "malformedBind" };
   }
-  return { kind: "bindSetCwd", cwd: cwd.value };
+  return {
+    kind: "bindWorktree",
+    repository: repository.value,
+    branch: branch.value,
+    prefix: prefix.value,
+  };
 };
 
 export const parseShake = (options: ReadonlyArray<CommandOption> | undefined): ShakeCommand => {

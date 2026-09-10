@@ -21,6 +21,12 @@ export const WorktreeSettings = Schema.Struct({
 });
 export type WorktreeSettings = typeof WorktreeSettings.Type;
 
+export const WorkspaceConfiguration = Schema.Struct({
+  defaultCwd: AbsolutePath,
+  worktree: Schema.NullOr(WorktreeSettings),
+});
+export type WorkspaceConfiguration = typeof WorkspaceConfiguration.Type;
+
 export const Workspace = Schema.Struct({
   id: WorkspaceId,
   name: Schema.NonEmptyString,

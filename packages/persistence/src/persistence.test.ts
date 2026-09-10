@@ -106,7 +106,12 @@ describe("Persistence.layer", () => {
           PersistenceError,
         );
         assert.instanceOf(
-          yield* Effect.flip(workspaces.changeDefaultCwd(missingWorkspaceId, cwdB)),
+          yield* Effect.flip(
+            workspaces.replaceConfiguration(missingWorkspaceId, {
+              defaultCwd: cwdB,
+              worktree: null,
+            }),
+          ),
           PersistenceError,
         );
 
@@ -119,8 +124,25 @@ describe("Persistence.layer", () => {
         });
         assert.strictEqual(firstRegular.cwd, cwdA);
 
-        const changed = yield* workspaces.changeDefaultCwd(regularWorkspaceId, cwdB);
-        assert.strictEqual(changed.defaultCwd, cwdB);
+        const changed = yield* workspaces.replaceConfiguration(regularWorkspaceId, {
+          defaultCwd: cwdB,
+          worktree: { branch: "release", prefix: "bound/" },
+        });
+        assert.deepStrictEqual(changed, {
+          ...regularWorkspace,
+          defaultCwd: cwdB,
+          worktree: { branch: "release", prefix: "bound/" },
+        });
+        assert.deepStrictEqual(
+          Option.getOrThrow(yield* workspaces.findById(regularWorkspaceId)),
+          changed,
+        );
+
+        const direct = yield* workspaces.replaceConfiguration(regularWorkspaceId, {
+          defaultCwd: cwdB,
+          worktree: null,
+        });
+        assert.deepStrictEqual(direct, { ...regularWorkspace, defaultCwd: cwdB });
 
         const staleDefaultCwd = yield* chats.create({
           id: chatId(10),

@@ -1,7 +1,7 @@
 import * as BunServices from "@effect/platform-bun/BunServices";
 import { assert, describe, it } from "@effect/vitest";
 import * as Chat from "@pico/contract/chat-model";
-import { GitError, PersistenceError } from "@pico/contract/errors";
+import { GitError, PersistenceError, WorkspaceBindingInvalid } from "@pico/contract/errors";
 import { AbsolutePath } from "@pico/contract/path";
 import { make } from "@pico/git/worktree";
 import * as Effect from "effect/Effect";
@@ -72,7 +72,7 @@ describe("GitWorktree.create", () => {
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const { repositoryCwd, worktreesDir } = yield* makeRepository();
-      const create = yield* make(worktreesDir);
+      const { create } = yield* make(worktreesDir);
       const id = chatId(1);
       const cwd = AbsolutePath.make(path.join(worktreesDir, id));
       const committed = {};
@@ -100,7 +100,7 @@ describe("GitWorktree.create", () => {
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const { repositoryCwd, worktreesDir } = yield* makeRepository();
-      const create = yield* make(worktreesDir);
+      const { create } = yield* make(worktreesDir);
       const id = chatId(2);
       const cwd = AbsolutePath.make(path.join(worktreesDir, id));
       const branch = `chat/${id}`;
@@ -128,7 +128,7 @@ describe("GitWorktree.create", () => {
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const { repositoryCwd, worktreesDir } = yield* makeRepository();
-      const create = yield* make(worktreesDir);
+      const { create } = yield* make(worktreesDir);
       const id = chatId(3);
       const cwd = AbsolutePath.make(path.join(worktreesDir, id));
       const branch = `chat/${id}`;
@@ -145,6 +145,83 @@ describe("GitWorktree.create", () => {
       assert.isFalse(callbackRan);
       assert.isFalse(yield* fileSystem.exists(cwd));
       assert.strictEqual((yield* git(repositoryCwd, ["branch", "--list", branch])).trim(), branch);
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
+});
+
+describe("GitWorktree.validate", () => {
+  it.effect("accepts a repository, commit-ish ref, and generated branch shape", () =>
+    Effect.gen(function* () {
+      const { repositoryCwd, worktreesDir } = yield* makeRepository();
+      const { validate } = yield* make(worktreesDir);
+
+      const branches = yield* git(repositoryCwd, ["branch", "--list"]);
+      const worktrees = yield* git(repositoryCwd, ["worktree", "list", "--porcelain"]);
+      yield* validate({
+        repositoryCwd: AbsolutePath.make(`${repositoryCwd}/.`),
+        settings: { branch: "HEAD", prefix: "chat/" },
+      });
+      assert.strictEqual(yield* git(repositoryCwd, ["branch", "--list"]), branches);
+      assert.strictEqual(yield* git(repositoryCwd, ["worktree", "list", "--porcelain"]), worktrees);
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
+
+  it.effect("reports expected repository, branch, and prefix validation failures", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const { repositoryCwd, worktreesDir } = yield* makeRepository();
+      const notRepository = AbsolutePath.make(path.join(worktreesDir, "not-repository"));
+      yield* fileSystem.makeDirectory(notRepository, { recursive: true });
+      const { validate } = yield* make(worktreesDir);
+
+      for (const candidate of [
+        {
+          options: { repositoryCwd, settings: { branch: " main", prefix: "chat/" } },
+          field: "branch",
+          reason: "surrounding-whitespace",
+        },
+        {
+          options: { repositoryCwd, settings: { branch: "main", prefix: "chat/ " } },
+          field: "prefix",
+          reason: "surrounding-whitespace",
+        },
+        {
+          options: { repositoryCwd: notRepository, settings },
+          field: "repository",
+          reason: "not-repository",
+        },
+        {
+          options: { repositoryCwd, settings: { branch: "--help", prefix: "chat/" } },
+          field: "branch",
+          reason: "not-commit",
+        },
+        {
+          options: { repositoryCwd, settings: { branch: "main", prefix: "bad.." } },
+          field: "prefix",
+          reason: "invalid-ref",
+        },
+      ] as const) {
+        const error = yield* validate(candidate.options).pipe(Effect.flip);
+        assert.instanceOf(error, WorkspaceBindingInvalid);
+        if (!(error instanceof WorkspaceBindingInvalid)) continue;
+        assert.strictEqual(error.issue.field, candidate.field);
+        assert.strictEqual(error.issue.reason, candidate.reason);
+      }
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
+
+  it.effect("keeps process spawn failure unexpected", () =>
+    Effect.gen(function* () {
+      const path = yield* Path.Path;
+      const { worktreesDir } = yield* makeRepository();
+      const { validate } = yield* make(worktreesDir);
+      const missingRepository = AbsolutePath.make(path.join(worktreesDir, "missing"));
+
+      assert.instanceOf(
+        yield* validate({ repositoryCwd: missingRepository, settings }).pipe(Effect.flip),
+        GitError,
+      );
     }).pipe(Effect.provide(BunServices.layer)),
   );
 });

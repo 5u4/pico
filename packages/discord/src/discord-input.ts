@@ -2,7 +2,7 @@ import type { DiscordConfig } from "@pico/config/config";
 import type { ContextUsage, ShakeResult } from "@pico/contract/agent-runtime";
 import { Application } from "@pico/contract/application";
 import type * as Chat from "@pico/contract/chat-model";
-import type { WorkspaceCwdInvalid } from "@pico/contract/errors";
+import type { WorkspaceBindingInvalid } from "@pico/contract/errors";
 import type * as Workspace from "@pico/contract/workspace-model";
 import { ChannelTypes, InteractionTypes } from "discordeno";
 import * as Cause from "effect/Cause";
@@ -248,18 +248,43 @@ export const install = Effect.fn("DiscordInput.install")(function* <
     yield* application.sendMessage(chat.id, message.content);
   });
 
-  const cwdFailureCopy = (reason: WorkspaceCwdInvalid["reason"]) => {
-    switch (reason) {
+  type WorkspacePathIssue = Extract<
+    WorkspaceBindingInvalid["issue"],
+    { readonly field: "cwd" | "repository" }
+  >;
+
+  const pathFailureCopy = (label: string, issue: WorkspacePathIssue) => {
+    switch (issue.reason) {
       case "surrounding-whitespace":
-        return "The working directory cannot start or end with whitespace.";
+        return `The ${label} cannot start or end with whitespace.`;
       case "not-absolute":
-        return "The working directory must be an absolute path.";
+        return `The ${label} must be an absolute path.`;
       case "not-found":
-        return "That working directory does not exist.";
+        return `That ${label} does not exist.`;
       case "not-directory":
-        return "That path is not a directory.";
+        return `That ${label} is not a directory.`;
       case "unreadable":
-        return "That working directory cannot be inspected.";
+        return `That ${label} cannot be inspected.`;
+      case "not-repository":
+        return "That path is not a Git repository.";
+    }
+  };
+
+  const bindingFailureCopy = (error: WorkspaceBindingInvalid) => {
+    const issue = error.issue;
+    switch (issue.field) {
+      case "cwd":
+        return pathFailureCopy("working directory", issue);
+      case "repository":
+        return pathFailureCopy("repository path", issue);
+      case "branch":
+        return issue.reason === "surrounding-whitespace"
+          ? "The branch cannot start or end with whitespace."
+          : "The branch must resolve to a commit in that repository.";
+      case "prefix":
+        return issue.reason === "surrounding-whitespace"
+          ? "The prefix cannot start or end with whitespace."
+          : "The prefix cannot form valid Git branch names.";
     }
   };
 
@@ -286,15 +311,28 @@ export const install = Effect.fn("DiscordInput.install")(function* <
 
     switch (command.kind) {
       case "malformedBind":
-        return "The /bind set command requires one cwd value.";
-      case "bindSetCwd": {
+        return "Use /bind set with cwd, or /bind worktree with repository, branch, and prefix.";
+      case "bindDirect": {
         const workspace = yield* application.bindWorkspace({
           binding: { platform: "discord", externalId: channel.id.toString() },
           workspaceName: channel.name ?? channel.id.toString(),
-          cwd: command.cwd,
+          configuration: { kind: "direct", cwd: command.cwd },
         });
         workspaceIds.set(channel.id, workspace.id);
-        return `Workspace binding updated to ${workspace.defaultCwd}.`;
+        return `Workspace binding updated to ${workspace.defaultCwd}. Worktrees are disabled for new chats.`;
+      }
+      case "bindWorktree": {
+        const workspace = yield* application.bindWorkspace({
+          binding: { platform: "discord", externalId: channel.id.toString() },
+          workspaceName: channel.name ?? channel.id.toString(),
+          configuration: {
+            kind: "worktree",
+            repository: command.repository,
+            settings: { branch: command.branch, prefix: command.prefix },
+          },
+        });
+        workspaceIds.set(channel.id, workspace.id);
+        return `Workspace worktrees configured from ${workspace.defaultCwd}. This affects new chats only.`;
       }
       default: {
         const exhaustive: never = command;
@@ -387,11 +425,12 @@ export const install = Effect.fn("DiscordInput.install")(function* <
   ) {
     const content = yield* (() => {
       switch (command.kind) {
-        case "bindSetCwd":
+        case "bindDirect":
+        case "bindWorktree":
         case "malformedBind":
           return bindResponse(interaction, command).pipe(
-            Effect.catchTag("WorkspaceCwdInvalid", (error) =>
-              Effect.succeed(cwdFailureCopy(error.reason)),
+            Effect.catchTag("WorkspaceBindingInvalid", (error) =>
+              Effect.succeed(bindingFailureCopy(error)),
             ),
             Effect.catchCause((cause) =>
               Effect.logError("Discord interaction failed", Cause.pretty(cause)).pipe(

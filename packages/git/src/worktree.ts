@@ -1,6 +1,11 @@
-import { GitError } from "@pico/contract/errors";
+import { GitError, WorkspaceBindingInvalid } from "@pico/contract/errors";
 import { AbsolutePath } from "@pico/contract/path";
-import type { CreateWorktree, CreateWorktreeOptions } from "@pico/contract/worktree";
+import type {
+  CreateWorktree,
+  CreateWorktreeOptions,
+  GitWorktree,
+  ValidateWorktreeOptions,
+} from "@pico/contract/worktree";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -18,9 +23,12 @@ interface CreatedWorktree {
 
 type Spawner = ChildProcessSpawner.ChildProcessSpawner["Service"];
 
+const validationError = (issue: WorkspaceBindingInvalid["issue"]) =>
+  new WorkspaceBindingInvalid({ issue });
+
 const gitError = (action: string) => new GitError({ message: `Failed to ${action}` });
 
-const runGit = Effect.fn("GitWorktree.runGit")(function* (
+const runGitExit = Effect.fn("GitWorktree.runGitExit")(function* (
   spawner: Spawner,
   repositoryCwd: AbsolutePath,
   action: string,
@@ -39,7 +47,59 @@ const runGit = Effect.fn("GitWorktree.runGit")(function* (
     }),
   ).pipe(Effect.mapError(() => gitError(action)));
 
-  if (exitCode !== 0) return yield* gitError(action);
+  return exitCode === 0;
+});
+
+const runGit = Effect.fn("GitWorktree.runGit")(function* (
+  spawner: Spawner,
+  repositoryCwd: AbsolutePath,
+  action: string,
+  args: ReadonlyArray<string>,
+) {
+  if (!(yield* runGitExit(spawner, repositoryCwd, action, args))) return yield* gitError(action);
+});
+
+const validate = Effect.fn("GitWorktree.validate")(function* (
+  spawner: Spawner,
+  options: ValidateWorktreeOptions,
+) {
+  if (options.settings.branch.trim() !== options.settings.branch) {
+    return yield* validationError({ field: "branch", reason: "surrounding-whitespace" });
+  }
+  if (options.settings.prefix.trim() !== options.settings.prefix) {
+    return yield* validationError({ field: "prefix", reason: "surrounding-whitespace" });
+  }
+
+  if (
+    !(yield* runGitExit(spawner, options.repositoryCwd, "inspect repository", [
+      "rev-parse",
+      "--git-dir",
+    ]))
+  ) {
+    return yield* validationError({ field: "repository", reason: "not-repository" });
+  }
+  if (
+    options.settings.branch.length === 0 ||
+    !(yield* runGitExit(spawner, options.repositoryCwd, "inspect branch", [
+      "rev-parse",
+      "--verify",
+      "--quiet",
+      "--end-of-options",
+      `${options.settings.branch}^{commit}`,
+    ]))
+  ) {
+    return yield* validationError({ field: "branch", reason: "not-commit" });
+  }
+  if (
+    options.settings.prefix.length === 0 ||
+    !(yield* runGitExit(spawner, options.repositoryCwd, "inspect prefix", [
+      "check-ref-format",
+      "--branch",
+      `${options.settings.prefix}018f47a0-0000-7000-8000-000000000000`,
+    ]))
+  ) {
+    return yield* validationError({ field: "prefix", reason: "invalid-ref" });
+  }
 });
 
 const acquire = Effect.fn("GitWorktree.create.acquire")(function* (
@@ -106,7 +166,7 @@ const rollback = Effect.fn("GitWorktree.create.rollback")(function* (
 export const make = Effect.fn("GitWorktree.make")(function* (
   worktreesDir: AbsolutePath,
 ): Effect.fn.Return<
-  CreateWorktree,
+  GitWorktree,
   never,
   FileSystem.FileSystem | Path.Path | ChildProcessSpawner.ChildProcessSpawner
 > {
@@ -125,5 +185,8 @@ export const make = Effect.fn("GitWorktree.make")(function* (
     );
   });
 
-  return create;
+  return {
+    validate: (options) => validate(spawner, options),
+    create,
+  };
 });

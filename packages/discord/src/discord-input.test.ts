@@ -2,7 +2,7 @@ import { assert, describe, it } from "@effect/vitest";
 import type { ContextUsage } from "@pico/contract/agent-runtime";
 import { Application, type BindWorkspace } from "@pico/contract/application";
 import * as Chat from "@pico/contract/chat-model";
-import { ApplicationError, WorkspaceCwdInvalid } from "@pico/contract/errors";
+import { ApplicationError, WorkspaceBindingInvalid } from "@pico/contract/errors";
 import { AbsolutePath } from "@pico/contract/path";
 import * as Workspace from "@pico/contract/workspace-model";
 import { ApplicationCommandOptionTypes, ChannelTypes, InteractionTypes } from "discordeno";
@@ -49,6 +49,18 @@ const bindOptions = (cwd: string) => [
     name: "set",
     type: ApplicationCommandOptionTypes.SubCommand,
     options: [{ name: "cwd", type: ApplicationCommandOptionTypes.String, value: cwd }],
+  },
+];
+
+const worktreeOptions = (repository: string, branch: string, prefix: string) => [
+  {
+    name: "worktree",
+    type: ApplicationCommandOptionTypes.SubCommand,
+    options: [
+      { name: "prefix", type: ApplicationCommandOptionTypes.String, value: prefix },
+      { name: "repository", type: ApplicationCommandOptionTypes.String, value: repository },
+      { name: "branch", type: ApplicationCommandOptionTypes.String, value: branch },
+    ],
   },
 ];
 
@@ -270,15 +282,44 @@ describe("Discord input", () => {
           createWorkspace: () => Effect.die("unexpected workspace creation"),
           bindWorkspace: (input) => {
             bindings.push(input);
-            if (input.cwd === "/missing") {
-              return Effect.fail(new WorkspaceCwdInvalid({ cwd: input.cwd, reason: "not-found" }));
+            if (input.configuration.kind === "direct") {
+              if (input.configuration.cwd === "/missing") {
+                return Effect.fail(
+                  new WorkspaceBindingInvalid({ issue: { field: "cwd", reason: "not-found" } }),
+                );
+              }
+              return Effect.succeed({
+                id: workspaceId,
+                name: "general",
+                binding: input.binding,
+                defaultCwd: AbsolutePath.make(input.configuration.cwd),
+                worktree: null,
+                createdAt: 0,
+              });
+            }
+            if (input.configuration.repository === "/not-git") {
+              return Effect.fail(
+                new WorkspaceBindingInvalid({
+                  issue: { field: "repository", reason: "not-repository" },
+                }),
+              );
+            }
+            if (input.configuration.settings.branch === "missing") {
+              return Effect.fail(
+                new WorkspaceBindingInvalid({ issue: { field: "branch", reason: "not-commit" } }),
+              );
+            }
+            if (input.configuration.settings.prefix === "bad") {
+              return Effect.fail(
+                new WorkspaceBindingInvalid({ issue: { field: "prefix", reason: "invalid-ref" } }),
+              );
             }
             return Effect.succeed({
               id: workspaceId,
               name: "general",
               binding: input.binding,
-              defaultCwd: AbsolutePath.make(input.cwd),
-              worktree: null,
+              defaultCwd: AbsolutePath.make(input.configuration.repository),
+              worktree: input.configuration.settings,
               createdAt: 0,
             });
           },
@@ -329,7 +370,7 @@ describe("Discord input", () => {
 
         assert.strictEqual(
           yield* Effect.promise(() => invoke({ data: { name: "bind", options: [] } })),
-          "The /bind set command requires one cwd value.",
+          "Use /bind set with cwd, or /bind worktree with repository, branch, and prefix.",
         );
         assert.strictEqual(
           yield* Effect.promise(() =>
@@ -341,22 +382,68 @@ describe("Discord input", () => {
           yield* Effect.promise(() =>
             invoke({ data: { name: "bind", options: bindOptions("/repo") } }),
           ),
-          "Workspace binding updated to /repo.",
+          "Workspace binding updated to /repo. Worktrees are disabled for new chats.",
+        );
+        assert.strictEqual(
+          yield* Effect.promise(() =>
+            invoke({
+              data: { name: "bind", options: worktreeOptions("/not-git", "main", "chat/") },
+            }),
+          ),
+          "That path is not a Git repository.",
+        );
+        assert.strictEqual(
+          yield* Effect.promise(() =>
+            invoke({
+              data: { name: "bind", options: worktreeOptions("/repo", "missing", "chat/") },
+            }),
+          ),
+          "The branch must resolve to a commit in that repository.",
+        );
+        assert.strictEqual(
+          yield* Effect.promise(() =>
+            invoke({
+              data: { name: "bind", options: worktreeOptions("/repo", "main", "bad") },
+            }),
+          ),
+          "The prefix cannot form valid Git branch names.",
+        );
+        assert.strictEqual(
+          yield* Effect.promise(() =>
+            invoke({
+              data: { name: "bind", options: worktreeOptions("/repo", "main", "chat/") },
+            }),
+          ),
+          "Workspace worktrees configured from /repo. This affects new chats only.",
         );
         assert.deepStrictEqual(bindings, [
           {
             binding: { platform: "discord", externalId: "10" },
             workspaceName: "general",
-            cwd: "/missing",
+            configuration: { kind: "direct", cwd: "/missing" },
           },
           {
             binding: { platform: "discord", externalId: "10" },
             workspaceName: "general",
-            cwd: "/repo",
+            configuration: { kind: "direct", cwd: "/repo" },
           },
+          ...[
+            { repository: "/not-git", branch: "main", prefix: "chat/" },
+            { repository: "/repo", branch: "missing", prefix: "chat/" },
+            { repository: "/repo", branch: "main", prefix: "bad" },
+            { repository: "/repo", branch: "main", prefix: "chat/" },
+          ].map(({ repository, branch, prefix }) => ({
+            binding: { platform: "discord" as const, externalId: "10" },
+            workspaceName: "general",
+            configuration: {
+              kind: "worktree" as const,
+              repository,
+              settings: { branch, prefix },
+            },
+          })),
         ]);
-        assert.strictEqual(defers, 9);
-        assert.strictEqual(edits, 9);
+        assert.strictEqual(defers, 13);
+        assert.strictEqual(edits, 13);
 
         let ignoredDefers = 0;
         handleInteraction(

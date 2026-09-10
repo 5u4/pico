@@ -28,9 +28,9 @@ export const open = Effect.fn("Daemon.open")(function* (root: PicoRoot) {
 const daemonLayer = (paths: PicoPaths, config: Config.PicoConfig) =>
   Layer.unwrap(
     Effect.gen(function* () {
-      const createWorktree = yield* GitWorktree.make(paths.worktreesDir);
+      const gitWorktree = yield* GitWorktree.make(paths.worktreesDir);
       const persistence = PersistenceLayer.layer(paths.storeFile);
-      const application = ApplicationLayer.layer(createWorktree).pipe(
+      const application = ApplicationLayer.layer(gitWorktree).pipe(
         Layer.provide(Layer.merge(persistence, AgentSessionStoreLayer.layer(paths.sessionsDir))),
       );
       const agentRuntime = AgentRuntimeLayer.layer(paths.sessionsDir).pipe(

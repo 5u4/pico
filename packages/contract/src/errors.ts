@@ -8,21 +8,34 @@ export class ApplicationError extends Schema.TaggedError<ApplicationError>()("Ap
   message: Schema.String,
 }) {}
 
-export const WorkspaceCwdInvalidReason = Schema.Literals([
+const WorkspacePathInvalidReason = Schema.Literals([
   "surrounding-whitespace",
   "not-absolute",
   "not-found",
   "not-directory",
   "unreadable",
 ]);
-export type WorkspaceCwdInvalidReason = typeof WorkspaceCwdInvalidReason.Type;
 
-export class WorkspaceCwdInvalid extends Schema.TaggedError<WorkspaceCwdInvalid>()(
-  "WorkspaceCwdInvalid",
-  {
-    cwd: Schema.String,
-    reason: WorkspaceCwdInvalidReason,
-  },
+export const WorkspaceBindingInvalidIssue = Schema.Union([
+  Schema.Struct({ field: Schema.Literal("cwd"), reason: WorkspacePathInvalidReason }),
+  Schema.Struct({
+    field: Schema.Literal("repository"),
+    reason: Schema.Union([WorkspacePathInvalidReason, Schema.Literal("not-repository")]),
+  }),
+  Schema.Struct({
+    field: Schema.Literal("branch"),
+    reason: Schema.Literals(["surrounding-whitespace", "not-commit"]),
+  }),
+  Schema.Struct({
+    field: Schema.Literal("prefix"),
+    reason: Schema.Literals(["surrounding-whitespace", "invalid-ref"]),
+  }),
+]);
+export type WorkspaceBindingInvalidIssue = typeof WorkspaceBindingInvalidIssue.Type;
+
+export class WorkspaceBindingInvalid extends Schema.TaggedError<WorkspaceBindingInvalid>()(
+  "WorkspaceBindingInvalid",
+  { issue: WorkspaceBindingInvalidIssue },
 ) {}
 
 export class PersistenceError extends Schema.TaggedError<PersistenceError>()("PersistenceError", {
