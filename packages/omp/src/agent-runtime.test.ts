@@ -262,4 +262,179 @@ describe("AgentRuntime", () => {
       }),
     ),
   );
+  it.effect("closes and evicts an existing session without creating one", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const lifecycle: Array<string> = [];
+        let acquisitions = 0;
+        const factory: SessionFactory = {
+          open: () => {
+            acquisitions += 1;
+            return Effect.succeed({
+              session: {
+                settleInFlightMessagePersistence: () => Promise.resolve(),
+                abort: () => Promise.resolve(),
+                beginDispose: () => {
+                  lifecycle.push("begin-dispose");
+                },
+                dispose: () => {
+                  lifecycle.push("dispose");
+                  return Promise.resolve();
+                },
+              },
+              sendPrompt: () => Promise.resolve(),
+              shake: async (mode) => shakeResult(mode),
+              contextUsage: () => ({ kind: "unavailable" }),
+              unsubscribe: () => {
+                lifecycle.push("unsubscribe");
+              },
+            });
+          },
+        };
+        const pool = yield* makeSessionPool({
+          factory,
+          loadTranscript: () => Effect.succeed([]),
+        });
+
+        yield* pool.close(chatId);
+        assert.strictEqual(acquisitions, 0);
+        yield* pool.send(chatId, prompt("open"));
+        assert.strictEqual(acquisitions, 1);
+        yield* pool.close(chatId);
+        assert.deepStrictEqual(lifecycle, ["begin-dispose", "unsubscribe", "dispose"]);
+        yield* pool.close(chatId);
+        assert.strictEqual(acquisitions, 1);
+        assert.deepStrictEqual(lifecycle, ["begin-dispose", "unsubscribe", "dispose"]);
+        assert.deepStrictEqual(yield* pool.transcript(chatId), []);
+        assert.strictEqual(acquisitions, 1);
+      }),
+    ),
+  );
+
+  it.effect("surfaces a disposal failure without retrying the terminal session", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        let disposeCalls = 0;
+        let disposal: Promise<void> | undefined;
+        const pool = yield* makeSessionPool({
+          factory: {
+            open: () =>
+              Effect.succeed({
+                session: {
+                  settleInFlightMessagePersistence: () => Promise.resolve(),
+                  abort: () => Promise.resolve(),
+                  beginDispose: () => {},
+                  dispose: () => {
+                    disposeCalls += 1;
+                    disposal ??= Promise.reject(new Error("dispose failed"));
+                    return disposal;
+                  },
+                },
+                sendPrompt: () => Promise.resolve(),
+                shake: async (mode) => shakeResult(mode),
+                contextUsage: () => ({ kind: "unavailable" }),
+                unsubscribe: () => {},
+              }),
+          },
+          loadTranscript: () => Effect.succeed([]),
+        });
+
+        yield* pool.send(chatId, prompt("open"));
+        const first = yield* pool.close(chatId).pipe(Effect.flip);
+        const second = yield* pool.close(chatId).pipe(Effect.flip);
+        assert.instanceOf(first, AgentError);
+        assert.strictEqual(first.message, "Failed to dispose OMP session");
+        assert.strictEqual(second, first);
+        assert.strictEqual(disposeCalls, 1);
+      }),
+    ),
+  );
+
+  it.effect("continues teardown after an unsubscribe failure", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const lifecycle: Array<string> = [];
+        const pool = yield* makeSessionPool({
+          factory: {
+            open: () =>
+              Effect.succeed({
+                session: {
+                  settleInFlightMessagePersistence: () => Promise.resolve(),
+                  abort: () => Promise.resolve(),
+                  beginDispose: () => {
+                    lifecycle.push("begin-dispose");
+                  },
+                  dispose: () => {
+                    lifecycle.push("dispose");
+                    return Promise.reject(new Error("dispose failed"));
+                  },
+                },
+                sendPrompt: () => Promise.resolve(),
+                shake: async (mode) => shakeResult(mode),
+                contextUsage: () => ({ kind: "unavailable" }),
+                unsubscribe: () => {
+                  lifecycle.push("unsubscribe");
+                  throw new Error("unsubscribe failed");
+                },
+              }),
+          },
+          loadTranscript: () => Effect.succeed([]),
+        });
+
+        yield* pool.send(chatId, prompt("open"));
+        const error = yield* pool.close(chatId).pipe(Effect.flip);
+        assert.instanceOf(error, AgentError);
+        assert.strictEqual(error.message, "Failed to unsubscribe from OMP session events");
+        assert.deepStrictEqual(lifecycle, ["begin-dispose", "unsubscribe", "dispose"]);
+      }),
+    ),
+  );
+
+  it.effect("waits for event consumers at the drain barrier", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const deliveryStarted = yield* Deferred.make<void>();
+        const releaseDelivery = yield* Deferred.make<void>();
+        const drainCompleted = yield* Deferred.make<void>();
+        const pool = yield* makeSessionPool({
+          factory: {
+            open: (_id, emit) =>
+              Effect.succeed({
+                session: {
+                  settleInFlightMessagePersistence: () => Promise.resolve(),
+                  abort: () => Promise.resolve(),
+                  beginDispose: () => {},
+                  dispose: () => Promise.resolve(),
+                },
+                sendPrompt: () => {
+                  emit({ type: "notice", level: "info", message: "last" });
+                  return Promise.resolve();
+                },
+                shake: async (mode) => shakeResult(mode),
+                contextUsage: () => ({ kind: "unavailable" }),
+                unsubscribe: () => {},
+              }),
+          },
+          loadTranscript: () => Effect.succeed([]),
+        });
+        yield* pool.events.pipe(
+          Stream.runForEach(() =>
+            Deferred.succeed(deliveryStarted, undefined).pipe(
+              Effect.andThen(Deferred.await(releaseDelivery)),
+            ),
+          ),
+          Effect.forkChild,
+        );
+        yield* pool.send(chatId, prompt("emit"));
+        yield* Deferred.await(deliveryStarted);
+        yield* pool
+          .drain()
+          .pipe(Effect.ensuring(Deferred.succeed(drainCompleted, undefined)), Effect.forkChild);
+        yield* Effect.yieldNow;
+        assert.isFalse(yield* Deferred.isDone(drainCompleted));
+        yield* Deferred.succeed(releaseDelivery, undefined);
+        yield* Deferred.await(drainCompleted);
+      }),
+    ),
+  );
 });

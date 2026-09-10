@@ -4,12 +4,14 @@ import type { ContextUsage, ShakeMode, ShakeResult } from "@pico/contract/agent-
 import type * as Chat from "@pico/contract/chat-model";
 import { AgentError } from "@pico/contract/errors";
 import * as Cause from "effect/Cause";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as MutableRef from "effect/MutableRef";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as RcMap from "effect/RcMap";
+import * as Result from "effect/Result";
 import type * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 
@@ -40,6 +42,7 @@ export interface SessionFactory {
 
 export interface SessionPool {
   readonly events: Stream.Stream<AgentEvent.AgentEventEnvelope>;
+  readonly drain: () => Effect.Effect<void>;
   readonly transcript: (
     chatId: Chat.ChatId,
   ) => Effect.Effect<AgentMessage.AgentTranscript, AgentError>;
@@ -47,6 +50,7 @@ export interface SessionPool {
     chatId: Chat.ChatId,
     prompt: AgentMessage.AgentPrompt,
   ) => Effect.Effect<void, AgentError>;
+  readonly close: (chatId: Chat.ChatId) => Effect.Effect<void, AgentError>;
   readonly abort: (chatId: Chat.ChatId) => Effect.Effect<void, AgentError>;
   readonly contextUsage: (chatId: Chat.ChatId) => Effect.Effect<ContextUsage, AgentError>;
   readonly shake: (chatId: Chat.ChatId, mode: ShakeMode) => Effect.Effect<ShakeResult, AgentError>;
@@ -84,6 +88,10 @@ interface MakeOptions {
   ) => Effect.Effect<AgentMessage.AgentTranscript, AgentError>;
 }
 
+type OutputItem =
+  | { readonly kind: "event"; readonly envelope: AgentEvent.AgentEventEnvelope }
+  | { readonly kind: "drain"; readonly completed: Deferred.Deferred<void> };
+
 const boundary = <A>(message: string, evaluate: () => Promise<A>) =>
   Effect.tryPromise({
     try: evaluate,
@@ -96,34 +104,70 @@ const attemptCleanup = <A, E, R>(message: string, effect: Effect.Effect<A, E, R>
     Effect.catchCause((cause) => Effect.logError(message, Cause.pretty(cause))),
   );
 
-const releaseEntry = Effect.fn("SessionPool.releaseEntry")(function* (entry: LiveEntry) {
-  const lifecycle = MutableRef.getAndSet(entry.lifecycle, { type: "closing" });
-  if (lifecycle.type !== "open") return;
+const closeEntry = Effect.fn("SessionPool.closeEntry")(function* (entry: LiveEntry) {
+  const lifecycle = MutableRef.get(entry.lifecycle);
+  if (lifecycle.type === "closed") return;
 
-  yield* attemptCleanup(
-    "Failed to begin OMP session disposal",
-    Effect.sync(() => entry.session.beginDispose()),
-  );
-  yield* attemptCleanup(
-    "Failed to unsubscribe from OMP session events",
-    Effect.sync(lifecycle.unsubscribe),
-  );
-  yield* attemptCleanup(
-    "Failed to end OMP session event queue",
-    Effect.sync(() => Queue.endUnsafe(entry.events)),
-  );
-  yield* attemptCleanup("Failed to drain OMP session events", Fiber.join(entry.forwarder));
-  yield* attemptCleanup(
-    "Failed to dispose OMP session",
-    boundary("Failed to dispose OMP session", () => entry.session.dispose()),
-  );
+  let firstFailure: AgentError | undefined;
+  const capture = (effect: Effect.Effect<void, AgentError>) =>
+    effect.pipe(
+      Effect.catch((error) =>
+        Effect.sync(() => {
+          firstFailure ??= error;
+        }),
+      ),
+    );
 
-  MutableRef.set(entry.lifecycle, { type: "closed" });
+  if (lifecycle.type === "open") {
+    MutableRef.set(entry.lifecycle, { type: "closing" });
+    yield* capture(
+      Effect.try({
+        try: () => entry.session.beginDispose(),
+        catch: () => new AgentError({ message: "Failed to begin OMP session disposal" }),
+      }).pipe(Effect.asVoid),
+    );
+    yield* capture(
+      Effect.try({
+        try: lifecycle.unsubscribe,
+        catch: () => new AgentError({ message: "Failed to unsubscribe from OMP session events" }),
+      }).pipe(Effect.asVoid),
+    );
+    yield* capture(
+      Effect.try({
+        try: () => Queue.endUnsafe(entry.events),
+        catch: () => new AgentError({ message: "Failed to end OMP session event queue" }),
+      }).pipe(Effect.asVoid),
+    );
+    yield* capture(
+      Fiber.join(entry.forwarder).pipe(
+        Effect.asVoid,
+        Effect.catchCause(() =>
+          Effect.fail(new AgentError({ message: "Failed to drain OMP session events" })),
+        ),
+      ),
+    );
+  }
+
+  let disposed = false;
+  yield* capture(
+    boundary("Failed to dispose OMP session", () => entry.session.dispose()).pipe(
+      Effect.tap(() =>
+        Effect.sync(() => {
+          disposed = true;
+        }),
+      ),
+    ),
+  );
+  if (disposed) MutableRef.set(entry.lifecycle, { type: "closed" });
+  if (firstFailure !== undefined) return yield* firstFailure;
 }, Effect.uninterruptible);
+
+const releaseEntry = (entry: LiveEntry) =>
+  attemptCleanup("Failed to close OMP session", closeEntry(entry));
 
 const acquireEntry = Effect.fn("SessionPool.acquireEntry")(function* (
   factory: SessionFactory,
-  output: Queue.Queue<AgentEvent.AgentEventEnvelope, Cause.Done>,
+  output: Queue.Queue<OutputItem, Cause.Done>,
   chatId: Chat.ChatId,
 ) {
   const events = yield* Queue.unbounded<AgentEvent.AgentEvent, Cause.Done>();
@@ -131,7 +175,9 @@ const acquireEntry = Effect.fn("SessionPool.acquireEntry")(function* (
     Queue.offerUnsafe(events, event);
   });
   const forwarder = yield* Stream.fromQueue(events).pipe(
-    Stream.runForEach((event) => Queue.offer(output, { chatId, event })),
+    Stream.runForEach((event) =>
+      Queue.offer(output, { kind: "event", envelope: { chatId, event } }),
+    ),
     Effect.asVoid,
     Effect.forkDetach,
   );
@@ -170,14 +216,19 @@ const retainOption = (
 export const makeSessionPool = Effect.fn("SessionPool.make")(function* (
   options: MakeOptions,
 ): Effect.fn.Return<SessionPool, never, Scope.Scope> {
-  const output = yield* Effect.acquireRelease(
-    Queue.unbounded<AgentEvent.AgentEventEnvelope, Cause.Done>(),
-    (queue) => Queue.end(queue).pipe(Effect.asVoid),
+  const output = yield* Effect.acquireRelease(Queue.unbounded<OutputItem, Cause.Done>(), (queue) =>
+    Queue.end(queue).pipe(Effect.asVoid),
   );
   const sessions = yield* RcMap.make({
     lookup: (chatId: Chat.ChatId) =>
       Effect.acquireRelease(acquireEntry(options.factory, output, chatId), releaseEntry),
     idleTimeToLive: "10 minutes",
+  });
+  const closeFailures = new Map<Chat.ChatId, AgentError>();
+  const drain = Effect.fn("AgentRuntime.drain")(function* () {
+    const completed = yield* Deferred.make<void>();
+    yield* Queue.offer(output, { kind: "drain", completed });
+    yield* Deferred.await(completed);
   });
 
   const transcript = Effect.fn("AgentRuntime.transcript")(function* (chatId: Chat.ChatId) {
@@ -204,6 +255,25 @@ export const makeSessionPool = Effect.fn("SessionPool.make")(function* (
         yield* boundary("Failed to send OMP prompt", () => entry.sendPrompt(prompt));
       }),
     );
+  });
+
+  const close = Effect.fn("AgentRuntime.close")(function* (chatId: Chat.ChatId) {
+    const previousFailure = closeFailures.get(chatId);
+    if (previousFailure !== undefined) return yield* previousFailure;
+
+    yield* Effect.scoped(
+      Effect.gen(function* () {
+        const entry = yield* retainOption(sessions, chatId);
+        if (Option.isSome(entry)) yield* closeEntry(entry.value);
+      }),
+    ).pipe(
+      Effect.tapError((error) =>
+        Effect.sync(() => {
+          closeFailures.set(chatId, error);
+        }),
+      ),
+    );
+    yield* RcMap.invalidate(sessions, chatId);
   });
 
   const contextUsage = Effect.fn("AgentRuntime.contextUsage")(function* (chatId: Chat.ChatId) {
@@ -244,9 +314,16 @@ export const makeSessionPool = Effect.fn("SessionPool.make")(function* (
   });
 
   return {
-    events: Stream.fromQueue(output),
+    events: Stream.fromQueue(output).pipe(
+      Stream.filterMapEffect((item) => {
+        if (item.kind === "event") return Effect.succeed(Result.succeed(item.envelope));
+        return Deferred.succeed(item.completed, undefined).pipe(Effect.as(Result.failVoid));
+      }),
+    ),
+    drain,
     transcript,
     send,
+    close,
     abort,
     contextUsage,
     shake,

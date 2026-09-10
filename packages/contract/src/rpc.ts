@@ -15,7 +15,7 @@ export const PicoRpcs = RpcGroup.make(
   Rpc.make("SendMessage", {
     payload: { chatId: Chat.ChatId, prompt: AgentMessage.AgentPrompt },
     success: Schema.Void,
-    error: Errors.ApplicationError,
+    error: Schema.Union([Errors.ApplicationError, Errors.ChatClosed]),
   }),
   Rpc.make("Abort", {
     payload: { chatId: Chat.ChatId },

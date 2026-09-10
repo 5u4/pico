@@ -1,17 +1,26 @@
 import type { AgentEventEnvelope } from "@pico/contract/agent-event";
 import { AgentRuntime } from "@pico/contract/agent-runtime";
 import { type EventFilter, type EventRoute, EventRouter } from "@pico/contract/event-router";
+import type * as Cause from "effect/Cause";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as MutableRef from "effect/MutableRef";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
+import * as Result from "effect/Result";
 import type * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 
+type RouteItem =
+  | { readonly kind: "event"; readonly envelope: AgentEventEnvelope }
+  | { readonly kind: "drain"; readonly completed: Deferred.Deferred<void> };
+
 interface RouteState {
   readonly filter: MutableRef.MutableRef<EventFilter>;
-  readonly output: Queue.Queue<AgentEventEnvelope>;
+  readonly output: Queue.Queue<RouteItem, Cause.Done>;
+  readonly drains: Set<Deferred.Deferred<void>>;
+  closed: boolean;
 }
 
 const make = Effect.fn("EventRouter.make")(function* () {
@@ -23,7 +32,7 @@ const make = Effect.fn("EventRouter.make")(function* () {
 
     for (const route of activeRoutes) {
       if (MutableRef.get(route.filter)(envelope)) {
-        yield* Queue.offer(route.output, envelope);
+        yield* Queue.offer(route.output, { kind: "event", envelope });
       }
     }
   });
@@ -37,19 +46,40 @@ const make = Effect.fn("EventRouter.make")(function* () {
     initialFilter: EventFilter,
   ): Effect.fn.Return<EventRoute, never, Scope.Scope> {
     const filter = MutableRef.make(initialFilter);
-    const output = yield* Queue.unbounded<AgentEventEnvelope>();
-    const state: RouteState = { filter, output };
+    const output = yield* Queue.unbounded<RouteItem, Cause.Done>();
+    const state: RouteState = { filter, output, drains: new Set(), closed: false };
 
     yield* Effect.acquireRelease(
       Ref.update(routes, (activeRoutes) => [...activeRoutes, state]),
       () =>
         Ref.update(routes, (activeRoutes) => activeRoutes.filter((route) => route !== state)).pipe(
-          Effect.andThen(Queue.shutdown(output)),
+          Effect.andThen(
+            Effect.gen(function* () {
+              const drains = yield* Effect.sync(() => {
+                state.closed = true;
+                const drains = Array.from(state.drains);
+                state.drains.clear();
+                return drains;
+              });
+              yield* Effect.forEach(drains, (drain) => Deferred.succeed(drain, undefined), {
+                discard: true,
+              });
+              yield* Queue.end(output);
+            }),
+          ),
         ),
     );
 
     return {
-      events: Stream.fromQueue(output),
+      events: Stream.fromQueue(output).pipe(
+        Stream.filterMapEffect((item) => {
+          if (item.kind === "event") return Effect.succeed(Result.succeed(item.envelope));
+          return Effect.sync(() => state.drains.delete(item.completed)).pipe(
+            Effect.andThen(Deferred.succeed(item.completed, undefined)),
+            Effect.as(Result.failVoid),
+          );
+        }),
+      ),
       setFilter: (nextFilter) =>
         Effect.sync(() => {
           MutableRef.set(filter, nextFilter);
@@ -57,7 +87,33 @@ const make = Effect.fn("EventRouter.make")(function* () {
     };
   });
 
-  return EventRouter.of({ open });
+  const drain = Effect.fn("EventRouter.drain")(function* () {
+    yield* runtime.drain();
+    const activeRoutes = yield* Ref.get(routes);
+    const completed = yield* Effect.forEach(activeRoutes, (route) =>
+      Effect.gen(function* () {
+        const completed = yield* Deferred.make<void>();
+        const registered = yield* Effect.sync(() => {
+          if (route.closed) return false;
+          route.drains.add(completed);
+          return true;
+        });
+        if (!registered) {
+          yield* Deferred.succeed(completed, undefined);
+          return completed;
+        }
+        const accepted = yield* Queue.offer(route.output, { kind: "drain", completed });
+        if (!accepted) {
+          yield* Effect.sync(() => route.drains.delete(completed));
+          yield* Deferred.succeed(completed, undefined);
+        }
+        return completed;
+      }),
+    );
+    yield* Effect.forEach(completed, (deferred) => Deferred.await(deferred), { discard: true });
+  });
+
+  return EventRouter.of({ open, drain });
 });
 
 export const layer = Layer.effect(EventRouter, make());

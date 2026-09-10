@@ -8,6 +8,8 @@ export class ApplicationError extends Schema.TaggedError<ApplicationError>()("Ap
   message: Schema.String,
 }) {}
 
+export class ChatClosed extends Schema.TaggedError<ChatClosed>()("ChatClosed", {}) {}
+
 const WorkspacePathInvalidReason = Schema.Literals([
   "surrounding-whitespace",
   "not-absolute",

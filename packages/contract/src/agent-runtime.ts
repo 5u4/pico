@@ -43,10 +43,13 @@ export class AgentRuntime extends Context.Service<
   AgentRuntime,
   {
     readonly events: Stream.Stream<AgentEventEnvelope>;
+    readonly drain: () => Effect.Effect<void>;
 
     readonly transcript: (chatId: ChatId) => Effect.Effect<AgentTranscript, AgentError>;
 
     readonly send: (chatId: ChatId, prompt: AgentPrompt) => Effect.Effect<void, AgentError>;
+
+    readonly close: (chatId: ChatId) => Effect.Effect<void, AgentError>;
 
     readonly abort: (chatId: ChatId) => Effect.Effect<void, AgentError>;
 

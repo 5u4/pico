@@ -2,6 +2,7 @@ import { assert, describe, it } from "@effect/vitest";
 import type { AgentEvent, AgentEventEnvelope } from "@pico/contract/agent-event";
 import type { AgentAssistantMessage } from "@pico/contract/agent-message";
 import * as Chat from "@pico/contract/chat-model";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Scope from "effect/Scope";
 import * as TestClock from "effect/testing/TestClock";
@@ -250,6 +251,38 @@ describe("Discord output", () => {
     ),
   );
 
+  it.effect("waits for title renames before completing dispatch", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const renameStarted = yield* Deferred.make<void>();
+        const releaseRename = yield* Deferred.make<void>();
+        const dispatchCompleted = yield* Deferred.make<void>();
+        const scope = yield* Scope.Scope;
+        const dispatch = make(
+          {
+            send: () => Effect.die("unexpected message"),
+            edit: () => Effect.die("unexpected edit"),
+            renameThread: () =>
+              Deferred.succeed(renameStarted, undefined).pipe(
+                Effect.andThen(Deferred.await(releaseRename)),
+              ),
+            triggerTyping: () => Effect.die("unexpected typing"),
+          },
+          scope,
+        );
+
+        yield* dispatch(11n, envelope(chatA, { type: "title-changed", title: "Closed chat" })).pipe(
+          Effect.ensuring(Deferred.succeed(dispatchCompleted, undefined)),
+          Effect.forkChild,
+        );
+        yield* Deferred.await(renameStarted);
+        assert.isFalse(yield* Deferred.isDone(dispatchCompleted));
+        yield* Deferred.succeed(releaseRename, undefined);
+        yield* Deferred.await(dispatchCompleted);
+      }),
+    ),
+  );
+
   it.effect("curates tool targets without exposing malformed or unknown arguments", () =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -388,7 +421,7 @@ describe("Discord output", () => {
     ),
   );
 
-  it.effect("renames threads without stalling or failing later output", () =>
+  it.effect("contains rename failures without failing later output", () =>
     Effect.scoped(
       Effect.gen(function* () {
         const renamed: Array<{ readonly threadId: bigint; readonly title: string }> = [];
@@ -403,26 +436,15 @@ describe("Discord output", () => {
               }),
             edit: () => Effect.void,
             renameThread: (threadId, title) =>
-              Effect.gen(function* () {
+              Effect.sync(() => {
                 renamed.push({ threadId, title });
-                if (title === "Stalled rename") return yield* Effect.never;
-                if (title === "Failed rename") return yield* Effect.fail("rename failed");
-              }),
+              }).pipe(Effect.andThen(Effect.fail("rename failed"))),
             triggerTyping: () => Effect.void,
           },
           scope,
         );
 
-        yield* dispatch(11n, envelope(chatA, { type: "title-changed", title: "Stalled rename" }));
-        yield* dispatch(
-          11n,
-          envelope(chatA, {
-            type: "message-settled",
-            message: completed("tool-use", [{ type: "text", text: "after stall" }]),
-          }),
-        );
         yield* dispatch(22n, envelope(chatB, { type: "title-changed", title: "Failed rename" }));
-        yield* Effect.yieldNow;
         yield* dispatch(
           22n,
           envelope(chatB, {
@@ -431,16 +453,10 @@ describe("Discord output", () => {
           }),
         );
 
-        assert.deepStrictEqual(renamed, [
-          { threadId: 11n, title: "Stalled rename" },
-          { threadId: 22n, title: "Failed rename" },
-        ]);
+        assert.deepStrictEqual(renamed, [{ threadId: 22n, title: "Failed rename" }]);
         assert.deepStrictEqual(
           sent.map(({ threadId, message }) => [threadId, message.content]),
-          [
-            [11n, "after stall"],
-            [22n, "after failure"],
-          ],
+          [[22n, "after failure"]],
         );
       }),
     ),

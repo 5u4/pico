@@ -5,7 +5,7 @@ import * as Schema from "effect/Schema";
 import type { AgentPrompt, AgentTranscript } from "./agent-message.ts";
 import type { ContextUsage, ShakeMode, ShakeResult } from "./agent-runtime.ts";
 import type { Chat, ChatId } from "./chat-model.ts";
-import type { ApplicationError, GitError, WorkspaceBindingInvalid } from "./errors.ts";
+import type { ApplicationError, ChatClosed, GitError, WorkspaceBindingInvalid } from "./errors.ts";
 import { AbsolutePath } from "./path.ts";
 import {
   type Workspace,
@@ -46,6 +46,14 @@ export const CreateChat = Schema.Struct({
 });
 export type CreateChat = typeof CreateChat.Type;
 
+export interface CloseChatOptions {
+  readonly allowDirtyWorktree: boolean;
+}
+
+export type CloseChatResult =
+  | { readonly kind: "closed" }
+  | { readonly kind: "worktree-confirmation-required" };
+
 export class Application extends Context.Service<
   Application,
   {
@@ -72,18 +80,25 @@ export class Application extends Context.Service<
 
     readonly transcript: (chatId: ChatId) => Effect.Effect<AgentTranscript, ApplicationError>;
 
+    readonly closeChat: (
+      chatId: ChatId,
+      options: CloseChatOptions,
+    ) => Effect.Effect<CloseChatResult, ApplicationError>;
+
     readonly sendMessage: (
       chatId: ChatId,
       prompt: AgentPrompt,
-    ) => Effect.Effect<void, ApplicationError>;
+    ) => Effect.Effect<void, ApplicationError | ChatClosed>;
 
     readonly abort: (chatId: ChatId) => Effect.Effect<void, ApplicationError>;
 
-    readonly contextUsage: (chatId: ChatId) => Effect.Effect<ContextUsage, ApplicationError>;
+    readonly contextUsage: (
+      chatId: ChatId,
+    ) => Effect.Effect<ContextUsage, ApplicationError | ChatClosed>;
 
     readonly shake: (
       chatId: ChatId,
       mode: ShakeMode,
-    ) => Effect.Effect<ShakeResult, ApplicationError>;
+    ) => Effect.Effect<ShakeResult, ApplicationError | ChatClosed>;
   }
 >()("@pico/contract/application/Application") {}

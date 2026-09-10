@@ -1,15 +1,24 @@
+import * as BunCrypto from "@effect/platform-bun/BunCrypto";
 import { assert, describe, it } from "@effect/vitest";
 import type { ContextUsage } from "@pico/contract/agent-runtime";
 import { Application, type BindWorkspace } from "@pico/contract/application";
 import * as Chat from "@pico/contract/chat-model";
-import { ApplicationError, WorkspaceBindingInvalid } from "@pico/contract/errors";
+import { ApplicationError, ChatClosed, WorkspaceBindingInvalid } from "@pico/contract/errors";
 import { AbsolutePath } from "@pico/contract/path";
 import * as Workspace from "@pico/contract/workspace-model";
-import { ApplicationCommandOptionTypes, ChannelTypes, InteractionTypes } from "discordeno";
+import {
+  ApplicationCommandOptionTypes,
+  ButtonStyles,
+  ChannelTypes,
+  InteractionTypes,
+  MessageComponentTypes,
+} from "discordeno";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Option from "effect/Option";
 import * as Redacted from "effect/Redacted";
+import * as TestClock from "effect/testing/TestClock";
 import {
   type DiscordInputBot,
   type DiscordInteraction,
@@ -68,8 +77,10 @@ const interaction = (overrides: Partial<DiscordInteraction> = {}): DiscordIntera
   type: InteractionTypes.ApplicationCommand,
   guildId: 1n,
   channelId: 10n,
+  user: { id: 100n },
   data: { name: "bind", options: bindOptions("/repo") },
   defer: async () => undefined,
+  deferEdit: async () => undefined,
   edit: async () => undefined,
   ...overrides,
 });
@@ -101,6 +112,7 @@ describe("Discord input", () => {
               return { id: 10n, type: ChannelTypes.GuildText, name: "general" };
             },
             sendMessage: async () => undefined,
+            editChannel: async () => undefined,
             startThreadWithMessage: async (_channelId, _messageId, options) => {
               order.push("create-thread");
               assert.strictEqual(options.name, "hello from pico");
@@ -155,10 +167,12 @@ describe("Discord input", () => {
           abort: () => Effect.die("unexpected chat abort"),
           contextUsage: () => Effect.die("unexpected context read"),
           shake: () => Effect.die("unexpected chat shake"),
+          closeChat: () => Effect.die("unexpected chat close"),
         });
 
         threadIdForChat = yield* install(bot, config).pipe(
           Effect.provideService(Application, application),
+          Effect.provide(BunCrypto.layer),
         );
         const handleMessage = handlerFor(bot);
 
@@ -200,6 +214,7 @@ describe("Discord input", () => {
               replies.push(options.content);
               resolveRejection?.();
             },
+            editChannel: async () => undefined,
             startThreadWithMessage: async () => ({ id: 20n }),
           },
         } satisfies DiscordInputBot;
@@ -214,9 +229,13 @@ describe("Discord input", () => {
           abort: () => Effect.die("unexpected chat abort"),
           contextUsage: () => Effect.die("unexpected context read"),
           shake: () => Effect.die("unexpected chat shake"),
+          closeChat: () => Effect.die("unexpected chat close"),
         });
 
-        yield* install(bot, config).pipe(Effect.provideService(Application, application));
+        yield* install(bot, config).pipe(
+          Effect.provideService(Application, application),
+          Effect.provide(BunCrypto.layer),
+        );
         const handleMessage = handlerFor(bot);
         handleMessage(message({ guildId: 2n }));
         yield* Effect.yieldNow;
@@ -275,6 +294,7 @@ describe("Discord input", () => {
               }
             },
             sendMessage: async () => undefined,
+            editChannel: async () => undefined,
             startThreadWithMessage: async () => ({ id: 50n }),
           },
         } satisfies DiscordInputBot;
@@ -331,9 +351,13 @@ describe("Discord input", () => {
           abort: () => Effect.die("unexpected chat abort"),
           contextUsage: () => Effect.die("unexpected context read"),
           shake: () => Effect.die("unexpected chat shake"),
+          closeChat: () => Effect.die("unexpected chat close"),
         });
 
-        yield* install(bot, config).pipe(Effect.provideService(Application, application));
+        yield* install(bot, config).pipe(
+          Effect.provideService(Application, application),
+          Effect.provide(BunCrypto.layer),
+        );
         const handleInteraction = interactionHandlerFor(bot);
         const invoke = (
           overrides: Partial<DiscordInteraction> = {},
@@ -499,6 +523,7 @@ describe("Discord input", () => {
             sendMessage: async () => {
               throw new Error("shake must not use Discord sendMessage");
             },
+            editChannel: async () => undefined,
             startThreadWithMessage: async () => {
               throw new Error("shake must not create a thread");
             },
@@ -552,9 +577,13 @@ describe("Discord input", () => {
               }
             }
           },
+          closeChat: () => Effect.die("unexpected chat close"),
         });
 
-        yield* install(bot, config).pipe(Effect.provideService(Application, application));
+        yield* install(bot, config).pipe(
+          Effect.provideService(Application, application),
+          Effect.provide(BunCrypto.layer),
+        );
         const handleInteraction = interactionHandlerFor(bot);
         const invoke = (
           channelId: bigint,
@@ -670,6 +699,7 @@ describe("Discord input", () => {
             sendMessage: async () => {
               throw new Error("context must not use Discord sendMessage");
             },
+            editChannel: async () => undefined,
             startThreadWithMessage: async () => {
               throw new Error("context must not create a thread");
             },
@@ -719,9 +749,13 @@ describe("Discord input", () => {
             });
           },
           shake: () => Effect.die("unexpected chat shake"),
+          closeChat: () => Effect.die("unexpected chat close"),
         });
 
-        yield* install(bot, config).pipe(Effect.provideService(Application, application));
+        yield* install(bot, config).pipe(
+          Effect.provideService(Application, application),
+          Effect.provide(BunCrypto.layer),
+        );
         const handleInteraction = interactionHandlerFor(bot);
         const invoke = (channelId: bigint, guildId = 1n) =>
           new Promise<string>((resolve) => {
@@ -801,6 +835,7 @@ describe("Discord input", () => {
               parentId: 10n,
             }),
             sendMessage: async () => undefined,
+            editChannel: async () => undefined,
             startThreadWithMessage: async () => {
               throw new Error("unexpected thread creation");
             },
@@ -838,9 +873,13 @@ describe("Discord input", () => {
               order.push("shake-end");
               return { mode: "elide", toolResultsDropped: 0, blocksDropped: 0, tokensFreed: 0 };
             }),
+          closeChat: () => Effect.die("unexpected chat close"),
         });
 
-        yield* install(bot, config).pipe(Effect.provideService(Application, application));
+        yield* install(bot, config).pipe(
+          Effect.provideService(Application, application),
+          Effect.provide(BunCrypto.layer),
+        );
         interactionHandlerFor(bot)(
           interaction({
             channelId: 20n,
@@ -885,6 +924,7 @@ describe("Discord input", () => {
               parentId: 10n,
             }),
             sendMessage: async () => undefined,
+            editChannel: async () => undefined,
             startThreadWithMessage: async () => {
               throw new Error("unexpected thread creation");
             },
@@ -922,9 +962,13 @@ describe("Discord input", () => {
               return { kind: "unavailable" } satisfies ContextUsage;
             }),
           shake: () => Effect.die("unexpected chat shake"),
+          closeChat: () => Effect.die("unexpected chat close"),
         });
 
-        yield* install(bot, config).pipe(Effect.provideService(Application, application));
+        yield* install(bot, config).pipe(
+          Effect.provideService(Application, application),
+          Effect.provide(BunCrypto.layer),
+        );
         interactionHandlerFor(bot)(
           interaction({
             channelId: 20n,
@@ -987,6 +1031,7 @@ describe("Discord input", () => {
               name: "general",
             }),
             sendMessage: async () => undefined,
+            editChannel: async () => undefined,
             startThreadWithMessage: async () => {
               order.push("create-thread");
               return { id: 20n };
@@ -1033,9 +1078,13 @@ describe("Discord input", () => {
           abort: () => Effect.die("unexpected chat abort"),
           contextUsage: () => Effect.die("unexpected context read"),
           shake: () => Effect.die("unexpected chat shake"),
+          closeChat: () => Effect.die("unexpected chat close"),
         });
 
-        yield* install(bot, config).pipe(Effect.provideService(Application, application));
+        yield* install(bot, config).pipe(
+          Effect.provideService(Application, application),
+          Effect.provide(BunCrypto.layer),
+        );
         const handleInteraction = interactionHandlerFor(bot);
         const handleMessage = handlerFor(bot);
         handleInteraction(
@@ -1064,6 +1113,201 @@ describe("Discord input", () => {
           "create-chat",
           "send",
         ]);
+      }),
+    ),
+  );
+  it.effect("authorizes destructive close and archives only after core success", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const order: Array<string> = [];
+        const sent: Array<string> = [];
+        let resolveSent: (() => void) | undefined;
+        const delivered = new Promise<void>((resolve) => {
+          resolveSent = resolve;
+        });
+        const drainStarted = yield* Deferred.make<void>();
+        const releaseDrain = yield* Deferred.make<void>();
+        let componentDeferrals = 0;
+        let closed = false;
+        const bot = {
+          id: 999n,
+          events: {},
+          helpers: {
+            getChannel: async () => ({
+              id: 20n,
+              guildId: 1n,
+              type: ChannelTypes.PublicThread,
+              parentId: 10n,
+            }),
+            sendMessage: async (_channelId, options) => {
+              sent.push(options.content);
+              resolveSent?.();
+            },
+            editChannel: async (_channelId, options) => {
+              assert.deepStrictEqual(options, { archived: true, locked: true });
+              order.push("archive-thread");
+            },
+            startThreadWithMessage: async () => {
+              throw new Error("close must not create a thread");
+            },
+          },
+        } satisfies DiscordInputBot;
+        const chat: Chat.Chat = {
+          id: chatId,
+          workspaceId,
+          cwd: defaultCwd,
+          externalId: "20",
+          createdAt: 0,
+          archivedAt: null,
+        };
+        const application = Application.of({
+          createWorkspace: () => Effect.die("unexpected workspace creation"),
+          bindWorkspace: () => Effect.die("unexpected workspace binding"),
+          createChat: () => Effect.die("unexpected chat creation"),
+          findWorkspaceByPlatformId: () => Effect.die("unexpected workspace lookup"),
+          findChatByPlatformId: () => Effect.succeed(Option.some(chat)),
+          transcript: () => Effect.die("unexpected transcript read"),
+          closeChat: (_id, options) =>
+            Effect.sync(() => {
+              order.push(options.allowDirtyWorktree ? "core-force" : "core-safe");
+              if (options.allowDirtyWorktree) {
+                closed = true;
+                return { kind: "closed" };
+              }
+              return { kind: "worktree-confirmation-required" };
+            }),
+          sendMessage: () =>
+            closed ? Effect.fail(new ChatClosed()) : Effect.die("unexpected open message"),
+          abort: () => Effect.die("unexpected chat abort"),
+          contextUsage: () => Effect.die("unexpected context read"),
+          shake: () => Effect.die("unexpected chat shake"),
+        });
+
+        yield* install(bot, config, () =>
+          Effect.gen(function* () {
+            order.push("drain-start");
+            yield* Deferred.succeed(drainStarted, undefined);
+            yield* Deferred.await(releaseDrain);
+            order.push("drain-end");
+          }),
+        ).pipe(Effect.provideService(Application, application), Effect.provide(BunCrypto.layer));
+        const handleInteraction = interactionHandlerFor(bot);
+        const invoke = (overrides: Partial<DiscordInteraction>) =>
+          new Promise<Parameters<DiscordInteraction["edit"]>[0]>((resolve) => {
+            handleInteraction(
+              interaction({
+                channelId: 20n,
+                data: { name: "close" },
+                deferEdit: async () => {
+                  componentDeferrals += 1;
+                },
+                edit: async (options) => {
+                  order.push("reply");
+                  resolve(options);
+                },
+                ...overrides,
+              }),
+            );
+          });
+
+        yield* TestClock.setTime(0);
+        const first = yield* Effect.promise(() => invoke({}));
+        const actionRow = first.components?.[0];
+        if (actionRow?.type !== MessageComponentTypes.ActionRow) {
+          return yield* Effect.die("missing close confirmation row");
+        }
+        const button = actionRow.components[0];
+        if (button?.type !== MessageComponentTypes.Button || button.customId === undefined) {
+          return yield* Effect.die("missing close confirmation button");
+        }
+        const customId = button.customId;
+        assert.strictEqual(
+          first.content,
+          "Git requires destructive removal for this worktree. Closing may discard changes or nested repositories. Local and remote branches will be kept.",
+        );
+        assert.strictEqual(button.label, "Close with force");
+        assert.strictEqual(button.style, ButtonStyles.Danger);
+        assert.deepStrictEqual(order, ["core-safe", "reply"]);
+
+        const unauthorized = yield* Effect.promise(() =>
+          invoke({
+            type: InteractionTypes.MessageComponent,
+            user: { id: 101n },
+            message: { id: 50n, channelId: 20n },
+            data: { customId },
+          }),
+        );
+        assert.strictEqual(
+          unauthorized.content,
+          "Only the person who requested this close can confirm it.",
+        );
+        assert.notInclude(order, "clear-button");
+
+        yield* TestClock.setTime(300_001);
+        const expired = yield* Effect.promise(() =>
+          invoke({
+            type: InteractionTypes.MessageComponent,
+            message: { id: 50n, channelId: 20n },
+            data: { customId },
+          }),
+        );
+        assert.strictEqual(expired.content, "This close confirmation is no longer valid.");
+        assert.deepStrictEqual(expired.components, []);
+        assert.deepStrictEqual(order.slice(-1), ["reply"]);
+
+        const second = yield* Effect.promise(() => invoke({}));
+        const secondActionRow = second.components?.[0];
+        if (secondActionRow?.type !== MessageComponentTypes.ActionRow) {
+          return yield* Effect.die("missing close confirmation row");
+        }
+        const secondButton = secondActionRow.components[0];
+        if (
+          secondButton?.type !== MessageComponentTypes.Button ||
+          secondButton.customId === undefined
+        ) {
+          return yield* Effect.die("missing close confirmation button");
+        }
+        const secondCustomId = secondButton.customId;
+        const beforeConfirm = order.length;
+        const confirming = yield* Effect.promise(() =>
+          invoke({
+            type: InteractionTypes.MessageComponent,
+            message: { id: 51n, channelId: 20n },
+            data: { customId: secondCustomId },
+          }),
+        ).pipe(Effect.forkChild);
+        yield* Deferred.await(drainStarted);
+        assert.notInclude(order, "archive-thread");
+        yield* Deferred.succeed(releaseDrain, undefined);
+        const confirmed = yield* Fiber.join(confirming);
+        assert.strictEqual(
+          confirmed.content,
+          "Chat closed. The transcript remains available in this archived thread.",
+        );
+        assert.deepStrictEqual(confirmed.components, []);
+        assert.deepStrictEqual(order.slice(beforeConfirm), [
+          "core-force",
+          "drain-start",
+          "drain-end",
+          "archive-thread",
+          "reply",
+        ]);
+        assert.strictEqual(componentDeferrals, 3);
+
+        const repeated = yield* Effect.promise(() =>
+          invoke({
+            type: InteractionTypes.MessageComponent,
+            message: { id: 51n, channelId: 20n },
+            data: { customId: secondCustomId },
+          }),
+        );
+        assert.strictEqual(repeated.content, "This close confirmation is no longer valid.");
+        assert.strictEqual(order.filter((entry) => entry === "core-force").length, 1);
+        assert.strictEqual(componentDeferrals, 4);
+
+        handlerFor(bot)(message({ channelId: 20n, content: "late" }));
+        yield* Effect.promise(() => delivered);
+        assert.strictEqual(sent.at(-1), "This chat is closed. Start a new thread to continue.");
       }),
     ),
   );

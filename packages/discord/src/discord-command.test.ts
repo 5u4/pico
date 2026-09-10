@@ -25,7 +25,7 @@ const worktreeOptions = (options: ReadonlyArray<DiscordCommand.CommandOption>) =
 ];
 
 describe("Discord command", () => {
-  it("registers bind, shake, and context commands exactly", () => {
+  it("registers bind, shake, close, and context commands exactly", () => {
     assert.deepStrictEqual(DiscordCommand.applicationCommands, [
       {
         name: "bind",
@@ -86,6 +86,10 @@ describe("Discord command", () => {
             ],
           },
         ],
+      },
+      {
+        name: "close",
+        description: "Close this chat and archive its thread",
       },
       {
         name: "context",

@@ -4,6 +4,7 @@ import type * as AgentEvent from "@pico/contract/agent-event";
 import type * as AgentMessage from "@pico/contract/agent-message";
 import { Application } from "@pico/contract/application";
 import * as Chat from "@pico/contract/chat-model";
+import { ChatClosed } from "@pico/contract/errors";
 import { type EventFilter, type EventRoute, EventRouter } from "@pico/contract/event-router";
 import * as RpcClient from "@pico/rpc/client";
 import * as RpcServer from "@pico/rpc/server";
@@ -66,10 +67,12 @@ describe("RPC", () => {
             return transcript;
           }),
         sendMessage: (chatId, prompt) =>
-          Effect.gen(function* () {
-            sendInputs.push({ chatId, prompt });
-            yield* Deferred.succeed(sent, undefined);
-          }),
+          chatId === secondChatId
+            ? Effect.fail(new ChatClosed())
+            : Effect.gen(function* () {
+                sendInputs.push({ chatId, prompt });
+                yield* Deferred.succeed(sent, undefined);
+              }),
         abort: (chatId) =>
           Effect.gen(function* () {
             abortInputs.push(chatId);
@@ -77,8 +80,10 @@ describe("RPC", () => {
           }),
         contextUsage: () => Effect.die("unexpected context read"),
         shake: () => Effect.die("unexpected chat shake"),
+        closeChat: () => Effect.die("unexpected chat close"),
       });
       const eventRouter = EventRouter.of({
+        drain: () => Effect.void,
         open: (filter) =>
           Effect.acquireRelease(
             Effect.gen(function* () {
@@ -135,6 +140,10 @@ describe("RPC", () => {
         yield* client.SendMessage({ chatId: firstChatId, prompt: "ship it" });
         yield* Deferred.await(sent);
         assert.deepStrictEqual(sendInputs, [{ chatId: firstChatId, prompt: "ship it" }]);
+        assert.instanceOf(
+          yield* client.SendMessage({ chatId: secondChatId, prompt: "too late" }).pipe(Effect.flip),
+          ChatClosed,
+        );
 
         yield* client.Abort({ chatId: secondChatId });
         yield* Deferred.await(aborted);

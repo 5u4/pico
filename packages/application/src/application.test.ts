@@ -13,13 +13,20 @@ import { AgentSessionStore, type CreateAgentSession } from "@pico/contract/agent
 import { Application } from "@pico/contract/application";
 import * as Chat from "@pico/contract/chat-model";
 import { ChatRepository } from "@pico/contract/chat-repository";
-import { AgentError, ApplicationError, WorkspaceBindingInvalid } from "@pico/contract/errors";
+import {
+  AgentError,
+  ApplicationError,
+  ChatClosed,
+  WorkspaceBindingInvalid,
+} from "@pico/contract/errors";
 import { AbsolutePath } from "@pico/contract/path";
 import * as Workspace from "@pico/contract/workspace-model";
 import { WorkspaceRepository } from "@pico/contract/workspace-repository";
 import type { CreateWorktreeOptions, GitWorktree } from "@pico/contract/worktree";
 import * as Persistence from "@pico/persistence/layer";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -84,6 +91,7 @@ describe("Application", () => {
         AgentRuntime,
         AgentRuntime.of({
           events: Stream.empty,
+          drain: () => Effect.void,
           transcript: (chatId) =>
             Effect.sync(() => {
               transcriptChatIds.push(chatId);
@@ -143,6 +151,7 @@ describe("Application", () => {
                     }),
               ),
             ),
+          close: () => Effect.die("unexpected runtime close"),
         }),
       );
       const gitWorktree: GitWorktree = {
@@ -151,6 +160,8 @@ describe("Application", () => {
           Effect.sync(() => {
             createdWorktrees.push(options);
           }).pipe(Effect.andThen(use(worktreeCwd))),
+        inspectChat: () => Effect.succeed({ kind: "not-managed" }),
+        removeChat: () => Effect.die("unexpected worktree removal"),
       };
 
       yield* Effect.gen(function* () {
@@ -382,11 +393,13 @@ describe("Application", () => {
         AgentRuntime,
         AgentRuntime.of({
           events: Stream.empty,
+          drain: () => Effect.void,
           transcript: () => Effect.die("unexpected transcript read"),
           send: () => Effect.die("unexpected runtime send"),
           abort: () => Effect.die("unexpected runtime abort"),
           contextUsage: () => Effect.die("unexpected runtime context read"),
           shake: () => Effect.die("unexpected runtime shake"),
+          close: () => Effect.die("unexpected runtime close"),
         }),
       );
       const validations: Array<Workspace.WorkspaceConfiguration> = [];
@@ -406,6 +419,8 @@ describe("Application", () => {
             ),
           ),
         create: (_options, use) => use(worktreeCwd),
+        inspectChat: () => Effect.succeed({ kind: "not-managed" }),
+        removeChat: () => Effect.die("unexpected worktree removal"),
       };
 
       yield* Effect.gen(function* () {
@@ -596,6 +611,254 @@ describe("Application", () => {
         Effect.provide(repositories),
         Effect.provide(sessionsLayer),
         Effect.provide(runtimeLayer),
+        Effect.provide(BunCrypto.layer),
+        Effect.scoped,
+      );
+    }).pipe(Effect.provide(platformLayer)),
+  );
+  it.effect("serializes close after sends and rejects later live operations", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const temporaryDirectory = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "pico-application-close-",
+      });
+      const defaultCwd = AbsolutePath.make(path.join(temporaryDirectory, "workspace"));
+      const storeFile = AbsolutePath.make(path.join(temporaryDirectory, "store.db"));
+      const persistenceLayer = Persistence.layer(storeFile);
+      const sendStarted = yield* Deferred.make<void>();
+      const releaseSend = yield* Deferred.make<void>();
+      const order: Array<string> = [];
+      let aborts = 0;
+
+      const runtimeLayer = Layer.effect(
+        AgentRuntime,
+        Effect.gen(function* () {
+          const chats = yield* ChatRepository;
+          return AgentRuntime.of({
+            events: Stream.empty,
+            drain: () => Effect.void,
+            transcript: () => Effect.succeed(runtimeTranscript),
+            send: () =>
+              Effect.gen(function* () {
+                order.push("send-start");
+                yield* Deferred.succeed(sendStarted, undefined);
+                yield* Deferred.await(releaseSend);
+                order.push("send-end");
+              }),
+            close: (id) =>
+              Effect.gen(function* () {
+                const chat = Option.getOrThrow(yield* chats.findById(id).pipe(Effect.orDie));
+                assert.strictEqual(chat.archivedAt, 3_000);
+                order.push("runtime-close");
+              }),
+            abort: () =>
+              Effect.sync(() => {
+                aborts += 1;
+              }),
+            contextUsage: () => Effect.succeed({ kind: "unavailable" }),
+            shake: () =>
+              Effect.succeed({
+                mode: "elide",
+                toolResultsDropped: 0,
+                blocksDropped: 0,
+                tokensFreed: 0,
+              }),
+          });
+        }),
+      ).pipe(Layer.provide(persistenceLayer));
+      const sessionsLayer = Layer.succeed(
+        AgentSessionStore,
+        AgentSessionStore.of({ create: () => Effect.void }),
+      );
+      const gitWorktree: GitWorktree = {
+        validate: () => Effect.void,
+        create: (_options, use) => use(defaultCwd),
+        inspectChat: () =>
+          Effect.sync(() => {
+            order.push("inspect");
+            return { kind: "not-managed" };
+          }),
+        removeChat: () => Effect.die("direct chat must not remove a worktree"),
+      };
+
+      yield* Effect.gen(function* () {
+        const application = yield* Application;
+        yield* TestClock.setTime(1_000);
+        const workspace = yield* application.createWorkspace({
+          name: "close",
+          binding: null,
+          defaultCwd,
+          worktree: null,
+        });
+        yield* TestClock.setTime(2_000);
+        const chat = yield* application.createChat({ workspaceId: workspace.id, externalId: null });
+
+        const send = yield* application.sendMessage(chat.id, "in flight").pipe(Effect.forkChild);
+        yield* Deferred.await(sendStarted);
+        yield* TestClock.setTime(3_000);
+        const closing = yield* application
+          .closeChat(chat.id, { allowDirtyWorktree: false })
+          .pipe(Effect.forkChild);
+        yield* Effect.yieldNow;
+        assert.deepStrictEqual(order, ["send-start"]);
+        yield* Deferred.succeed(releaseSend, undefined);
+        yield* Fiber.join(send);
+        assert.deepStrictEqual(yield* Fiber.join(closing), { kind: "closed" });
+        assert.deepStrictEqual(order, ["send-start", "send-end", "inspect", "runtime-close"]);
+
+        const chats = yield* ChatRepository;
+        assert.strictEqual(Option.getOrThrow(yield* chats.findById(chat.id)).archivedAt, 3_000);
+        assert.instanceOf(
+          yield* application.sendMessage(chat.id, "late").pipe(Effect.flip),
+          ChatClosed,
+        );
+        assert.instanceOf(yield* application.contextUsage(chat.id).pipe(Effect.flip), ChatClosed);
+        assert.instanceOf(yield* application.shake(chat.id, "elide").pipe(Effect.flip), ChatClosed);
+        yield* application.abort(chat.id);
+        assert.strictEqual(aborts, 0);
+        assert.deepStrictEqual(yield* application.transcript(chat.id), runtimeTranscript);
+
+        yield* TestClock.setTime(4_000);
+        assert.deepStrictEqual(
+          yield* application.closeChat(chat.id, { allowDirtyWorktree: false }),
+          { kind: "closed" },
+        );
+        assert.strictEqual(Option.getOrThrow(yield* chats.findById(chat.id)).archivedAt, 3_000);
+      }).pipe(
+        Effect.provide(ApplicationLayer.layer(gitWorktree)),
+        Effect.provide(persistenceLayer),
+        Effect.provide(runtimeLayer),
+        Effect.provide(sessionsLayer),
+        Effect.provide(BunCrypto.layer),
+        Effect.scoped,
+      );
+    }).pipe(Effect.provide(platformLayer)),
+  );
+  it.effect("confirms destructive cleanup and never removes before runtime disposal", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const temporaryDirectory = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "pico-application-cleanup-",
+      });
+      const defaultCwd = AbsolutePath.make(path.join(temporaryDirectory, "repository"));
+      const worktreeCwd = AbsolutePath.make(path.join(temporaryDirectory, "worktree"));
+      const storeFile = AbsolutePath.make(path.join(temporaryDirectory, "store.db"));
+      const persistenceLayer = Persistence.layer(storeFile);
+      const order: Array<string> = [];
+      let inspectionState: "clean" | "dirty" = "dirty";
+      let removalResult: "removed" | "force-required" = "removed";
+      let runtimeFails = false;
+
+      const runtimeLayer = Layer.effect(
+        AgentRuntime,
+        Effect.gen(function* () {
+          const chats = yield* ChatRepository;
+          return AgentRuntime.of({
+            events: Stream.empty,
+            drain: () => Effect.void,
+            transcript: () => Effect.succeed([]),
+            send: () => Effect.die("unexpected send"),
+            close: (id) =>
+              Effect.gen(function* () {
+                assert.isNotNull(Option.getOrThrow(yield* chats.findById(id)).archivedAt);
+                order.push("runtime-close");
+                if (runtimeFails) return yield* new AgentError({ message: "dispose failed" });
+              }),
+            abort: () => Effect.die("unexpected abort"),
+            contextUsage: () => Effect.die("unexpected context read"),
+            shake: () => Effect.die("unexpected shake"),
+          });
+        }),
+      ).pipe(Layer.provide(persistenceLayer));
+      const sessionsLayer = Layer.succeed(
+        AgentSessionStore,
+        AgentSessionStore.of({ create: () => Effect.void }),
+      );
+      const gitWorktree: GitWorktree = {
+        validate: () => Effect.void,
+        create: (_options, use) => use(worktreeCwd),
+        inspectChat: () =>
+          Effect.sync(() => {
+            order.push(`inspect-${inspectionState}`);
+            return { kind: "managed", state: inspectionState };
+          }),
+        removeChat: ({ force }) =>
+          Effect.sync(() => {
+            order.push(force ? "remove-force" : "remove-clean");
+            return { kind: removalResult };
+          }),
+      };
+
+      yield* Effect.gen(function* () {
+        const application = yield* Application;
+        const chats = yield* ChatRepository;
+        const workspace = yield* application.createWorkspace({
+          name: "worktree",
+          binding: null,
+          defaultCwd,
+          worktree: { branch: "main", prefix: "chat/" },
+        });
+        const dirtyChat = yield* application.createChat({
+          workspaceId: workspace.id,
+          externalId: null,
+        });
+
+        assert.deepStrictEqual(
+          yield* application.closeChat(dirtyChat.id, { allowDirtyWorktree: false }),
+          { kind: "worktree-confirmation-required" },
+        );
+        assert.isNull(Option.getOrThrow(yield* chats.findById(dirtyChat.id)).archivedAt);
+        assert.deepStrictEqual(order, ["inspect-dirty"]);
+
+        assert.deepStrictEqual(
+          yield* application.closeChat(dirtyChat.id, { allowDirtyWorktree: true }),
+          { kind: "closed" },
+        );
+        assert.deepStrictEqual(order, [
+          "inspect-dirty",
+          "inspect-dirty",
+          "runtime-close",
+          "remove-force",
+        ]);
+
+        const racedChat = yield* application.createChat({
+          workspaceId: workspace.id,
+          externalId: null,
+        });
+        inspectionState = "clean";
+        removalResult = "force-required";
+        assert.deepStrictEqual(
+          yield* application.closeChat(racedChat.id, { allowDirtyWorktree: false }),
+          { kind: "worktree-confirmation-required" },
+        );
+        assert.isNotNull(Option.getOrThrow(yield* chats.findById(racedChat.id)).archivedAt);
+        assert.deepStrictEqual(order.slice(-3), ["inspect-clean", "runtime-close", "remove-clean"]);
+
+        const failedChat = yield* application.createChat({
+          workspaceId: workspace.id,
+          externalId: null,
+        });
+        runtimeFails = true;
+        removalResult = "removed";
+        const removalsBeforeFailure = order.filter((entry) => entry.startsWith("remove")).length;
+        assertApplicationError(
+          yield* application
+            .closeChat(failedChat.id, { allowDirtyWorktree: true })
+            .pipe(Effect.flip),
+          "Failed to close chat runtime",
+        );
+        assert.isNotNull(Option.getOrThrow(yield* chats.findById(failedChat.id)).archivedAt);
+        assert.strictEqual(
+          order.filter((entry) => entry.startsWith("remove")).length,
+          removalsBeforeFailure,
+        );
+      }).pipe(
+        Effect.provide(ApplicationLayer.layer(gitWorktree)),
+        Effect.provide(persistenceLayer),
+        Effect.provide(runtimeLayer),
+        Effect.provide(sessionsLayer),
         Effect.provide(BunCrypto.layer),
         Effect.scoped,
       );

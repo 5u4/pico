@@ -15,6 +15,7 @@ export interface EventRoute {
 export class EventRouter extends Context.Service<
   EventRouter,
   {
+    readonly drain: () => Effect.Effect<void>;
     readonly open: (initialFilter: EventFilter) => Effect.Effect<EventRoute, never, Scope.Scope>;
   }
 >()("@pico/contract/event/EventRouter") {}

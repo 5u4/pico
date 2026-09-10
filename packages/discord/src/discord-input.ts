@@ -1,11 +1,21 @@
 import type { DiscordConfig } from "@pico/config/config";
 import type { ContextUsage, ShakeResult } from "@pico/contract/agent-runtime";
-import { Application } from "@pico/contract/application";
+import { Application, type CloseChatResult } from "@pico/contract/application";
 import type * as Chat from "@pico/contract/chat-model";
 import type { WorkspaceBindingInvalid } from "@pico/contract/errors";
 import type * as Workspace from "@pico/contract/workspace-model";
-import { ChannelTypes, InteractionTypes } from "discordeno";
+import {
+  ButtonStyles,
+  ChannelTypes,
+  type InteractionCallbackData,
+  InteractionTypes,
+  type MessageComponents,
+  MessageComponentTypes,
+} from "discordeno";
 import * as Cause from "effect/Cause";
+import * as Clock from "effect/Clock";
+import * as Crypto from "effect/Crypto";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FiberSet from "effect/FiberSet";
 import * as Option from "effect/Option";
@@ -50,15 +60,16 @@ export interface DiscordInteraction {
   readonly type: InteractionTypes;
   readonly guildId?: bigint;
   readonly channelId?: bigint;
+  readonly user?: { readonly id: bigint };
+  readonly message?: { readonly id: bigint; readonly channelId: bigint };
   readonly data?: {
-    readonly name: string;
+    readonly name?: string;
+    readonly customId?: string;
     readonly options?: ReadonlyArray<DiscordCommand.CommandOption>;
   };
   readonly defer: (isPrivate?: boolean) => Promise<unknown>;
-  readonly edit: (options: {
-    readonly content: string;
-    readonly allowedMentions: { readonly parse: []; readonly repliedUser: false };
-  }) => Promise<unknown>;
+  readonly deferEdit: () => Promise<unknown>;
+  readonly edit: (options: InteractionCallbackData) => Promise<unknown>;
 }
 
 export interface DiscordInputBot<
@@ -79,6 +90,10 @@ export interface DiscordInputBot<
         readonly allowedMentions: { readonly parse: []; readonly repliedUser: false };
       },
     ) => Promise<unknown>;
+    readonly editChannel: (
+      channelId: bigint,
+      options: { readonly archived: true; readonly locked: true },
+    ) => Promise<unknown>;
     readonly startThreadWithMessage: (
       channelId: bigint,
       messageId: bigint,
@@ -93,22 +108,45 @@ const isThread = (type: ChannelTypes) =>
   type === ChannelTypes.PrivateThread;
 
 interface CommandThread {
+  readonly guildId: bigint;
   readonly parentId: bigint;
   readonly threadId: bigint;
 }
 
 const threadName = (content: string) => content.trim().replace(/\s+/g, " ").slice(0, 100);
 
+interface CloseConfirmation {
+  readonly chatId: Chat.ChatId;
+  readonly guildId: bigint;
+  readonly threadId: bigint;
+  readonly requesterId: bigint;
+  readonly expiresAt: number;
+}
+
+interface ComponentResponse {
+  readonly content: string;
+  readonly components: MessageComponents;
+}
+
+const closeConfirmationPrefix = "pico:close:";
+const closeConfirmationTtl = 5 * 60 * 1_000;
+const closedMessage = "This chat is closed. Start a new thread to continue.";
 export const install = Effect.fn("DiscordInput.install")(function* <
   Message extends DiscordMessage,
   Interaction extends DiscordInteraction,
->(bot: DiscordInputBot<Message, Interaction>, config: DiscordConfig) {
+>(
+  bot: DiscordInputBot<Message, Interaction>,
+  config: DiscordConfig,
+  drainOutput: () => Effect.Effect<void> = () => Effect.void,
+) {
   const application = yield* Application;
+  const crypto = yield* Crypto.Crypto;
   const run = yield* FiberSet.makeRuntime();
   const allowedGuildIds = new Set(config.allowedGuildIds);
   const workspaceIds = new Map<bigint, Workspace.WorkspaceId>();
   const chatIds = new Map<bigint, Chat.ChatId>();
   const channelLocks = new Map<bigint, Semaphore.Semaphore>();
+  const closeConfirmations = new Map<string, CloseConfirmation>();
   const allowedMentions = { parse: [], repliedUser: false } satisfies {
     parse: [];
     repliedUser: false;
@@ -150,7 +188,7 @@ export const install = Effect.fn("DiscordInput.install")(function* <
     if (channel.guildId !== guildId || !isThread(channel.type) || channel.parentId === undefined) {
       return Option.none<CommandThread>();
     }
-    return Option.some({ parentId: channel.parentId, threadId: channel.id });
+    return Option.some({ guildId, parentId: channel.parentId, threadId: channel.id });
   });
 
   const resolveCommandChatId = Effect.fn("Discord.resolveCommandChatId")(function* (
@@ -168,6 +206,21 @@ export const install = Effect.fn("DiscordInput.install")(function* <
     workspaceIds.set(thread.parentId, chat.value.workspaceId);
     chatIds.set(thread.threadId, chat.value.id);
     return Option.some(chat.value.id);
+  });
+
+  const sendMessageToChat = Effect.fn("Discord.sendMessageToChat")(function* (
+    chatId: Chat.ChatId,
+    message: Message,
+  ) {
+    yield* application
+      .sendMessage(chatId, message.content)
+      .pipe(
+        Effect.catchTag("ChatClosed", () =>
+          promiseBoundary("Failed to report closed Discord chat", () =>
+            bot.helpers.sendMessage(message.channelId, { content: closedMessage, allowedMentions }),
+          ).pipe(Effect.asVoid),
+        ),
+      );
   });
 
   const handleMessage = Effect.fn("Discord.handleMessage")(function* (message: Message) {
@@ -194,7 +247,7 @@ export const install = Effect.fn("DiscordInput.install")(function* <
 
     const cachedChatId = chatIds.get(message.channelId);
     if (cachedChatId !== undefined) {
-      yield* application.sendMessage(cachedChatId, message.content);
+      yield* sendMessageToChat(cachedChatId, message);
       return;
     }
 
@@ -214,7 +267,7 @@ export const install = Effect.fn("DiscordInput.install")(function* <
 
       workspaceIds.set(channel.parentId, chat.value.workspaceId);
       chatIds.set(channel.id, chat.value.id);
-      yield* application.sendMessage(chat.value.id, message.content);
+      yield* sendMessageToChat(chat.value.id, message);
       return;
     }
 
@@ -245,7 +298,7 @@ export const install = Effect.fn("DiscordInput.install")(function* <
       externalId: thread.id.toString(),
     });
     chatIds.set(thread.id, chat.id);
-    yield* application.sendMessage(chat.id, message.content);
+    yield* sendMessageToChat(chat.id, message);
   });
 
   type WorkspacePathIssue = Extract<
@@ -419,11 +472,137 @@ export const install = Effect.fn("DiscordInput.install")(function* <
     return formatContextUsage(yield* application.contextUsage(chatId.value));
   });
 
+  const archiveThread = Effect.fn("Discord.archiveThread")(function* (threadId: bigint) {
+    yield* drainOutput();
+    yield* promiseBoundary("Failed to archive Discord thread", () =>
+      bot.helpers.editChannel(threadId, { archived: true, locked: true }),
+    );
+  });
+  const closeResultResponse = Effect.fn("Discord.closeResultResponse")(function* (
+    result: CloseChatResult,
+    thread: CommandThread,
+    requesterId: bigint,
+    chatId: Chat.ChatId,
+  ) {
+    const clearChatConfirmations = () => {
+      for (const [nonce, confirmation] of closeConfirmations) {
+        if (confirmation.chatId === chatId) closeConfirmations.delete(nonce);
+      }
+    };
+    if (result.kind === "closed") {
+      clearChatConfirmations();
+      yield* archiveThread(thread.threadId);
+      return "Chat closed. The transcript remains available in this archived thread.";
+    }
+
+    const nonce = yield* crypto.randomUUIDv4;
+    const now = yield* Clock.currentTimeMillis;
+    clearChatConfirmations();
+    closeConfirmations.set(nonce, {
+      chatId,
+      guildId: thread.guildId,
+      threadId: thread.threadId,
+      requesterId,
+      expiresAt: now + closeConfirmationTtl,
+    });
+    run(
+      Effect.sleep(Duration.millis(closeConfirmationTtl)).pipe(
+        Effect.andThen(Effect.sync(() => closeConfirmations.delete(nonce))),
+      ),
+    );
+    return {
+      content:
+        "Git requires destructive removal for this worktree. Closing may discard changes or nested repositories. Local and remote branches will be kept.",
+      components: [
+        {
+          type: MessageComponentTypes.ActionRow,
+          components: [
+            {
+              type: MessageComponentTypes.Button,
+              style: ButtonStyles.Danger,
+              label: "Close with force",
+              customId: closeConfirmationPrefix + nonce,
+            },
+          ],
+        },
+      ],
+    } satisfies ComponentResponse;
+  });
+
+  const closeResponse = Effect.fn("Discord.closeResponse")(function* (interaction: Interaction) {
+    const policyCopy = "This command can only be used in a persisted pico chat thread.";
+    const requesterId = interaction.user?.id;
+    if (requesterId === undefined) return policyCopy;
+    const thread = yield* resolveCommandThread(interaction);
+    if (Option.isNone(thread)) return policyCopy;
+    const chatId = yield* resolveCommandChatId(thread.value);
+    if (Option.isNone(chatId)) return policyCopy;
+
+    const result = yield* application.closeChat(chatId.value, { allowDirtyWorktree: false });
+    return yield* closeResultResponse(result, thread.value, requesterId, chatId.value);
+  });
+
+  const closeConfirmationResponse = Effect.fn("Discord.closeConfirmationResponse")(function* (
+    interaction: Interaction,
+    nonce: string,
+  ) {
+    const confirmation = closeConfirmations.get(nonce);
+    if (confirmation === undefined) {
+      return {
+        content: "This close confirmation is no longer valid.",
+        components: [],
+      } satisfies ComponentResponse;
+    }
+    if (
+      interaction.user?.id !== confirmation.requesterId ||
+      interaction.guildId !== confirmation.guildId ||
+      interaction.channelId !== confirmation.threadId ||
+      interaction.message?.channelId !== confirmation.threadId
+    ) {
+      return "Only the person who requested this close can confirm it.";
+    }
+
+    const thread = yield* resolveCommandThread(interaction);
+    if (Option.isNone(thread)) return "This close confirmation is no longer valid.";
+    const chatId = yield* resolveCommandChatId(thread.value);
+    if (Option.isNone(chatId) || chatId.value !== confirmation.chatId) {
+      return "This close confirmation is no longer valid.";
+    }
+
+    const now = yield* Clock.currentTimeMillis;
+    closeConfirmations.delete(nonce);
+    if (now >= confirmation.expiresAt) {
+      return {
+        content: "This close confirmation expired. Run /close again.",
+        components: [],
+      } satisfies ComponentResponse;
+    }
+
+    return yield* application.closeChat(chatId.value, { allowDirtyWorktree: true }).pipe(
+      Effect.flatMap((result) =>
+        closeResultResponse(result, thread.value, confirmation.requesterId, chatId.value),
+      ),
+      Effect.map((response) =>
+        typeof response === "string"
+          ? ({ content: response, components: [] } satisfies ComponentResponse)
+          : response,
+      ),
+      Effect.catchCause((cause) =>
+        Effect.logError("Discord close confirmation failed", Cause.pretty(cause)).pipe(
+          Effect.as({
+            content: "pico could not close this chat.",
+            components: [],
+          } satisfies ComponentResponse),
+        ),
+      ),
+    );
+  });
+
   const handleInteraction = Effect.fn("Discord.handleInteraction")(function* (
     interaction: Interaction,
     command: DiscordCommand.Command,
   ) {
-    const content = yield* (() => {
+    const response = yield* (() => {
       switch (command.kind) {
         case "bindDirect":
         case "bindWorktree":
@@ -441,6 +620,7 @@ export const install = Effect.fn("DiscordInput.install")(function* <
         case "shake":
         case "malformedShake":
           return shakeResponse(interaction, command).pipe(
+            Effect.catchTag("ChatClosed", () => Effect.succeed(closedMessage)),
             Effect.catchCause((cause) =>
               Effect.logError("Discord shake failed", Cause.pretty(cause)).pipe(
                 Effect.as("pico could not shake this chat."),
@@ -449,9 +629,18 @@ export const install = Effect.fn("DiscordInput.install")(function* <
           );
         case "context":
           return contextResponse(interaction).pipe(
+            Effect.catchTag("ChatClosed", () => Effect.succeed(closedMessage)),
             Effect.catchCause((cause) =>
               Effect.logError("Discord context failed", Cause.pretty(cause)).pipe(
                 Effect.as("pico could not read this chat's context."),
+              ),
+            ),
+          );
+        case "close":
+          return closeResponse(interaction).pipe(
+            Effect.catchCause((cause) =>
+              Effect.logError("Discord close failed", Cause.pretty(cause)).pipe(
+                Effect.as("pico could not close this chat."),
               ),
             ),
           );
@@ -461,8 +650,12 @@ export const install = Effect.fn("DiscordInput.install")(function* <
         }
       }
     })();
+    const options =
+      typeof response === "string"
+        ? { content: response, allowedMentions }
+        : { ...response, allowedMentions };
     yield* promiseBoundary("Failed to edit Discord interaction", () =>
-      interaction.edit({ content, allowedMentions }),
+      interaction.edit(options),
     ).pipe(
       Effect.catch((error) => Effect.logError("Discord interaction edit failed", error.message)),
     );
@@ -483,26 +676,56 @@ export const install = Effect.fn("DiscordInput.install")(function* <
   };
 
   bot.events.interactionCreate = (interaction) => {
-    if (interaction.type !== InteractionTypes.ApplicationCommand) return;
+    const customId = interaction.data?.customId;
+    const closeNonce =
+      interaction.type === InteractionTypes.MessageComponent &&
+      customId?.startsWith(closeConfirmationPrefix) === true
+        ? customId.slice(closeConfirmationPrefix.length)
+        : undefined;
     const name = interaction.data?.name;
-    if (name !== "bind" && name !== "shake" && name !== "context") return;
+    const isCommand =
+      interaction.type === InteractionTypes.ApplicationCommand &&
+      (name === "bind" || name === "shake" || name === "context" || name === "close");
+    if (closeNonce === undefined && !isCommand) return;
 
-    void interaction.defer(true).then(
+    const deferred = closeNonce === undefined ? interaction.defer(true) : interaction.deferEdit();
+    void deferred.then(
       () => {
-        const command: DiscordCommand.Command =
-          name === "bind"
-            ? DiscordCommand.parseBind(interaction.data?.options)
-            : name === "shake"
-              ? DiscordCommand.parseShake(interaction.data?.options)
-              : { kind: "context" };
         const channelId = interaction.channelId;
+        const effect = (() => {
+          if (closeNonce !== undefined) {
+            return closeConfirmationResponse(interaction, closeNonce).pipe(
+              Effect.flatMap((response) => {
+                const options =
+                  typeof response === "string"
+                    ? { content: response, allowedMentions }
+                    : { ...response, allowedMentions };
+                return promiseBoundary("Failed to edit Discord interaction", () =>
+                  interaction.edit(options),
+                );
+              }),
+              Effect.catch((error) =>
+                Effect.logError("Discord interaction edit failed", error.message),
+              ),
+            );
+          }
+          const command: DiscordCommand.Command =
+            name === "bind"
+              ? DiscordCommand.parseBind(interaction.data?.options)
+              : name === "shake"
+                ? DiscordCommand.parseShake(interaction.data?.options)
+                : name === "close"
+                  ? { kind: "close" }
+                  : { kind: "context" };
+          return handleInteraction(interaction, command);
+        })();
         if (channelId === undefined) {
-          run(handleInteraction(interaction, command));
+          run(effect);
           return;
         }
         const lock = channelLocks.get(channelId) ?? Semaphore.makeUnsafe(1);
         channelLocks.set(channelId, lock);
-        run(lock.withPermit(handleInteraction(interaction, command)));
+        run(lock.withPermit(effect));
       },
       (cause: unknown) => {
         run(
