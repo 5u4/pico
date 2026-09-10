@@ -57,6 +57,7 @@ describe("Application", () => {
       const storeFile = AbsolutePath.make(path.join(temporaryDirectory, "store.db"));
       const defaultCwd = AbsolutePath.make(path.join(temporaryDirectory, "workspace"));
       const worktreeCwd = AbsolutePath.make(path.join(temporaryDirectory, "worktree"));
+      yield* fileSystem.makeDirectory(defaultCwd);
       const createdSessions: Array<CreateAgentSession> = [];
       const createdWorktrees: Array<CreateWorktreeOptions> = [];
       const sentMessages: Array<{ readonly chatId: string; readonly content: string }> = [];
@@ -155,6 +156,7 @@ describe("Application", () => {
 
       yield* Effect.gen(function* () {
         const application = yield* Application;
+        const chats = yield* ChatRepository;
 
         yield* TestClock.setTime(1_000);
         const regularWorkspace = yield* application.createWorkspace({
@@ -300,6 +302,16 @@ describe("Application", () => {
             .createChat({ workspaceId: missingWorkspaceId, externalId: null })
             .pipe(Effect.flip),
           "Failed to create chat",
+        );
+        yield* fileSystem.remove(defaultCwd, { recursive: true });
+        assertApplicationError(
+          yield* application
+            .createChat({ workspaceId: regularWorkspace.id, externalId: "missing-cwd" })
+            .pipe(Effect.flip),
+          "Failed to create chat",
+        );
+        assert.isTrue(
+          Option.isNone(yield* chats.findByExternalId(regularWorkspace.id, "missing-cwd")),
         );
         assert.strictEqual(createdSessions.length, 3);
         assert.strictEqual(createdWorktrees.length, 1);
