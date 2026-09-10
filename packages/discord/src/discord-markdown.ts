@@ -103,36 +103,43 @@ const field = (
   };
 };
 
-const rowItem = (
+const rowItems = (
   headers: ReadonlyArray<TableCell>,
   cells: ReadonlyArray<TableCell>,
-  rowNumber: number,
-): ListItem => {
-  const width = Math.max(headers.length, cells.length);
+): ListItem[] => {
   const fields: ListItem[] = [];
-  for (let index = 0; index < width; index++) {
-    fields.push(field(headers[index], cells[index], index + 1));
+  for (let index = 1; index < cells.length; index++) {
+    const cell = cells[index];
+    if (cell === undefined || cell.children.length === 0) continue;
+
+    const header = headers[index];
+    const content: PhrasingContent[] = [];
+    if (header !== undefined && nonEmpty(header)) content.push(...header.children, text(": "));
+    content.push(...cell.children);
+    fields.push({ type: "listItem", children: [paragraph(content)] });
   }
+
+  const title = cells[0];
+  if (title === undefined || title.children.length === 0) return fields;
 
   const item: ListItem = {
     type: "listItem",
     spread: false,
-    children: [paragraph([strong([text(`Row ${rowNumber}`)])])],
+    children: [paragraph([strong(title.children)])],
   };
-
   if (fields.length > 0) {
     const nested: List = { type: "list", ordered: false, spread: false, children: fields };
     item.children.push(nested);
   }
-  return item;
+  return [item];
 };
 
 const tableList = (table: Table): Root => {
   const [headerRow, ...bodyRows] = table.children;
   const headers = headerRow?.children ?? [];
-  const items = bodyRows.map((row, index) => rowItem(headers, row.children, index + 1));
+  const items = bodyRows.flatMap((row) => rowItems(headers, row.children));
 
-  if (items.length === 0) {
+  if (bodyRows.length === 0) {
     const fields = headers.map((header, index) => field(undefined, header, index + 1));
     const columns: ListItem = {
       type: "listItem",
@@ -147,7 +154,8 @@ const tableList = (table: Table): Root => {
 
   return {
     type: "root",
-    children: [{ type: "list", ordered: false, spread: false, children: items }],
+    children:
+      items.length > 0 ? [{ type: "list", ordered: false, spread: false, children: items }] : [],
   };
 };
 

@@ -50,7 +50,7 @@ describe("Discord output", () => {
 
     assert.deepStrictEqual(rendered[0], { content: "🧠 checking", silent: true });
     assert.deepStrictEqual(rendered[1], {
-      content: "- **Row 1**\n  - **A:** x\n  - **B:** y",
+      content: "- **x**\n  - B: y",
       silent: false,
     });
     assert.isTrue(
