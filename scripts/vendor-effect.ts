@@ -24,14 +24,14 @@ function warn(message: string): void {
 
 function hasEffectDependency(manifest: unknown): boolean {
   if (typeof manifest !== "object" || manifest === null) return false;
-  for (const key of ["dependencies", "devDependencies"] as const) {
-    if (!(key in manifest)) continue;
-    const dependencies = manifest[key];
-    if (typeof dependencies === "object" && dependencies !== null && "effect" in dependencies) {
-      return true;
-    }
-  }
-  return false;
+  return (
+    ("dependencies" in manifest && hasEffectEntry(manifest.dependencies)) ||
+    ("devDependencies" in manifest && hasEffectEntry(manifest.devDependencies))
+  );
+}
+
+function hasEffectEntry(dependencies: unknown): boolean {
+  return typeof dependencies === "object" && dependencies !== null && "effect" in dependencies;
 }
 
 function installedEffectVersion(): string | null {
@@ -39,7 +39,7 @@ function installedEffectVersion(): string | null {
   const workspaceManifests = new Bun.Glob("{packages,apps}/*/package.json");
   const manifests = [
     join(root, "package.json"),
-    ...workspaceManifests.scanSync({ cwd: root, absolute: true }).toArray().sort(),
+    ...Array.from(workspaceManifests.scanSync({ cwd: root, absolute: true })).sort(),
   ];
   let installedVersion: string | null = null;
 

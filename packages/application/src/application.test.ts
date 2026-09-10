@@ -342,8 +342,8 @@ describe("Application", () => {
         prefix: "pico-application-bind-",
       });
       const storeFile = AbsolutePath.make(path.join(temporaryDirectory, "store.db"));
-      const firstCwd = path.join(temporaryDirectory, "first");
-      const secondCwd = path.join(temporaryDirectory, "second");
+      const firstCwd = AbsolutePath.make(path.join(temporaryDirectory, "first"));
+      const secondCwd = AbsolutePath.make(path.join(temporaryDirectory, "second"));
       const worktreeCwd = AbsolutePath.make(path.join(temporaryDirectory, "generated-worktree"));
       const unreadableCwd = path.join(temporaryDirectory, "unreadable");
       const file = path.join(temporaryDirectory, "file");
