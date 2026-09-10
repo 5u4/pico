@@ -46,12 +46,34 @@ describe("PicoConfig.load", () => {
           assert.strictEqual(Redacted.value(discord.token), "token-value");
           assert.strictEqual(String(discord.token), "<redacted:discord_bot_token>");
           assert.deepStrictEqual(
-            { allowedGuildIds: discord.allowedGuildIds, defaultCwd: discord.defaultCwd },
+            {
+              allowedGuildIds: discord.allowedGuildIds,
+              defaultCwd: discord.defaultCwd,
+              showToolCalls: discord.showToolCalls,
+              showThinking: discord.showThinking,
+            },
             {
               allowedGuildIds: ["guild-1"],
               defaultCwd: AbsolutePath.make(defaultCwd),
+              showToolCalls: false,
+              showThinking: false,
             },
           );
+
+          yield* fileSystem.writeFileString(
+            paths.configFile,
+            `${config('["guild-1"]', defaultCwd)}show_tool_calls = true\n`,
+          );
+          const toolCallsOnly = Option.getOrThrow((yield* load(paths)).discord);
+          assert.isTrue(toolCallsOnly.showToolCalls);
+          assert.isFalse(toolCallsOnly.showThinking);
+          yield* fileSystem.writeFileString(
+            paths.configFile,
+            `${config('["guild-1"]', defaultCwd)}show_thinking = true\n`,
+          );
+          const thinkingOnly = Option.getOrThrow((yield* load(paths)).discord);
+          assert.isFalse(thinkingOnly.showToolCalls);
+          assert.isTrue(thinkingOnly.showThinking);
 
           yield* fileSystem.writeFileString(tokenFile, "\n");
           assert.isTrue(Option.isNone((yield* load(paths)).discord));
@@ -63,6 +85,17 @@ describe("PicoConfig.load", () => {
           assert.instanceOf(yield* load(paths).pipe(Effect.flip), ConfigError);
 
           yield* fileSystem.writeFileString(paths.configFile, "[discord]\nallowed_guild = 1\n");
+          assert.instanceOf(yield* load(paths).pipe(Effect.flip), ConfigError);
+
+          yield* fileSystem.writeFileString(
+            paths.configFile,
+            `${config('["guild-1"]', defaultCwd)}show_tool_calls = "yes"\n`,
+          );
+          assert.instanceOf(yield* load(paths).pipe(Effect.flip), ConfigError);
+          yield* fileSystem.writeFileString(
+            paths.configFile,
+            `${config('["guild-1"]', defaultCwd)}show_thinking = 1\n`,
+          );
           assert.instanceOf(yield* load(paths).pipe(Effect.flip), ConfigError);
 
           yield* fileSystem.writeFileString(

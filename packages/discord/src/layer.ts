@@ -146,6 +146,7 @@ const start = Effect.fn("Discord.start")(function* (config: DiscordConfig) {
         ),
     },
     scope,
+    { showToolCalls: config.showToolCalls, showThinking: config.showThinking },
   );
 
   yield* route.events.pipe(

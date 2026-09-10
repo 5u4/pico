@@ -81,7 +81,7 @@ const smoke = Effect.fn("Discord.smoke")(function* () {
   yield* fileSystem.writeFileString(path.join(workspaceCwd, "emoji.txt"), "emoji");
   yield* fileSystem.writeFileString(
     path.join(canonicalRoot, "config.toml"),
-    `[discord]\nallowed_guild = [${JSON.stringify(guildId)}]\ndefault_cwd = ${JSON.stringify(workspaceCwd)}\n`,
+    `[discord]\nallowed_guild = [${JSON.stringify(guildId)}]\ndefault_cwd = ${JSON.stringify(workspaceCwd)}\nshow_tool_calls = true\n`,
   );
 
   const desiredProperties = {

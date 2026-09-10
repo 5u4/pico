@@ -11,6 +11,8 @@ const config = {
   token: Redacted.make("test"),
   allowedGuildIds: ["1", "2"],
   defaultCwd: AbsolutePath.make("/tmp/pico-discord-startup"),
+  showToolCalls: false,
+  showThinking: false,
 } as const;
 
 type Call =

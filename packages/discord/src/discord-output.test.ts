@@ -6,10 +6,23 @@ import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Scope from "effect/Scope";
 import * as TestClock from "effect/testing/TestClock";
-import { make, type RenderedMessage, renderAssistant } from "./discord-output.ts";
+import {
+  type DiscordOutputPolicy,
+  make,
+  type RenderedMessage,
+  renderAssistant,
+} from "./discord-output.ts";
 
 const chatA = Chat.ChatId.make("018f47a0-0000-7000-8000-000000000001");
 const chatB = Chat.ChatId.make("018f47a0-0000-7000-8000-000000000002");
+const hiddenPolicy: DiscordOutputPolicy = {
+  showToolCalls: false,
+  showThinking: false,
+};
+const visiblePolicy: DiscordOutputPolicy = {
+  showToolCalls: true,
+  showThinking: true,
+};
 const envelope = (chatId: Chat.ChatId, event: AgentEvent): AgentEventEnvelope => ({
   chatId,
   event,
@@ -47,6 +60,7 @@ describe("Discord output", () => {
         { type: "thinking", text: "checking" },
         { type: "text", text: "| A | B |\n| --- | --- |\n| x | y |" },
       ]),
+      true,
     );
 
     assert.deepStrictEqual(rendered[0], { content: "🧠 checking", silent: true });
@@ -55,34 +69,101 @@ describe("Discord output", () => {
       silent: false,
     });
     assert.isTrue(
-      renderAssistant(completed("tool-use", [{ type: "text", text: "working" }]))[0]?.silent,
+      renderAssistant(completed("tool-use", [{ type: "text", text: "working" }]), true)[0]?.silent,
     );
     assert.include(
-      renderAssistant(completed("length", [{ type: "text", text: "partial" }])).at(-1)?.content,
+      renderAssistant(completed("length", [{ type: "text", text: "partial" }]), true).at(-1)
+        ?.content,
       "length limit",
     );
-    assert.deepStrictEqual(renderAssistant(failed("error", [{ type: "text", text: "partial" }])), [
-      { content: "partial", silent: false },
-      { content: "The request failed.", silent: false },
-    ]);
+    assert.deepStrictEqual(
+      renderAssistant(failed("error", [{ type: "text", text: "partial" }]), true),
+      [
+        { content: "partial", silent: false },
+        { content: "The request failed.", silent: false },
+      ],
+    );
     const thinking = renderAssistant(
       completed("stop", [{ type: "thinking", text: "x".repeat(1_000) }]),
+      true,
     )[0];
     assert.strictEqual(Array.from(thinking?.content ?? "").length, 800);
   });
 
   it("does not render absent, empty, or whitespace-only thinking", () => {
-    assert.deepStrictEqual(renderAssistant(completed("stop", [])), []);
+    assert.deepStrictEqual(renderAssistant(completed("stop", []), true), []);
     assert.deepStrictEqual(
       renderAssistant(
         completed("stop", [
           { type: "thinking", text: "" },
           { type: "thinking", text: " \n\t" },
         ]),
+        true,
       ),
       [],
     );
   });
+
+  it.effect("hides tool activity and committed thinking without hiding text", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const sent: RenderedMessage[] = [];
+        const edited: string[] = [];
+        const scope = yield* Scope.Scope;
+        const dispatch = make(
+          {
+            send: (_threadId, message) =>
+              Effect.sync(() => {
+                sent.push(message);
+                return 1n;
+              }),
+            edit: (_threadId, _messageId, content) =>
+              Effect.sync(() => {
+                edited.push(content);
+              }),
+            renameThread: () => Effect.void,
+            triggerTyping: () => Effect.void,
+          },
+          scope,
+          hiddenPolicy,
+        );
+        const hiddenToolStarted: AgentEvent = {
+          type: "tool-started",
+          toolCallId: "hidden",
+          toolName: "read",
+          get argumentsJson(): string {
+            throw new Error("Hidden tool arguments were read");
+          },
+        };
+
+        yield* dispatch(11n, envelope(chatA, hiddenToolStarted));
+        yield* dispatch(
+          11n,
+          envelope(chatA, {
+            type: "tool-finished",
+            toolCallId: "hidden",
+            toolName: "read",
+            status: "succeeded",
+          }),
+        );
+        assert.deepStrictEqual(sent, []);
+        assert.deepStrictEqual(edited, []);
+        yield* dispatch(
+          11n,
+          envelope(chatA, {
+            type: "message-settled",
+            message: completed("stop", [
+              { type: "thinking", text: "private reasoning" },
+              { type: "text", text: "visible answer" },
+            ]),
+          }),
+        );
+
+        assert.deepStrictEqual(sent, [{ content: "visible answer", silent: false }]);
+        assert.deepStrictEqual(edited, []);
+      }),
+    ),
+  );
 
   it.effect("isolates tool correlation, renews typing, and claims terminal output once", () =>
     Effect.scoped(
@@ -114,6 +195,7 @@ describe("Discord output", () => {
               }),
           },
           scope,
+          visiblePolicy,
         );
 
         yield* dispatch(11n, envelope(chatA, { type: "run-started" }));
@@ -269,6 +351,7 @@ describe("Discord output", () => {
             triggerTyping: () => Effect.die("unexpected typing"),
           },
           scope,
+          visiblePolicy,
         );
 
         yield* dispatch(11n, envelope(chatA, { type: "title-changed", title: "Closed chat" })).pipe(
@@ -305,6 +388,7 @@ describe("Discord output", () => {
             triggerTyping: () => Effect.void,
           },
           scope,
+          visiblePolicy,
         );
         const start = (toolCallId: string, toolName: string, argumentsJson: string) =>
           dispatch(
@@ -386,6 +470,7 @@ describe("Discord output", () => {
             triggerTyping: () => Effect.void,
           },
           scope,
+          visiblePolicy,
         );
 
         yield* dispatch(
@@ -442,6 +527,7 @@ describe("Discord output", () => {
             triggerTyping: () => Effect.void,
           },
           scope,
+          visiblePolicy,
         );
 
         yield* dispatch(22n, envelope(chatB, { type: "title-changed", title: "Failed rename" }));

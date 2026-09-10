@@ -12,6 +12,8 @@ import * as Schema from "effect/Schema";
 const DiscordSection = Schema.Struct({
   allowed_guild: Schema.Array(Schema.NonEmptyString),
   default_cwd: Schema.NonEmptyString,
+  show_tool_calls: Schema.optionalKey(Schema.Boolean),
+  show_thinking: Schema.optionalKey(Schema.Boolean),
 });
 
 const PicoConfigFile = Schema.Struct({
@@ -22,6 +24,8 @@ export interface DiscordConfig {
   readonly token: Redacted.Redacted<string>;
   readonly allowedGuildIds: readonly [string, ...Array<string>];
   readonly defaultCwd: AbsolutePath;
+  readonly showToolCalls: boolean;
+  readonly showThinking: boolean;
 }
 
 export interface PicoConfig {
@@ -83,6 +87,8 @@ export const load = Effect.fn("PicoConfig.load")(function* (paths: PicoPaths) {
       token: Redacted.make(tokenValue, { label: "discord_bot_token" }),
       allowedGuildIds: [firstGuildId, ...restGuildIds],
       defaultCwd: AbsolutePath.make(path.normalize(defaultCwd)),
+      showToolCalls: config.discord.show_tool_calls ?? false,
+      showThinking: config.discord.show_thinking ?? false,
     }),
   } satisfies PicoConfig;
 });
