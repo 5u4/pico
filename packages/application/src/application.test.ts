@@ -272,9 +272,9 @@ describe("Application", () => {
         assert.deepStrictEqual(abortedChatIds, [discordChat.id]);
         assertApplicationError(
           yield* application.abort(missingChatId).pipe(Effect.flip),
-          "Failed to abort chat",
+          "Chat not found",
         );
-        assert.deepStrictEqual(abortedChatIds, [discordChat.id, missingChatId]);
+        assert.deepStrictEqual(abortedChatIds, [discordChat.id]);
         assert.deepStrictEqual(yield* application.contextUsage(discordChat.id), {
           kind: "available",
           contextWindow: 200_000,
@@ -288,9 +288,9 @@ describe("Application", () => {
         assert.deepStrictEqual(contextChatIds, [discordChat.id]);
         assertApplicationError(
           yield* application.contextUsage(missingChatId).pipe(Effect.flip),
-          "Failed to read chat context",
+          "Chat not found",
         );
-        assert.deepStrictEqual(contextChatIds, [discordChat.id, missingChatId]);
+        assert.deepStrictEqual(contextChatIds, [discordChat.id]);
         assert.deepStrictEqual(yield* application.shake(discordChat.id, "images"), {
           mode: "images",
           imagesDropped: 2,
@@ -299,12 +299,9 @@ describe("Application", () => {
         assert.deepStrictEqual(shakeInputs, [{ chatId: discordChat.id, mode: "images" }]);
         assertApplicationError(
           yield* application.shake(missingChatId, "elide").pipe(Effect.flip),
-          "Failed to shake chat",
+          "Chat not found",
         );
-        assert.deepStrictEqual(shakeInputs, [
-          { chatId: discordChat.id, mode: "images" },
-          { chatId: missingChatId, mode: "elide" },
-        ]);
+        assert.deepStrictEqual(shakeInputs, [{ chatId: discordChat.id, mode: "images" }]);
 
         assertApplicationError(
           yield* application
@@ -718,6 +715,24 @@ describe("Application", () => {
         yield* application.abort(chat.id);
         assert.strictEqual(aborts, 0);
         assert.deepStrictEqual(yield* application.transcript(chat.id), runtimeTranscript);
+
+        const missingChatId = Chat.ChatId.make("018f47a0-0000-7000-8000-000000000099");
+        assertApplicationError(
+          yield* application.sendMessage(missingChatId, "missing").pipe(Effect.flip),
+          "Chat not found",
+        );
+        assertApplicationError(
+          yield* application.contextUsage(missingChatId).pipe(Effect.flip),
+          "Chat not found",
+        );
+        assertApplicationError(
+          yield* application.shake(missingChatId, "elide").pipe(Effect.flip),
+          "Chat not found",
+        );
+        assertApplicationError(
+          yield* application.abort(missingChatId).pipe(Effect.flip),
+          "Chat not found",
+        );
 
         yield* TestClock.setTime(4_000);
         assert.deepStrictEqual(

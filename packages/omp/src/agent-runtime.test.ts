@@ -9,10 +9,12 @@ import * as Chat from "@pico/contract/chat-model";
 import { AgentError } from "@pico/contract/errors";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import { normalizeAgentEvent, normalizeTranscript } from "./agent-event.ts";
 import { makeSessionPool, type SessionFactory } from "./session-pool.ts";
@@ -388,6 +390,21 @@ describe("AgentRuntime", () => {
         assert.deepStrictEqual(lifecycle, ["begin-dispose", "unsubscribe", "dispose"]);
       }),
     ),
+  );
+
+  it.effect("does not wait when its output queue is already closed", () =>
+    Effect.gen(function* () {
+      const scope = yield* Scope.make();
+      const pool = yield* makeSessionPool({
+        factory: {
+          open: () => Effect.die("unexpected session open"),
+        },
+        loadTranscript: () => Effect.succeed([]),
+      }).pipe(Scope.provide(scope));
+
+      yield* Scope.close(scope, Exit.void);
+      yield* pool.drain();
+    }),
   );
 
   it.effect("waits for event consumers at the drain barrier", () =>

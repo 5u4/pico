@@ -80,7 +80,8 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
     errorMessage: string,
   ) {
     const chat = yield* chats.findById(chatId).pipe(Effect.mapError(failure(errorMessage)));
-    if (Option.isSome(chat) && chat.value.archivedAt !== null) return yield* new ChatClosed();
+    if (Option.isNone(chat)) return yield* new ApplicationError({ message: "Chat not found" });
+    if (chat.value.archivedAt !== null) return yield* new ChatClosed();
   });
 
   const createWorkspace = Effect.fn("Application.createWorkspace")(
@@ -334,7 +335,8 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
         const chat = yield* chats
           .findById(chatId)
           .pipe(Effect.mapError(failure("Failed to abort chat")));
-        if (Option.isSome(chat) && chat.value.archivedAt !== null) return;
+        if (Option.isNone(chat)) return yield* new ApplicationError({ message: "Chat not found" });
+        if (chat.value.archivedAt !== null) return;
         yield* runtime.abort(chatId).pipe(Effect.mapError(failure("Failed to abort chat")));
       }),
     );

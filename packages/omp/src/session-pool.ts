@@ -227,8 +227,8 @@ export const makeSessionPool = Effect.fn("SessionPool.make")(function* (
   const closeFailures = new Map<Chat.ChatId, AgentError>();
   const drain = Effect.fn("AgentRuntime.drain")(function* () {
     const completed = yield* Deferred.make<void>();
-    yield* Queue.offer(output, { kind: "drain", completed });
-    yield* Deferred.await(completed);
+    const accepted = yield* Queue.offer(output, { kind: "drain", completed });
+    if (accepted) yield* Deferred.await(completed);
   });
 
   const transcript = Effect.fn("AgentRuntime.transcript")(function* (chatId: Chat.ChatId) {
