@@ -11,6 +11,11 @@ export class ChatRepository extends Context.Service<
     // Application calls this after it provisions the chat's external resources.
     readonly create: (chat: NewChat) => Effect.Effect<Chat, PersistenceError>;
 
+    readonly archive: (
+      id: ChatId,
+      archivedAt: number,
+    ) => Effect.Effect<Option.Option<Chat>, PersistenceError>;
+
     readonly findById: (id: ChatId) => Effect.Effect<Option.Option<Chat>, PersistenceError>;
 
     readonly findByExternalId: (

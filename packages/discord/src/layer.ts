@@ -104,9 +104,11 @@ const start = Effect.fn("Discord.start")(function* (config: DiscordConfig) {
             channelId: true,
             data: true,
             guildId: true,
+            message: true,
             id: true,
             token: true,
             type: true,
+            user: true,
           },
         },
       }),
@@ -117,7 +119,7 @@ const start = Effect.fn("Discord.start")(function* (config: DiscordConfig) {
     for (const guildId of guilds) joinedGuildIds.add(guildId.toString());
   };
 
-  const findThreadId = yield* DiscordInput.install(bot, config);
+  const findThreadId = yield* DiscordInput.install(bot, config, () => eventRouter.drain());
   const route = yield* eventRouter.open((envelope) => findThreadId(envelope.chatId) !== undefined);
   const scope = yield* Scope.Scope;
   const dispatch = DiscordOutput.make(

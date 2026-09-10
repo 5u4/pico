@@ -2,13 +2,12 @@ import { assert, describe, it } from "@effect/vitest";
 import type { AgentEventEnvelope } from "@pico/contract/agent-event";
 import { AgentRuntime } from "@pico/contract/agent-runtime";
 import * as Chat from "@pico/contract/chat-model";
-import { type EventRoute, EventRouter } from "@pico/contract/event-router";
+import { EventRouter } from "@pico/contract/event-router";
 import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
-import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
@@ -23,25 +22,28 @@ const envelope = (chatId: Chat.ChatId, message: string): AgentEventEnvelope => (
   event: { type: "notice", level: "info", message },
 });
 
-const take = (route: EventRoute) =>
-  route.events.pipe(Stream.runHead, Effect.map(Option.getOrThrow));
-
 describe("EventRouter", () => {
   it.effect("routes trusted filters and owns route and pump lifecycles", () =>
     Effect.gen(function* () {
       const source = yield* Queue.unbounded<AgentEventEnvelope>();
       const pumpStopped = yield* Deferred.make<void>();
+      let runtimeDrains = 0;
       const runtimeLayer = Layer.succeed(
         AgentRuntime,
         AgentRuntime.of({
           events: Stream.fromQueue(source).pipe(
             Stream.ensuring(Deferred.succeed(pumpStopped, undefined)),
           ),
+          drain: () =>
+            Effect.sync(() => {
+              runtimeDrains += 1;
+            }),
           transcript: () => Effect.die("unused"),
           send: () => Effect.die("unused"),
           abort: () => Effect.die("unused"),
           contextUsage: () => Effect.die("unused"),
           shake: () => Effect.die("unused"),
+          close: () => Effect.die("unexpected runtime close"),
         }),
       );
       const routerScope = yield* Scope.make();
@@ -58,31 +60,83 @@ describe("EventRouter", () => {
         .open((event) => event.chatId === firstChatId)
         .pipe(Scope.provide(secondRouteScope));
 
+      const firstDelivered = yield* Queue.unbounded<AgentEventEnvelope>();
+      const secondDelivered = yield* Queue.unbounded<AgentEventEnvelope>();
+      const deliveryStarted = yield* Deferred.make<void>();
+      const releaseDelivery = yield* Deferred.make<void>();
+      const drainCompleted = yield* Deferred.make<void>();
+      yield* firstRoute.events.pipe(
+        Stream.runForEach((item) => Queue.offer(firstDelivered, item)),
+        Effect.forkIn(firstRouteScope),
+      );
+      yield* secondRoute.events.pipe(
+        Stream.runForEach((item) => {
+          if (item.event.type !== "notice" || item.event.message !== "before-drain") {
+            return Queue.offer(secondDelivered, item);
+          }
+          return Deferred.succeed(deliveryStarted, undefined).pipe(
+            Effect.andThen(Deferred.await(releaseDelivery)),
+            Effect.andThen(Queue.offer(secondDelivered, item)),
+          );
+        }),
+        Effect.forkIn(secondRouteScope),
+      );
+
       const shared = envelope(firstChatId, "shared");
       yield* Queue.offer(source, shared);
-      assert.deepStrictEqual(yield* take(firstRoute), shared);
-      assert.deepStrictEqual(yield* take(secondRoute), shared);
+      assert.deepStrictEqual(yield* Queue.take(firstDelivered), shared);
+      assert.deepStrictEqual(yield* Queue.take(secondDelivered), shared);
 
       const afterNonmatch = envelope(firstChatId, "after-nonmatch");
       yield* Queue.offer(source, envelope(thirdChatId, "excluded"));
       yield* Queue.offer(source, afterNonmatch);
-      assert.deepStrictEqual(yield* take(firstRoute), afterNonmatch);
-      assert.deepStrictEqual(yield* take(secondRoute), afterNonmatch);
+      assert.deepStrictEqual(yield* Queue.take(firstDelivered), afterNonmatch);
+      assert.deepStrictEqual(yield* Queue.take(secondDelivered), afterNonmatch);
 
       yield* firstRoute.setFilter((event) => event.chatId === secondChatId);
       const oldFilterMatch = envelope(firstChatId, "old-filter");
       const newFilterMatch = envelope(secondChatId, "new-filter");
       yield* Queue.offer(source, oldFilterMatch);
       yield* Queue.offer(source, newFilterMatch);
-      assert.deepStrictEqual(yield* take(firstRoute), newFilterMatch);
-      assert.deepStrictEqual(yield* take(secondRoute), oldFilterMatch);
+      assert.deepStrictEqual(yield* Queue.take(firstDelivered), newFilterMatch);
+      assert.deepStrictEqual(yield* Queue.take(secondDelivered), oldFilterMatch);
 
       yield* Scope.close(firstRouteScope, Exit.void);
       yield* Queue.offer(source, envelope(secondChatId, "after-route-release"));
       const routeReleaseSentinel = envelope(firstChatId, "route-release-sentinel");
       yield* Queue.offer(source, routeReleaseSentinel);
-      assert.deepStrictEqual(yield* take(secondRoute), routeReleaseSentinel);
-      assert.isTrue(Exit.isFailure(yield* firstRoute.events.pipe(Stream.runHead, Effect.exit)));
+      assert.deepStrictEqual(yield* Queue.take(secondDelivered), routeReleaseSentinel);
+      yield* Effect.yieldNow;
+      assert.strictEqual(yield* Queue.size(firstDelivered), 0);
+
+      yield* Queue.offer(source, envelope(firstChatId, "before-drain"));
+      yield* Deferred.await(deliveryStarted);
+      yield* router
+        .drain()
+        .pipe(Effect.ensuring(Deferred.succeed(drainCompleted, undefined)), Effect.forkChild);
+      yield* Effect.yieldNow;
+      assert.strictEqual(runtimeDrains, 1);
+      assert.isFalse(yield* Deferred.isDone(drainCompleted));
+      yield* Deferred.succeed(releaseDelivery, undefined);
+      yield* Deferred.await(drainCompleted);
+      assert.deepStrictEqual(
+        yield* Queue.take(secondDelivered),
+        envelope(firstChatId, "before-drain"),
+      );
+
+      const abandonedScope = yield* Scope.make();
+      yield* router.open(() => true).pipe(Scope.provide(abandonedScope));
+      const abandonedDrainCompleted = yield* Deferred.make<void>();
+      yield* router
+        .drain()
+        .pipe(
+          Effect.ensuring(Deferred.succeed(abandonedDrainCompleted, undefined)),
+          Effect.forkChild,
+        );
+      yield* Effect.yieldNow;
+      assert.isFalse(yield* Deferred.isDone(abandonedDrainCompleted));
+      yield* Scope.close(abandonedScope, Exit.void);
+      yield* Deferred.await(abandonedDrainCompleted);
 
       yield* Scope.close(secondRouteScope, Exit.void);
       yield* Scope.close(routerScope, Exit.void);

@@ -173,6 +173,12 @@ describe("Persistence.layer", () => {
         });
         assert.strictEqual(explicit.cwd, worktreeCwd);
         assert.deepStrictEqual(Option.getOrThrow(yield* chats.findById(explicit.id)), explicit);
+        const archived = Option.getOrThrow(yield* chats.archive(explicit.id, 100));
+        assert.strictEqual(archived.archivedAt, 100);
+        const archivedAgain = Option.getOrThrow(yield* chats.archive(explicit.id, 200));
+        assert.strictEqual(archivedAgain.archivedAt, 100);
+        assert.strictEqual(Option.getOrThrow(yield* chats.findById(explicit.id)).archivedAt, 100);
+        assert.isTrue(Option.isNone(yield* chats.archive(missingChatId, 100)));
 
         const regularCwdInWorktreeWorkspace = yield* chats.create({
           id: chatId(4),
@@ -261,6 +267,7 @@ describe("Persistence.layer", () => {
           cwdB,
         );
         assert.strictEqual(Option.getOrThrow(yield* chats.findById(chatId(1))).cwd, cwdA);
+        assert.strictEqual(Option.getOrThrow(yield* chats.findById(chatId(3))).archivedAt, 100);
         assert.deepStrictEqual(
           Option.getOrThrow(
             yield* workspaces.findByBinding({ platform: "discord", externalId: "channel-1" }),

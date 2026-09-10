@@ -15,6 +15,25 @@ export interface ValidateWorktreeOptions {
   readonly settings: WorktreeSettings;
 }
 
+export interface ChatWorktreeOptions {
+  readonly chatId: ChatId;
+  readonly cwd: AbsolutePath;
+}
+
+export type WorktreeInspection =
+  | { readonly kind: "not-managed" }
+  | { readonly kind: "managed"; readonly state: "absent" | "clean" | "dirty" };
+
+export interface RemoveChatWorktreeOptions extends ChatWorktreeOptions {
+  readonly force: boolean;
+}
+
+export type RemoveChatWorktreeResult =
+  | { readonly kind: "not-managed" }
+  | { readonly kind: "already-absent" }
+  | { readonly kind: "removed" }
+  | { readonly kind: "force-required" };
+
 export type ValidateWorktree = (
   options: ValidateWorktreeOptions,
 ) => Effect.Effect<void, GitError | WorkspaceBindingInvalid>;
@@ -27,4 +46,10 @@ export type CreateWorktree = <A, E>(
 export interface GitWorktree {
   readonly validate: ValidateWorktree;
   readonly create: CreateWorktree;
+  readonly inspectChat: (
+    options: ChatWorktreeOptions,
+  ) => Effect.Effect<WorktreeInspection, GitError>;
+  readonly removeChat: (
+    options: RemoveChatWorktreeOptions,
+  ) => Effect.Effect<RemoveChatWorktreeResult, GitError>;
 }

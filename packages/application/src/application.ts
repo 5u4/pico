@@ -4,12 +4,14 @@ import { AgentSessionStore } from "@pico/contract/agent-session-store";
 import {
   Application,
   type BindWorkspace,
+  type CloseChatOptions,
+  type CloseChatResult,
   type CreateChat,
   type CreateWorkspace,
 } from "@pico/contract/application";
 import * as Chat from "@pico/contract/chat-model";
 import { ChatRepository } from "@pico/contract/chat-repository";
-import { ApplicationError, WorkspaceBindingInvalid } from "@pico/contract/errors";
+import { ApplicationError, ChatClosed, WorkspaceBindingInvalid } from "@pico/contract/errors";
 import { AbsolutePath } from "@pico/contract/path";
 import * as Workspace from "@pico/contract/workspace-model";
 import { WorkspaceRepository } from "@pico/contract/workspace-repository";
@@ -21,6 +23,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as Semaphore from "effect/Semaphore";
 
 const failure = (message: string) => () => new ApplicationError({ message });
 
@@ -32,6 +35,54 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
   const crypto = yield* Crypto.Crypto;
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
+
+  interface ChatLock {
+    readonly semaphore: Semaphore.Semaphore;
+    users: number;
+  }
+
+  const chatLocks = new Map<Chat.ChatId, ChatLock>();
+  const serialized = <A, E, R>(
+    chatId: Chat.ChatId,
+    effect: Effect.Effect<A, E, R>,
+  ): Effect.Effect<A, E, R> =>
+    Effect.acquireUseRelease(
+      Effect.sync(() => {
+        const existing = chatLocks.get(chatId);
+        if (existing !== undefined) {
+          existing.users += 1;
+          return existing;
+        }
+        const created: ChatLock = { semaphore: Semaphore.makeUnsafe(1), users: 1 };
+        chatLocks.set(chatId, created);
+        return created;
+      }),
+      (entry) => entry.semaphore.withPermit(effect),
+      (entry) =>
+        Effect.sync(() => {
+          entry.users -= 1;
+          if (entry.users === 0 && chatLocks.get(chatId) === entry) chatLocks.delete(chatId);
+        }),
+    );
+
+  const findChat = Effect.fn("Application.findChat")(function* (chatId: Chat.ChatId) {
+    const chat = yield* chats
+      .findById(chatId)
+      .pipe(Effect.mapError(failure("Failed to find chat")));
+    if (Option.isNone(chat)) {
+      return yield* new ApplicationError({ message: "Chat not found" });
+    }
+    return chat.value;
+  });
+
+  const ensureChatOpen = Effect.fn("Application.ensureChatOpen")(function* (
+    chatId: Chat.ChatId,
+    errorMessage: string,
+  ) {
+    const chat = yield* chats.findById(chatId).pipe(Effect.mapError(failure(errorMessage)));
+    if (Option.isNone(chat)) return yield* new ApplicationError({ message: "Chat not found" });
+    if (chat.value.archivedAt !== null) return yield* new ChatClosed();
+  });
 
   const createWorkspace = Effect.fn("Application.createWorkspace")(
     function* (input: CreateWorkspace) {
@@ -210,33 +261,111 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
     Effect.mapError(failure("Failed to read transcript")),
   );
 
-  const sendMessage = Effect.fn("Application.sendMessage")(
-    function* (chatId: Chat.ChatId, prompt: AgentMessage.AgentPrompt) {
-      yield* runtime.send(chatId, prompt);
-    },
-    Effect.mapError(failure("Failed to send message")),
-  );
+  const closeChat = Effect.fn("Application.closeChat")(function* (
+    chatId: Chat.ChatId,
+    options: CloseChatOptions,
+  ): Effect.fn.Return<CloseChatResult, ApplicationError> {
+    return yield* serialized(
+      chatId,
+      Effect.gen(function* () {
+        const chat = yield* findChat(chatId);
+        const inspection = yield* gitWorktree
+          .inspectChat({ chatId, cwd: chat.cwd })
+          .pipe(Effect.mapError(failure("Failed to inspect chat worktree")));
+        if (
+          inspection.kind === "managed" &&
+          inspection.state === "dirty" &&
+          !options.allowDirtyWorktree
+        ) {
+          return { kind: "worktree-confirmation-required" };
+        }
 
-  const abort = Effect.fn("Application.abort")(
-    function* (chatId: Chat.ChatId) {
-      yield* runtime.abort(chatId);
-    },
-    Effect.mapError(failure("Failed to abort chat")),
-  );
+        const archivedAt = yield* Clock.currentTimeMillis;
+        const archived = yield* chats
+          .archive(chatId, archivedAt)
+          .pipe(Effect.mapError(failure("Failed to archive chat")));
+        if (Option.isNone(archived)) {
+          return yield* new ApplicationError({ message: "Chat not found" });
+        }
+        yield* runtime.close(chatId).pipe(Effect.mapError(failure("Failed to close chat runtime")));
 
-  const contextUsage = Effect.fn("Application.contextUsage")(
-    function* (chatId: Chat.ChatId) {
-      return yield* runtime.contextUsage(chatId);
-    },
-    Effect.mapError(failure("Failed to read chat context")),
-  );
+        if (inspection.kind === "managed" && inspection.state !== "absent") {
+          const removal = yield* gitWorktree
+            .removeChat({ chatId, cwd: chat.cwd, force: options.allowDirtyWorktree })
+            .pipe(Effect.mapError(failure("Failed to remove chat worktree")));
+          switch (removal.kind) {
+            case "removed":
+            case "already-absent":
+              break;
+            case "force-required":
+              return { kind: "worktree-confirmation-required" };
+            case "not-managed":
+              return yield* new ApplicationError({
+                message: "Failed to remove chat worktree",
+              });
+            default: {
+              const exhaustive: never = removal;
+              return exhaustive;
+            }
+          }
+        }
+        return { kind: "closed" };
+      }),
+    );
+  });
 
-  const shake = Effect.fn("Application.shake")(
-    function* (chatId: Chat.ChatId, mode: ShakeMode) {
-      return yield* runtime.shake(chatId, mode);
-    },
-    Effect.mapError(failure("Failed to shake chat")),
-  );
+  const sendMessage = Effect.fn("Application.sendMessage")(function* (
+    chatId: Chat.ChatId,
+    prompt: AgentMessage.AgentPrompt,
+  ) {
+    yield* serialized(
+      chatId,
+      Effect.gen(function* () {
+        yield* ensureChatOpen(chatId, "Failed to send message");
+        yield* runtime
+          .send(chatId, prompt)
+          .pipe(Effect.mapError(failure("Failed to send message")));
+      }),
+    );
+  });
+
+  const abort = Effect.fn("Application.abort")(function* (chatId: Chat.ChatId) {
+    yield* serialized(
+      chatId,
+      Effect.gen(function* () {
+        const chat = yield* chats
+          .findById(chatId)
+          .pipe(Effect.mapError(failure("Failed to abort chat")));
+        if (Option.isNone(chat)) return yield* new ApplicationError({ message: "Chat not found" });
+        if (chat.value.archivedAt !== null) return;
+        yield* runtime.abort(chatId).pipe(Effect.mapError(failure("Failed to abort chat")));
+      }),
+    );
+  });
+
+  const contextUsage = Effect.fn("Application.contextUsage")(function* (chatId: Chat.ChatId) {
+    return yield* serialized(
+      chatId,
+      Effect.gen(function* () {
+        yield* ensureChatOpen(chatId, "Failed to read chat context");
+        return yield* runtime
+          .contextUsage(chatId)
+          .pipe(Effect.mapError(failure("Failed to read chat context")));
+      }),
+    );
+  });
+
+  const shake = Effect.fn("Application.shake")(function* (chatId: Chat.ChatId, mode: ShakeMode) {
+    return yield* serialized(
+      chatId,
+      Effect.gen(function* () {
+        yield* ensureChatOpen(chatId, "Failed to shake chat");
+        return yield* runtime
+          .shake(chatId, mode)
+          .pipe(Effect.mapError(failure("Failed to shake chat")));
+      }),
+    );
+  });
 
   return Application.of({
     createWorkspace,
@@ -245,6 +374,7 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
     findWorkspaceByPlatformId,
     findChatByPlatformId,
     transcript,
+    closeChat,
     sendMessage,
     abort,
     contextUsage,

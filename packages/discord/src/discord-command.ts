@@ -63,6 +63,10 @@ export const applicationCommands = [
     ],
   },
   {
+    name: "close",
+    description: "Close this chat and archive its thread",
+  },
+  {
     name: "context",
     description: "Show this chat's context usage",
   },
@@ -92,7 +96,11 @@ export type ShakeCommand =
     }
   | { readonly kind: "malformedShake" };
 
-export type Command = BindCommand | ShakeCommand | { readonly kind: "context" };
+export type Command =
+  | BindCommand
+  | ShakeCommand
+  | { readonly kind: "context" }
+  | { readonly kind: "close" };
 
 export const parseBind = (options: ReadonlyArray<CommandOption> | undefined): BindCommand => {
   if (options?.length !== 1) return { kind: "malformedBind" };

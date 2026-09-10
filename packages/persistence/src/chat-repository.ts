@@ -15,6 +15,11 @@ const ExternalChat = Schema.Struct({
   externalId: Schema.NonEmptyString,
 });
 
+const ArchiveChat = Schema.Struct({
+  id: Chat.ChatId,
+  archivedAt: Schema.Natural,
+});
+
 const make = Effect.fn("ChatRepository.make")(function* () {
   const sql = yield* SqlClient.SqlClient;
 
@@ -30,6 +35,23 @@ const make = Effect.fn("ChatRepository.make")(function* () {
         ${chat.externalId},
         ${chat.createdAt}
       )
+      RETURNING
+        id,
+        workspace_id AS "workspaceId",
+        cwd,
+        external_id AS "externalId",
+        created_at AS "createdAt",
+        archived_at AS "archivedAt"
+    `,
+  });
+
+  const updateArchive = SqlSchema.findOneOption({
+    Request: ArchiveChat,
+    Result: Chat.Chat,
+    execute: ({ id, archivedAt }) => sql`
+      UPDATE chats
+      SET archived_at = COALESCE(archived_at, ${archivedAt})
+      WHERE id = ${id}
       RETURNING
         id,
         workspace_id AS "workspaceId",
@@ -79,6 +101,13 @@ const make = Effect.fn("ChatRepository.make")(function* () {
     Effect.mapError(failure("Failed to create chat")),
   );
 
+  const archive = Effect.fn("ChatRepository.archive")(
+    function* (id: Chat.ChatId, archivedAt: number) {
+      return yield* updateArchive({ id, archivedAt });
+    },
+    Effect.mapError(failure("Failed to archive chat")),
+  );
+
   const findById = Effect.fn("ChatRepository.findById")(
     function* (id: Chat.ChatId) {
       return yield* selectById(id);
@@ -93,7 +122,7 @@ const make = Effect.fn("ChatRepository.make")(function* () {
     Effect.mapError(failure("Failed to find chat")),
   );
 
-  return ChatRepository.of({ create, findById, findByExternalId });
+  return ChatRepository.of({ create, archive, findById, findByExternalId });
 });
 
 export const layer = Layer.effect(ChatRepository, make());

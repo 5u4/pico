@@ -309,20 +309,15 @@ export const make = (client: DiscordOutputClient, scope: Scope.Scope) => {
       case "thinking-delta":
       case "notice":
         return;
-      case "title-changed": {
-        yield* Effect.forkIn(
-          client
-            .renameThread(threadId, event.title)
-            .pipe(
-              Effect.catchCause((cause) =>
-                Effect.logWarning("Discord thread rename failed", Cause.pretty(cause)),
-              ),
+      case "title-changed":
+        yield* client
+          .renameThread(threadId, event.title)
+          .pipe(
+            Effect.catchCause((cause) =>
+              Effect.logWarning("Discord thread rename failed", Cause.pretty(cause)),
             ),
-          scope,
-          { startImmediately: true },
-        );
+          );
         return;
-      }
       case "tool-started": {
         if (state.tools.has(event.toolCallId) || state.finishedTools.has(event.toolCallId)) return;
         const presentation = toolPresentation(

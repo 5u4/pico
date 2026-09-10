@@ -225,3 +225,152 @@ describe("GitWorktree.validate", () => {
     }).pipe(Effect.provide(BunServices.layer)),
   );
 });
+
+describe("GitWorktree chat cleanup", () => {
+  it.effect("removes a clean managed worktree and preserves its branch", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const { repositoryCwd, worktreesDir } = yield* makeRepository();
+      const worktree = yield* make(worktreesDir);
+      const id = chatId(20);
+      const cwd = AbsolutePath.make(path.join(worktreesDir, id));
+      const branch = `chat/${id}`;
+      yield* worktree.create(options(id, repositoryCwd), () => Effect.void);
+
+      assert.deepStrictEqual(yield* worktree.inspectChat({ chatId: id, cwd }), {
+        kind: "managed",
+        state: "clean",
+      });
+      assert.deepStrictEqual(yield* worktree.removeChat({ chatId: id, cwd, force: false }), {
+        kind: "removed",
+      });
+      assert.isFalse(yield* fileSystem.exists(cwd));
+      assert.strictEqual((yield* git(repositoryCwd, ["branch", "--list", branch])).trim(), branch);
+      assert.deepStrictEqual(yield* worktree.removeChat({ chatId: id, cwd, force: false }), {
+        kind: "already-absent",
+      });
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
+
+  it.effect("requires force for dirty worktrees and preserves the branch", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const { repositoryCwd, worktreesDir } = yield* makeRepository();
+      const worktree = yield* make(worktreesDir);
+      const id = chatId(21);
+      const cwd = AbsolutePath.make(path.join(worktreesDir, id));
+      const branch = `chat/${id}`;
+      yield* worktree.create(options(id, repositoryCwd), () => Effect.void);
+      yield* fileSystem.writeFileString(path.join(cwd, "README.md"), "changed\n");
+      yield* fileSystem.writeFileString(path.join(cwd, "untracked.txt"), "local\n");
+
+      assert.deepStrictEqual(yield* worktree.inspectChat({ chatId: id, cwd }), {
+        kind: "managed",
+        state: "dirty",
+      });
+      assert.deepStrictEqual(yield* worktree.removeChat({ chatId: id, cwd, force: false }), {
+        kind: "force-required",
+      });
+      assert.isTrue(yield* fileSystem.exists(cwd));
+      assert.deepStrictEqual(yield* worktree.removeChat({ chatId: id, cwd, force: true }), {
+        kind: "removed",
+      });
+      assert.isFalse(yield* fileSystem.exists(cwd));
+      assert.strictEqual((yield* git(repositoryCwd, ["branch", "--list", branch])).trim(), branch);
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
+
+  it.effect("offers a force retry when Git rejects a clean worktree with a submodule", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const { repositoryCwd, worktreesDir } = yield* makeRepository();
+      const submoduleCwd = AbsolutePath.make(path.join(repositoryCwd, "..", "submodule"));
+      yield* fileSystem.makeDirectory(submoduleCwd);
+      yield* git(submoduleCwd, ["init", "--initial-branch=main"]);
+      yield* git(submoduleCwd, ["config", "user.email", "pico@example.invalid"]);
+      yield* git(submoduleCwd, ["config", "user.name", "pico"]);
+      yield* fileSystem.writeFileString(path.join(submoduleCwd, "README.md"), "nested\n");
+      yield* git(submoduleCwd, ["add", "--", "README.md"]);
+      yield* git(submoduleCwd, ["commit", "-m", "initial"]);
+      yield* git(repositoryCwd, [
+        "-c",
+        "protocol.file.allow=always",
+        "submodule",
+        "add",
+        "--",
+        submoduleCwd,
+        "nested",
+      ]);
+      yield* git(repositoryCwd, ["commit", "-am", "add submodule"]);
+
+      const worktree = yield* make(worktreesDir);
+      const id = chatId(24);
+      const cwd = AbsolutePath.make(path.join(worktreesDir, id));
+      const branch = `chat/${id}`;
+      yield* worktree.create(options(id, repositoryCwd), () => Effect.void);
+      yield* git(cwd, [
+        "-c",
+        "protocol.file.allow=always",
+        "submodule",
+        "update",
+        "--init",
+        "--recursive",
+      ]);
+
+      assert.deepStrictEqual(yield* worktree.inspectChat({ chatId: id, cwd }), {
+        kind: "managed",
+        state: "clean",
+      });
+      assert.deepStrictEqual(yield* worktree.removeChat({ chatId: id, cwd, force: false }), {
+        kind: "force-required",
+      });
+      assert.isTrue(yield* fileSystem.exists(cwd));
+      assert.deepStrictEqual(yield* worktree.removeChat({ chatId: id, cwd, force: true }), {
+        kind: "removed",
+      });
+      assert.isFalse(yield* fileSystem.exists(cwd));
+      assert.strictEqual((yield* git(repositoryCwd, ["branch", "--list", branch])).trim(), branch);
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
+
+  it.effect("rejects an unregistered exact slot without deleting it", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const { worktreesDir } = yield* makeRepository();
+      const worktree = yield* make(worktreesDir);
+      const id = chatId(22);
+      const cwd = AbsolutePath.make(path.join(worktreesDir, id));
+      yield* fileSystem.makeDirectory(cwd, { recursive: true });
+      yield* fileSystem.writeFileString(path.join(cwd, "keep.txt"), "keep\n");
+
+      assert.instanceOf(
+        yield* worktree.inspectChat({ chatId: id, cwd }).pipe(Effect.flip),
+        GitError,
+      );
+      assert.isTrue(yield* fileSystem.exists(path.join(cwd, "keep.txt")));
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
+  it.effect("never follows an exact-slot symlink", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const { repositoryCwd, worktreesDir } = yield* makeRepository();
+      const worktree = yield* make(worktreesDir);
+      const id = chatId(23);
+      const target = AbsolutePath.make(path.join(worktreesDir, "outside-slot"));
+      const slot = AbsolutePath.make(path.join(worktreesDir, id));
+      yield* git(repositoryCwd, ["worktree", "add", "-b", `chat/${id}`, "--", target, "main"]);
+      yield* fileSystem.symlink(target, slot);
+
+      assert.instanceOf(
+        yield* worktree.removeChat({ chatId: id, cwd: slot, force: true }).pipe(Effect.flip),
+        GitError,
+      );
+      assert.isTrue(yield* fileSystem.exists(path.join(target, "README.md")));
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
+});

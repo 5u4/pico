@@ -62,8 +62,10 @@ export const make = Effect.fn("AgentRuntime.make")(function* (sessionsDir: Absol
 
   return AgentRuntime.of({
     events: pool.events,
+    drain: pool.drain,
     transcript: pool.transcript,
     send: pool.send,
+    close: pool.close,
     abort: pool.abort,
     contextUsage: pool.contextUsage,
     shake: pool.shake,
