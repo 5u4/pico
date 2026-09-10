@@ -154,11 +154,12 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
       const createdAt = yield* Clock.currentTimeMillis;
 
       if (workspace.worktree === null) {
-        yield* sessions.create({ chatId: id, cwd: workspace.defaultCwd });
+        const cwd = yield* resolveWorkspacePath("cwd", workspace.defaultCwd);
+        yield* sessions.create({ chatId: id, cwd });
         return yield* chats.create({
           ...input,
           id,
-          cwd: workspace.defaultCwd,
+          cwd,
           createdAt,
         });
       }
