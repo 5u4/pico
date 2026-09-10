@@ -12,4 +12,5 @@ export interface PicoPaths {
   readonly secretsDir: AbsolutePathType;
   readonly worktreesDir: AbsolutePathType;
   readonly logsDir: AbsolutePathType;
+  readonly schedulesDir: AbsolutePathType;
 }

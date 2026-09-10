@@ -20,6 +20,7 @@ import {
   WorkspaceBindingInvalid,
 } from "@pico/contract/errors";
 import { AbsolutePath } from "@pico/contract/path";
+import * as Schedule from "@pico/contract/schedule";
 import * as Workspace from "@pico/contract/workspace-model";
 import { WorkspaceRepository } from "@pico/contract/workspace-repository";
 import type { CreateWorktreeOptions, GitWorktree } from "@pico/contract/worktree";
@@ -48,8 +49,11 @@ const runtimeTranscript: AgentMessage.AgentTranscript = [
   },
 ];
 
-const assertApplicationError = (error: ApplicationError, message: string) => {
-  assert.instanceOf(error, ApplicationError);
+const assertApplicationError = (error: ApplicationError | ChatClosed, message: string) => {
+  if (!(error instanceof ApplicationError)) {
+    assert.fail(`Expected ApplicationError, received ${error._tag}`);
+    return;
+  }
   assert.strictEqual(error.message, message);
 };
 
@@ -109,6 +113,19 @@ describe("Application", () => {
               : Effect.sync(() => {
                   sentMessages.push({ chatId, content });
                 }),
+          sendCaptured: (capturedChatId, runId, _prompt, onEvent) =>
+            onEvent({ type: "run-started" }).pipe(
+              Effect.as({
+                runId,
+                outcome: "completed",
+                events: [{ type: "run-started" }],
+                finalAssistantText: `captured:${capturedChatId}`,
+              }),
+            ),
+          deliver: (deliveredChatId, content) =>
+            Effect.sync(() => sentMessages.push({ chatId: deliveredChatId, content })),
+          publish: (publishedChatId, content) =>
+            Effect.sync(() => sentMessages.push({ chatId: publishedChatId, content })),
           abort: (chatId) =>
             Effect.sync(() => {
               abortedChatIds.push(chatId);
@@ -167,6 +184,7 @@ describe("Application", () => {
 
       yield* Effect.gen(function* () {
         const application = yield* Application;
+        const scheduleHost = yield* Schedule.ScheduleRunHostService;
         const chats = yield* ChatRepository;
 
         yield* TestClock.setTime(1_000);
@@ -311,6 +329,54 @@ describe("Application", () => {
             .pipe(Effect.flip),
           "Failed to create chat",
         );
+        const firstScheduledId = Chat.ChatId.make("018f47a0-0000-7000-8000-000000000010");
+        const secondScheduledId = Chat.ChatId.make("018f47a0-0000-7000-8000-000000000011");
+        const firstScheduled = yield* scheduleHost.prepare({
+          kind: "workspace-chat",
+          ownerWorkspaceId: worktreeWorkspace.id,
+          chatId: firstScheduledId,
+        });
+        const secondScheduled = yield* scheduleHost.prepare({
+          kind: "workspace-chat",
+          ownerWorkspaceId: worktreeWorkspace.id,
+          chatId: secondScheduledId,
+        });
+        assert.strictEqual(firstScheduled.chatId, firstScheduledId);
+        assert.strictEqual(secondScheduled.chatId, secondScheduledId);
+        assert.notStrictEqual(firstScheduled.chatId, secondScheduled.chatId);
+        assert.strictEqual(firstScheduled.cwd, worktreeCwd);
+        assert.strictEqual(secondScheduled.cwd, worktreeCwd);
+        const crossWorkspace = yield* scheduleHost
+          .prepare({
+            kind: "existing-chat",
+            ownerWorkspaceId: regularWorkspace.id,
+            chatId: discordChat.id,
+          })
+          .pipe(Effect.flip);
+        assert.strictEqual(
+          crossWorkspace.message,
+          "Scheduled chat does not belong to its owner workspace",
+        );
+        const runId = Schedule.ScheduleRunId.make(
+          "scheduled-1000-018f47a0-0000-7000-8000-000000000003",
+        );
+        const captured = yield* scheduleHost.runPrompt(
+          discordChat.id,
+          runId,
+          "scheduled prompt",
+          () => Effect.void,
+        );
+        assert.deepStrictEqual(captured, {
+          runId,
+          outcome: "completed",
+          events: [{ type: "run-started" }],
+          finalAssistantText: `captured:${discordChat.id}`,
+        });
+        yield* scheduleHost.deliver(discordChat.id, "scheduled delivery");
+        assert.deepInclude(sentMessages, { chatId: discordChat.id, content: "scheduled delivery" });
+        yield* scheduleHost.publish(discordChat.id, "scheduled publish");
+        assert.deepInclude(sentMessages, { chatId: discordChat.id, content: "scheduled publish" });
+
         yield* fileSystem.remove(defaultCwd, { recursive: true });
         assertApplicationError(
           yield* application
@@ -321,8 +387,8 @@ describe("Application", () => {
         assert.isTrue(
           Option.isNone(yield* chats.findByExternalId(regularWorkspace.id, "missing-cwd")),
         );
-        assert.strictEqual(createdSessions.length, 3);
-        assert.strictEqual(createdWorktrees.length, 1);
+        assert.strictEqual(createdSessions.length, 5);
+        assert.strictEqual(createdWorktrees.length, 3);
       }).pipe(
         Effect.provide(ApplicationLayer.layer(gitWorktree)),
         Effect.provide(sessionsLayer),
@@ -405,6 +471,9 @@ describe("Application", () => {
           drain: () => Effect.void,
           transcript: () => Effect.die("unexpected transcript read"),
           send: () => Effect.die("unexpected runtime send"),
+          sendCaptured: () => Effect.die("unexpected captured runtime send"),
+          deliver: () => Effect.die("unexpected scheduled delivery"),
+          publish: () => Effect.die("unexpected scheduled publish"),
           abort: () => Effect.die("unexpected runtime abort"),
           contextUsage: () => Effect.die("unexpected runtime context read"),
           shake: () => Effect.die("unexpected runtime shake"),
@@ -435,7 +504,10 @@ describe("Application", () => {
       yield* Effect.gen(function* () {
         const application = yield* Application;
         const chats = yield* ChatRepository;
-        const binding = { platform: "discord", externalId: "channel-1" } as const;
+        const binding: Workspace.WorkspaceBinding = {
+          platform: "discord",
+          externalId: "channel-1",
+        };
 
         const created = yield* application.bindWorkspace({
           binding,
@@ -568,7 +640,14 @@ describe("Application", () => {
           Option.isNone(yield* application.findWorkspaceByPlatformId("discord", "invalid-branch")),
         );
 
-        const invalidInputs = [
+        const invalidInputs: ReadonlyArray<{
+          readonly externalId: string;
+          readonly cwd: string;
+          readonly reason: Extract<
+            WorkspaceBindingInvalid["issue"],
+            { readonly field: "cwd" }
+          >["reason"];
+        }> = [
           { externalId: "whitespace", cwd: ` ${firstCwd}`, reason: "surrounding-whitespace" },
           { externalId: "relative", cwd: "relative/project", reason: "not-absolute" },
           { externalId: "home", cwd: "~/project", reason: "not-absolute" },
@@ -578,7 +657,7 @@ describe("Application", () => {
             reason: "not-found",
           },
           { externalId: "file", cwd: file, reason: "not-directory" },
-        ] as const;
+        ];
         for (const input of invalidInputs) {
           const error = yield* application
             .bindWorkspace({
@@ -625,7 +704,7 @@ describe("Application", () => {
       );
     }).pipe(Effect.provide(platformLayer)),
   );
-  it.effect("serializes close after sends and rejects later live operations", () =>
+  it.effect("serializes close after sends and lets abort reach a scheduled run", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
@@ -634,9 +713,12 @@ describe("Application", () => {
       });
       const defaultCwd = AbsolutePath.make(path.join(temporaryDirectory, "workspace"));
       const storeFile = AbsolutePath.make(path.join(temporaryDirectory, "store.db"));
+      yield* fileSystem.makeDirectory(defaultCwd);
       const persistenceLayer = Persistence.layer(storeFile);
       const sendStarted = yield* Deferred.make<void>();
       const releaseSend = yield* Deferred.make<void>();
+      const scheduledStarted = yield* Deferred.make<void>();
+      const releaseScheduled = yield* Deferred.make<void>();
       const order: Array<string> = [];
       let aborts = 0;
 
@@ -655,6 +737,18 @@ describe("Application", () => {
                 yield* Deferred.await(releaseSend);
                 order.push("send-end");
               }),
+            sendCaptured: (_chatId, runId) =>
+              Deferred.succeed(scheduledStarted, undefined).pipe(
+                Effect.andThen(Deferred.await(releaseScheduled)),
+                Effect.as({
+                  runId,
+                  outcome: "aborted",
+                  events: [],
+                  finalAssistantText: "",
+                }),
+              ),
+            deliver: () => Effect.die("unexpected scheduled delivery"),
+            publish: () => Effect.die("unexpected scheduled publish"),
             close: (id) =>
               Effect.gen(function* () {
                 const chat = Option.getOrThrow(yield* chats.findById(id).pipe(Effect.orDie));
@@ -664,7 +758,7 @@ describe("Application", () => {
             abort: () =>
               Effect.sync(() => {
                 aborts += 1;
-              }),
+              }).pipe(Effect.andThen(Deferred.succeed(releaseScheduled, undefined)), Effect.asVoid),
             contextUsage: () => Effect.succeed({ kind: "unavailable" }),
             shake: () =>
               Effect.succeed({
@@ -693,6 +787,7 @@ describe("Application", () => {
 
       yield* Effect.gen(function* () {
         const application = yield* Application;
+        const scheduleHost = yield* Schedule.ScheduleRunHostService;
         yield* TestClock.setTime(1_000);
         const workspace = yield* application.createWorkspace({
           name: "close",
@@ -702,6 +797,19 @@ describe("Application", () => {
         });
         yield* TestClock.setTime(2_000);
         const chat = yield* application.createChat({ workspaceId: workspace.id, externalId: null });
+
+        const scheduled = yield* scheduleHost
+          .runPrompt(
+            chat.id,
+            Schedule.ScheduleRunId.make("scheduled-1000-018f47a0-0000-7000-8000-000000000003"),
+            "scheduled",
+            () => Effect.void,
+          )
+          .pipe(Effect.forkChild);
+        yield* Deferred.await(scheduledStarted);
+        yield* application.abort(chat.id);
+        assert.strictEqual(aborts, 1);
+        assert.strictEqual((yield* Fiber.join(scheduled)).outcome, "aborted");
 
         const send = yield* application.sendMessage(chat.id, "in flight").pipe(Effect.forkChild);
         yield* Deferred.await(sendStarted);
@@ -725,7 +833,7 @@ describe("Application", () => {
         assert.instanceOf(yield* application.contextUsage(chat.id).pipe(Effect.flip), ChatClosed);
         assert.instanceOf(yield* application.shake(chat.id, "elide").pipe(Effect.flip), ChatClosed);
         yield* application.abort(chat.id);
-        assert.strictEqual(aborts, 0);
+        assert.strictEqual(aborts, 1);
         assert.deepStrictEqual(yield* application.transcript(chat.id), runtimeTranscript);
 
         const missingChatId = Chat.ChatId.make("018f47a0-0000-7000-8000-000000000099");
@@ -787,9 +895,14 @@ describe("Application", () => {
             drain: () => Effect.void,
             transcript: () => Effect.succeed([]),
             send: () => Effect.die("unexpected send"),
+            sendCaptured: () => Effect.die("unexpected captured runtime send"),
+            deliver: () => Effect.die("unexpected scheduled delivery"),
+            publish: () => Effect.die("unexpected scheduled publish"),
             close: (id) =>
               Effect.gen(function* () {
-                assert.isNotNull(Option.getOrThrow(yield* chats.findById(id)).archivedAt);
+                assert.isNotNull(
+                  Option.getOrThrow(yield* chats.findById(id).pipe(Effect.orDie)).archivedAt,
+                );
                 order.push("runtime-close");
                 if (runtimeFails) return yield* new AgentError({ message: "dispose failed" });
               }),

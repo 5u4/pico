@@ -15,13 +15,20 @@ const smoke = Effect.fn("Daemon.smoke")(function* () {
   const storeFile = path.join(canonicalRoot, "store.db");
   const sessionsDir = path.join(canonicalRoot, "sessions");
   const logsDir = path.join(canonicalRoot, "logs");
+  const schedulesDir = path.join(canonicalRoot, "schedules");
 
   yield* Effect.scoped(
     Effect.gen(function* () {
       yield* Daemon.open(PicoRoot.make(canonicalRoot));
 
-      for (const expected of [lockFile, storeFile, sessionsDir, logsDir]) {
+      for (const expected of [lockFile, storeFile, sessionsDir, logsDir, schedulesDir]) {
         assert.isTrue(yield* fileSystem.exists(expected), `Missing ${expected}`);
+      }
+      for (const child of ["enabled", "disabled", "runs", ".staging"]) {
+        assert.isTrue(
+          yield* fileSystem.exists(path.join(schedulesDir, child)),
+          `Missing schedule directory ${child}`,
+        );
       }
     }),
   );

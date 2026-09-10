@@ -1,0 +1,298 @@
+import * as BunCrypto from "@effect/platform-bun/BunCrypto";
+import * as BunFileSystem from "@effect/platform-bun/BunFileSystem";
+import * as BunPath from "@effect/platform-bun/BunPath";
+import { assert, describe, it } from "@effect/vitest";
+import * as Chat from "@pico/contract/chat-model";
+import { AbsolutePath } from "@pico/contract/path";
+import * as Schedule from "@pico/contract/schedule";
+import * as Workspace from "@pico/contract/workspace-model";
+import * as Crypto from "effect/Crypto";
+import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
+import * as FileSystem from "effect/FileSystem";
+import * as Layer from "effect/Layer";
+import * as Path from "effect/Path";
+import * as Schema from "effect/Schema";
+import { runScript, ScriptRunError } from "./script.ts";
+import { bootstrap, publishRun, runDirectory, type Storage } from "./storage.ts";
+
+const platformLayer = Layer.mergeAll(BunCrypto.layer, BunFileSystem.layer, BunPath.layer);
+const scheduleId = Schedule.ScheduleId.make("018f47a0-0000-7000-8000-000000000001");
+const runId = Schedule.ScheduleRunId.make("scheduled-1000-018f47a0-0000-7000-8000-000000000004");
+const chatId = Chat.ChatId.make("018f47a0-0000-7000-8000-000000000002");
+const workspaceId = Workspace.WorkspaceId.make("018f47a0-0000-7000-8000-000000000003");
+const decodeResult = Schema.decodeUnknownSync(
+  Schema.fromJsonString(
+    Schema.Struct({
+      timeoutMillis: Schema.Int,
+      stdout: Schema.Struct({ totalBytes: Schema.Natural, truncated: Schema.Boolean }),
+    }),
+  ),
+);
+const decodeFailedDecision = Schema.decodeUnknownSync(
+  Schema.fromJsonString(Schema.Struct({ kind: Schema.Literal("failed"), message: Schema.String })),
+);
+
+const awaitExists = Effect.fn("Schedules.test.awaitExists")(function* (
+  fileSystem: FileSystem.FileSystem,
+  path: string,
+  attempts = 500,
+): Effect.fn.Return<void> {
+  if (yield* fileSystem.exists(path).pipe(Effect.orDie)) return;
+  if (attempts === 0) return yield* Effect.die(`Path did not appear: ${path}`);
+  yield* Effect.promise(() => Bun.sleep(10));
+  return yield* awaitExists(fileSystem, path, attempts - 1);
+});
+
+describe("schedule script runner", () => {
+  it.effect("records decisions for script failures and stops interrupted children", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const crypto = yield* Crypto.Crypto;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-script-runner-" });
+      const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
+      const cwd = AbsolutePath.make(root);
+      const storage: Storage = {
+        fileSystem,
+        path,
+        schedulesDir,
+        temporaryId: () =>
+          crypto.randomUUIDv7.pipe(
+            Effect.mapError(
+              (error) => new Schedule.ScheduleError({ kind: "io", message: error.message }),
+            ),
+          ),
+      };
+      yield* bootstrap(storage);
+      const definition: Schedule.ScheduleDefinition = {
+        version: 1,
+        revision: Schedule.ScheduleRevision.make("018f47a0-0000-7000-8000-000000000004"),
+        name: "invalid protocol",
+        ownerWorkspaceId: workspaceId,
+        createdByChatId: chatId,
+        createdAt: 0,
+        target: { kind: "chat", chatId },
+        trigger: { kind: "once", at: 1_000 },
+      };
+      const run: Schedule.ScheduleRunLifecycle = {
+        version: 1,
+        id: runId,
+        scheduleId,
+        definitionRevision: definition.revision,
+        source: { kind: "scheduled", scheduledFor: 1_000 },
+        plannedTarget: { kind: "existing-chat", ownerWorkspaceId: workspaceId, chatId },
+        claimedAt: 1_000,
+        state: { kind: "claimed" },
+      };
+      yield* publishRun(
+        storage,
+        run,
+        definition,
+        {
+          script: 'process.stdout.write(JSON.stringify({agent:false})+" trailing")',
+          prompt: null,
+        },
+        "018f47a0-0000-7000-8000-000000000010",
+      );
+      const target: Schedule.ResolvedScheduleRunTarget = { chatId, workspaceId, cwd };
+      const readFailedDecision = (id: Schedule.ScheduleRunId) =>
+        fileSystem
+          .readFileString(path.join(runDirectory(storage, scheduleId, id), "decision.json"))
+          .pipe(Effect.map(decodeFailedDecision));
+      const error = yield* runScript(storage, process.execPath, run, target).pipe(Effect.flip);
+      assert.instanceOf(error, ScriptRunError);
+      if (!(error instanceof ScriptRunError)) return;
+      assert.strictEqual(error.stage, "protocol");
+      const directory = runDirectory(storage, scheduleId, runId);
+      assert.isTrue(yield* fileSystem.exists(path.join(directory, "script", "stdout.bin")));
+      const result = decodeResult(
+        yield* fileSystem.readFileString(path.join(directory, "script", "result.json")),
+      );
+      assert.isAbove(result.stdout.totalBytes, 0);
+      assert.isFalse(result.stdout.truncated);
+      assert.strictEqual(result.timeoutMillis, Schedule.DEFAULT_SCRIPT_TIMEOUT_MS);
+      assert.strictEqual((yield* readFailedDecision(runId)).kind, "failed");
+
+      const failedRun: Schedule.ScheduleRunLifecycle = {
+        ...run,
+        id: Schedule.ScheduleRunId.make("scheduled-2000-018f47a0-0000-7000-8000-000000000004"),
+        source: { kind: "scheduled", scheduledFor: 2_000 },
+      };
+      yield* publishRun(
+        storage,
+        failedRun,
+        definition,
+        { script: "process.exit(2)", prompt: null },
+        "018f47a0-0000-7000-8000-000000000012",
+      );
+      const executionError = yield* runScript(storage, process.execPath, failedRun, target).pipe(
+        Effect.flip,
+      );
+      assert.instanceOf(executionError, ScriptRunError);
+      if (!(executionError instanceof ScriptRunError)) return;
+      assert.strictEqual(executionError.stage, "script");
+      assert.strictEqual((yield* readFailedDecision(failedRun.id)).kind, "failed");
+
+      const signalRun: Schedule.ScheduleRunLifecycle = {
+        ...run,
+        id: Schedule.ScheduleRunId.make("scheduled-3000-018f47a0-0000-7000-8000-000000000004"),
+        source: { kind: "scheduled", scheduledFor: 3_000 },
+      };
+      yield* publishRun(
+        storage,
+        signalRun,
+        definition,
+        { script: 'process.kill(process.pid,"SIGTERM")', prompt: null },
+        "018f47a0-0000-7000-8000-000000000014",
+      );
+      const signalError = yield* runScript(storage, process.execPath, signalRun, target).pipe(
+        Effect.flip,
+      );
+      assert.instanceOf(signalError, ScriptRunError);
+      if (!(signalError instanceof ScriptRunError)) return;
+      assert.notInclude(signalError.message, "timed out");
+      assert.strictEqual((yield* readFailedDecision(signalRun.id)).kind, "failed");
+
+      const timeoutRun: Schedule.ScheduleRunLifecycle = {
+        ...run,
+        id: Schedule.ScheduleRunId.make("scheduled-4000-018f47a0-0000-7000-8000-000000000004"),
+        source: { kind: "scheduled", scheduledFor: 4_000 },
+      };
+      yield* publishRun(
+        storage,
+        timeoutRun,
+        definition,
+        {
+          script: 'process.on("SIGTERM",()=>{});setInterval(()=>{},1000)',
+          prompt: null,
+        },
+        "018f47a0-0000-7000-8000-000000000016",
+      );
+      const timeoutError = yield* runScript(storage, process.execPath, timeoutRun, target, 10).pipe(
+        Effect.flip,
+      );
+      assert.instanceOf(timeoutError, ScriptRunError);
+      if (!(timeoutError instanceof ScriptRunError)) return;
+      assert.strictEqual(timeoutError.stage, "script");
+      assert.include(timeoutError.message, "timed out after 10 milliseconds");
+      assert.strictEqual((yield* readFailedDecision(timeoutRun.id)).kind, "failed");
+
+      const spawnRun: Schedule.ScheduleRunLifecycle = {
+        ...run,
+        id: Schedule.ScheduleRunId.make("scheduled-5000-018f47a0-0000-7000-8000-000000000004"),
+        source: { kind: "scheduled", scheduledFor: 5_000 },
+      };
+      yield* publishRun(
+        storage,
+        spawnRun,
+        definition,
+        { script: "process.exit(0)", prompt: null },
+        "018f47a0-0000-7000-8000-000000000018",
+      );
+      const spawnError = yield* runScript(
+        storage,
+        path.join(root, "missing-executable"),
+        spawnRun,
+        target,
+      ).pipe(Effect.flip);
+      assert.instanceOf(spawnError, ScriptRunError);
+      assert.strictEqual((yield* readFailedDecision(spawnRun.id)).kind, "failed");
+
+      const oversizedRun: Schedule.ScheduleRunLifecycle = {
+        ...run,
+        id: Schedule.ScheduleRunId.make("scheduled-6000-018f47a0-0000-7000-8000-000000000004"),
+        source: { kind: "scheduled", scheduledFor: 6_000 },
+      };
+      yield* publishRun(
+        storage,
+        oversizedRun,
+        definition,
+        { script: 'process.stdout.write("x".repeat(256*1024+1))', prompt: null },
+        "018f47a0-0000-7000-8000-000000000020",
+      );
+      const oversizedError = yield* runScript(storage, process.execPath, oversizedRun, target).pipe(
+        Effect.flip,
+      );
+      assert.instanceOf(oversizedError, ScriptRunError);
+      assert.strictEqual((yield* readFailedDecision(oversizedRun.id)).kind, "failed");
+
+      const invalidVariantRun: Schedule.ScheduleRunLifecycle = {
+        ...run,
+        id: Schedule.ScheduleRunId.make("scheduled-7000-018f47a0-0000-7000-8000-000000000004"),
+        source: { kind: "scheduled", scheduledFor: 7_000 },
+      };
+      yield* publishRun(
+        storage,
+        invalidVariantRun,
+        definition,
+        {
+          script: 'process.stdout.write(JSON.stringify({agent:false,kind:"unknown"}))',
+          prompt: null,
+        },
+        "018f47a0-0000-7000-8000-000000000022",
+      );
+      const invalidVariantError = yield* runScript(
+        storage,
+        process.execPath,
+        invalidVariantRun,
+        target,
+      ).pipe(Effect.flip);
+      assert.instanceOf(invalidVariantError, ScriptRunError);
+      assert.strictEqual((yield* readFailedDecision(invalidVariantRun.id)).kind, "failed");
+
+      const emptyOutputRun: Schedule.ScheduleRunLifecycle = {
+        ...run,
+        id: Schedule.ScheduleRunId.make("scheduled-7500-018f47a0-0000-7000-8000-000000000004"),
+        source: { kind: "scheduled", scheduledFor: 7_500 },
+      };
+      yield* publishRun(
+        storage,
+        emptyOutputRun,
+        definition,
+        { script: "", prompt: null },
+        "018f47a0-0000-7000-8000-000000000023",
+      );
+      const emptyOutputError = yield* runScript(
+        storage,
+        process.execPath,
+        emptyOutputRun,
+        target,
+      ).pipe(Effect.flip);
+      assert.instanceOf(emptyOutputError, ScriptRunError);
+      if (!(emptyOutputError instanceof ScriptRunError)) return;
+      assert.strictEqual(emptyOutputError.stage, "protocol");
+      assert.strictEqual((yield* readFailedDecision(emptyOutputRun.id)).kind, "failed");
+      const interruptedRun: Schedule.ScheduleRunLifecycle = {
+        ...run,
+        id: Schedule.ScheduleRunId.make("scheduled-8000-018f47a0-0000-7000-8000-000000000004"),
+        source: { kind: "scheduled", scheduledFor: 8_000 },
+      };
+      const childReady = path.join(root, "child-ready");
+      const childStopped = path.join(root, "child-stopped");
+      yield* publishRun(
+        storage,
+        interruptedRun,
+        definition,
+        {
+          script: `
+process.on("SIGTERM", async () => {
+  await Bun.write(${JSON.stringify(childStopped)}, "stopped");
+  process.exit(0);
+});
+await Bun.write(${JSON.stringify(childReady)}, "ready");
+setInterval(() => {}, 1000);
+`,
+          prompt: null,
+        },
+        "018f47a0-0000-7000-8000-000000000024",
+      );
+      const interrupted = yield* runScript(storage, process.execPath, interruptedRun, target).pipe(
+        Effect.forkChild,
+      );
+      yield* awaitExists(fileSystem, childReady);
+      yield* Fiber.interrupt(interrupted);
+      yield* awaitExists(fileSystem, childStopped);
+    }).pipe(Effect.provide(platformLayer), Effect.scoped),
+  );
+});

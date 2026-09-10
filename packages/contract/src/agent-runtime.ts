@@ -5,6 +5,7 @@ import type { AgentEventEnvelope } from "./agent-event.ts";
 import type { AgentPrompt, AgentTranscript } from "./agent-message.ts";
 import type { ChatId } from "./chat-model.ts";
 import type { AgentError } from "./errors.ts";
+import type { ScheduleRunId } from "./schedule.ts";
 
 export type ShakeMode = "elide" | "images" | "thinking";
 
@@ -38,6 +39,12 @@ export type ContextUsage =
       readonly skillsTokens: number;
       readonly messagesTokens: number;
     };
+export interface CapturedAgentRun {
+  readonly runId: ScheduleRunId;
+  readonly outcome: "completed" | "failed" | "aborted";
+  readonly events: ReadonlyArray<AgentEventEnvelope["event"]>;
+  readonly finalAssistantText: string;
+}
 
 export class AgentRuntime extends Context.Service<
   AgentRuntime,
@@ -48,6 +55,15 @@ export class AgentRuntime extends Context.Service<
     readonly transcript: (chatId: ChatId) => Effect.Effect<AgentTranscript, AgentError>;
 
     readonly send: (chatId: ChatId, prompt: AgentPrompt) => Effect.Effect<void, AgentError>;
+    readonly sendCaptured: (
+      chatId: ChatId,
+      runId: ScheduleRunId,
+      prompt: AgentPrompt,
+      onEvent: (event: AgentEventEnvelope["event"]) => Effect.Effect<void, AgentError>,
+    ) => Effect.Effect<CapturedAgentRun, AgentError>;
+    readonly deliver: (chatId: ChatId, content: string) => Effect.Effect<void, AgentError>;
+
+    readonly publish: (chatId: ChatId, content: string) => Effect.Effect<void, AgentError>;
 
     readonly close: (chatId: ChatId) => Effect.Effect<void, AgentError>;
 

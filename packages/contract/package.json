@@ -17,9 +17,13 @@
     "./agent-session-store": "./src/agent-session-store.ts",
     "./agent-event": "./src/agent-event.ts",
     "./event-router": "./src/event-router.ts",
-    "./agent-runtime": "./src/agent-runtime.ts"
+    "./agent-runtime": "./src/agent-runtime.ts",
+    "./schedule": "./src/schedule.ts"
   },
   "dependencies": {
     "effect": "catalog:"
+  },
+  "devDependencies": {
+    "@effect/vitest": "catalog:"
   }
 }

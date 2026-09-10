@@ -7,6 +7,7 @@ import { AgentRuntime } from "@pico/contract/agent-runtime";
 import * as Chat from "@pico/contract/chat-model";
 import { ChatRepository } from "@pico/contract/chat-repository";
 import { AbsolutePath } from "@pico/contract/path";
+import { Schedules } from "@pico/contract/schedule";
 import * as Workspace from "@pico/contract/workspace-model";
 import { WorkspaceRepository } from "@pico/contract/workspace-repository";
 import * as Persistence from "@pico/persistence/layer";
@@ -30,8 +31,17 @@ const smoke = Effect.fn("AgentRuntime.smoke")(function* () {
   const storeFile = AbsolutePath.make(path.join(temporaryRoot, "pico.sqlite"));
   const sessionsDir = AbsolutePath.make(path.join(temporaryRoot, "sessions"));
   const cwd = AbsolutePath.make(process.cwd());
+  const schedules = Schedules.of({
+    create: () => Effect.die("unexpected schedule create"),
+    list: () => Effect.die("unexpected schedule list"),
+    get: () => Effect.die("unexpected schedule get"),
+    replace: () => Effect.die("unexpected schedule update"),
+    setEnabled: () => Effect.die("unexpected schedule state change"),
+    remove: () => Effect.die("unexpected schedule delete"),
+    start: () => Effect.die("unexpected scheduler start"),
+  });
   const persistenceLayer = Persistence.layer(storeFile);
-  const runtimeLayer = AgentRuntimeLayer.layer(sessionsDir).pipe(
+  const runtimeLayer = AgentRuntimeLayer.layer(sessionsDir, schedules).pipe(
     Layer.provideMerge(persistenceLayer),
   );
 
