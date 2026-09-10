@@ -20,6 +20,11 @@ export interface RenderedMessage {
   readonly silent: boolean;
 }
 
+export interface DiscordOutputPolicy {
+  readonly showToolCalls: boolean;
+  readonly showThinking: boolean;
+}
+
 export interface DiscordOutputClient {
   readonly send: (threadId: bigint, message: RenderedMessage) => Effect.Effect<bigint, unknown>;
   readonly edit: (
@@ -174,6 +179,7 @@ const textMessages = (text: string, silent: boolean): ReadonlyArray<RenderedMess
 
 export const renderAssistant = (
   message: AgentMessage.AgentAssistantMessage,
+  showThinking: boolean,
 ): ReadonlyArray<RenderedMessage> => {
   const rendered: RenderedMessage[] = [];
   let notified = message.status === "completed" && message.stopReason === "tool-use";
@@ -181,7 +187,7 @@ export const renderAssistant = (
 
   for (let index = 0; index < message.content.length; index++) {
     const content = message.content[index];
-    if (content?.type === "thinking") {
+    if (showThinking && content?.type === "thinking") {
       if (content.text.trim().length === 0) continue;
       const thinking = Markdown.truncate(`🧠 ${content.text}`, Markdown.THINKING_LIMIT);
       if (thinking !== undefined) rendered.push({ content: thinking, silent: SILENT });
@@ -214,7 +220,11 @@ const interruptTyping = Effect.fn("Discord.output.interruptTyping")(function* (s
   if (typing !== undefined) yield* Fiber.interrupt(typing);
 });
 
-export const make = (client: DiscordOutputClient, scope: Scope.Scope) => {
+export const make = (
+  client: DiscordOutputClient,
+  scope: Scope.Scope,
+  policy: DiscordOutputPolicy,
+) => {
   const states = new Map<Chat.ChatId, RunState>();
 
   const stateFor = (chatId: Chat.ChatId) => {
@@ -289,8 +299,14 @@ export const make = (client: DiscordOutputClient, scope: Scope.Scope) => {
     threadId: bigint,
     envelope: AgentEventEnvelope,
   ) {
-    const state = stateFor(envelope.chatId);
     const event = envelope.event;
+    if (
+      !policy.showToolCalls &&
+      (event.type === "tool-started" || event.type === "tool-finished")
+    ) {
+      return;
+    }
+    const state = stateFor(envelope.chatId);
 
     switch (event.type) {
       case "run-started": {
@@ -341,7 +357,9 @@ export const make = (client: DiscordOutputClient, scope: Scope.Scope) => {
           event.message.status === "failed" || event.message.stopReason !== "tool-use";
         if (terminal && state.terminalClaimed) return;
         if (terminal) state.terminalClaimed = true;
-        for (const message of renderAssistant(event.message)) yield* client.send(threadId, message);
+        for (const message of renderAssistant(event.message, policy.showThinking)) {
+          yield* client.send(threadId, message);
+        }
         return;
       }
       case "run-finished": {

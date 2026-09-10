@@ -34,6 +34,8 @@ const config = {
   token: Redacted.make("test"),
   allowedGuildIds: ["1"],
   defaultCwd,
+  showToolCalls: false,
+  showThinking: false,
 } as const;
 
 const message = (overrides: Partial<DiscordMessage> = {}): DiscordMessage => ({
