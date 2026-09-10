@@ -203,6 +203,7 @@ merely restates the service contract.
 - State the problem in a sentence or two, then how it was fixed. End with the model and harness that
   did the work.
 - Rebase onto the latest main before opening.
+- Merge pull requests with squash merge, then delete the source branch.
 - UI changes need before/after images; motion or timing needs a short video.
 - Keep one concern per PR. If the description says "also", split it.
 - When babysitting, poll checks and comments newer than the last push, verify every bot finding
