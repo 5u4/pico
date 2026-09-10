@@ -351,6 +351,7 @@ describe("Discord output", () => {
             triggerTyping: () => Effect.die("unexpected typing"),
           },
           scope,
+          visiblePolicy,
         );
 
         yield* dispatch(11n, envelope(chatA, { type: "title-changed", title: "Closed chat" })).pipe(
