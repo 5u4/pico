@@ -42,31 +42,21 @@ describe("Discord Markdown", () => {
       [
         "before __untouched__  ",
         "",
-        "- **Row 1**",
-        "  - **Name:** **Ada**",
-        "  - **Detail:** `a|b`",
-        "  - **Link:** [site](https://example.com)",
-        "- **Row 2**",
-        "  - **Name:**",
-        "  - **Detail:** 空",
-        "  - **Link:** 😀",
+        "- ****Ada****",
+        "  - Detail: `a|b`",
+        "  - Link: [site](https://example.com)",
+        "- Detail: 空",
+        "- Link: 😀",
         "",
         "after ||untouched||\r\n",
       ].join("\n"),
     );
   });
 
-  it("keeps row boundaries and labels every value by its header", () => {
+  it("uses the first cell as each row title and labels the remaining values", () => {
     assert.strictEqual(
       Markdown.transformTables("| A | B |\n| --- | --- |\n| x | y |\n| z | w |"),
-      [
-        "- **Row 1**",
-        "  - **A:** x",
-        "  - **B:** y",
-        "- **Row 2**",
-        "  - **A:** z",
-        "  - **B:** w",
-      ].join("\n"),
+      ["- **x**", "  - B: y", "- **z**", "  - B: w"].join("\n"),
     );
     assert.strictEqual(
       Markdown.transformTables("| A | B |\n| --- | --- |"),
@@ -74,28 +64,24 @@ describe("Discord Markdown", () => {
     );
   });
 
-  it("retains blank, missing, and extra cells in uneven rows", () => {
+  it("drops empty body values and keeps missing headers and extra cells unlabeled", () => {
     assert.strictEqual(
       Markdown.transformTables(
         "| | H |\n| --- | --- |\n| | |\n| title |\n| value | detail | extra |",
       ),
-      [
-        "- **Row 1**",
-        "  - **Column 1:**",
-        "  - **H:**",
-        "- **Row 2**",
-        "  - **Column 1:** title",
-        "  - **H:**",
-        "- **Row 3**",
-        "  - **Column 1:** value",
-        "  - **H:** detail",
-        "  - **Column 3:** extra",
-      ].join("\n"),
+      ["- **title**", "- **value**", "  - H: detail", "  - extra"].join("\n"),
     );
 
     assert.strictEqual(
       Markdown.transformTables("| A | | A |\n| --- | --- | --- |"),
       "- **Columns**\n  - **Column 1:** A\n  - **Column 2:**\n  - **Column 3:** A",
+    );
+  });
+
+  it("retains the quote prefix on every transformed line", () => {
+    assert.strictEqual(
+      Markdown.transformTables("> | A | B |\n> | --- | --- |\n> | x | y |"),
+      "> - **x**\n>   - B: y",
     );
   });
 
