@@ -18,7 +18,7 @@ import * as PlatformError from "effect/PlatformError";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as TestClock from "effect/testing/TestClock";
-import { make } from "./schedule.ts";
+import { make, open } from "./schedule.ts";
 import {
   appendArtifactString,
   bootstrap,
@@ -82,6 +82,50 @@ const permissionDenied = (method: string, path: string) =>
   );
 
 describe("Schedules", () => {
+  it.effect("opens usable schedule storage before the runner starts", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-schedules-open-" });
+        const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
+        const schedules = yield* open(schedulesDir);
+
+        assert.deepStrictEqual(yield* schedules.list(caller), []);
+        const created = yield* schedules.create(caller, {
+          name: "ready before start",
+          enabled: false,
+          target: { kind: "current-chat" },
+          trigger: { kind: "once", at: 1_000 },
+          prompt: "ship it",
+        });
+        assert.strictEqual(created.kind, "ready");
+        assert.deepStrictEqual(yield* schedules.list(caller), [created]);
+      }).pipe(Effect.provide(platformLayer)),
+    ),
+  );
+
+  it.effect("initializes direct construction when the runner starts", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-schedules-start-" });
+        const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
+        const schedules = yield* make(schedulesDir);
+        const cwd = AbsolutePath.make(root);
+        yield* schedules.start({
+          prepare: () => Effect.succeed({ chatId, workspaceId, cwd }),
+          deliver: () => Effect.void,
+          publish: () => Effect.void,
+          runPrompt: () => Effect.die("unexpected scheduled prompt"),
+        });
+
+        assert.deepStrictEqual(yield* schedules.list(caller), []);
+      }).pipe(Effect.provide(platformLayer)),
+    ),
+  );
+
   it.effect(
     "runs same-slot revisions independently, records artifacts, disables them, and retains history",
     () =>

@@ -61,6 +61,7 @@ describe("RPC", () => {
         createChat: () => Effect.die("unexpected chat creation"),
         findWorkspaceByPlatformId: () => Effect.die("unexpected workspace lookup"),
         findChatByPlatformId: () => Effect.die("unexpected chat lookup"),
+        findChatPlatformBinding: () => Effect.die("unexpected chat binding lookup"),
         transcript: (chatId) =>
           Effect.sync(() => {
             transcriptInputs.push(chatId);

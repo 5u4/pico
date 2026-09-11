@@ -824,18 +824,22 @@ describe("AgentRuntime", () => {
       }),
     ),
   );
-  it.effect("keeps capture failures isolated and preserves the session forwarder", () =>
+  it.effect("aborts a pending prompt when its capture sink fails and preserves the session", () =>
     Effect.scoped(
       Effect.gen(function* () {
+        const abortCalled = yield* Deferred.make<void>();
         let sends = 0;
+        let resolvePendingPrompt: (() => void) | undefined;
         const pool = yield* makeSessionPool({
           factory: {
-            open: (_id, emit) => {
-              return Effect.succeed({
+            open: (_id, emit) =>
+              Effect.succeed({
                 session: {
                   settleInFlightMessagePersistence: () => Promise.resolve(),
                   abort: () => {
+                    resolvePendingPrompt?.();
                     emit({ type: "run-finished", outcome: "aborted" });
+                    Effect.runSync(Deferred.succeed(abortCalled, undefined));
                     return Promise.resolve();
                   },
                   beginDispose: () => {},
@@ -845,7 +849,11 @@ describe("AgentRuntime", () => {
                   sends += 1;
                   if (sends === 1) {
                     emit({ type: "run-started" });
-                  } else if (sends === 2) {
+                    return new Promise<void>((resolve) => {
+                      resolvePendingPrompt = resolve;
+                    });
+                  }
+                  if (sends === 2) {
                     emit({ type: "run-started" });
                     emit({ type: "run-finished", outcome: "completed" });
                   } else {
@@ -857,8 +865,7 @@ describe("AgentRuntime", () => {
                 appendAssistantMessage: () => Promise.resolve(),
                 contextUsage: () => ({ kind: "unavailable" }),
                 unsubscribe: () => {},
-              });
-            },
+              }),
           },
           loadTranscript: () => Effect.succeed([]),
         });
@@ -874,12 +881,22 @@ describe("AgentRuntime", () => {
         const runId = Schedule.ScheduleRunId.make(
           "scheduled-1000-018f47a0-0000-7000-8000-000000000003",
         );
-        const sinkFailure = yield* pool
-          .sendCaptured(chatId, runId, prompt("fails to capture"), () =>
-            Effect.fail(new AgentError({ message: "artifact sink failed" })),
+        const capturedTypes: Array<string> = [];
+        const failedCapture = yield* pool
+          .sendCaptured(chatId, runId, prompt("fails to capture"), (event) =>
+            Effect.gen(function* () {
+              capturedTypes.push(event.type);
+              if (capturedTypes.length === 1) {
+                return yield* new AgentError({ message: "artifact sink failed" });
+              }
+            }),
           )
-          .pipe(Effect.flip);
+          .pipe(Effect.flip, Effect.forkChild);
+
+        yield* Deferred.await(abortCalled);
+        const sinkFailure = yield* Fiber.join(failedCapture);
         assert.strictEqual(sinkFailure.message, "artifact sink failed");
+        assert.deepStrictEqual(capturedTypes, ["run-started", "run-finished"]);
 
         const recovered = yield* pool.sendCaptured(
           chatId,

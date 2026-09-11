@@ -131,6 +131,8 @@ interface ComponentResponse {
 const closeConfirmationPrefix = "pico:close:";
 const closeConfirmationTtl = 5 * 60 * 1_000;
 const closedMessage = "This chat is closed. Start a new thread to continue.";
+const decodeThreadId = Schema.decodeUnknownEffect(Schema.BigIntFromString);
+
 export const install = Effect.fn("DiscordInput.install")(function* <
   Message extends DiscordMessage,
   Interaction extends DiscordInteraction,
@@ -145,6 +147,7 @@ export const install = Effect.fn("DiscordInput.install")(function* <
   const allowedGuildIds = new Set(config.allowedGuildIds);
   const workspaceIds = new Map<bigint, Workspace.WorkspaceId>();
   const chatIds = new Map<bigint, Chat.ChatId>();
+  const threadIds = new Map<Chat.ChatId, bigint>();
   const channelLocks = new Map<bigint, Semaphore.Semaphore>();
   const closeConfirmations = new Map<string, CloseConfirmation>();
   const allowedMentions = { parse: [], repliedUser: false } satisfies {
@@ -153,12 +156,33 @@ export const install = Effect.fn("DiscordInput.install")(function* <
   };
   const formatNumber = new Intl.NumberFormat("en-US").format;
 
-  const findThreadId = (chatId: Chat.ChatId) => {
-    for (const [threadId, candidate] of chatIds) {
-      if (candidate === chatId) return threadId;
+  const cacheChat = (threadId: bigint, chatId: Chat.ChatId) => {
+    const previousChatId = chatIds.get(threadId);
+    if (previousChatId !== undefined && previousChatId !== chatId) {
+      threadIds.delete(previousChatId);
     }
-    return undefined;
+    const previousThreadId = threadIds.get(chatId);
+    if (previousThreadId !== undefined && previousThreadId !== threadId) {
+      chatIds.delete(previousThreadId);
+    }
+    chatIds.set(threadId, chatId);
+    threadIds.set(chatId, threadId);
   };
+
+  const resolveThreadId = Effect.fn("Discord.resolveThreadId")(function* (chatId: Chat.ChatId) {
+    const cached = threadIds.get(chatId);
+    if (cached !== undefined) return Option.some(cached);
+
+    const binding = yield* application.findChatPlatformBinding(chatId);
+    if (Option.isNone(binding) || binding.value.platform !== "discord") {
+      return Option.none<bigint>();
+    }
+    const threadId = yield* decodeThreadId(binding.value.externalId).pipe(
+      Effect.mapError(() => discordError("Invalid Discord thread binding", undefined)),
+    );
+    cacheChat(threadId, chatId);
+    return Option.some(threadId);
+  });
 
   const findWorkspace = Effect.fn("Discord.findWorkspace")(function* (channelId: bigint) {
     const cached = workspaceIds.get(channelId);
@@ -204,7 +228,7 @@ export const install = Effect.fn("DiscordInput.install")(function* <
     );
     if (Option.isNone(chat)) return Option.none<Chat.ChatId>();
     workspaceIds.set(thread.parentId, chat.value.workspaceId);
-    chatIds.set(thread.threadId, chat.value.id);
+    cacheChat(thread.threadId, chat.value.id);
     return Option.some(chat.value.id);
   });
 
@@ -266,7 +290,7 @@ export const install = Effect.fn("DiscordInput.install")(function* <
       if (Option.isNone(chat)) return;
 
       workspaceIds.set(channel.parentId, chat.value.workspaceId);
-      chatIds.set(channel.id, chat.value.id);
+      cacheChat(channel.id, chat.value.id);
       yield* sendMessageToChat(chat.value.id, message);
       return;
     }
@@ -297,7 +321,7 @@ export const install = Effect.fn("DiscordInput.install")(function* <
       workspaceId,
       externalId: thread.id.toString(),
     });
-    chatIds.set(thread.id, chat.id);
+    cacheChat(thread.id, chat.id);
     yield* sendMessageToChat(chat.id, message);
   });
 
@@ -738,5 +762,5 @@ export const install = Effect.fn("DiscordInput.install")(function* <
     );
   };
 
-  return findThreadId;
+  return resolveThreadId;
 });

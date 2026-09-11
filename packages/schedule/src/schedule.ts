@@ -130,7 +130,7 @@ const latestCronSlot = (
   return Cron.prev(parsed.success, now + 1_000).getTime();
 };
 
-export const make = Effect.fn("Schedules.make")(function* (
+const capture = Effect.fn("Schedules.capture")(function* (
   schedulesDir: AbsolutePath,
   executable = process.execPath,
 ) {
@@ -653,10 +653,12 @@ export const make = Effect.fn("Schedules.make")(function* (
     }
   });
 
+  const initialize = yield* Effect.cached(bootstrap(storage));
+
   const start = Effect.fn("Schedules.start")(function* (
     host: Schedule.ScheduleRunHost,
   ): Effect.fn.Return<void, Schedule.ScheduleError, Scope.Scope> {
-    yield* bootstrap(storage);
+    yield* initialize;
     yield* reconcile();
     const cycle = scheduleCycle(host).pipe(
       Effect.catch((error) =>
@@ -670,8 +672,27 @@ export const make = Effect.fn("Schedules.make")(function* (
     );
   });
 
-  return Schedule.Schedules.of({ create, list, get, replace, setEnabled, remove, start });
+  return {
+    service: Schedule.Schedules.of({ create, list, get, replace, setEnabled, remove, start }),
+    initialize,
+  };
+});
+
+export const make = Effect.fn("Schedules.make")(function* (
+  schedulesDir: AbsolutePath,
+  executable = process.execPath,
+) {
+  return (yield* capture(schedulesDir, executable)).service;
+});
+
+export const open = Effect.fn("Schedules.open")(function* (
+  schedulesDir: AbsolutePath,
+  executable = process.execPath,
+) {
+  const captured = yield* capture(schedulesDir, executable);
+  yield* captured.initialize;
+  return captured.service;
 });
 
 export const layer = (schedulesDir: AbsolutePath, executable = process.execPath) =>
-  Layer.effect(Schedule.Schedules, make(schedulesDir, executable));
+  Layer.effect(Schedule.Schedules, open(schedulesDir, executable));

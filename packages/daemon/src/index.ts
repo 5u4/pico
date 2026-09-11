@@ -32,7 +32,7 @@ const daemonLayer = (paths: PicoPaths, config: Config.PicoConfig) =>
   Layer.unwrap(
     Effect.gen(function* () {
       const gitWorktree = yield* GitWorktree.make(paths.worktreesDir);
-      const schedules = yield* ScheduleLayer.make(paths.schedulesDir);
+      const schedules = yield* ScheduleLayer.open(paths.schedulesDir);
       const persistence = PersistenceLayer.layer(paths.storeFile);
       const application = ApplicationLayer.layer(gitWorktree).pipe(
         Layer.provide(Layer.merge(persistence, AgentSessionStoreLayer.layer(paths.sessionsDir))),

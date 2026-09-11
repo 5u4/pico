@@ -251,6 +251,10 @@ describe("Application", () => {
           workspaceId: discordWorkspace.id,
           externalId: "thread-1",
         });
+        const unboundChat = yield* application.createChat({
+          workspaceId: regularWorkspace.id,
+          externalId: "local-thread",
+        });
 
         assert.deepStrictEqual(
           Option.getOrThrow(yield* application.findWorkspaceByPlatformId("discord", "channel-1")),
@@ -271,6 +275,13 @@ describe("Application", () => {
         assert.isTrue(
           Option.isNone(yield* application.findChatByPlatformId("discord", "missing", "thread-1")),
         );
+        assert.deepStrictEqual(
+          Option.getOrThrow(yield* application.findChatPlatformBinding(discordChat.id)),
+          { platform: "discord", externalId: "thread-1" },
+        );
+        assert.isTrue(Option.isNone(yield* application.findChatPlatformBinding(regularChat.id)));
+        assert.isTrue(Option.isNone(yield* application.findChatPlatformBinding(unboundChat.id)));
+        assert.isTrue(Option.isNone(yield* application.findChatPlatformBinding(missingChatId)));
 
         assert.deepStrictEqual(yield* application.transcript(discordChat.id), runtimeTranscript);
         assert.deepStrictEqual(transcriptChatIds, [discordChat.id]);
@@ -389,7 +400,7 @@ describe("Application", () => {
         assert.isTrue(
           Option.isNone(yield* chats.findByExternalId(regularWorkspace.id, "missing-cwd")),
         );
-        assert.strictEqual(createdSessions.length, 5);
+        assert.strictEqual(createdSessions.length, 6);
         assert.strictEqual(createdWorktrees.length, 3);
       }).pipe(
         Effect.provide(ApplicationLayer.layer(gitWorktree)),

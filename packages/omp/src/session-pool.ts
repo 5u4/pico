@@ -347,10 +347,14 @@ export const makeSessionPool = Effect.fn("SessionPool.make")(function* (
         MutableRef.set(entry.capture, handler);
         return yield* Effect.uninterruptibleMask((restore) =>
           Effect.gen(function* () {
+            const terminalFailure = Deferred.await(terminal).pipe(
+              Effect.flatMap(() => Effect.never),
+            );
             const completed = yield* restore(
               Effect.gen(function* () {
-                yield* boundary("Failed to send captured OMP prompt", () =>
-                  entry.sendPrompt(prompt),
+                yield* Effect.raceFirst(
+                  boundary("Failed to send captured OMP prompt", () => entry.sendPrompt(prompt)),
+                  terminalFailure,
                 );
                 const result = yield* Deferred.await(terminal);
                 yield* boundary("Failed to settle captured OMP persistence", () =>

@@ -5,6 +5,7 @@ import { AgentSessionStore } from "@pico/contract/agent-session-store";
 import {
   Application,
   type BindWorkspace,
+  type ChatPlatformBinding,
   type CloseChatOptions,
   type CloseChatResult,
   type CreateChat,
@@ -322,6 +323,24 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
     },
     Effect.mapError(failure("Failed to find chat")),
   );
+  const findChatPlatformBinding = Effect.fn("Application.findChatPlatformBinding")(
+    function* (chatId: Chat.ChatId) {
+      const chat = yield* chats.findById(chatId);
+      if (Option.isNone(chat) || chat.value.externalId === null) {
+        return Option.none<ChatPlatformBinding>();
+      }
+      const workspace = yield* workspaces.findById(chat.value.workspaceId);
+      if (Option.isNone(workspace)) {
+        return yield* new ApplicationError({ message: "Chat workspace not found" });
+      }
+      if (workspace.value.binding === null) return Option.none<ChatPlatformBinding>();
+      return Option.some({
+        platform: workspace.value.binding.platform,
+        externalId: chat.value.externalId,
+      });
+    },
+    Effect.mapError(failure("Failed to find chat platform binding")),
+  );
 
   const transcript = Effect.fn("Application.transcript")(
     function* (chatId: Chat.ChatId) {
@@ -483,6 +502,7 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
     createChat,
     findWorkspaceByPlatformId,
     findChatByPlatformId,
+    findChatPlatformBinding,
     transcript,
     closeChat,
     sendMessage,
