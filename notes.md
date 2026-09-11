@@ -6,6 +6,7 @@
 - omp session jsonl file is the source of truth
 - set omp session async:false; this is because currently cannot support multiple omp sdk agents run async
 - share omp auth/model registry
+- append pico identity and platform context through the omp sdk; do not replace its system prompt, so omp's coding instructions remain intact
 - workspace is like folder
 - chat is like file; one chat = one omp session
 - one workspace can have multiple chats

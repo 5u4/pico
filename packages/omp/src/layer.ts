@@ -23,7 +23,7 @@ import { makeExchangeTitleFlow } from "./exchange-title.ts";
 import { makeOmpPromptSender } from "./omp-prompt-sender.ts";
 import { make as makeScheduleExtension } from "./schedule-extension.ts";
 import { makeSessionPool, type OpenedSession, type SessionFactory } from "./session-pool.ts";
-import { prepareSessionSettings } from "./session-settings.ts";
+import { prepareSessionOptions } from "./session-settings.ts";
 
 export const make = Effect.fn("AgentRuntime.make")(function* (
   sessionsDir: AbsolutePath,
@@ -191,7 +191,7 @@ const makeFactory = (
   open: Effect.fn("OmpSession.open")(function* (chatId, emit) {
     const { chat, platform } = yield* chatPlatforms.resolve(chatId);
     const sessionFile = path.join(sessionsDir, `${chat.id}.jsonl`);
-    const settings = yield* prepareSessionSettings(chat.cwd, platform);
+    const { settings, appendSystemPrompt } = yield* prepareSessionOptions(chat.cwd, platform);
 
     const manager = yield* promiseBoundary("Failed to open OMP session journal", () =>
       OmpSessionManager.SessionManager.open(sessionFile, sessionsDir, undefined, {
@@ -204,6 +204,7 @@ const makeFactory = (
         cwd: chat.cwd,
         sessionManager: manager,
         settings,
+        appendSystemPrompt,
         authStorage,
         modelRegistry,
         agentRegistry: new OmpAgentRegistry.AgentRegistry(),
