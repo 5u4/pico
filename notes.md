@@ -7,7 +7,7 @@
 - set omp session async:false; this is because currently cannot support multiple omp sdk agents run async
 - share omp auth/model registry
 - append pico identity and platform context through the omp sdk; do not replace its system prompt, so omp's coding instructions remain intact
-- register bundled `pico` and `pico-schedule` skills through per-session OMP `skills.customDirectories`; append after configured directories without copying into user settings
+- register bundled `pico-schedule` through per-session OMP `skills.customDirectories`; append after configured directories without copying into user settings
   - keep native skill filters and opt-outs; user custom directories win name collisions, but OMP custom-directory skills override ordinary project/provider skills
   - resolve bundled skill files relative to the package, not the chat cwd; deployments must retain these disk-backed resources
 - workspace is like folder

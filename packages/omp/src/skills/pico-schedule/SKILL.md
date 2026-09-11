@@ -1,112 +1,52 @@
 ---
 name: pico-schedule
-description: Create, inspect, update, pause, or delete pico schedules, and write or debug their Bun JavaScript script.js and prompt.md sources. Use for reminders, recurring agent tasks, and conditional automation in pico.
+description: Pico reminders, scheduled tasks, and schedule scripts.
 ---
 
-# pico schedules
+# Pico schedules
 
-Use pico's session-local `schedule_*` tools to manage schedules. They belong to the current workspace. There is no `pico schedule` CLI subcommand.
+Use the `schedule_*` tools. Supply `script` and `prompt` as source text.
 
-The pico daemon must be running for schedules to execute. Each definition contains `script.js`, `prompt.md`, or both. A script runs first and decides whether to skip, publish text directly, or invoke OMP. Without a script, pico sends the prompt to OMP.
+## Choose what runs
 
-## Manage a schedule
+- Use a prompt alone when every run needs the agent.
+- Use a script alone for a fixed reminder or deterministic result.
+- Use a script with a prompt when a cheap check can decide whether the agent has work to do.
 
-Read the current tool schema before calling it. Supply `script` and `prompt` as source text, not file paths.
+Schedules belong to the current workspace. `current-chat` reuses this conversation. `current-workspace` creates a new chat for each run, even when the script then skips.
 
-- `schedule_create` takes `name`, `enabled`, `target`, `trigger`, at least one of `script` or `prompt`, and optional `scriptTimeoutMs`.
-- `schedule_list` takes no arguments and includes invalid definitions in the current workspace.
-- `schedule_get` takes `scheduleId` and returns the definition and complete sources.
-- `schedule_update` takes `scheduleId`, `name`, `target`, `trigger`, at least one source, and optional `scriptTimeoutMs`. It replaces the whole definition and source set. Read the existing schedule first and retain every source you want to keep. Omitted sources are removed.
-- `schedule_set_enabled` takes `scheduleId` and `enabled`. Use it to pause or resume without replacing the definition.
-- `schedule_delete` takes `scheduleId`. It removes the definition but retains run history.
+For one-time triggers, `at` is Unix epoch milliseconds. Cron uses five fields and an explicit IANA time zone or `UTC`. Use the user's intended zone. Ask only if it is unknown. Pico must be running, and checks roughly every 30 seconds rather than at an exact instant.
 
-Use the ID returned by the tools. Updates preserve enabled state. Change that state with `schedule_set_enabled`.
-
-Choose a target:
-
-- `{"kind":"current-chat"}` reuses this chat for every run.
-- `{"kind":"current-workspace"}` creates a new chat in this workspace for each run. The chat is created before the script, even if the script then skips.
-
-Choose a trigger:
-
-- `{"kind":"once","at":1790000000000}` uses Unix epoch milliseconds. Compute the actual requested time with an explicit time zone rather than copying this example timestamp.
-- `{"kind":"cron","expression":"0 9 * * 1-5","timeZone":"Asia/Shanghai"}` runs at 09:00 on weekdays in that zone. Cron has five fields, in minute, hour, day-of-month, month, day-of-week order. Use `UTC` or an IANA zone.
-
-Resolve an ambiguous time zone with the user before scheduling. Do not silently use the daemon machine's local zone.
-
-For a daily prompt-only task, pass this object to `schedule_create` after choosing the user's intended time zone:
-
-```json
-{
-  "name": "Daily repository review",
-  "enabled": true,
-  "target": { "kind": "current-chat" },
-  "trigger": {
-    "kind": "cron",
-    "expression": "0 9 * * *",
-    "timeZone": "Asia/Shanghai"
-  },
-  "prompt": "Inspect this repository's working tree and summarize changes that need attention. Do not modify files."
-}
-```
-
-Create an unverified script with `enabled: false`. Check its output in a temporary directory before enabling it. After a mutation, use `schedule_get` to confirm the saved trigger, target, state, and sources.
+Before replacing a schedule, read it with `schedule_get` and retain the sources and custom timeout you want to keep. Updates replace them rather than merge them. Use `schedule_set_enabled` to pause or resume without replacing sources.
 
 ## Write script.js
 
-Write a standalone Bun JavaScript program with top-level await if needed. Pico runs an immutable copy of the script with the target chat's working directory as `process.cwd()`.
+Write a standalone Bun JavaScript program. Pico runs a snapshot with the target chat's working directory as `process.cwd()`. Relative data paths use that directory, but relative imports use the script snapshot's directory.
 
-Read stdin with `JSON.parse(await Bun.stdin.text())`. Pico supplies one JSON document with these fields:
+When needed, read run context with `JSON.parse(await Bun.stdin.text())`. It contains:
 
-- `scheduleId` and `runId` identify this execution.
-- `source.kind` is `"scheduled"`. `source.scheduledFor` is the scheduled Unix epoch time in milliseconds.
-- `claimedAt` is the claim time in milliseconds.
-- `target` contains `kind`, `chatId`, and `workspaceId`. Its kind is `"existing-chat"` or `"workspace-chat"`, not the tool input's `"current-chat"` or `"current-workspace"`.
+- `scheduleId`, `runId`, and `claimedAt`.
+- `source.kind`, which is `"scheduled"`, and `source.scheduledFor`.
+- `target.kind`, which is `"existing-chat"` or `"workspace-chat"`, plus `target.chatId` and `target.workspaceId`.
 
-The environment includes `PICO_SCHEDULE_ID`, `PICO_RUN_ID`, `PICO_CHAT_ID`, and `PICO_WORKSPACE_ID`. Pico forwards `HOME`, `PATH`, `TMPDIR`, `TEMP`, `TMP`, `LANG`, and `LC_ALL` when present. Do not expect other daemon environment variables, API keys, or a `PICO_ROOT` variable.
+Timestamps are Unix epoch milliseconds. The environment contains `PICO_SCHEDULE_ID`, `PICO_RUN_ID`, `PICO_CHAT_ID`, and `PICO_WORKSPACE_ID`. Pico forwards only `HOME`, `PATH`, `TMPDIR`, `TEMP`, `TMP`, `LANG`, and `LC_ALL` from its own environment when present.
 
-Relative filesystem paths resolve from the target chat's working directory. Relative imports resolve from the script's run snapshot, not that working directory. Do not depend on sibling helper files or a local `node_modules` directory beside `script.js`. The runner is not a filesystem or network sandbox. Run only code authorized for this environment.
+Write one JSON object to stdout and exit successfully. Send logs to stderr with `console.error`. Only `agent` and optional non-empty `content` are accepted.
 
-Write exactly one UTF-8 JSON object to stdout with this shape:
-
-```json
-{ "agent": false, "content": "Time to review the repository." }
-```
-
-Only `agent` and optional `content` are allowed. `agent` is required and boolean. If present, `content` must be a non-empty string. Omit `content` to skip without a message. Use `console.error` for logs. Do not put logs, Markdown fences, or multiple JSON objects on stdout.
-
-Choose the decision that matches the task:
-
-| Decision | Result |
+| Output | Result |
 | --- | --- |
 | `{"agent":false}` | Skip without publishing. |
-| `{"agent":false,"content":"..."}` | Publish the text directly without a model call. Ignore any prompt. |
-| `{"agent":true}` | Send `prompt.md` to OMP. Fail if no prompt exists. |
-| `{"agent":true,"content":"..."}` | Send content to OMP, followed by two newlines and `prompt.md` if present. |
+| `{"agent":false,"content":"Time for a break."}` | Publish text directly. Ignore any prompt. |
+| `{"agent":true}` | Send `prompt.md` to the agent. Requires a prompt. |
+| `{"agent":true,"content":"Review these changes."}` | Send content to the agent, followed by two newlines and `prompt.md` if present. |
 
-An OMP run publishes its final assistant text after successful completion. Script failures and skipped runs are recorded in run history, not automatically posted as chat messages.
+The default script timeout is 60 seconds. `scriptTimeoutMs` controls only the script, not the agent. A nonzero exit, timeout, invalid decision, or stdout larger than 256 KiB fails the run. Failures are recorded in run history, not automatically posted to the chat.
 
-Exit successfully after writing the decision. A nonzero exit, timeout, invalid JSON, extra property, or stdout larger than 256 KiB fails the run. The default script timeout is 60 seconds. `scriptTimeoutMs` accepts an integer from 1 to 86,400,000 and limits only the script, not the agent run.
+### Review only when the working tree has changes
 
-### Publish a reminder without a model call
-
-Pass this program as `script`. No `prompt` is needed.
+Use this script with the prompt `Review the working-tree status above and inspect relevant diffs. Summarize risks without modifying files.` It checks the current state on each run, not changes since the previous run.
 
 ```js
-const input = JSON.parse(await Bun.stdin.text());
-const scheduledAt = new Date(input.source.scheduledFor).toISOString();
-console.log(JSON.stringify({
-	agent: false,
-	content: `Repository review reminder for ${scheduledAt}.`,
-}));
-```
-
-### Call the agent only when the working tree changes
-
-Use this script with the prompt `Review the working-tree status above and inspect relevant diffs. Summarize risks without modifying files.` It reports the current status on every run with changes. It does not remember whether a previous run saw the same changes.
-
-```js
-const input = JSON.parse(await Bun.stdin.text());
 const result = Bun.spawnSync(["git", "status", "--short"], {
 	cwd: process.cwd(),
 	stdout: "pipe",
@@ -117,24 +57,9 @@ if (result.exitCode !== 0) {
 	process.exit(1);
 }
 const status = new TextDecoder().decode(result.stdout).trim();
-console.error(`Schedule ${input.scheduleId}, run ${input.runId}`);
 console.log(JSON.stringify(status === ""
 	? { agent: false }
 	: { agent: true, content: `Working-tree status:\n${status}` }));
 ```
 
-To use that script without a separate prompt, include the review instruction in the returned `content`. A script-only `{"agent":true}` has no input for OMP and fails.
-
-## Inspect execution
-
-Prefer the schedule tools over direct definition edits. The configured pico root, which defaults to `~/.pico`, contains these paths:
-
-- `schedules/enabled/<schedule-id>/` and `schedules/disabled/<schedule-id>/` hold `meta.json` and at least one of `script.js` or `prompt.md`. The parent directory determines enabled state. Extra files, subdirectories, and symlinks invalidate a definition.
-- `schedules/runs/<schedule-id>/<run-id>/run.json` records the lifecycle and outcome.
-- A run's `input/` contains the snapshotted definition and sources. Inspect these to see what actually ran after later edits.
-- `script/stdin.json`, `script/stdout.bin`, `script/stderr.bin`, and `script/result.json` capture script input, output, exit status, and timeout details.
-- `decision.json` records the decision. Agent runs also have `omp/request.md`, `omp/events.jsonl`, `omp/final.md`, and `omp/result.json`.
-
-Artifacts exist only for stages the run reached. Do not edit run history to retry a task.
-
-Schedules are not precise timers. The daemon checks at startup and roughly every 30 seconds. It does not overlap unfinished runs of the same schedule. After downtime, it considers the latest cron occurrence rather than replaying every missed occurrence. An occurrence older than two hours is marked missed. A completed one-time definition is disabled. A restart marks unfinished runs interrupted rather than replaying them.
+Run a new script in a temporary directory with representative inputs before enabling its schedule. Check stdout and exit status. A script can affect real files and external services, so use disposable inputs rather than the user's live data.
