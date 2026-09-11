@@ -522,10 +522,14 @@ export const moveDefinition = Effect.fn("Schedules.moveDefinition")(function* (
   yield* ensureDirectPath(storage, loaded.directory, "schedule directory");
   if (loaded.view.state === state) return;
   const value = roots(storage);
-  const destination = storage.path.join(
-    state === "enabled" ? value.enabled : value.disabled,
-    loaded.view.id,
-  );
+  const destinationRoot = state === "enabled" ? value.enabled : value.disabled;
+  if (!(yield* inspectDirectory(storage, destinationRoot, "schedule state directory"))) {
+    return yield* new Schedule.ScheduleError({
+      kind: "corrupt",
+      message: "Schedule state directory must exist before changing state",
+    });
+  }
+  const destination = storage.path.join(destinationRoot, loaded.view.id);
   yield* storage.fileSystem
     .rename(loaded.directory, destination)
     .pipe(mapIo("Failed to change schedule state"));

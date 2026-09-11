@@ -23,6 +23,7 @@ import {
   appendArtifactString,
   bootstrap,
   loadSchedule,
+  moveDefinition,
   publishDefinition,
   publishRun,
   readRuns,
@@ -885,6 +886,54 @@ describe("Schedules", () => {
         yield* fileSystem.readFileString(path.join(retainedEnabled, id, "meta.json")),
       );
       assert.strictEqual(retained.revision, definition.revision);
+    }).pipe(Effect.provide(platformLayer), Effect.scoped),
+  );
+  it.effect("rejects a symlinked state destination when moving a definition", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-move-root-" });
+      const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
+      const outside = path.join(root, "outside");
+      const sentinel = path.join(outside, "sentinel");
+      const storage: Storage = {
+        fileSystem,
+        path,
+        schedulesDir,
+        temporaryId: () => Effect.succeed("018f47a0-0000-7000-8000-000000000094"),
+      };
+      const id = Schedule.ScheduleId.make("018f47a0-0000-7000-8000-000000000095");
+      const definition: Schedule.ScheduleDefinition = {
+        version: 1,
+        revision: Schedule.ScheduleRevision.make("018f47a0-0000-7000-8000-000000000096"),
+        name: "move destination",
+        ownerWorkspaceId: workspaceId,
+        createdByChatId: chatId,
+        createdAt: 0,
+        target: { kind: "chat", chatId },
+        trigger: { kind: "once", at: 1_000 },
+      };
+      yield* fileSystem.makeDirectory(outside);
+      yield* fileSystem.writeFileString(sentinel, "unchanged");
+      yield* bootstrap(storage);
+      yield* publishDefinition(
+        storage,
+        id,
+        "enabled",
+        definition,
+        { script: null, prompt: "move me" },
+        "move-source",
+      );
+      const loaded = yield* loadSchedule(storage, id);
+      if (loaded === undefined) return yield* Effect.die("Published definition disappeared");
+      const disabled = path.join(schedulesDir, "disabled");
+      yield* fileSystem.remove(disabled, { recursive: true });
+      yield* fileSystem.symlink(outside, disabled);
+
+      const error = yield* moveDefinition(storage, loaded, "disabled").pipe(Effect.flip);
+      assert.strictEqual(error.kind, "corrupt");
+      assert.deepStrictEqual(yield* fileSystem.readDirectory(outside), ["sentinel"]);
+      assert.isTrue(yield* fileSystem.exists(path.join(schedulesDir, "enabled", id, "meta.json")));
     }).pipe(Effect.provide(platformLayer), Effect.scoped),
   );
   it.effect("keeps a definition canonical when replacement is interrupted during commit", () =>
