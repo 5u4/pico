@@ -42,6 +42,7 @@ export const prepareSessionOptions = Effect.fn("OmpSession.prepareOptions")(func
     try: () => {
       settings.override("async.enabled", false);
       settings.override("title.refreshOnReplan", false);
+      settings.override("secrets.enabled", true);
       if (policy.mermaid === "disabled") {
         settings.override("tui.renderMermaid", false);
       }
