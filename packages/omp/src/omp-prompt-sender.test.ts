@@ -30,6 +30,7 @@ const makeFakeSession = (
   enableSkillCommands: boolean,
   sessionFile: string,
   accepted = true,
+  promptGate?: (call: number) => Promise<void>,
 ) => {
   const customMessages: Array<{
     readonly message: CustomMessage;
@@ -53,12 +54,13 @@ const makeFakeSession = (
     setPromptDropped: (handler: PromptDropped) => {
       promptDropped = handler;
     },
-    prompt: (text: string, options?: ImagePromptOptions) => {
+    prompt: async (text: string, options?: ImagePromptOptions) => {
       imagePrompts.push({ text, options });
+      await promptGate?.(imagePrompts.length);
       if (!accepted) {
         promptDropped?.({ text, ...(options?.images ? { images: options.images } : {}) });
       }
-      return Promise.resolve(true);
+      return true;
     },
   };
   return { session, customMessages, literalPrompts, imagePrompts };
@@ -310,6 +312,90 @@ describe("makeOmpPromptSender", () => {
       }).pipe(Effect.flip);
       assert.instanceOf(failure, Error);
       assert.isFalse(yield* fileSystem.exists(path.join(root, "chat")));
+    }).pipe(Effect.provide(platformLayer)),
+  );
+
+  it.effect("rejects out-of-contract prompts before writing originals", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const crypto = yield* Crypto.Crypto;
+      const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-omp-limit-" });
+      const sessionFile = path.join(root, "chat.jsonl");
+      const skill = {
+        name: "focused-skill",
+        description: "Focused adapter test",
+        filePath: path.join(root, "SKILL.md"),
+        baseDir: root,
+        source: "test",
+      } satisfies Skill;
+      const fake = makeFakeSession(skill, true, sessionFile);
+      const attachment: AgentMessage.AgentImageAttachment = {
+        type: "image",
+        name: "tiny.png",
+        data: "aQ==",
+        mimeType: "image/png",
+      };
+      const invalidPrompt: AgentMessage.AgentPrompt = {
+        text: "",
+        attachments: Array.from(
+          { length: AgentMessage.MAX_AGENT_IMAGE_ATTACHMENTS + 1 },
+          () => attachment,
+        ),
+      };
+
+      const failure = yield* Effect.tryPromise({
+        try: () => makeOmpPromptSender(fake.session, fileSystem, path, crypto)(invalidPrompt),
+        catch: (error) => error,
+      }).pipe(Effect.flip);
+
+      assert.instanceOf(failure, Error);
+      assert.deepStrictEqual(fake.imagePrompts, []);
+      assert.isFalse(yield* fileSystem.exists(path.join(root, "chat")));
+    }).pipe(Effect.provide(platformLayer)),
+  );
+
+  it.effect("serializes prompt acceptance and attachment cleanup per session", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const crypto = yield* Crypto.Crypto;
+      const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-omp-serial-" });
+      const sessionFile = path.join(root, "chat.jsonl");
+      const firstStarted = Promise.withResolvers<void>();
+      const releaseFirst = Promise.withResolvers<void>();
+      const skill = {
+        name: "focused-skill",
+        description: "Focused adapter test",
+        filePath: path.join(root, "SKILL.md"),
+        baseDir: root,
+        source: "test",
+      } satisfies Skill;
+      const fake = makeFakeSession(skill, true, sessionFile, true, async (call) => {
+        if (call !== 1) return;
+        firstStarted.resolve();
+        await releaseFirst.promise;
+      });
+      const send = makeOmpPromptSender(fake.session, fileSystem, path, crypto);
+      const attachment = (name: string): AgentMessage.AgentImageAttachment => ({
+        type: "image",
+        name,
+        data: Buffer.from(name).toString("base64"),
+        mimeType: "image/png",
+      });
+
+      const first = send({ text: "first", attachments: [attachment("first")] });
+      yield* Effect.promise(() => firstStarted.promise);
+      const second = send({ text: "second", attachments: [attachment("second")] });
+      yield* Effect.promise(() => Promise.resolve());
+      assert.strictEqual(fake.imagePrompts.length, 1);
+
+      releaseFirst.resolve();
+      yield* Effect.promise(() => Promise.all([first, second]));
+      assert.deepStrictEqual(
+        fake.imagePrompts.map(({ text }) => text.split("\n", 1)[0]),
+        ["first", "second"],
+      );
     }).pipe(Effect.provide(platformLayer)),
   );
 });

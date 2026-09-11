@@ -1,11 +1,12 @@
 import { tryRunRpcSkillCommand } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
 import type * as OmpAgentSession from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import type * as AgentMessage from "@pico/contract/agent-message";
+import * as AgentMessage from "@pico/contract/agent-message";
 import type * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import type * as FileSystem from "effect/FileSystem";
 import type * as Path from "effect/Path";
 import type * as PlatformError from "effect/PlatformError";
+import * as Schema from "effect/Schema";
 
 type OmpPromptSession = Parameters<typeof tryRunRpcSkillCommand>[0] &
   Pick<OmpAgentSession.AgentSession, "prompt" | "sendUserMessage" | "setPromptDropped"> & {
@@ -80,100 +81,119 @@ const hexDigest = async (crypto: Crypto.Crypto, bytes: Uint8Array) => {
   const digest = await Effect.runPromise(crypto.digest("SHA-256", bytes));
   return Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("");
 };
+const validatePrompt = Schema.decodeUnknownSync(AgentMessage.AgentPrompt, {
+  onExcessProperty: "error",
+});
+
+const serialize = () => {
+  let tail = Promise.resolve();
+  return <A>(operation: () => Promise<A>) => {
+    const result = tail.then(operation);
+    tail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  };
+};
 
 export const makeOmpPromptSender = (
   session: OmpPromptSession,
   fileSystem: FileSystem.FileSystem,
   path: Path.Path,
   crypto: Crypto.Crypto,
-) =>
-  async function sendPrompt(prompt: AgentMessage.AgentPrompt): Promise<void> {
-    if (prompt.attachments.length === 0) {
-      const skillResult = await tryRunRpcSkillCommand(session, prompt.text, "steer");
-      if (skillResult !== false) return;
-      await session.sendUserMessage(prompt.text);
-      return;
-    }
+) => {
+  const runSerialized = serialize();
+  return (input: AgentMessage.AgentPrompt): Promise<void> =>
+    runSerialized(async () => {
+      const prompt = validatePrompt(input);
+      if (prompt.attachments.length === 0) {
+        const skillResult = await tryRunRpcSkillCommand(session, prompt.text, "steer");
+        if (skillResult !== false) return;
+        await session.sendUserMessage(prompt.text);
+        return;
+      }
 
-    const sessionFile = session.sessionManager.getSessionFile();
-    if (sessionFile === undefined) throw new Error("OMP session has no journal path");
-    const sessionDirectory = path.join(
-      path.dirname(sessionFile),
-      path.basename(sessionFile, path.extname(sessionFile)),
-    );
-    const attachmentsDirectory = path.join(sessionDirectory, "attachments");
-    let createdSessionDirectory = false;
-    let createdAttachmentsDirectory = false;
-
-    const written: string[] = [];
-    const originals: PersistedAttachment[] = [];
-    try {
-      createdSessionDirectory = !(await Effect.runPromise(fileSystem.exists(sessionDirectory)));
-      await Effect.runPromise(
-        fileSystem.makeDirectory(sessionDirectory, { recursive: true, mode: 0o700 }),
+      const sessionFile = session.sessionManager.getSessionFile();
+      if (sessionFile === undefined) throw new Error("OMP session has no journal path");
+      const sessionDirectory = path.join(
+        path.dirname(sessionFile),
+        path.basename(sessionFile, path.extname(sessionFile)),
       );
-      await Effect.runPromise(fileSystem.chmod(sessionDirectory, 0o700));
-      createdAttachmentsDirectory = !(await Effect.runPromise(
-        fileSystem.exists(attachmentsDirectory),
-      ));
-      await Effect.runPromise(
-        fileSystem.makeDirectory(attachmentsDirectory, { recursive: true, mode: 0o700 }),
-      );
-      await Effect.runPromise(fileSystem.chmod(attachmentsDirectory, 0o700));
+      const attachmentsDirectory = path.join(sessionDirectory, "attachments");
+      let createdSessionDirectory = false;
+      let createdAttachmentsDirectory = false;
 
-      for (const attachment of prompt.attachments) {
-        const bytes = Buffer.from(attachment.data, "base64");
-        const digest = await hexDigest(crypto, bytes);
-        const file = path.join(
-          attachmentsDirectory,
-          `${digest}.${extensionFor(attachment.mimeType)}`,
+      const written: string[] = [];
+      const originals: PersistedAttachment[] = [];
+      try {
+        createdSessionDirectory = !(await Effect.runPromise(fileSystem.exists(sessionDirectory)));
+        await Effect.runPromise(
+          fileSystem.makeDirectory(sessionDirectory, { recursive: true, mode: 0o700 }),
         );
-        const created = await Effect.runPromise(
-          fileSystem.writeFile(file, bytes, { flag: "wx", mode: 0o600 }).pipe(
-            Effect.as(true),
-            Effect.catch((error) =>
-              isSystemReason(error, "AlreadyExists") ? Effect.succeed(false) : Effect.fail(error),
+        await Effect.runPromise(fileSystem.chmod(sessionDirectory, 0o700));
+        createdAttachmentsDirectory = !(await Effect.runPromise(
+          fileSystem.exists(attachmentsDirectory),
+        ));
+        await Effect.runPromise(
+          fileSystem.makeDirectory(attachmentsDirectory, { recursive: true, mode: 0o700 }),
+        );
+        await Effect.runPromise(fileSystem.chmod(attachmentsDirectory, 0o700));
+
+        for (const attachment of prompt.attachments) {
+          const bytes = Buffer.from(attachment.data, "base64");
+          const digest = await hexDigest(crypto, bytes);
+          const file = path.join(
+            attachmentsDirectory,
+            `${digest}.${extensionFor(attachment.mimeType)}`,
+          );
+          const created = await Effect.runPromise(
+            fileSystem.writeFile(file, bytes, { flag: "wx", mode: 0o600 }).pipe(
+              Effect.as(true),
+              Effect.catch((error) =>
+                isSystemReason(error, "AlreadyExists") ? Effect.succeed(false) : Effect.fail(error),
+              ),
             ),
-          ),
-        );
-        if (created) written.push(file);
-        originals.push({ attachment, path: file });
-      }
+          );
+          if (created) written.push(file);
+          originals.push({ attachment, path: file });
+        }
 
-      let dropped = false;
-      session.setPromptDropped(() => {
-        dropped = true;
-      });
-      try {
-        await session.prompt(withOriginalReferences(prompt.text, originals), {
-          images: prompt.attachments.map(({ data, mimeType }) => ({
-            type: "image",
-            data,
-            mimeType,
-          })),
-          expandPromptTemplates: false,
-          streamingBehavior: "steer",
+        let dropped = false;
+        session.setPromptDropped(() => {
+          dropped = true;
         });
-      } finally {
-        session.setPromptDropped(undefined);
+        try {
+          await session.prompt(withOriginalReferences(prompt.text, originals), {
+            images: prompt.attachments.map(({ data, mimeType }) => ({
+              type: "image",
+              data,
+              mimeType,
+            })),
+            expandPromptTemplates: false,
+            streamingBehavior: "steer",
+          });
+        } finally {
+          session.setPromptDropped(undefined);
+        }
+        if (dropped) throw new Error("OMP did not accept the image prompt");
+      } catch (error) {
+        try {
+          await removeWrittenOriginals(
+            fileSystem,
+            written,
+            attachmentsDirectory,
+            sessionDirectory,
+            createdAttachmentsDirectory,
+            createdSessionDirectory,
+          );
+        } catch (cleanupError) {
+          throw new AggregateError(
+            [error, cleanupError],
+            "OMP rejected the image prompt and cleanup failed",
+          );
+        }
+        throw error;
       }
-      if (dropped) throw new Error("OMP did not accept the image prompt");
-    } catch (error) {
-      try {
-        await removeWrittenOriginals(
-          fileSystem,
-          written,
-          attachmentsDirectory,
-          sessionDirectory,
-          createdAttachmentsDirectory,
-          createdSessionDirectory,
-        );
-      } catch (cleanupError) {
-        throw new AggregateError(
-          [error, cleanupError],
-          "OMP rejected the image prompt and cleanup failed",
-        );
-      }
-      throw error;
-    }
-  };
+    });
+};

@@ -124,9 +124,9 @@ interface CommandThread {
 
 const threadName = (content: string) => content.trim().replace(/\s+/g, " ").slice(0, 100);
 
-const maximumAttachmentCount = 10;
-const maximumAttachmentBytes = 20 * 1024 * 1024;
-const maximumMessageAttachmentBytes = 40 * 1024 * 1024;
+const maximumAttachmentCount = AgentMessage.MAX_AGENT_IMAGE_ATTACHMENTS;
+const maximumAttachmentBytes = AgentMessage.MAX_AGENT_IMAGE_ATTACHMENT_BYTES;
+const maximumMessageAttachmentBytes = AgentMessage.MAX_AGENT_IMAGE_BYTES;
 const attachmentPolicyMessage =
   "Attach up to 10 PNG, JPEG, GIF, or WebP images. Each image must be 20 MiB or smaller, with 40 MiB total.";
 const attachmentDownloadMessage =

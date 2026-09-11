@@ -100,6 +100,12 @@ const assistantText = (message: AgentMessage.AgentAssistantMessage) => {
 
   return result;
 };
+const promptTitleText = (prompt: AgentMessage.AgentPrompt) => {
+  if (prompt.text.trim().length > 0) return prompt.text;
+  return prompt.attachments.length === 1
+    ? "[image attachment]"
+    : `[${prompt.attachments.length} image attachments]`;
+};
 
 const historyIsSpent = (history: ReadonlyArray<HistoryMessage>) =>
   history.some(
@@ -118,7 +124,7 @@ export const makeExchangeTitleFlow = (options: ExchangeTitleOptions): ExchangeTi
       await options.sendPrompt(prompt);
       return;
     }
-    const claim: PromptClaim = { userText: capText(prompt.text) };
+    const claim: PromptClaim = { userText: capText(promptTitleText(prompt)) };
     claims.push(claim);
     try {
       await options.sendPrompt(prompt);

@@ -172,6 +172,40 @@ describe("exchange titles", () => {
     assert.deepStrictEqual(emitted, ["Clean persisted title"]);
   });
 
+  it("describes image-only prompts without exposing attachment metadata", async () => {
+    const generated: string[] = [];
+    const flow = makeExchangeTitleFlow({
+      chatId,
+      handleBranchNaming: ignoreBranchNaming,
+      history: [],
+      sendPrompt: async () => {},
+      generateTitle: async (exchange) => {
+        generated.push(exchange);
+        return "Image request";
+      },
+      getTitleSource: () => undefined,
+      setSessionName: async () => true,
+      getSessionName: () => "Image request",
+      emitTitleChanged: () => {},
+    });
+
+    await flow.sendPrompt(
+      AgentMessage.AgentPrompt.make({
+        text: "",
+        attachments: [{ type: "image", name: "secret.png", data: "aQ==", mimeType: "image/png" }],
+      }),
+    );
+    flow.observe(assistant("stop", [{ type: "text", text: "analyzed" }]));
+    flow.observe(completed);
+    assert.strictEqual(generated.length, 1);
+
+    for (const exchange of generated) {
+      assert.include(exchange, "<user>[image attachment]</user>");
+      assert.notInclude(exchange, "secret.png");
+      assert.notInclude(exchange, "aQ==");
+    }
+  });
+
   it("correlates concurrent sends by claim identity and spends once", async () => {
     const generated: string[] = [];
     const firstSend = Promise.withResolvers<void>();
