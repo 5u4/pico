@@ -46,6 +46,8 @@ export const CreateChat = Schema.Struct({
 });
 export type CreateChat = typeof CreateChat.Type;
 
+export type ChatPlatformBinding = Pick<typeof WorkspaceBinding.Type, "platform" | "externalId">;
+
 export interface CloseChatOptions {
   readonly allowDirtyWorktree: boolean;
 }
@@ -77,6 +79,11 @@ export class Application extends Context.Service<
       workspaceExternalId: string,
       chatExternalId: string,
     ) => Effect.Effect<Option.Option<Chat>, ApplicationError>;
+
+    /** Platform adapters call this when delivering output for a persisted chat. */
+    readonly findChatPlatformBinding: (
+      chatId: ChatId,
+    ) => Effect.Effect<Option.Option<ChatPlatformBinding>, ApplicationError>;
 
     readonly transcript: (chatId: ChatId) => Effect.Effect<AgentTranscript, ApplicationError>;
 

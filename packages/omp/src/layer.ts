@@ -11,6 +11,7 @@ import type * as Chat from "@pico/contract/chat-model";
 import { ChatRepository } from "@pico/contract/chat-repository";
 import { AgentError } from "@pico/contract/errors";
 import type { AbsolutePath } from "@pico/contract/path";
+import type * as Schedule from "@pico/contract/schedule";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -20,9 +21,13 @@ import * as Path from "effect/Path";
 import { normalizeAgentEvent, normalizeTranscript } from "./agent-event.ts";
 import { makeExchangeTitleFlow } from "./exchange-title.ts";
 import { makeOmpPromptSender } from "./omp-prompt-sender.ts";
+import { make as makeScheduleExtension } from "./schedule-extension.ts";
 import { makeSessionPool, type OpenedSession, type SessionFactory } from "./session-pool.ts";
 
-export const make = Effect.fn("AgentRuntime.make")(function* (sessionsDir: AbsolutePath) {
+export const make = Effect.fn("AgentRuntime.make")(function* (
+  sessionsDir: AbsolutePath,
+  schedules: Schedule.Schedules["Service"],
+) {
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const chats = yield* ChatRepository;
@@ -56,7 +61,7 @@ export const make = Effect.fn("AgentRuntime.make")(function* (sessionsDir: Absol
   });
 
   const pool = yield* makeSessionPool({
-    factory: makeFactory(sessionsDir, path, chats, authStorage, modelRegistry),
+    factory: makeFactory(sessionsDir, path, chats, authStorage, modelRegistry, schedules),
     loadTranscript,
   });
 
@@ -65,6 +70,9 @@ export const make = Effect.fn("AgentRuntime.make")(function* (sessionsDir: Absol
     drain: pool.drain,
     transcript: pool.transcript,
     send: pool.send,
+    sendCaptured: pool.sendCaptured,
+    deliver: pool.deliver,
+    publish: pool.publish,
     close: pool.close,
     abort: pool.abort,
     contextUsage: pool.contextUsage,
@@ -72,7 +80,8 @@ export const make = Effect.fn("AgentRuntime.make")(function* (sessionsDir: Absol
   });
 });
 
-export const layer = (sessionsDir: AbsolutePath) => Layer.effect(AgentRuntime, make(sessionsDir));
+export const layer = (sessionsDir: AbsolutePath, schedules: Schedule.Schedules["Service"]) =>
+  Layer.effect(AgentRuntime, make(sessionsDir, schedules));
 
 const agentError = (message: string, cause: unknown) =>
   new AgentError({
@@ -161,6 +170,7 @@ const makeFactory = (
   chats: ChatRepository["Service"],
   authStorage: Awaited<ReturnType<typeof OmpSdk.discoverAuthStorage>>,
   modelRegistry: OmpModelRegistry.ModelRegistry,
+  schedules: Schedule.Schedules["Service"],
 ): SessionFactory => ({
   open: Effect.fn("OmpSession.open")(function* (chatId, emit) {
     const maybeChat = yield* chats
@@ -195,6 +205,12 @@ const makeFactory = (
         modelRegistry,
         agentRegistry: new OmpAgentRegistry.AgentRegistry(),
         hasUI: false,
+        extensions: [
+          makeScheduleExtension({
+            caller: { chatId: chat.id, workspaceId: chat.workspaceId },
+            schedules,
+          }),
+        ],
       }),
     ).pipe(Effect.catch((error) => closeManagerAfterFailure(manager, error)));
 
@@ -223,6 +239,11 @@ const makeFactory = (
       sendPrompt: titleFlow.sendPrompt,
       shake: (mode) => created.session.shake(mode).then(normalizeShakeResult),
       contextUsage: () => normalizeContextUsage(created.session.getContextBreakdown()),
+      appendAssistantMessage: async (message) => {
+        created.session.sessionManager.appendMessage(message);
+        created.session.agent.appendMessage(message);
+        await created.session.sessionManager.flush();
+      },
       unsubscribe,
     };
     return opened;

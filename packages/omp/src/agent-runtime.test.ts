@@ -3,10 +3,12 @@ import * as BunPath from "@effect/platform-bun/BunPath";
 import { assert, describe, it } from "@effect/vitest";
 import * as OmpSessionLoader from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import * as OmpSessionManager from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import type * as AgentEvent from "@pico/contract/agent-event";
 import * as Agent from "@pico/contract/agent-message";
 import type { ContextUsage, ShakeMode, ShakeResult } from "@pico/contract/agent-runtime";
 import * as Chat from "@pico/contract/chat-model";
 import { AgentError } from "@pico/contract/errors";
+import * as Schedule from "@pico/contract/schedule";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -17,7 +19,7 @@ import * as Path from "effect/Path";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import { normalizeAgentEvent, normalizeTranscript } from "./agent-event.ts";
-import { makeSessionPool, type SessionFactory } from "./session-pool.ts";
+import { makeSessionPool, type OpenedSession, type SessionFactory } from "./session-pool.ts";
 
 const platformLayer = Layer.merge(BunFileSystem.layer, BunPath.layer);
 const chatId = Chat.ChatId.make("018f47a0-0000-7000-8000-000000000001");
@@ -86,6 +88,7 @@ describe("AgentRuntime", () => {
                 return Promise.resolve();
               },
               shake: async (mode) => shakeResult(mode),
+              appendAssistantMessage: () => Promise.resolve(),
               contextUsage: () => ({ kind: "unavailable" }),
               unsubscribe: () => {
                 lifecycle.push("unsubscribe");
@@ -162,6 +165,221 @@ describe("AgentRuntime", () => {
     }).pipe(Effect.provide(platformLayer)),
   );
 
+  it.effect("persists scheduled publications before emitting them", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const sessionsDir = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "pico-omp-publish-",
+        });
+        const sessionFile = path.join(sessionsDir, `${chatId}.jsonl`);
+        const liveMessages: Array<Parameters<OpenedSession["appendAssistantMessage"]>[0]> = [];
+        const publicationOrder: Array<string> = [];
+        const factory: SessionFactory = {
+          open: () =>
+            Effect.promise(async () => {
+              const manager = await OmpSessionManager.SessionManager.open(
+                sessionFile,
+                sessionsDir,
+                undefined,
+                { initialCwd: sessionsDir, suppressBreadcrumb: true },
+              );
+              return {
+                session: {
+                  settleInFlightMessagePersistence: () => Promise.resolve(),
+                  abort: () => Promise.resolve(),
+                  beginDispose: () => manager.seal(),
+                  dispose: async () => {
+                    await manager.close();
+                    manager.releaseRetainedEntries();
+                  },
+                },
+                sendPrompt: () => Promise.resolve(),
+                shake: async (mode) => shakeResult(mode),
+                appendAssistantMessage: async (message) => {
+                  manager.appendMessage(message);
+                  liveMessages.push(message);
+                  await manager.flush();
+                  publicationOrder.push("persisted");
+                },
+                contextUsage: () => ({ kind: "unavailable" }),
+                unsubscribe: () => {},
+              } satisfies OpenedSession;
+            }),
+        };
+        const pool = yield* makeSessionPool({
+          factory,
+          loadTranscript: () =>
+            Effect.promise(() => OmpSessionLoader.loadSessionMessagesReadOnly(sessionFile)).pipe(
+              Effect.map(normalizeTranscript),
+            ),
+        });
+        const delivered = yield* pool.events.pipe(
+          Stream.take(3),
+          Stream.tap(({ event }) =>
+            Effect.sync(() => {
+              publicationOrder.push(event.type);
+            }),
+          ),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+
+        yield* pool.publish(chatId, "durable publication");
+        const envelopes = yield* Fiber.join(delivered);
+        assert.deepStrictEqual(
+          envelopes.map(({ event }) => event.type),
+          ["run-started", "message-settled", "run-finished"],
+        );
+        assert.deepStrictEqual(publicationOrder, [
+          "persisted",
+          "run-started",
+          "message-settled",
+          "run-finished",
+        ]);
+        const liveMessage = liveMessages[0];
+        if (liveMessage === undefined) return yield* Effect.die("Publication missed live context");
+        assert.strictEqual(liveMessage.provider, "pico");
+        assert.strictEqual(liveMessage.model, "schedule");
+        assert.deepStrictEqual(liveMessage.usage, {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 0,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        });
+
+        yield* pool.close(chatId);
+        const transcript = yield* pool.transcript(chatId);
+        const published = transcript[0];
+        if (published === undefined) return yield* Effect.die("Publication missed transcript");
+        assert.deepInclude(published, {
+          role: "assistant",
+          status: "completed",
+          stopReason: "stop",
+          content: [{ type: "text", text: "durable publication" }],
+          model: "schedule",
+        });
+      }),
+    ).pipe(Effect.provide(platformLayer)),
+  );
+
+  it.effect("delivers one persisted agent response without appending it again", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const sessionsDir = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "pico-omp-deliver-",
+        });
+        const sessionFile = path.join(sessionsDir, `${chatId}.jsonl`);
+        const pool = yield* makeSessionPool({
+          factory: {
+            open: (_requestedChatId, emit) =>
+              Effect.promise(async () => {
+                const manager = await OmpSessionManager.SessionManager.open(
+                  sessionFile,
+                  sessionsDir,
+                  undefined,
+                  { initialCwd: sessionsDir, suppressBreadcrumb: true },
+                );
+                const assistantMessage: Parameters<OpenedSession["appendAssistantMessage"]>[0] = {
+                  role: "assistant",
+                  content: [{ type: "text", text: "scheduled answer" }],
+                  api: "test",
+                  provider: "test",
+                  model: "test",
+                  usage: {
+                    input: 0,
+                    output: 0,
+                    cacheRead: 0,
+                    cacheWrite: 0,
+                    totalTokens: 0,
+                    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+                  },
+                  stopReason: "stop",
+                  timestamp: 1,
+                };
+                return {
+                  session: {
+                    settleInFlightMessagePersistence: async () => {
+                      await manager.ensureOnDisk();
+                      await manager.flush();
+                    },
+                    abort: () => Promise.resolve(),
+                    beginDispose: () => manager.seal(),
+                    dispose: async () => {
+                      await manager.close();
+                      manager.releaseRetainedEntries();
+                    },
+                  },
+                  sendPrompt: () => {
+                    manager.appendMessage(assistantMessage);
+                    emit({ type: "run-started" });
+                    emit({
+                      type: "message-settled",
+                      message: {
+                        role: "assistant",
+                        status: "completed",
+                        stopReason: "stop",
+                        content: [{ type: "text", text: "scheduled answer" }],
+                        model: "test",
+                        timestamp: 1,
+                      },
+                    });
+                    emit({ type: "run-finished", outcome: "completed" });
+                    return Promise.resolve();
+                  },
+                  shake: async (mode) => shakeResult(mode),
+                  appendAssistantMessage: () => Promise.resolve(),
+                  contextUsage: () => ({ kind: "unavailable" }),
+                  unsubscribe: () => {},
+                } satisfies OpenedSession;
+              }),
+          },
+          loadTranscript: () =>
+            Effect.promise(() => OmpSessionLoader.loadSessionMessagesReadOnly(sessionFile)).pipe(
+              Effect.map(normalizeTranscript),
+            ),
+        });
+        const observed: Array<string> = [];
+        const delivery = yield* pool.events.pipe(
+          Stream.runForEach(({ event }) =>
+            Effect.sync(() => {
+              observed.push(event.type);
+            }),
+          ),
+          Effect.forkChild,
+        );
+        const runId = Schedule.ScheduleRunId.make(
+          "scheduled-1000-018f47a0-0000-7000-8000-000000000003",
+        );
+
+        const captured = yield* pool.sendCaptured(
+          chatId,
+          runId,
+          prompt("scheduled"),
+          () => Effect.void,
+        );
+        assert.strictEqual(captured.finalAssistantText, "scheduled answer");
+        yield* pool.deliver(chatId, captured.finalAssistantText);
+
+        yield* pool.drain();
+        assert.deepStrictEqual(observed, ["run-started", "message-settled", "run-finished"]);
+        yield* Fiber.interrupt(delivery);
+        yield* pool.close(chatId);
+        const transcript = yield* pool.transcript(chatId);
+        assert.strictEqual(transcript.length, 1);
+        assert.deepInclude(transcript[0], {
+          role: "assistant",
+          content: [{ type: "text", text: "scheduled answer" }],
+        });
+      }),
+    ).pipe(Effect.provide(platformLayer)),
+  );
+
   it.effect("acquires idle sessions, reads context, forwards shake, and maps failures", () =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -200,6 +418,7 @@ describe("AgentRuntime", () => {
                   ? Promise.reject(new Error("shake rejected"))
                   : Promise.resolve(shakeResult(mode));
               },
+              appendAssistantMessage: () => Promise.resolve(),
               contextUsage: () => {
                 contextReads += 1;
                 if (throwContext) throw new Error("context failed");
@@ -286,6 +505,7 @@ describe("AgentRuntime", () => {
               },
               sendPrompt: () => Promise.resolve(),
               shake: async (mode) => shakeResult(mode),
+              appendAssistantMessage: () => Promise.resolve(),
               contextUsage: () => ({ kind: "unavailable" }),
               unsubscribe: () => {
                 lifecycle.push("unsubscribe");
@@ -334,6 +554,7 @@ describe("AgentRuntime", () => {
                 },
                 sendPrompt: () => Promise.resolve(),
                 shake: async (mode) => shakeResult(mode),
+                appendAssistantMessage: () => Promise.resolve(),
                 contextUsage: () => ({ kind: "unavailable" }),
                 unsubscribe: () => {},
               }),
@@ -373,6 +594,7 @@ describe("AgentRuntime", () => {
                 },
                 sendPrompt: () => Promise.resolve(),
                 shake: async (mode) => shakeResult(mode),
+                appendAssistantMessage: () => Promise.resolve(),
                 contextUsage: () => ({ kind: "unavailable" }),
                 unsubscribe: () => {
                   lifecycle.push("unsubscribe");
@@ -428,6 +650,7 @@ describe("AgentRuntime", () => {
                   return Promise.resolve();
                 },
                 shake: async (mode) => shakeResult(mode),
+                appendAssistantMessage: () => Promise.resolve(),
                 contextUsage: () => ({ kind: "unavailable" }),
                 unsubscribe: () => {},
               }),
@@ -451,6 +674,303 @@ describe("AgentRuntime", () => {
         assert.isFalse(yield* Deferred.isDone(drainCompleted));
         yield* Deferred.succeed(releaseDelivery, undefined);
         yield* Deferred.await(drainCompleted);
+      }),
+    ),
+  );
+  it.effect("captures one scheduled run without forwarding its events", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        let settled = 0;
+        const pool = yield* makeSessionPool({
+          factory: {
+            open: (_id, emit) =>
+              Effect.succeed({
+                session: {
+                  settleInFlightMessagePersistence: () => {
+                    settled += 1;
+                    return Promise.resolve();
+                  },
+                  abort: () => Promise.resolve(),
+                  beginDispose: () => {},
+                  dispose: () => Promise.resolve(),
+                },
+                sendPrompt: () => {
+                  emit({ type: "run-started" });
+                  emit({
+                    type: "message-settled",
+                    message: {
+                      role: "assistant",
+                      status: "completed",
+                      stopReason: "stop",
+                      content: [{ type: "text", text: "scheduled answer" }],
+                      model: "test",
+                      timestamp: 1,
+                    },
+                  });
+                  emit({ type: "run-finished", outcome: "completed" });
+                  return Promise.resolve();
+                },
+                shake: async (mode) => shakeResult(mode),
+                appendAssistantMessage: () => Promise.resolve(),
+                contextUsage: () => ({ kind: "unavailable" }),
+                unsubscribe: () => {},
+              }),
+          },
+          loadTranscript: () => Effect.succeed([]),
+        });
+        const observed: Array<string> = [];
+        const runId = Schedule.ScheduleRunId.make(
+          "scheduled-1000-018f47a0-0000-7000-8000-000000000003",
+        );
+        const captured = yield* pool.sendCaptured(chatId, runId, prompt("scheduled"), (event) =>
+          Effect.sync(() => observed.push(event.type)).pipe(Effect.asVoid),
+        );
+        assert.deepStrictEqual(captured, {
+          runId,
+          outcome: "completed",
+          events: [
+            { type: "run-started" },
+            {
+              type: "message-settled",
+              message: {
+                role: "assistant",
+                status: "completed",
+                stopReason: "stop",
+                content: [{ type: "text", text: "scheduled answer" }],
+                model: "test",
+                timestamp: 1,
+              },
+            },
+            { type: "run-finished", outcome: "completed" },
+          ],
+          finalAssistantText: "scheduled answer",
+        });
+        assert.deepStrictEqual(observed, ["run-started", "message-settled", "run-finished"]);
+        assert.strictEqual(settled, 1);
+      }),
+    ),
+  );
+  it.effect("forwards delayed session titles while a scheduled run is captured", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const captureStarted = yield* Deferred.make<void>();
+        let emitEvent: ((event: AgentEvent.AgentEvent) => void) | undefined;
+        let completeCapture: (() => void) | undefined;
+        const pool = yield* makeSessionPool({
+          factory: {
+            open: (_id, emit) => {
+              emitEvent = emit;
+              return Effect.succeed({
+                session: {
+                  settleInFlightMessagePersistence: () => Promise.resolve(),
+                  abort: () => Promise.resolve(),
+                  beginDispose: () => {},
+                  dispose: () => Promise.resolve(),
+                },
+                sendPrompt: () => {
+                  emit({ type: "run-started" });
+                  const pending = new Promise<void>((resolve) => {
+                    completeCapture = () => {
+                      emit({ type: "run-finished", outcome: "completed" });
+                      resolve();
+                    };
+                  });
+                  Effect.runSync(Deferred.succeed(captureStarted, undefined));
+                  return pending;
+                },
+                shake: async (mode) => shakeResult(mode),
+                appendAssistantMessage: () => Promise.resolve(),
+                contextUsage: () => ({ kind: "unavailable" }),
+                unsubscribe: () => {},
+              });
+            },
+          },
+          loadTranscript: () => Effect.succeed([]),
+        });
+        const forwarded = yield* pool.events.pipe(
+          Stream.take(1),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        const capturedTypes: Array<string> = [];
+        const capture = yield* pool
+          .sendCaptured(
+            chatId,
+            Schedule.ScheduleRunId.make("scheduled-1000-018f47a0-0000-7000-8000-000000000003"),
+            prompt("scheduled"),
+            (event) =>
+              Effect.sync(() => {
+                capturedTypes.push(event.type);
+              }),
+          )
+          .pipe(Effect.forkChild);
+        yield* Deferred.await(captureStarted);
+        if (emitEvent === undefined || completeCapture === undefined) {
+          return yield* Effect.die("Session controls were not initialized");
+        }
+        emitEvent({ type: "title-changed", title: "Delayed title" });
+        completeCapture();
+        const result = yield* Fiber.join(capture);
+        yield* pool.drain();
+        assert.deepStrictEqual(capturedTypes, ["run-started", "run-finished"]);
+        assert.deepStrictEqual(
+          result.events.map((event) => event.type),
+          ["run-started", "run-finished"],
+        );
+        assert.deepStrictEqual(
+          (yield* Fiber.join(forwarded)).map((envelope) => envelope.event),
+          [{ type: "title-changed", title: "Delayed title" }],
+        );
+      }),
+    ),
+  );
+  it.effect("aborts a pending prompt when its capture sink fails and preserves the session", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const abortCalled = yield* Deferred.make<void>();
+        let sends = 0;
+        let resolvePendingPrompt: (() => void) | undefined;
+        const pool = yield* makeSessionPool({
+          factory: {
+            open: (_id, emit) =>
+              Effect.succeed({
+                session: {
+                  settleInFlightMessagePersistence: () => Promise.resolve(),
+                  abort: () => {
+                    resolvePendingPrompt?.();
+                    emit({ type: "run-finished", outcome: "aborted" });
+                    Effect.runSync(Deferred.succeed(abortCalled, undefined));
+                    return Promise.resolve();
+                  },
+                  beginDispose: () => {},
+                  dispose: () => Promise.resolve(),
+                },
+                sendPrompt: () => {
+                  sends += 1;
+                  if (sends === 1) {
+                    emit({ type: "run-started" });
+                    return new Promise<void>((resolve) => {
+                      resolvePendingPrompt = resolve;
+                    });
+                  }
+                  if (sends === 2) {
+                    emit({ type: "run-started" });
+                    emit({ type: "run-finished", outcome: "completed" });
+                  } else {
+                    emit({ type: "title-changed", title: "ordinary" });
+                  }
+                  return Promise.resolve();
+                },
+                shake: async (mode) => shakeResult(mode),
+                appendAssistantMessage: () => Promise.resolve(),
+                contextUsage: () => ({ kind: "unavailable" }),
+                unsubscribe: () => {},
+              }),
+          },
+          loadTranscript: () => Effect.succeed([]),
+        });
+        const forwarded: Array<string> = [];
+        yield* pool.events.pipe(
+          Stream.runForEach((envelope) =>
+            Effect.sync(() => {
+              forwarded.push(envelope.event.type);
+            }),
+          ),
+          Effect.forkChild,
+        );
+        const runId = Schedule.ScheduleRunId.make(
+          "scheduled-1000-018f47a0-0000-7000-8000-000000000003",
+        );
+        const capturedTypes: Array<string> = [];
+        const failedCapture = yield* pool
+          .sendCaptured(chatId, runId, prompt("fails to capture"), (event) =>
+            Effect.gen(function* () {
+              capturedTypes.push(event.type);
+              if (capturedTypes.length === 1) {
+                return yield* new AgentError({ message: "artifact sink failed" });
+              }
+            }),
+          )
+          .pipe(Effect.flip, Effect.forkChild);
+
+        yield* Deferred.await(abortCalled);
+        const sinkFailure = yield* Fiber.join(failedCapture);
+        assert.strictEqual(sinkFailure.message, "artifact sink failed");
+        assert.deepStrictEqual(capturedTypes, ["run-started", "run-finished"]);
+
+        const recovered = yield* pool.sendCaptured(
+          chatId,
+          runId,
+          prompt("capture after failure"),
+          () => Effect.void,
+        );
+        assert.strictEqual(recovered.outcome, "completed");
+        yield* pool.send(chatId, prompt("ordinary"));
+        yield* pool.drain();
+        assert.deepStrictEqual(forwarded, ["title-changed"]);
+      }),
+    ),
+  );
+
+  it.effect("drains interrupted capture events before restoring ordinary forwarding", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const runStarted = yield* Deferred.make<void>();
+        let sends = 0;
+        const pool = yield* makeSessionPool({
+          factory: {
+            open: (_id, emit) =>
+              Effect.succeed({
+                session: {
+                  settleInFlightMessagePersistence: () => Promise.resolve(),
+                  abort: () => {
+                    emit({ type: "title-changed", title: "captured-after-abort" });
+                    emit({ type: "run-finished", outcome: "aborted" });
+                    return Promise.resolve();
+                  },
+                  beginDispose: () => {},
+                  dispose: () => Promise.resolve(),
+                },
+                sendPrompt: () => {
+                  sends += 1;
+                  if (sends === 1) {
+                    emit({ type: "run-started" });
+                    Effect.runSync(Deferred.succeed(runStarted, undefined));
+                  } else {
+                    emit({ type: "title-changed", title: "ordinary" });
+                  }
+                  return Promise.resolve();
+                },
+                shake: async (mode) => shakeResult(mode),
+                appendAssistantMessage: () => Promise.resolve(),
+                contextUsage: () => ({ kind: "unavailable" }),
+                unsubscribe: () => {},
+              }),
+          },
+          loadTranscript: () => Effect.succeed([]),
+        });
+        const forwarded: Array<string> = [];
+        yield* pool.events.pipe(
+          Stream.runForEach((envelope) =>
+            Effect.sync(() => {
+              forwarded.push(envelope.event.type);
+            }),
+          ),
+          Effect.forkChild,
+        );
+        const capture = yield* pool
+          .sendCaptured(
+            chatId,
+            Schedule.ScheduleRunId.make("scheduled-1000-018f47a0-0000-7000-8000-000000000003"),
+            prompt("interrupt me"),
+            () => Effect.void,
+          )
+          .pipe(Effect.forkChild);
+        yield* Deferred.await(runStarted);
+        yield* Fiber.interrupt(capture);
+        yield* pool.send(chatId, prompt("ordinary"));
+        yield* pool.drain();
+        assert.deepStrictEqual(forwarded, ["title-changed", "title-changed"]);
       }),
     ),
   );

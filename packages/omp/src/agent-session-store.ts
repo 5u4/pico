@@ -62,7 +62,15 @@ export const make = Effect.fn("AgentSessionStore.make")(function* (sessionsDir: 
     );
   });
 
-  return AgentSessionStore.of({ create });
+  const remove = Effect.fn("AgentSessionStore.remove")(function* (
+    chatId: CreateAgentSession["chatId"],
+  ) {
+    yield* fileSystem
+      .remove(path.join(sessionsDir, `${chatId}.jsonl`), { force: true })
+      .pipe(Effect.mapError((error) => agentError("Failed to remove OMP session", error)));
+  });
+
+  return AgentSessionStore.of({ create, remove });
 });
 
 export const layer = (sessionsDir: AbsolutePath) =>

@@ -35,6 +35,7 @@ describe("ConfigRoot.open", () => {
             secretsDir: path.join(canonicalRoot, "secrets"),
             worktreesDir: path.join(canonicalRoot, "worktrees"),
             logsDir: path.join(canonicalRoot, "logs"),
+            schedulesDir: path.join(canonicalRoot, "schedules"),
           });
           assert.isTrue(yield* fileSystem.exists(lockFile));
           assert.isFalse(yield* fileSystem.exists(paths.configFile));

@@ -29,6 +29,7 @@ export const open = Effect.fn("ConfigRoot.open")(function* (root: PicoRootType) 
     secretsDir: child("secrets"),
     worktreesDir: child("worktrees"),
     logsDir: child("logs"),
+    schedulesDir: child("schedules"),
   };
   const lockFile = child(".pico.lock");
 

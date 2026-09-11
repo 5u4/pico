@@ -15,6 +15,7 @@
     "@pico/logging": "workspace:*",
     "@pico/omp": "workspace:*",
     "@pico/persistence": "workspace:*",
+    "@pico/schedule": "workspace:*",
     "effect": "catalog:"
   }
 }

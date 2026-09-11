@@ -20,6 +20,14 @@
   - ~/.pico/secrets/* # secrets
   - ~/.pico/worktrees/* # the worktrees
   - ~/.pico/logs/* # the logs
+- ~/.pico/schedules/{enabled,disabled}/{schedule-id}/meta.json # metadata without source flags
+  - script.js and prompt.md are the only source files; at least one must exist as a direct regular file, and no extra definition files are allowed
+  - scriptTimeoutMs is optional and only affects script.js
+  - scripts emit one strict JSON decision: { agent: boolean, content?: non-empty string }
+- ~/.pico/schedules/runs/{schedule-id}/{run-id}/run.json # run lifecycle
+- schedule state comes only from the parent `enabled` or `disabled` directory
+- schedule runs copy their exact metadata and source files before execution
+- schedule definitions and runs never use sqlite
 - each workspace can only belong to one platform (native | discord | ...)
 - platform = null means it's native -> created through the native pico app, not from the other chat apps
 - db workspace schema

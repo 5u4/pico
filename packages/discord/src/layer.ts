@@ -1,9 +1,12 @@
 import type { DiscordConfig } from "@pico/config/config";
+import type { AgentEventEnvelope } from "@pico/contract/agent-event";
+import type * as Chat from "@pico/contract/chat-model";
 import { EventRouter } from "@pico/contract/event-router";
 import { type CreateApplicationCommand, createBot, GatewayIntents, MessageFlags } from "discordeno";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Redacted from "effect/Redacted";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
@@ -70,6 +73,28 @@ export const openBot = Effect.fn("Discord.openBot")(function* (
   return yield* Effect.acquireRelease(acquire, () => stopBot(bot));
 });
 
+export const pumpOutput = Effect.fn("Discord.pumpOutput")(function* (
+  eventRouter: EventRouter["Service"],
+  resolveThreadId: (chatId: Chat.ChatId) => Effect.Effect<Option.Option<bigint>, unknown>,
+  dispatch: (threadId: bigint, envelope: AgentEventEnvelope) => Effect.Effect<unknown, unknown>,
+) {
+  const route = yield* eventRouter.open(() => true);
+  yield* route.events.pipe(
+    Stream.runForEach((envelope) =>
+      resolveThreadId(envelope.chatId).pipe(
+        Effect.flatMap(
+          Option.match({
+            onNone: () => Effect.void,
+            onSome: (threadId) => dispatch(threadId, envelope),
+          }),
+        ),
+        Effect.catchCause((cause) => Effect.logError("Discord output failed", Cause.pretty(cause))),
+      ),
+    ),
+    Effect.forkScoped({ startImmediately: true }),
+  );
+});
+
 const start = Effect.fn("Discord.start")(function* (config: DiscordConfig) {
   const eventRouter = yield* EventRouter;
   const allowedMentions = { parse: [], repliedUser: false };
@@ -119,8 +144,7 @@ const start = Effect.fn("Discord.start")(function* (config: DiscordConfig) {
     for (const guildId of guilds) joinedGuildIds.add(guildId.toString());
   };
 
-  const findThreadId = yield* DiscordInput.install(bot, config, () => eventRouter.drain());
-  const route = yield* eventRouter.open((envelope) => findThreadId(envelope.chatId) !== undefined);
+  const resolveThreadId = yield* DiscordInput.install(bot, config, () => eventRouter.drain());
   const scope = yield* Scope.Scope;
   const dispatch = DiscordOutput.make(
     {
@@ -149,16 +173,7 @@ const start = Effect.fn("Discord.start")(function* (config: DiscordConfig) {
     { showToolCalls: config.showToolCalls, showThinking: config.showThinking },
   );
 
-  yield* route.events.pipe(
-    Stream.runForEach((envelope) => {
-      const threadId = findThreadId(envelope.chatId);
-      if (threadId === undefined) return Effect.void;
-      return dispatch(threadId, envelope).pipe(
-        Effect.catchCause((cause) => Effect.logError("Discord output failed", Cause.pretty(cause))),
-      );
-    }),
-    Effect.forkScoped({ startImmediately: true }),
-  );
+  yield* pumpOutput(eventRouter, resolveThreadId, dispatch);
 
   yield* openBot(bot, config, joinedGuildIds);
 });

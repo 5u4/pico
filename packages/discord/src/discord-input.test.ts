@@ -1,9 +1,11 @@
 import * as BunCrypto from "@effect/platform-bun/BunCrypto";
 import { assert, describe, it } from "@effect/vitest";
+import type { AgentEventEnvelope } from "@pico/contract/agent-event";
 import type { ContextUsage } from "@pico/contract/agent-runtime";
 import { Application, type BindWorkspace } from "@pico/contract/application";
 import * as Chat from "@pico/contract/chat-model";
 import { ApplicationError, ChatClosed, WorkspaceBindingInvalid } from "@pico/contract/errors";
+import { EventRouter } from "@pico/contract/event-router";
 import { AbsolutePath } from "@pico/contract/path";
 import * as Workspace from "@pico/contract/workspace-model";
 import {
@@ -18,6 +20,8 @@ import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Option from "effect/Option";
 import * as Redacted from "effect/Redacted";
+import * as Scope from "effect/Scope";
+import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 import {
   type DiscordInputBot,
@@ -25,6 +29,8 @@ import {
   type DiscordMessage,
   install,
 } from "./discord-input.ts";
+import * as DiscordOutput from "./discord-output.ts";
+import { pumpOutput } from "./layer.ts";
 
 const workspaceId = Workspace.WorkspaceId.make("018f47a0-0000-7000-8000-000000000001");
 const chatId = Chat.ChatId.make("018f47a0-0000-7000-8000-000000000002");
@@ -103,7 +109,9 @@ describe("Discord input", () => {
         const order: string[] = [];
         const sent: string[] = [];
         let channelReads = 0;
-        let threadIdForChat: ((candidate: Chat.ChatId) => bigint | undefined) | undefined;
+        let resolveThreadId:
+          | ((candidate: Chat.ChatId) => Effect.Effect<Option.Option<bigint>, unknown>)
+          | undefined;
 
         const bot = {
           id: 999n,
@@ -158,12 +166,17 @@ describe("Discord input", () => {
               return Option.none();
             }),
           findChatByPlatformId: () => Effect.succeed(Option.none()),
+          findChatPlatformBinding: () => Effect.die("unexpected chat binding lookup"),
           transcript: () => Effect.die("unexpected transcript read"),
           sendMessage: (_chatId, content) =>
             Effect.gen(function* () {
               order.push("send");
               sent.push(content);
-              assert.strictEqual(threadIdForChat?.(chatId), 20n);
+              if (resolveThreadId === undefined) return yield* Effect.die("Resolver not installed");
+              assert.strictEqual(
+                Option.getOrUndefined(yield* resolveThreadId(chatId).pipe(Effect.orDie)),
+                20n,
+              );
               yield* Deferred.succeed(sent.length === 1 ? firstSent : secondSent, undefined);
             }),
           abort: () => Effect.die("unexpected chat abort"),
@@ -171,8 +184,7 @@ describe("Discord input", () => {
           shake: () => Effect.die("unexpected chat shake"),
           closeChat: () => Effect.die("unexpected chat close"),
         });
-
-        threadIdForChat = yield* install(bot, config).pipe(
+        resolveThreadId = yield* install(bot, config).pipe(
           Effect.provideService(Application, application),
           Effect.provide(BunCrypto.layer),
         );
@@ -188,13 +200,123 @@ describe("Discord input", () => {
           "send",
         ]);
         assert.deepStrictEqual(sent, ["  hello   from pico  "]);
-        assert.strictEqual(channelReads, 1);
-        assert.strictEqual(threadIdForChat(chatId), 20n);
+        if (resolveThreadId === undefined) return yield* Effect.die("Resolver not installed");
+        assert.strictEqual(Option.getOrUndefined(yield* resolveThreadId(chatId)), 20n);
 
         handleMessage(message({ channelId: 20n, id: 12n, content: "again" }));
         yield* Deferred.await(secondSent);
         assert.deepStrictEqual(sent, ["  hello   from pico  ", "again"]);
         assert.strictEqual(channelReads, 1);
+      }),
+    ),
+  );
+
+  it.effect("delivers persisted Discord output with cold caches", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        let bindingLookups = 0;
+        const delivered = yield* Deferred.make<void>();
+        const sent: Array<{ readonly threadId: bigint; readonly content: string }> = [];
+        const bot = {
+          id: 999n,
+          events: {},
+          helpers: {
+            getChannel: async () => {
+              throw new Error("cold output must not inspect Discord channels");
+            },
+            sendMessage: async () => undefined,
+            editChannel: async () => undefined,
+            startThreadWithMessage: async () => {
+              throw new Error("cold output must not create Discord threads");
+            },
+          },
+        } satisfies DiscordInputBot;
+        const application = Application.of({
+          createWorkspace: () => Effect.die("unexpected workspace creation"),
+          bindWorkspace: () => Effect.die("unexpected workspace binding"),
+          createChat: () => Effect.die("unexpected chat creation"),
+          findWorkspaceByPlatformId: () => Effect.die("unexpected workspace lookup"),
+          findChatByPlatformId: () => Effect.die("unexpected chat lookup"),
+          findChatPlatformBinding: (requestedChatId) =>
+            Effect.sync(() => {
+              bindingLookups += 1;
+              return Option.some({
+                platform: "discord",
+                externalId: requestedChatId === chatId ? "20" : "not-a-thread",
+              });
+            }),
+          transcript: () => Effect.die("unexpected transcript read"),
+          sendMessage: () => Effect.die("unexpected message send"),
+          abort: () => Effect.die("unexpected chat abort"),
+          contextUsage: () => Effect.die("unexpected context read"),
+          shake: () => Effect.die("unexpected chat shake"),
+          closeChat: () => Effect.die("unexpected chat close"),
+        });
+        const resolveThreadId = yield* install(bot, config).pipe(
+          Effect.provideService(Application, application),
+          Effect.provide(BunCrypto.layer),
+        );
+        const envelopes: ReadonlyArray<AgentEventEnvelope> = [
+          {
+            chatId: failingChatId,
+            event: { type: "notice", level: "error", message: "invalid persisted binding" },
+          },
+          { chatId, event: { type: "run-started" } },
+          {
+            chatId,
+            event: {
+              type: "message-settled",
+              message: {
+                role: "assistant",
+                status: "completed",
+                stopReason: "stop",
+                content: [{ type: "text", text: "scheduled after restart" }],
+                model: "pico/schedule",
+                timestamp: 0,
+              },
+            },
+          },
+          { chatId, event: { type: "run-finished", outcome: "completed" } },
+        ];
+        const eventRouter = EventRouter.of({
+          open: (filter) =>
+            Effect.sync(() => {
+              assert.isTrue(envelopes.every(filter));
+              return {
+                events: Stream.fromIterable(envelopes),
+                setFilter: () => Effect.void,
+              };
+            }),
+          drain: () => Deferred.await(delivered),
+        });
+        const scope = yield* Scope.Scope;
+        const dispatch = DiscordOutput.make(
+          {
+            send: (threadId, output) =>
+              Effect.sync(() => {
+                sent.push({ threadId, content: output.content });
+                return 1n;
+              }),
+            edit: () => Effect.void,
+            renameThread: () => Effect.void,
+            triggerTyping: () => Effect.void,
+          },
+          scope,
+          { showToolCalls: false, showThinking: false },
+        );
+        yield* pumpOutput(eventRouter, resolveThreadId, (threadId, envelope) =>
+          dispatch(threadId, envelope).pipe(
+            Effect.tap(() =>
+              envelope.event.type === "run-finished"
+                ? Deferred.succeed(delivered, undefined)
+                : Effect.void,
+            ),
+          ),
+        );
+        yield* eventRouter.drain();
+
+        assert.deepStrictEqual(sent, [{ threadId: 20n, content: "scheduled after restart" }]);
+        assert.strictEqual(bindingLookups, 2);
       }),
     ),
   );
@@ -226,6 +348,7 @@ describe("Discord input", () => {
           createChat: () => Effect.die("unexpected chat creation"),
           findWorkspaceByPlatformId: () => Effect.die("unexpected workspace lookup"),
           findChatByPlatformId: () => Effect.die("unexpected chat lookup"),
+          findChatPlatformBinding: () => Effect.die("unexpected chat binding lookup"),
           transcript: () => Effect.die("unexpected transcript read"),
           sendMessage: () => Effect.die("unexpected message send"),
           abort: () => Effect.die("unexpected chat abort"),
@@ -348,6 +471,7 @@ describe("Discord input", () => {
           createChat: () => Effect.die("unexpected chat creation"),
           findWorkspaceByPlatformId: () => Effect.die("unexpected workspace lookup"),
           findChatByPlatformId: () => Effect.die("unexpected chat lookup"),
+          findChatPlatformBinding: () => Effect.die("unexpected chat binding lookup"),
           transcript: () => Effect.die("unexpected transcript read"),
           sendMessage: () => Effect.die("unexpected message send"),
           abort: () => Effect.die("unexpected chat abort"),
@@ -377,7 +501,7 @@ describe("Discord input", () => {
                   repliedUser: false,
                 });
                 edits += 1;
-                resolve(options.content);
+                resolve(options.content ?? "");
               },
               ...overrides,
             });
@@ -552,6 +676,7 @@ describe("Discord input", () => {
               if (threadId === "22") return Option.some(failedChat);
               return Option.none();
             }),
+          findChatPlatformBinding: () => Effect.die("unexpected chat binding lookup"),
           transcript: () => Effect.die("unexpected transcript read"),
           sendMessage: () => Effect.die("shake must not use application.sendMessage"),
           abort: () => Effect.die("unexpected chat abort"),
@@ -605,7 +730,7 @@ describe("Discord input", () => {
                     parse: [],
                     repliedUser: false,
                   });
-                  resolve(response.content);
+                  resolve(response.content ?? "");
                 },
               }),
             );
@@ -728,6 +853,7 @@ describe("Discord input", () => {
               if (threadId === "23") return Option.some(chat(unavailableChatId, threadId));
               return Option.none();
             }),
+          findChatPlatformBinding: () => Effect.die("unexpected chat binding lookup"),
           transcript: () => Effect.die("unexpected transcript read"),
           sendMessage: () => Effect.die("context must not use application.sendMessage"),
           abort: () => Effect.die("unexpected chat abort"),
@@ -775,7 +901,7 @@ describe("Discord input", () => {
                     parse: [],
                     repliedUser: false,
                   });
-                  resolve(response.content);
+                  resolve(response.content ?? "");
                 },
               }),
             );
@@ -859,6 +985,7 @@ describe("Discord input", () => {
                 archivedAt: null,
               }),
             ),
+          findChatPlatformBinding: () => Effect.die("unexpected chat binding lookup"),
           transcript: () => Effect.die("unexpected transcript read"),
           sendMessage: () =>
             Effect.gen(function* () {
@@ -948,6 +1075,7 @@ describe("Discord input", () => {
                 archivedAt: null,
               }),
             ),
+          findChatPlatformBinding: () => Effect.die("unexpected chat binding lookup"),
           transcript: () => Effect.die("unexpected transcript read"),
           sendMessage: () =>
             Effect.gen(function* () {
@@ -1071,6 +1199,7 @@ describe("Discord input", () => {
             }),
           findWorkspaceByPlatformId: () => Effect.die("bind cache must prevent workspace lookup"),
           findChatByPlatformId: () => Effect.die("unexpected chat lookup"),
+          findChatPlatformBinding: () => Effect.die("unexpected chat binding lookup"),
           transcript: () => Effect.die("unexpected transcript read"),
           sendMessage: () =>
             Effect.gen(function* () {
@@ -1168,6 +1297,7 @@ describe("Discord input", () => {
           createChat: () => Effect.die("unexpected chat creation"),
           findWorkspaceByPlatformId: () => Effect.die("unexpected workspace lookup"),
           findChatByPlatformId: () => Effect.succeed(Option.some(chat)),
+          findChatPlatformBinding: () => Effect.die("unexpected chat binding lookup"),
           transcript: () => Effect.die("unexpected transcript read"),
           closeChat: (_id, options) =>
             Effect.sync(() => {

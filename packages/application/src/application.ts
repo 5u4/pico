@@ -1,9 +1,11 @@
+import type * as AgentEvent from "@pico/contract/agent-event";
 import type * as AgentMessage from "@pico/contract/agent-message";
 import { AgentRuntime, type ShakeMode } from "@pico/contract/agent-runtime";
 import { AgentSessionStore } from "@pico/contract/agent-session-store";
 import {
   Application,
   type BindWorkspace,
+  type ChatPlatformBinding,
   type CloseChatOptions,
   type CloseChatResult,
   type CreateChat,
@@ -11,14 +13,23 @@ import {
 } from "@pico/contract/application";
 import * as Chat from "@pico/contract/chat-model";
 import { ChatRepository } from "@pico/contract/chat-repository";
-import { ApplicationError, ChatClosed, WorkspaceBindingInvalid } from "@pico/contract/errors";
+import {
+  AgentError,
+  ApplicationError,
+  ChatClosed,
+  WorkspaceBindingInvalid,
+} from "@pico/contract/errors";
 import { AbsolutePath } from "@pico/contract/path";
+import * as Schedule from "@pico/contract/schedule";
 import * as Workspace from "@pico/contract/workspace-model";
 import { WorkspaceRepository } from "@pico/contract/workspace-repository";
 import type { GitWorktree } from "@pico/contract/worktree";
+import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
+import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -26,6 +37,10 @@ import * as Path from "effect/Path";
 import * as Semaphore from "effect/Semaphore";
 
 const failure = (message: string) => () => new ApplicationError({ message });
+const scheduleHostError = (cause: { readonly message?: string }) =>
+  new Schedule.ScheduleHostError({
+    message: cause.message ?? "Scheduled application operation failed",
+  });
 
 const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) {
   const workspaces = yield* WorkspaceRepository;
@@ -193,41 +208,96 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
       .pipe(Effect.mapError(failure("Failed to bind workspace")));
   });
 
-  const createChat = Effect.fn("Application.createChat")(
-    function* (input: CreateChat) {
+  const persistChat = Effect.fn("Application.persistChat")(function* (
+    input: CreateChat,
+    id: Chat.ChatId,
+    cwd: AbsolutePath,
+    createdAt: number,
+  ) {
+    return yield* Effect.acquireUseRelease(
+      sessions.create({ chatId: id, cwd }),
+      () => chats.create({ ...input, id, cwd, createdAt }),
+      (_, exit) =>
+        Exit.isFailure(exit)
+          ? sessions
+              .remove(id)
+              .pipe(
+                Effect.catchCause((cause) =>
+                  Effect.logError("Failed to roll back OMP session", Cause.pretty(cause)),
+                ),
+              )
+          : Effect.void,
+    );
+  });
+
+  const createChatWithId = Effect.fn("Application.createChatWithId")(
+    function* (input: CreateChat, id: Chat.ChatId, createdAt: number) {
       const maybeWorkspace = yield* workspaces.findById(input.workspaceId);
       if (Option.isNone(maybeWorkspace)) {
         return yield* Effect.fail(new ApplicationError({ message: "Failed to create chat" }));
       }
 
       const workspace = maybeWorkspace.value;
-      const id = Chat.ChatId.make(yield* crypto.randomUUIDv7);
-      const createdAt = yield* Clock.currentTimeMillis;
-
       if (workspace.worktree === null) {
         const cwd = yield* resolveWorkspacePath("cwd", workspace.defaultCwd);
-        yield* sessions.create({ chatId: id, cwd });
-        return yield* chats.create({
-          ...input,
-          id,
-          cwd,
-          createdAt,
-        });
+        return yield* persistChat(input, id, cwd, createdAt);
       }
 
-      const cwd = yield* gitWorktree.create(
+      return yield* gitWorktree.create(
         {
           chatId: id,
           repositoryCwd: workspace.defaultCwd,
           settings: workspace.worktree,
         },
-        (createdCwd) =>
-          sessions.create({ chatId: id, cwd: createdCwd }).pipe(Effect.as(createdCwd)),
+        (cwd) => persistChat(input, id, cwd, createdAt),
       );
-      return yield* chats.create({ ...input, id, cwd, createdAt });
     },
     Effect.mapError(failure("Failed to create chat")),
   );
+
+  const createChat = Effect.fn("Application.createChat")(function* (input: CreateChat) {
+    return yield* createChatWithId(
+      input,
+      Chat.ChatId.make(
+        yield* crypto.randomUUIDv7.pipe(Effect.mapError(failure("Failed to create chat"))),
+      ),
+      yield* Clock.currentTimeMillis,
+    );
+  });
+
+  const createScheduledChat = Effect.fn("Application.createScheduledChat")(function* (
+    workspaceId: Workspace.WorkspaceId,
+    chatId: Chat.ChatId,
+  ) {
+    const existing = yield* chats
+      .findById(chatId)
+      .pipe(Effect.mapError(failure("Failed to create chat")));
+    if (Option.isSome(existing)) {
+      if (existing.value.workspaceId !== workspaceId) {
+        return yield* new ApplicationError({ message: "Failed to create chat" });
+      }
+      return existing.value;
+    }
+    return yield* createChatWithId(
+      { workspaceId, externalId: null },
+      chatId,
+      yield* Clock.currentTimeMillis,
+    );
+  });
+
+  const resolveScheduledChat = Effect.fn("Application.resolveScheduledChat")(function* (
+    ownerWorkspaceId: Workspace.WorkspaceId,
+    chatId: Chat.ChatId,
+  ) {
+    const chat = yield* findChat(chatId);
+    if (chat.workspaceId !== ownerWorkspaceId) {
+      return yield* new ApplicationError({
+        message: "Scheduled chat does not belong to its owner workspace",
+      });
+    }
+    if (chat.archivedAt !== null) return yield* new ChatClosed();
+    return chat;
+  });
 
   const findWorkspaceByPlatformId = Effect.fn("Application.findWorkspaceByPlatformId")(
     function* (platform: Workspace.WorkspacePlatform, workspaceExternalId: string) {
@@ -253,6 +323,24 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
     },
     Effect.mapError(failure("Failed to find chat")),
   );
+  const findChatPlatformBinding = Effect.fn("Application.findChatPlatformBinding")(
+    function* (chatId: Chat.ChatId) {
+      const chat = yield* chats.findById(chatId);
+      if (Option.isNone(chat) || chat.value.externalId === null) {
+        return Option.none<ChatPlatformBinding>();
+      }
+      const workspace = yield* workspaces.findById(chat.value.workspaceId);
+      if (Option.isNone(workspace)) {
+        return yield* new ApplicationError({ message: "Chat workspace not found" });
+      }
+      if (workspace.value.binding === null) return Option.none<ChatPlatformBinding>();
+      return Option.some({
+        platform: workspace.value.binding.platform,
+        externalId: chat.value.externalId,
+      });
+    },
+    Effect.mapError(failure("Failed to find chat platform binding")),
+  );
 
   const transcript = Effect.fn("Application.transcript")(
     function* (chatId: Chat.ChatId) {
@@ -277,7 +365,7 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
           inspection.state === "dirty" &&
           !options.allowDirtyWorktree
         ) {
-          return { kind: "worktree-confirmation-required" };
+          return { kind: "worktree-confirmation-required" } satisfies CloseChatResult;
         }
 
         const archivedAt = yield* Clock.currentTimeMillis;
@@ -298,7 +386,7 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
             case "already-absent":
               break;
             case "force-required":
-              return { kind: "worktree-confirmation-required" };
+              return { kind: "worktree-confirmation-required" } satisfies CloseChatResult;
             case "not-managed":
               return yield* new ApplicationError({
                 message: "Failed to remove chat worktree",
@@ -309,7 +397,7 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
             }
           }
         }
-        return { kind: "closed" };
+        return { kind: "closed" } satisfies CloseChatResult;
       }),
     );
   });
@@ -328,19 +416,60 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
       }),
     );
   });
+  const runScheduled = Effect.fn("Application.runScheduled")(function* (
+    chatId: Chat.ChatId,
+    runId: Schedule.ScheduleRunId,
+    prompt: AgentMessage.AgentPrompt,
+    onEvent: (event: AgentEvent.AgentEvent) => Effect.Effect<void, AgentError>,
+  ) {
+    return yield* serialized(
+      chatId,
+      Effect.gen(function* () {
+        yield* ensureChatOpen(chatId, "Failed to run scheduled prompt");
+        return yield* runtime
+          .sendCaptured(chatId, runId, prompt, onEvent)
+          .pipe(Effect.mapError(failure("Failed to run scheduled prompt")));
+      }),
+    );
+  });
 
-  const abort = Effect.fn("Application.abort")(function* (chatId: Chat.ChatId) {
+  const deliverScheduled = Effect.fn("Application.deliverScheduled")(function* (
+    chatId: Chat.ChatId,
+    content: string,
+  ) {
     yield* serialized(
       chatId,
       Effect.gen(function* () {
-        const chat = yield* chats
-          .findById(chatId)
-          .pipe(Effect.mapError(failure("Failed to abort chat")));
-        if (Option.isNone(chat)) return yield* new ApplicationError({ message: "Chat not found" });
-        if (chat.value.archivedAt !== null) return;
-        yield* runtime.abort(chatId).pipe(Effect.mapError(failure("Failed to abort chat")));
+        yield* ensureChatOpen(chatId, "Failed to deliver scheduled result");
+        yield* runtime
+          .deliver(chatId, content)
+          .pipe(Effect.mapError(failure("Failed to deliver scheduled result")));
       }),
     );
+  });
+
+  const publishScheduled = Effect.fn("Application.publishScheduled")(function* (
+    chatId: Chat.ChatId,
+    content: string,
+  ) {
+    yield* serialized(
+      chatId,
+      Effect.gen(function* () {
+        yield* ensureChatOpen(chatId, "Failed to publish scheduled result");
+        yield* runtime
+          .publish(chatId, content)
+          .pipe(Effect.mapError(failure("Failed to publish scheduled result")));
+      }),
+    );
+  });
+
+  const abort = Effect.fn("Application.abort")(function* (chatId: Chat.ChatId) {
+    const chat = yield* chats
+      .findById(chatId)
+      .pipe(Effect.mapError(failure("Failed to abort chat")));
+    if (Option.isNone(chat)) return yield* new ApplicationError({ message: "Chat not found" });
+    if (chat.value.archivedAt !== null) return;
+    yield* runtime.abort(chatId).pipe(Effect.mapError(failure("Failed to abort chat")));
   });
 
   const contextUsage = Effect.fn("Application.contextUsage")(function* (chatId: Chat.ChatId) {
@@ -367,12 +496,13 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
     );
   });
 
-  return Application.of({
+  const application = Application.of({
     createWorkspace,
     bindWorkspace,
     createChat,
     findWorkspaceByPlatformId,
     findChatByPlatformId,
+    findChatPlatformBinding,
     transcript,
     closeChat,
     sendMessage,
@@ -380,6 +510,45 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
     contextUsage,
     shake,
   });
+  const scheduleHost = Schedule.ScheduleRunHostService.of({
+    prepare: (target) => {
+      switch (target.kind) {
+        case "existing-chat":
+          return resolveScheduledChat(target.ownerWorkspaceId, target.chatId).pipe(
+            Effect.map((chat) => ({
+              chatId: chat.id,
+              workspaceId: chat.workspaceId,
+              cwd: chat.cwd,
+            })),
+            Effect.mapError(scheduleHostError),
+          );
+        case "workspace-chat":
+          return createScheduledChat(target.ownerWorkspaceId, target.chatId).pipe(
+            Effect.map((chat) => ({
+              chatId: chat.id,
+              workspaceId: chat.workspaceId,
+              cwd: chat.cwd,
+            })),
+            Effect.mapError(scheduleHostError),
+          );
+        default: {
+          const exhaustive: never = target;
+          return exhaustive;
+        }
+      }
+    },
+    deliver: (chatId, content) =>
+      deliverScheduled(chatId, content).pipe(Effect.mapError(scheduleHostError)),
+    publish: (chatId, content) =>
+      publishScheduled(chatId, content).pipe(Effect.mapError(scheduleHostError)),
+    runPrompt: (chatId, runId, prompt, onEvent) =>
+      runScheduled(chatId, runId, prompt, (event) =>
+        onEvent(event).pipe(Effect.mapError((error) => new AgentError({ message: error.message }))),
+      ).pipe(Effect.mapError(scheduleHostError)),
+  });
+  return Context.make(Application, application).pipe(
+    Context.add(Schedule.ScheduleRunHostService, scheduleHost),
+  );
 });
 
-export const layer = (gitWorktree: GitWorktree) => Layer.effect(Application, make(gitWorktree));
+export const layer = (gitWorktree: GitWorktree) => Layer.effectContext(make(gitWorktree));
