@@ -42,7 +42,7 @@ const daemonLayer = (paths: PicoPaths, config: Config.PicoConfig) =>
       const application = ApplicationLayer.layer(gitWorktree).pipe(
         Layer.provide(Layer.merge(persistence, AgentSessionStoreLayer.layer(paths.sessionsDir))),
       );
-      const agentRuntime = AgentRuntimeLayer.layer(paths, schedules).pipe(
+      const agentRuntime = AgentRuntimeLayer.layer(paths.sessionsDir, schedules).pipe(
         Layer.provide(Layer.merge(chatPlatformResolver, branchNaming)),
       );
       const core = Layer.merge(application, EventRouterLayer.layer).pipe(

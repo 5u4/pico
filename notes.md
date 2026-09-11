@@ -5,7 +5,7 @@
 - reference omp cli if unsure
 - omp session jsonl file is the source of truth
 - set omp session async:false; this is because currently cannot support multiple omp sdk agents run async
-- pico forces OMP `secrets.enabled` for outbound conversation text, even when project settings disable it. OMP owns detection and reversible placeholders; pico does not load its secrets directory into a second detector.
+- pico forces OMP `secrets.enabled` for outbound conversation text, even when project settings disable it. OMP owns detection and reversible placeholders.
 - secret detection is format- and configuration-based, not a guarantee for arbitrary passwords, encoded values, or images. Local tool details, journals, and logs may retain plaintext.
 - share omp auth/model registry
 - append pico identity and platform context through the omp sdk; do not replace its system prompt, so omp's coding instructions remain intact
@@ -31,11 +31,6 @@
 - schedule state comes only from the parent `enabled` or `disabled` directory
 - schedule runs copy their exact metadata and source files before execution
 - schedule definitions and runs never use sqlite
-- the path guard blocks direct file-tool reads and searches of pico secrets, plus writes to secrets and managed state. Searches that include the secrets directory must use a narrower root.
-- managed state includes sessions, schedules, logs, config.toml, store.db and its SQLite sidecars, and .pico.lock. Worktrees stay writable; schedule changes use the registered `schedule_*` tools through `xd://`.
-- the guard checks canonical paths for supported local targets, including symlinks and missing-file parents. It is not a sandbox for shell programs, eval, custom tools, other protocol handlers, hard links, or filesystem races.
-- AST search and rewrite scopes are authorized before native execution, including previews dispatched through `xd://`. OMP rescans an allowed rewrite scope when `xd://resolve` applies it; filesystem changes between preview and apply remain outside this guard's race protection.
-- OMP 18.1.17 has different hashline inspection and execution recovery rules. The guard accepts canonical tagged headers and rejects recovery-only forms. Missing or ambiguous source recovery and `write conflict://` fail closed; use explicit file paths.
 - each workspace can only belong to one platform (native | discord | ...)
 - platform = null means it's native -> created through the native pico app, not from the other chat apps
 - db workspace schema
