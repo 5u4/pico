@@ -34,6 +34,7 @@
 - the path guard blocks direct file-tool reads and searches of pico secrets, plus writes to secrets and managed state. Searches that include the secrets directory must use a narrower root.
 - managed state includes sessions, schedules, logs, config.toml, store.db and its SQLite sidecars, and .pico.lock. Worktrees stay writable; schedule changes use the registered `schedule_*` tools through `xd://`.
 - the guard checks canonical paths for supported local targets, including symlinks and missing-file parents. It is not a sandbox for shell programs, eval, custom tools, other protocol handlers, hard links, or filesystem races.
+- AST search and rewrite scopes are authorized before native execution, including previews dispatched through `xd://`. OMP rescans an allowed rewrite scope when `xd://resolve` applies it; filesystem changes between preview and apply remain outside this guard's race protection.
 - OMP 18.1.17 has different hashline inspection and execution recovery rules. The guard accepts canonical tagged headers and rejects recovery-only forms. Missing or ambiguous source recovery and `write conflict://` fail closed; use explicit file paths.
 - each workspace can only belong to one platform (native | discord | ...)
 - platform = null means it's native -> created through the native pico app, not from the other chat apps

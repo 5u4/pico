@@ -26,6 +26,7 @@ import {
   probeLiteralPathExists,
   resolveReadPath,
   resolveToCwd,
+  resolveToolSearchScope,
   splitInternalUrlSel,
   splitPathAndSelPreferringLiteral,
   toPathList,
@@ -45,7 +46,7 @@ interface Policy {
 }
 
 type Access = "read" | "search" | "write";
-type GuardContext = Pick<ExtensionContext, "cwd" | "localProtocolOptions">;
+type GuardContext = Pick<ExtensionContext, "cwd" | "localProtocolOptions" | "sessionManager">;
 type ProtectedPaths = Pick<
   PicoPaths,
   "root" | "secretsDir" | "sessionsDir" | "schedulesDir" | "logsDir" | "configFile" | "storeFile"
@@ -313,6 +314,51 @@ const checkTool = async (
         ) {
           return true;
         }
+      }
+      return false;
+    }
+    case "ast_grep":
+    case "ast_edit": {
+      const rewriting = event.toolName === "ast_edit";
+      const raw = rewriting
+        ? "paths" in input
+          ? input.paths
+          : undefined
+        : "path" in input
+          ? input.path
+          : undefined;
+      if (
+        raw !== undefined &&
+        raw !== null &&
+        typeof raw !== "string" &&
+        !(Array.isArray(raw) && raw.every((part): part is string => typeof part === "string"))
+      ) {
+        throw new Error("Invalid AST targets");
+      }
+      const entries = toPathList(raw ?? undefined);
+      if (rewriting && entries.length === 0) throw new Error("Missing AST rewrite targets");
+      const rawPaths = await expandDelimitedPathEntries(
+        (entries.length > 0 ? entries : ["."]).map(normalizePathLikeInput),
+        ctx.cwd,
+      );
+      // OMP's skill URL handler reads file content even during path-only scope resolution.
+      for (const path of rawPaths) {
+        if (path.includes("://") && (await checkPath(path, "search", ctx, policy))) return true;
+      }
+      const sessionFile = ctx.sessionManager.getSessionFile();
+      const scope = await resolveToolSearchScope({
+        rawPaths,
+        cwd: ctx.cwd,
+        internalUrlAction: rewriting ? "rewrite" : "search",
+        ...(sessionFile ? { sessionFile } : {}),
+        sessionId: ctx.sessionManager.getSessionId(),
+        ...(ctx.localProtocolOptions ? { localProtocolOptions: ctx.localProtocolOptions } : {}),
+        skills: getActiveSkills(),
+        rules: getActiveRules(),
+      });
+      const access = rewriting ? "write" : "search";
+      for (const target of scope.multiTargets ?? [{ basePath: scope.searchPath }]) {
+        if (await denies(target.basePath, access, policy)) return true;
       }
       return false;
     }

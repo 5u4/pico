@@ -14,6 +14,7 @@ import type {
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { getActiveSkills, setActiveSkills } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { normalizeToolEventInput } from "@oh-my-pi/pi-coding-agent/extensibility/tool-event-input";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { type PicoPaths, PicoRoot } from "@pico/contract/config";
 import { AbsolutePath } from "@pico/contract/path";
@@ -65,6 +66,7 @@ const fixture = async () => {
     );
     const handler = extension.handlers.get("tool_call")?.[0];
     if (!handler) throw new Error("Path guard did not register its tool-call handler");
+    const sessionManager = SessionManager.inMemory(cwd);
     const call = async (
       toolName: ToolCallEvent["toolName"],
       input: Record<string, unknown>,
@@ -78,8 +80,9 @@ const fixture = async () => {
       };
       const context = {
         cwd: workingDirectory,
+        sessionManager,
         localProtocolOptions: { getArtifactsDir: () => artifactsDir },
-      } satisfies Pick<ExtensionContext, "cwd" | "localProtocolOptions">;
+      } satisfies Pick<ExtensionContext, "cwd" | "localProtocolOptions" | "sessionManager">;
       const result = await handler(event, context);
       return (
         typeof result === "object" && result !== null && "block" in result && result.block === true
@@ -308,6 +311,69 @@ describe("Pico path guard", () => {
       assert.isFalse(await f.call("grep", { pattern: "fixture", path: "www.project" }));
       assert.isFalse(await f.call("grep", { pattern: "fixture", path: "www.example.invalid" }));
       assert.isFalse(await f.call("read", { path: "www.token" }));
+    } finally {
+      await f.close();
+    }
+  });
+
+  it("blocks AST secret searches and managed rewrites before a preview can be staged", async () => {
+    const f = await fixture();
+    try {
+      const secret = join(f.paths.secretsDir, "token.ts");
+      const managed = join(f.paths.schedulesDir, "script.js");
+      await writeFile(secret, 'const token = "fabricated";\n');
+      await writeFile(managed, "oldApi();\n");
+      const ops = [{ pat: "oldApi()", out: "newApi()" }];
+      assert.isTrue(await f.call("ast_grep", { pat: "token", path: secret }));
+      assert.isTrue(await f.call("ast_edit", { ops, paths: [secret] }));
+      assert.isTrue(await f.call("ast_edit", { ops, paths: [managed] }));
+      assert.isFalse(await f.call("ast_grep", { pat: "oldApi()", path: managed }));
+      assert.isFalse(await f.call("ast_grep", { pat: "token", path: "ordinary.ts" }));
+      assert.isFalse(await f.call("ast_edit", { ops, paths: ["ordinary.ts"] }));
+    } finally {
+      await f.close();
+    }
+  });
+
+  it("authorizes the resolved AST roots for default, delimited, and glob scopes", async () => {
+    const f = await fixture();
+    try {
+      const secret = join(f.paths.secretsDir, "token.txt");
+      const ops = [{ pat: "oldApi()", out: "newApi()" }];
+      assert.isTrue(await f.call("ast_grep", { pat: "token" }, f.paths.root));
+      assert.isTrue(await f.call("ast_grep", { pat: "token", path: `ordinary.ts;${secret}` }));
+      assert.isTrue(await f.call("ast_grep", { pat: "token", path: `${f.paths.root}/**/*.ts` }));
+      assert.isTrue(await f.call("ast_edit", { ops, paths: [f.paths.root] }));
+      assert.isTrue(await f.call("ast_edit", { ops, paths: [`${f.paths.root}/**/*.ts`] }));
+      assert.isTrue(
+        await f.call("ast_edit", { ops, paths: ["ordinary.ts", f.paths.schedulesDir] }),
+      );
+      assert.isTrue(
+        await f.call("ast_edit", { ops, paths: [`ordinary.ts;${f.paths.schedulesDir}`] }),
+      );
+      assert.isFalse(await f.call("ast_grep", { pat: "token" }));
+      assert.isFalse(await f.call("ast_grep", { pat: "token", path: "**/*.ts" }));
+      assert.isFalse(await f.call("ast_edit", { ops, paths: ["**/*.ts"] }));
+    } finally {
+      await f.close();
+    }
+  });
+
+  it("resolves AST filesystem aliases and local URLs before applying the path policy", async () => {
+    const f = await fixture();
+    try {
+      const ops = [{ pat: "oldApi()", out: "newApi()" }];
+      await symlink(f.paths.secretsDir, join(f.cwd, "private-link"));
+      await symlink(f.paths.schedulesDir, join(f.artifactsDir, "local", "managed"));
+      await symlink(f.paths.secretsDir, join(f.artifactsDir, "local", "private"));
+      assert.isTrue(await f.call("ast_grep", { pat: "token", path: "private-link/*" }));
+      assert.isTrue(await f.call("ast_grep", { pat: "token", path: "local://private/token.txt" }));
+      assert.isTrue(await f.call("ast_edit", { ops, paths: ["local://managed"] }));
+      assert.isTrue(
+        await f.call("ast_edit", { ops, paths: [pathToFileURL(f.paths.secretsDir).href] }),
+      );
+      assert.isFalse(await f.call("ast_grep", { pat: "token", path: "local://scratch.txt" }));
+      assert.isFalse(await f.call("ast_edit", { ops, paths: ["local://scratch.txt"] }));
     } finally {
       await f.close();
     }
