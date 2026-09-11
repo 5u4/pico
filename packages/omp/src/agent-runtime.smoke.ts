@@ -9,6 +9,7 @@ import { BranchNaming } from "@pico/contract/branch-naming";
 import * as Chat from "@pico/contract/chat-model";
 import { ChatPlatformResolver } from "@pico/contract/chat-platform-resolver";
 import { ChatRepository } from "@pico/contract/chat-repository";
+import { type PicoPaths, PicoRoot } from "@pico/contract/config";
 import { AbsolutePath } from "@pico/contract/path";
 import { Schedules } from "@pico/contract/schedule";
 import * as Workspace from "@pico/contract/workspace-model";
@@ -33,6 +34,16 @@ const smoke = Effect.fn("AgentRuntime.smoke")(function* () {
   const temporaryRoot = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-omp-smoke-" });
   const storeFile = AbsolutePath.make(path.join(temporaryRoot, "pico.sqlite"));
   const sessionsDir = AbsolutePath.make(path.join(temporaryRoot, "sessions"));
+  const paths: PicoPaths = {
+    root: PicoRoot.make(temporaryRoot),
+    storeFile,
+    sessionsDir,
+    configFile: AbsolutePath.make(path.join(temporaryRoot, "config.toml")),
+    secretsDir: AbsolutePath.make(path.join(temporaryRoot, "secrets")),
+    schedulesDir: AbsolutePath.make(path.join(temporaryRoot, "schedules")),
+    logsDir: AbsolutePath.make(path.join(temporaryRoot, "logs")),
+    worktreesDir: AbsolutePath.make(path.join(temporaryRoot, "worktrees")),
+  };
   const cwd = AbsolutePath.make(process.cwd());
   const resolvedChat: Chat.Chat = {
     id: chatId,
@@ -62,7 +73,7 @@ const smoke = Effect.fn("AgentRuntime.smoke")(function* () {
         }),
     }),
   );
-  const runtimeLayer = AgentRuntimeLayer.layer(sessionsDir, schedules).pipe(
+  const runtimeLayer = AgentRuntimeLayer.layer(paths, schedules).pipe(
     Layer.provide(
       Layer.merge(
         chatPlatformResolver,

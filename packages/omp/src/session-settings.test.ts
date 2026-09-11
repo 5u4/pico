@@ -23,7 +23,7 @@ const makeProject = Effect.fn("OmpSessionSettingsTest.makeProject")(function* (
   yield* fileSystem.makeDirectory(configDir, { recursive: true });
   yield* fileSystem.writeFileString(
     path.join(configDir, "config.yml"),
-    `tui:\n  renderMermaid: ${renderMermaid}\n`,
+    `tui:\n  renderMermaid: ${renderMermaid}\nsecrets:\n  enabled: false\n`,
   );
   return cwd;
 });
@@ -81,6 +81,8 @@ describe("OMP session settings", () => {
         assert.strictEqual(second.get("async.enabled"), false);
         assert.strictEqual(first.get("title.refreshOnReplan"), false);
         assert.strictEqual(second.get("title.refreshOnReplan"), false);
+        assert.strictEqual(first.get("secrets.enabled"), true);
+        assert.strictEqual(second.get("secrets.enabled"), true);
       }),
     ),
   );

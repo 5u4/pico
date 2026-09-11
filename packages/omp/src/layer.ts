@@ -9,8 +9,8 @@ import { AgentRuntime, type ContextUsage, type ShakeResult } from "@pico/contrac
 import { BranchNaming, type BranchNamingHandler } from "@pico/contract/branch-naming";
 import type * as Chat from "@pico/contract/chat-model";
 import { ChatPlatformResolver } from "@pico/contract/chat-platform-resolver";
+import type { PicoPaths } from "@pico/contract/config";
 import { AgentError } from "@pico/contract/errors";
-import type { AbsolutePath } from "@pico/contract/path";
 import type * as Schedule from "@pico/contract/schedule";
 import * as Cause from "effect/Cause";
 import * as Crypto from "effect/Crypto";
@@ -22,13 +22,15 @@ import { normalizeAgentEvent, normalizeTranscript } from "./agent-event.ts";
 import { makeExchangeTitleFlow } from "./exchange-title.ts";
 import { makeOmpPromptSender } from "./omp-prompt-sender.ts";
 import { make as makeScheduleExtension } from "./schedule-extension.ts";
+import { make as makeSecretGuard } from "./secret-guard.ts";
 import { makeSessionPool, type OpenedSession, type SessionFactory } from "./session-pool.ts";
 import { prepareSessionOptions } from "./session-settings.ts";
 
 export const make = Effect.fn("AgentRuntime.make")(function* (
-  sessionsDir: AbsolutePath,
+  paths: PicoPaths,
   schedules: Schedule.Schedules["Service"],
 ) {
+  const { sessionsDir } = paths;
   const fileSystem = yield* FileSystem.FileSystem;
   const crypto = yield* Crypto.Crypto;
   const path = yield* Path.Path;
@@ -65,7 +67,7 @@ export const make = Effect.fn("AgentRuntime.make")(function* (
 
   const pool = yield* makeSessionPool({
     factory: makeFactory(
-      sessionsDir,
+      paths,
       path,
       fileSystem,
       crypto,
@@ -93,8 +95,8 @@ export const make = Effect.fn("AgentRuntime.make")(function* (
   });
 });
 
-export const layer = (sessionsDir: AbsolutePath, schedules: Schedule.Schedules["Service"]) =>
-  Layer.effect(AgentRuntime, make(sessionsDir, schedules));
+export const layer = (paths: PicoPaths, schedules: Schedule.Schedules["Service"]) =>
+  Layer.effect(AgentRuntime, make(paths, schedules));
 
 const agentError = (message: string, cause: unknown) =>
   new AgentError({
@@ -178,7 +180,7 @@ const normalizeContextUsage = (
 };
 
 const makeFactory = (
-  sessionsDir: AbsolutePath,
+  paths: PicoPaths,
   path: Path.Path,
   fileSystem: FileSystem.FileSystem,
   crypto: Crypto.Crypto,
@@ -190,6 +192,7 @@ const makeFactory = (
 ): SessionFactory => ({
   open: Effect.fn("OmpSession.open")(function* (chatId, emit) {
     const { chat, platform } = yield* chatPlatforms.resolve(chatId);
+    const { sessionsDir } = paths;
     const sessionFile = path.join(sessionsDir, `${chat.id}.jsonl`);
     const { settings, appendSystemPrompt } = yield* prepareSessionOptions(chat.cwd, platform);
 
@@ -210,6 +213,7 @@ const makeFactory = (
         agentRegistry: new OmpAgentRegistry.AgentRegistry(),
         hasUI: false,
         extensions: [
+          makeSecretGuard(paths),
           makeScheduleExtension({
             caller: { chatId: chat.id, workspaceId: chat.workspaceId },
             schedules,

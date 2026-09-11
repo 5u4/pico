@@ -138,6 +138,8 @@
       "name": "@pico/omp",
       "dependencies": {
         "@oh-my-pi/pi-coding-agent": "catalog:",
+        "@oh-my-pi/pi-natives": "catalog:",
+        "@oh-my-pi/pi-utils": "catalog:",
         "@pico/contract": "workspace:*",
         "effect": "catalog:",
       },
@@ -209,6 +211,7 @@
     "@effect/vitest": "4.0.0-rc.112",
     "@oh-my-pi/pi-ai": "18.1.17",
     "@oh-my-pi/pi-coding-agent": "18.1.17",
+    "@oh-my-pi/pi-natives": "18.1.17",
     "@oh-my-pi/pi-utils": "18.1.17",
     "@phosphor-icons/react": "2.1.10",
     "@tailwindcss/vite": "4.3.3",
