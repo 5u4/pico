@@ -7,6 +7,7 @@ import * as OmpSessionLoader from "@oh-my-pi/pi-coding-agent/session/session-loa
 import * as OmpSessionManager from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type * as OmpShake from "@oh-my-pi/pi-coding-agent/session/shake-types";
 import { AgentRuntime, type ContextUsage, type ShakeResult } from "@pico/contract/agent-runtime";
+import { BranchNaming, type BranchNamingHandler } from "@pico/contract/branch-naming";
 import type * as Chat from "@pico/contract/chat-model";
 import { ChatRepository } from "@pico/contract/chat-repository";
 import { AgentError } from "@pico/contract/errors";
@@ -31,6 +32,7 @@ export const make = Effect.fn("AgentRuntime.make")(function* (
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const chats = yield* ChatRepository;
+  const branchNaming = yield* BranchNaming;
 
   yield* fileSystem
     .makeDirectory(sessionsDir, { recursive: true, mode: 0o700 })
@@ -61,7 +63,15 @@ export const make = Effect.fn("AgentRuntime.make")(function* (
   });
 
   const pool = yield* makeSessionPool({
-    factory: makeFactory(sessionsDir, path, chats, authStorage, modelRegistry, schedules),
+    factory: makeFactory(
+      sessionsDir,
+      path,
+      chats,
+      authStorage,
+      modelRegistry,
+      schedules,
+      branchNaming.handle,
+    ),
     loadTranscript,
   });
 
@@ -171,6 +181,7 @@ const makeFactory = (
   authStorage: Awaited<ReturnType<typeof OmpSdk.discoverAuthStorage>>,
   modelRegistry: OmpModelRegistry.ModelRegistry,
   schedules: Schedule.Schedules["Service"],
+  handleBranchNaming: BranchNamingHandler,
 ): SessionFactory => ({
   open: Effect.fn("OmpSession.open")(function* (chatId, emit) {
     const maybeChat = yield* chats
@@ -215,6 +226,8 @@ const makeFactory = (
     ).pipe(Effect.catch((error) => closeManagerAfterFailure(manager, error)));
 
     const titleFlow = makeExchangeTitleFlow({
+      chatId,
+      handleBranchNaming,
       history: created.session.messages,
       sendPrompt: makeOmpPromptSender(created.session),
       generateTitle: (exchange, systemPrompt) =>

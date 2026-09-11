@@ -4,6 +4,7 @@ import { assert, describe, it } from "@effect/vitest";
 import type * as AgentEvent from "@pico/contract/agent-event";
 import * as AgentMessage from "@pico/contract/agent-message";
 import { AgentRuntime } from "@pico/contract/agent-runtime";
+import { BranchNaming } from "@pico/contract/branch-naming";
 import * as Chat from "@pico/contract/chat-model";
 import { ChatRepository } from "@pico/contract/chat-repository";
 import { AbsolutePath } from "@pico/contract/path";
@@ -42,6 +43,14 @@ const smoke = Effect.fn("AgentRuntime.smoke")(function* () {
   });
   const persistenceLayer = Persistence.layer(storeFile);
   const runtimeLayer = AgentRuntimeLayer.layer(sessionsDir, schedules).pipe(
+    Layer.provide(
+      Layer.succeed(
+        BranchNaming,
+        BranchNaming.of({
+          handle: () => {},
+        }),
+      ),
+    ),
     Layer.provideMerge(persistenceLayer),
   );
 

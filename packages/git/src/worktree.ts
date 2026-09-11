@@ -7,6 +7,8 @@ import type {
   GitWorktree,
   RemoveChatWorktreeOptions,
   RemoveChatWorktreeResult,
+  RenameChatBranchOptions,
+  RenameChatBranchResult,
   ValidateWorktreeOptions,
   WorktreeInspection,
 } from "@pico/contract/worktree";
@@ -19,6 +21,8 @@ import type * as PlatformError from "effect/PlatformError";
 import * as Stream from "effect/Stream";
 import * as ChildProcess from "effect/unstable/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
+
+export const BRANCH_ID_SUFFIX_LENGTH = 8;
 
 interface CreatedWorktree {
   readonly repositoryCwd: AbsolutePath;
@@ -155,7 +159,11 @@ const inspectManaged = Effect.fn("GitWorktree.inspectChat")(function* (
 ): Effect.fn.Return<ManagedWorktreeInspection, GitError> {
   const slot = path.normalize(path.join(worktreesDir, options.chatId));
   if (path.normalize(options.cwd) !== slot) return { kind: "not-managed" };
-  if (!(yield* fileSystem.exists(slot))) return { kind: "managed", state: "absent" };
+  if (
+    !(yield* fileSystem.exists(slot).pipe(Effect.mapError(() => gitError("inspect worktree path"))))
+  ) {
+    return { kind: "managed", state: "absent" };
+  }
 
   const isSymlink = yield* fileSystem.readLink(slot).pipe(
     Effect.as(true),
@@ -219,6 +227,132 @@ const inspectChat = (
     ),
   );
 
+type SymbolicHead =
+  | { readonly kind: "branch"; readonly branch: string }
+  | { readonly kind: "detached" };
+
+const symbolicHead = Effect.fn("GitWorktree.symbolicHead")(function* (
+  spawner: Spawner,
+  cwd: AbsolutePath,
+): Effect.fn.Return<SymbolicHead, GitError> {
+  const result = yield* runGitResult(spawner, cwd, "inspect worktree branch", [
+    "symbolic-ref",
+    "--quiet",
+    "--short",
+    "HEAD",
+  ]);
+  if (result.exitCode === 1) return { kind: "detached" };
+  const branch = result.output.trim();
+  if (result.exitCode !== 0 || branch.length === 0) {
+    return yield* gitError("inspect worktree branch");
+  }
+  return { kind: "branch", branch };
+});
+
+const localBranchExists = Effect.fn("GitWorktree.localBranchExists")(function* (
+  spawner: Spawner,
+  cwd: AbsolutePath,
+  branch: string,
+) {
+  const result = yield* runGitResult(spawner, cwd, "inspect local branch", [
+    "show-ref",
+    "--verify",
+    "--quiet",
+    `refs/heads/${branch}`,
+  ]);
+  if (result.exitCode === 0) return true;
+  if (result.exitCode === 1) return false;
+  return yield* gitError("inspect local branch");
+});
+
+const hasRemoteState = Effect.fn("GitWorktree.hasRemoteState")(function* (
+  spawner: Spawner,
+  cwd: AbsolutePath,
+  source: string,
+  target: string,
+) {
+  const configured = yield* runGitResult(spawner, cwd, "inspect branch remote configuration", [
+    "for-each-ref",
+    "--format=%(upstream)%00%(push)",
+    `refs/heads/${source}`,
+  ]);
+  if (configured.exitCode !== 0) return yield* gitError("inspect branch remote configuration");
+  if (configured.output.replaceAll("\0", "").trim().length > 0) return true;
+
+  const remoteRefs = yield* runGitResult(spawner, cwd, "inspect remote-tracking branches", [
+    "for-each-ref",
+    "--format=%(refname)",
+    "refs/remotes",
+  ]);
+  if (remoteRefs.exitCode !== 0) return yield* gitError("inspect remote-tracking branches");
+  return remoteRefs.output
+    .split("\n")
+    .some(
+      (ref) =>
+        ref.startsWith("refs/remotes/") &&
+        (ref.endsWith(`/${source}`) || ref.endsWith(`/${target}`)),
+    );
+});
+
+const renameChatBranch = Effect.fn("GitWorktree.renameChatBranch")(function* (
+  fileSystem: FileSystem.FileSystem,
+  path: Path.Path,
+  spawner: Spawner,
+  worktreesDir: AbsolutePath,
+  options: RenameChatBranchOptions,
+): Effect.fn.Return<RenameChatBranchResult, GitError> {
+  const inspection = yield* inspectManaged(fileSystem, path, spawner, worktreesDir, options);
+  if (inspection.kind === "not-managed") {
+    return { kind: "skipped", reason: "not-managed" };
+  }
+  if (inspection.state === "absent") {
+    return { kind: "skipped", reason: "already-absent" };
+  }
+  const target = `${options.prefix}${options.topic}-${options.chatId.slice(-BRANCH_ID_SUFFIX_LENGTH)}`;
+  const source = `${options.prefix}${options.chatId}`;
+  if (
+    !(yield* runGitExit(spawner, options.cwd, "validate worktree branch", [
+      "check-ref-format",
+      "--branch",
+      target,
+    ]))
+  ) {
+    return { kind: "skipped", reason: "invalid-target" };
+  }
+
+  const head = yield* symbolicHead(spawner, options.cwd);
+  if (head.kind === "detached") return { kind: "skipped", reason: "detached" };
+  if (head.branch === target) return { kind: "already-renamed" };
+  if (head.branch !== source) return { kind: "skipped", reason: "branch-changed" };
+  if (yield* hasRemoteState(spawner, options.cwd, source, target)) {
+    return { kind: "skipped", reason: "remote-state" };
+  }
+  if (yield* localBranchExists(spawner, options.cwd, target)) {
+    return { kind: "skipped", reason: "target-exists" };
+  }
+
+  if (
+    yield* runGitExit(spawner, options.cwd, "rename worktree branch", [
+      "branch",
+      "-m",
+      "--",
+      source,
+      target,
+    ])
+  ) {
+    return { kind: "renamed" };
+  }
+
+  const afterFailure = yield* symbolicHead(spawner, options.cwd);
+  if (afterFailure.kind === "branch" && afterFailure.branch === target) {
+    return { kind: "already-renamed" };
+  }
+  if (afterFailure.kind === "branch" && afterFailure.branch !== source) {
+    return { kind: "skipped", reason: "branch-changed" };
+  }
+  return yield* gitError("rename worktree branch");
+});
+
 const removeChat = Effect.fn("GitWorktree.removeChat")(function* (
   fileSystem: FileSystem.FileSystem,
   path: Path.Path,
@@ -250,7 +384,7 @@ const removeChat = Effect.fn("GitWorktree.removeChat")(function* (
   if (afterFailure.kind === "managed" && afterFailure.state === "absent") {
     return { kind: "already-absent" };
   }
-  if (!options.force && afterFailure.kind === "managed" && afterFailure.state !== "absent") {
+  if (!options.force && afterFailure.kind === "managed") {
     return { kind: "force-required" };
   }
   return yield* gitError("remove worktree");
@@ -343,6 +477,8 @@ export const make = Effect.fn("GitWorktree.make")(function* (
     validate: (options) => validate(spawner, options),
     create,
     inspectChat: (options) => inspectChat(fileSystem, path, spawner, worktreesDir, options),
+    renameChatBranch: (options) =>
+      renameChatBranch(fileSystem, path, spawner, worktreesDir, options),
     removeChat: (options) => removeChat(fileSystem, path, spawner, worktreesDir, options),
   };
 });

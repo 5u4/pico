@@ -3,7 +3,7 @@ import { assert, describe, it } from "@effect/vitest";
 import * as Chat from "@pico/contract/chat-model";
 import { GitError, PersistenceError, WorkspaceBindingInvalid } from "@pico/contract/errors";
 import { AbsolutePath } from "@pico/contract/path";
-import { make } from "@pico/git/worktree";
+import { BRANCH_ID_SUFFIX_LENGTH, make } from "@pico/git/worktree";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
@@ -65,6 +65,16 @@ const options = (id: Chat.ChatId, repositoryCwd: AbsolutePath) => ({
   repositoryCwd,
   settings,
 });
+
+const renameOptions = (id: Chat.ChatId, cwd: AbsolutePath, topic: string) => ({
+  chatId: id,
+  cwd,
+  prefix: settings.prefix,
+  topic,
+});
+
+const renamedBranch = (id: Chat.ChatId, topic: string) =>
+  `${settings.prefix}${topic}-${id.slice(-BRANCH_ID_SUFFIX_LENGTH)}`;
 
 describe("GitWorktree.create", () => {
   it.effect("retains the worktree after commit succeeds", () =>
@@ -226,6 +236,187 @@ describe("GitWorktree.validate", () => {
   );
 });
 
+describe("GitWorktree.renameChatBranch", () => {
+  it.effect("renames the local branch once without moving the UUID worktree", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const { repositoryCwd, worktreesDir } = yield* makeRepository();
+      const worktree = yield* make(worktreesDir);
+      const id = chatId(30);
+      const cwd = AbsolutePath.make(path.join(worktreesDir, id));
+      const source = `chat/${id}`;
+      const target = renamedBranch(id, "fix-parser-flow");
+      yield* worktree.create(options(id, repositoryCwd), () => Effect.void);
+
+      assert.deepStrictEqual(
+        yield* worktree.renameChatBranch(renameOptions(id, cwd, "fix-parser-flow")),
+        { kind: "renamed" },
+      );
+      assert.strictEqual((yield* git(cwd, ["branch", "--show-current"])).trim(), target);
+      assert.strictEqual((yield* git(repositoryCwd, ["branch", "--list", source])).trim(), "");
+      yield* git(repositoryCwd, ["show-ref", "--verify", `refs/heads/${target}`]);
+      assert.strictEqual((yield* fileSystem.realPath(cwd)).trim(), cwd);
+      assert.include(
+        yield* git(repositoryCwd, ["worktree", "list", "--porcelain"]),
+        `worktree ${cwd}`,
+      );
+
+      const fresh = yield* make(worktreesDir);
+      assert.deepStrictEqual(
+        yield* fresh.renameChatBranch(renameOptions(id, cwd, "fix-parser-flow")),
+        { kind: "already-renamed" },
+      );
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
+
+  it.effect("preserves user-renamed and detached worktrees", () =>
+    Effect.gen(function* () {
+      const path = yield* Path.Path;
+      const { repositoryCwd, worktreesDir } = yield* makeRepository();
+      const worktree = yield* make(worktreesDir);
+
+      const renamedId = chatId(31);
+      const renamedCwd = AbsolutePath.make(path.join(worktreesDir, renamedId));
+      yield* worktree.create(options(renamedId, repositoryCwd), () => Effect.void);
+      yield* git(renamedCwd, ["branch", "-m", "custom/user-choice"]);
+      assert.deepStrictEqual(
+        yield* worktree.renameChatBranch(renameOptions(renamedId, renamedCwd, "generated-topic")),
+        { kind: "skipped", reason: "branch-changed" },
+      );
+      assert.strictEqual(
+        (yield* git(renamedCwd, ["branch", "--show-current"])).trim(),
+        "custom/user-choice",
+      );
+
+      const detachedId = chatId(32);
+      const detachedCwd = AbsolutePath.make(path.join(worktreesDir, detachedId));
+      yield* worktree.create(options(detachedId, repositoryCwd), () => Effect.void);
+      yield* git(detachedCwd, ["checkout", "--detach"]);
+      assert.deepStrictEqual(
+        yield* worktree.renameChatBranch(renameOptions(detachedId, detachedCwd, "generated-topic")),
+        { kind: "skipped", reason: "detached" },
+      );
+      assert.strictEqual((yield* git(detachedCwd, ["branch", "--show-current"])).trim(), "");
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
+
+  it.effect("refuses upstream, push, and remote-tracking state", () =>
+    Effect.gen(function* () {
+      const path = yield* Path.Path;
+
+      for (const [index, state] of [
+        "upstream",
+        "push",
+        "remote-source",
+        "remote-target",
+      ].entries()) {
+        const { repositoryCwd, worktreesDir } = yield* makeRepository();
+        const worktree = yield* make(worktreesDir);
+        const id = chatId(40 + index);
+        const cwd = AbsolutePath.make(path.join(worktreesDir, id));
+        const source = `chat/${id}`;
+        const target = renamedBranch(id, "known-remote-topic");
+        yield* worktree.create(options(id, repositoryCwd), () => Effect.void);
+
+        if (state === "upstream") {
+          yield* git(cwd, ["branch", "--set-upstream-to=main", source]);
+        } else if (state === "push") {
+          yield* git(repositoryCwd, ["remote", "add", "origin", repositoryCwd]);
+          yield* git(cwd, ["config", `branch.${source}.pushRemote`, "origin"]);
+          yield* git(cwd, ["config", "push.default", "current"]);
+        } else {
+          const remoteBranch = state === "remote-source" ? source : target;
+          yield* git(repositoryCwd, ["update-ref", `refs/remotes/origin/${remoteBranch}`, "HEAD"]);
+        }
+
+        assert.deepStrictEqual(
+          yield* worktree.renameChatBranch(renameOptions(id, cwd, "known-remote-topic")),
+          { kind: "skipped", reason: "remote-state" },
+          state,
+        );
+        assert.strictEqual((yield* git(cwd, ["branch", "--show-current"])).trim(), source);
+      }
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
+
+  it.effect("refuses invalid and colliding targets without forcing", () =>
+    Effect.gen(function* () {
+      const path = yield* Path.Path;
+      const { repositoryCwd, worktreesDir } = yield* makeRepository();
+      const worktree = yield* make(worktreesDir);
+      const id = chatId(50);
+      const cwd = AbsolutePath.make(path.join(worktreesDir, id));
+      const source = `chat/${id}`;
+      yield* worktree.create(options(id, repositoryCwd), () => Effect.void);
+
+      assert.deepStrictEqual(
+        yield* worktree.renameChatBranch(renameOptions(id, cwd, "bad..topic")),
+        { kind: "skipped", reason: "invalid-target" },
+      );
+      const existingTarget = renamedBranch(id, "existing-topic");
+      yield* git(repositoryCwd, ["branch", existingTarget, "main"]);
+      assert.deepStrictEqual(
+        yield* worktree.renameChatBranch(renameOptions(id, cwd, "existing-topic")),
+        { kind: "skipped", reason: "target-exists" },
+      );
+      assert.strictEqual((yield* git(cwd, ["branch", "--show-current"])).trim(), source);
+      assert.strictEqual(
+        (yield* git(repositoryCwd, ["branch", "--list", existingTarget])).trim(),
+        existingTarget,
+      );
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
+
+  it.effect("converges concurrent same and different topic attempts", () =>
+    Effect.gen(function* () {
+      const path = yield* Path.Path;
+      const { repositoryCwd, worktreesDir } = yield* makeRepository();
+      const worktree = yield* make(worktreesDir);
+
+      const sameId = chatId(60);
+      const sameCwd = AbsolutePath.make(path.join(worktreesDir, sameId));
+      yield* worktree.create(options(sameId, repositoryCwd), () => Effect.void);
+      const sameResults = yield* Effect.all(
+        [
+          worktree.renameChatBranch(renameOptions(sameId, sameCwd, "same-topic")),
+          worktree.renameChatBranch(renameOptions(sameId, sameCwd, "same-topic")),
+        ],
+        { concurrency: "unbounded" },
+      );
+      assert.deepStrictEqual(sameResults.map((result) => result.kind).sort(), [
+        "already-renamed",
+        "renamed",
+      ]);
+      assert.strictEqual(
+        (yield* git(sameCwd, ["branch", "--show-current"])).trim(),
+        renamedBranch(sameId, "same-topic"),
+      );
+
+      const differentId = chatId(61);
+      const differentCwd = AbsolutePath.make(path.join(worktreesDir, differentId));
+      yield* worktree.create(options(differentId, repositoryCwd), () => Effect.void);
+      const differentResults = yield* Effect.all(
+        [
+          worktree.renameChatBranch(renameOptions(differentId, differentCwd, "first-topic")),
+          worktree.renameChatBranch(renameOptions(differentId, differentCwd, "second-topic")),
+        ],
+        { concurrency: "unbounded" },
+      );
+      assert.strictEqual(differentResults.filter((result) => result.kind === "renamed").length, 1);
+      assert.strictEqual(
+        differentResults.filter(
+          (result) => result.kind === "skipped" && result.reason === "branch-changed",
+        ).length,
+        1,
+      );
+      assert.include(
+        [renamedBranch(differentId, "first-topic"), renamedBranch(differentId, "second-topic")],
+        (yield* git(differentCwd, ["branch", "--show-current"])).trim(),
+      );
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
+});
 describe("GitWorktree chat cleanup", () => {
   it.effect("removes a clean managed worktree and preserves its branch", () =>
     Effect.gen(function* () {
