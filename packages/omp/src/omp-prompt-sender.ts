@@ -34,6 +34,44 @@ const extensionFor = (mimeType: AgentMessage.AgentImageMimeType) => {
     }
   }
 };
+const bunFormatFor = (mimeType: AgentMessage.AgentImageMimeType) => {
+  switch (mimeType) {
+    case "image/png":
+      return "png";
+    case "image/jpeg":
+      return "jpeg";
+    case "image/gif":
+      return "gif";
+    case "image/webp":
+      return "webp";
+    default: {
+      const exhaustive: never = mimeType;
+      return exhaustive;
+    }
+  }
+};
+
+const validateImageBytes = async (
+  attachment: AgentMessage.AgentImageAttachment,
+  bytes: Uint8Array,
+) => {
+  let metadata: Awaited<ReturnType<Bun.Image["metadata"]>>;
+  try {
+    metadata = await new Bun.Image(bytes).metadata();
+  } catch {
+    throw new Error(`Invalid image attachment: ${JSON.stringify(attachment.name)}`);
+  }
+  if (
+    metadata.format !== bunFormatFor(attachment.mimeType) ||
+    metadata.width < 1 ||
+    metadata.height < 1 ||
+    metadata.width > AgentMessage.MAX_AGENT_IMAGE_EDGE ||
+    metadata.height > AgentMessage.MAX_AGENT_IMAGE_EDGE ||
+    metadata.width * metadata.height > AgentMessage.MAX_AGENT_IMAGE_PIXELS
+  ) {
+    throw new Error(`Invalid image attachment: ${JSON.stringify(attachment.name)}`);
+  }
+};
 
 const isSystemReason = (error: PlatformError.PlatformError, reason: PlatformError.SystemErrorTag) =>
   error.reason._tag === reason;
@@ -113,6 +151,13 @@ export const makeOmpPromptSender = (
         await session.sendUserMessage(prompt.text);
         return;
       }
+      const decoded = await Promise.all(
+        prompt.attachments.map(async (attachment) => {
+          const bytes = Buffer.from(attachment.data, "base64");
+          await validateImageBytes(attachment, bytes);
+          return { attachment, bytes };
+        }),
+      );
 
       const sessionFile = session.sessionManager.getSessionFile();
       if (sessionFile === undefined) throw new Error("OMP session has no journal path");
@@ -140,8 +185,7 @@ export const makeOmpPromptSender = (
         );
         await Effect.runPromise(fileSystem.chmod(attachmentsDirectory, 0o700));
 
-        for (const attachment of prompt.attachments) {
-          const bytes = Buffer.from(attachment.data, "base64");
+        for (const { attachment, bytes } of decoded) {
           const digest = await hexDigest(crypto, bytes);
           const file = path.join(
             attachmentsDirectory,

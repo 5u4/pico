@@ -179,8 +179,8 @@ const sniffImageMimeType = (bytes: Uint8Array): AgentMessage.AgentImageMimeType 
   }
   return undefined;
 };
-const maximumImageEdge = 16_384;
-const maximumImagePixels = 40_000_000;
+const maximumImageEdge = AgentMessage.MAX_AGENT_IMAGE_EDGE;
+const maximumImagePixels = AgentMessage.MAX_AGENT_IMAGE_PIXELS;
 
 const validateDecodedImage = Effect.fn("Discord.validateDecodedImage")(function* (
   bytes: Uint8Array,

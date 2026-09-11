@@ -24,6 +24,9 @@ const platformLayer = Layer.mergeAll(BunCrypto.layer, BunFileSystem.layer, BunPa
 const textPrompt = (text: string) => AgentMessage.AgentPrompt.make({ text, attachments: [] });
 const hex = (bytes: Uint8Array) =>
   Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+const pngBase64 =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+const gifBase64 = "R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
 
 const makeFakeSession = (
   skill: Skill,
@@ -193,8 +196,8 @@ describe("makeOmpPromptSender", () => {
         baseDir: root,
         source: "test",
       } satisfies Skill;
-      const png = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 1, 2, 3]);
-      const gif = Uint8Array.from([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 4, 5]);
+      const png = Uint8Array.from(Buffer.from(pngBase64, "base64"));
+      const gif = Uint8Array.from(Buffer.from(gifBase64, "base64"));
       const prompt = AgentMessage.AgentPrompt.make({
         text: "",
         attachments: [
@@ -301,9 +304,9 @@ describe("makeOmpPromptSender", () => {
               attachments: [
                 {
                   type: "image",
-                  name: "rollback.webp",
-                  data: Buffer.from("rollback").toString("base64"),
-                  mimeType: "image/webp",
+                  name: "rollback.png",
+                  data: pngBase64,
+                  mimeType: "image/png",
                 },
               ],
             }),
@@ -311,6 +314,39 @@ describe("makeOmpPromptSender", () => {
         catch: (error) => error,
       }).pipe(Effect.flip);
       assert.instanceOf(failure, Error);
+      assert.isFalse(yield* fileSystem.exists(path.join(root, "chat")));
+    }).pipe(Effect.provide(platformLayer)),
+  );
+
+  it.effect("rejects malformed or mislabeled images before persistence", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const crypto = yield* Crypto.Crypto;
+      const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-omp-invalid-" });
+      const sessionFile = path.join(root, "chat.jsonl");
+      const skill = {
+        name: "focused-skill",
+        description: "Focused adapter test",
+        filePath: path.join(root, "SKILL.md"),
+        baseDir: root,
+        source: "test",
+      } satisfies Skill;
+      const fake = makeFakeSession(skill, true, sessionFile);
+      const send = makeOmpPromptSender(fake.session, fileSystem, path, crypto);
+
+      for (const attachment of [
+        { type: "image", name: "fake.png", data: "bm90IGFuIGltYWdl", mimeType: "image/png" },
+        { type: "image", name: "mislabeled.webp", data: pngBase64, mimeType: "image/webp" },
+      ] satisfies ReadonlyArray<AgentMessage.AgentImageAttachment>) {
+        const failure = yield* Effect.tryPromise({
+          try: () => send({ text: "inspect", attachments: [attachment] }),
+          catch: (error) => error,
+        }).pipe(Effect.flip);
+        assert.instanceOf(failure, Error);
+      }
+
+      assert.deepStrictEqual(fake.imagePrompts, []);
       assert.isFalse(yield* fileSystem.exists(path.join(root, "chat")));
     }).pipe(Effect.provide(platformLayer)),
   );
@@ -380,7 +416,7 @@ describe("makeOmpPromptSender", () => {
       const attachment = (name: string): AgentMessage.AgentImageAttachment => ({
         type: "image",
         name,
-        data: Buffer.from(name).toString("base64"),
+        data: pngBase64,
         mimeType: "image/png",
       });
 

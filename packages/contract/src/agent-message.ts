@@ -2,6 +2,8 @@ import * as Schema from "effect/Schema";
 export const MAX_AGENT_IMAGE_ATTACHMENTS = 10;
 export const MAX_AGENT_IMAGE_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 export const MAX_AGENT_IMAGE_BYTES = 40 * 1024 * 1024;
+export const MAX_AGENT_IMAGE_EDGE = 16_384;
+export const MAX_AGENT_IMAGE_PIXELS = 40_000_000;
 
 const maximumBase64Length = (bytes: number) => Math.ceil(bytes / 3) * 4;
 
