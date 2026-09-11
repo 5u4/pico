@@ -4,6 +4,8 @@ import type { AbsolutePath } from "@pico/contract/path";
 import type { WorkspacePlatform } from "@pico/contract/workspace-model";
 import * as Effect from "effect/Effect";
 
+const bundledSkillsDirectory = Bun.fileURLToPath(new URL("./skills", import.meta.url));
+
 type SessionPlatform = WorkspacePlatform | "web";
 
 interface PlatformSessionPolicy {
@@ -42,6 +44,10 @@ export const prepareSessionOptions = Effect.fn("OmpSession.prepareOptions")(func
     try: () => {
       settings.override("async.enabled", false);
       settings.override("title.refreshOnReplan", false);
+      settings.override("skills.customDirectories", [
+        ...settings.get("skills.customDirectories"),
+        bundledSkillsDirectory,
+      ]);
       if (policy.mermaid === "disabled") {
         settings.override("tui.renderMermaid", false);
       }
