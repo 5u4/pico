@@ -7,7 +7,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import type * as Scope from "effect/Scope";
-import { prepareSessionSettings } from "./session-settings.ts";
+import { prepareSessionOptions } from "./session-settings.ts";
 
 const platformLayer = Layer.merge(BunFileSystem.layer, BunPath.layer);
 
@@ -37,7 +37,7 @@ describe("OMP session settings", () => {
     testEffect(
       Effect.gen(function* () {
         const cwd = yield* makeProject(false);
-        const settings = yield* prepareSessionSettings(cwd, null);
+        const { settings } = yield* prepareSessionOptions(cwd, null);
 
         assert.strictEqual(settings.get("tui.renderMermaid"), false);
       }),
@@ -48,7 +48,7 @@ describe("OMP session settings", () => {
     testEffect(
       Effect.gen(function* () {
         const cwd = yield* makeProject(true);
-        const settings = yield* prepareSessionSettings(cwd, null);
+        const { settings } = yield* prepareSessionOptions(cwd, null);
 
         assert.strictEqual(settings.get("tui.renderMermaid"), true);
       }),
@@ -59,7 +59,7 @@ describe("OMP session settings", () => {
     testEffect(
       Effect.gen(function* () {
         const cwd = yield* makeProject(true);
-        const settings = yield* prepareSessionSettings(cwd, "discord");
+        const { settings } = yield* prepareSessionOptions(cwd, "discord");
 
         assert.strictEqual(settings.get("tui.renderMermaid"), false);
       }),
@@ -70,9 +70,9 @@ describe("OMP session settings", () => {
     testEffect(
       Effect.gen(function* () {
         const cwd = yield* makeProject(true);
-        const first = yield* prepareSessionSettings(cwd, null);
+        const { settings: first } = yield* prepareSessionOptions(cwd, null);
         first.override("tui.renderMermaid", false);
-        const second = yield* prepareSessionSettings(cwd, null);
+        const { settings: second } = yield* prepareSessionOptions(cwd, null);
 
         assert.notStrictEqual(first, second);
         assert.strictEqual(first.get("tui.renderMermaid"), false);
