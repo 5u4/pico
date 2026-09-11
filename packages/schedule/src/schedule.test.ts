@@ -10,14 +10,27 @@ import * as Workspace from "@pico/contract/workspace-model";
 import * as Crypto from "effect/Crypto";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as PlatformError from "effect/PlatformError";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as TestClock from "effect/testing/TestClock";
 import { make } from "./schedule.ts";
-import { bootstrap, publishRun, readRuns, runDirectory, type Storage } from "./storage.ts";
+import {
+  appendArtifactString,
+  bootstrap,
+  loadSchedule,
+  publishDefinition,
+  publishRun,
+  readRuns,
+  replaceDefinition,
+  runDirectory,
+  type Storage,
+  writeArtifactString,
+} from "./storage.ts";
 
 const platformLayer = Layer.mergeAll(BunCrypto.layer, BunFileSystem.layer, BunPath.layer);
 const workspaceId = Workspace.WorkspaceId.make("018f47a0-0000-7000-8000-000000000001");
@@ -57,6 +70,15 @@ const awaitExists = Effect.fn("Schedules.test.awaitExists")(function* (
   yield* Effect.yieldNow;
   return yield* awaitExists(fileSystem, path, attempts - 1);
 });
+const permissionDenied = (method: string, path: string) =>
+  new PlatformError.PlatformError(
+    new PlatformError.SystemError({
+      _tag: "PermissionDenied",
+      module: "FileSystem",
+      method,
+      pathOrDescriptor: path,
+    }),
+  );
 
 describe("Schedules", () => {
   it.effect(
@@ -734,6 +756,333 @@ describe("Schedules", () => {
       yield* fileSystem.symlink(externalMetadata, metadata);
       const listed = yield* schedules.list(caller);
       assert.deepStrictEqual(listed, []);
+    }).pipe(Effect.provide(platformLayer), Effect.scoped),
+  );
+  it.effect("rejects a symlinked schedule root before writing through it", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-schedule-root-" });
+      const outside = path.join(root, "outside");
+      const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
+      yield* fileSystem.makeDirectory(outside);
+      yield* fileSystem.symlink(outside, schedulesDir);
+      const storage: Storage = {
+        fileSystem,
+        path,
+        schedulesDir,
+        temporaryId: () => Effect.succeed("018f47a0-0000-7000-8000-000000000040"),
+      };
+
+      const error = yield* bootstrap(storage).pipe(Effect.flip);
+      assert.strictEqual(error.kind, "corrupt");
+      assert.deepStrictEqual(yield* fileSystem.readDirectory(outside), []);
+
+      const childSchedulesDir = AbsolutePath.make(path.join(root, "child-schedules"));
+      const childOutside = path.join(root, "child-outside");
+      yield* fileSystem.makeDirectory(childSchedulesDir);
+      yield* fileSystem.makeDirectory(childOutside);
+      yield* fileSystem.symlink(childOutside, path.join(childSchedulesDir, "enabled"));
+      const childError = yield* bootstrap({
+        ...storage,
+        schedulesDir: childSchedulesDir,
+      }).pipe(Effect.flip);
+      assert.strictEqual(childError.kind, "corrupt");
+      assert.deepStrictEqual(yield* fileSystem.readDirectory(childOutside), []);
+      assert.deepStrictEqual(yield* fileSystem.readDirectory(childSchedulesDir), ["enabled"]);
+    }).pipe(Effect.provide(platformLayer), Effect.scoped),
+  );
+  it.effect("keeps a definition canonical when replacement is interrupted during commit", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-replace-interrupt-" });
+      const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
+      const storage: Storage = {
+        fileSystem,
+        path,
+        schedulesDir,
+        temporaryId: () => Effect.succeed("018f47a0-0000-7000-8000-000000000041"),
+      };
+      yield* bootstrap(storage);
+      const id = Schedule.ScheduleId.make("018f47a0-0000-7000-8000-000000000042");
+      const original: Schedule.ScheduleDefinition = {
+        version: 1,
+        revision: Schedule.ScheduleRevision.make("018f47a0-0000-7000-8000-000000000043"),
+        name: "original",
+        ownerWorkspaceId: workspaceId,
+        createdByChatId: chatId,
+        createdAt: 0,
+        target: { kind: "chat", chatId },
+        trigger: { kind: "once", at: 1_000 },
+      };
+      yield* publishDefinition(
+        storage,
+        id,
+        "enabled",
+        original,
+        { script: null, prompt: "original" },
+        "018f47a0-0000-7000-8000-000000000044",
+      );
+      const current = yield* loadSchedule(storage, id);
+      if (current === undefined) return yield* Effect.die("Published definition disappeared");
+      const replacement: Schedule.ScheduleDefinition = {
+        ...original,
+        revision: Schedule.ScheduleRevision.make("018f47a0-0000-7000-8000-000000000045"),
+        name: "replacement",
+      };
+      const secondRenameStarted = yield* Deferred.make<void>();
+      const releaseSecondRename = yield* Deferred.make<void>();
+      const destination = path.join(schedulesDir, "enabled", id);
+      const next = path.join(
+        schedulesDir,
+        ".staging",
+        "replace-018f47a0-0000-7000-8000-000000000046",
+        "next",
+      );
+      const interruptedFileSystem = FileSystem.FileSystem.of({
+        ...fileSystem,
+        rename: (from, to) =>
+          from === next && to === destination
+            ? Deferred.succeed(secondRenameStarted, undefined).pipe(
+                Effect.andThen(Deferred.await(releaseSecondRename)),
+                Effect.andThen(fileSystem.rename(from, to)),
+              )
+            : fileSystem.rename(from, to),
+      });
+      const interruptedStorage: Storage = { ...storage, fileSystem: interruptedFileSystem };
+      const fiber = yield* replaceDefinition(
+        interruptedStorage,
+        current,
+        replacement,
+        { script: null, prompt: "replacement" },
+        "018f47a0-0000-7000-8000-000000000046",
+      ).pipe(Effect.forkChild);
+      yield* Deferred.await(secondRenameStarted);
+      const interruption = yield* Fiber.interrupt(fiber).pipe(Effect.forkChild);
+      yield* Effect.yieldNow;
+      yield* Deferred.succeed(releaseSecondRename, undefined);
+      yield* Fiber.join(interruption);
+
+      const loaded = yield* loadSchedule(storage, id);
+      assert.strictEqual(loaded?.view.kind, "ready");
+      if (loaded?.view.kind !== "ready") return;
+      assert.strictEqual(loaded.view.definition.revision, replacement.revision);
+      assert.strictEqual(loaded.view.definition.name, "replacement");
+    }).pipe(Effect.provide(platformLayer), Effect.scoped),
+  );
+  it.effect("keeps the canonical event log during an interrupted append", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-append-interrupt-" });
+      const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
+      const storage: Storage = {
+        fileSystem,
+        path,
+        schedulesDir,
+        temporaryId: () => Effect.succeed("018f47a0-0000-7000-8000-000000000047"),
+      };
+      yield* bootstrap(storage);
+      const definition: Schedule.ScheduleDefinition = {
+        version: 1,
+        revision: Schedule.ScheduleRevision.make("018f47a0-0000-7000-8000-000000000048"),
+        name: "append interruption",
+        ownerWorkspaceId: workspaceId,
+        createdByChatId: chatId,
+        createdAt: 0,
+        target: { kind: "chat", chatId },
+        trigger: { kind: "once", at: 1_000 },
+      };
+      const run: Schedule.ScheduleRunLifecycle = {
+        version: 1,
+        id: Schedule.ScheduleRunId.make(`scheduled-1000-${definition.revision}`),
+        scheduleId: Schedule.ScheduleId.make("018f47a0-0000-7000-8000-000000000049"),
+        definitionRevision: definition.revision,
+        source: { kind: "scheduled", scheduledFor: 1_000 },
+        plannedTarget: { kind: "existing-chat", ownerWorkspaceId: workspaceId, chatId },
+        claimedAt: 1_000,
+        state: { kind: "claimed" },
+      };
+      yield* publishRun(
+        storage,
+        run,
+        definition,
+        { script: null, prompt: "append" },
+        "018f47a0-0000-7000-8000-000000000050",
+      );
+      const original = `${JSON.stringify({ type: "run-started" })}\n`;
+      yield* writeArtifactString(storage, run, "omp/events.jsonl", original);
+      const eventsFile = path.join(
+        runDirectory(storage, run.scheduleId, run.id),
+        "omp",
+        "events.jsonl",
+      );
+      const appendPrepared = yield* Deferred.make<void>();
+      const holdAppend = yield* Deferred.make<void>();
+      const interruptedFileSystem = FileSystem.FileSystem.of({
+        ...fileSystem,
+        copyFile: (from, to) =>
+          fileSystem.copyFile(from, to).pipe(
+            Effect.tap(() => Deferred.succeed(appendPrepared, undefined)),
+            Effect.andThen(Deferred.await(holdAppend)),
+          ),
+        rename: (from, to) =>
+          from === eventsFile && path.basename(to).endsWith(".append")
+            ? fileSystem.rename(from, to).pipe(
+                Effect.tap(() => Deferred.succeed(appendPrepared, undefined)),
+                Effect.andThen(Deferred.await(holdAppend)),
+              )
+            : fileSystem.rename(from, to),
+      });
+      const fiber = yield* appendArtifactString(
+        { ...storage, fileSystem: interruptedFileSystem },
+        run,
+        "omp/events.jsonl",
+        `${JSON.stringify({ type: "run-finished", outcome: "completed" })}\n`,
+      ).pipe(Effect.forkChild);
+      yield* Deferred.await(appendPrepared);
+      yield* Fiber.interrupt(fiber);
+
+      assert.strictEqual(yield* fileSystem.readFileString(eventsFile), original);
+      assert.isFalse(
+        (yield* fileSystem.readDirectory(path.dirname(eventsFile))).some((name) =>
+          name.endsWith(".append"),
+        ),
+      );
+    }).pipe(Effect.provide(platformLayer), Effect.scoped),
+  );
+  it.effect("preserves a completed once run when disabling its definition fails", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-once-disable-" });
+      const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
+      const cwd = AbsolutePath.make(root);
+      let rejectedDisable = false;
+      const failingFileSystem = FileSystem.FileSystem.of({
+        ...fileSystem,
+        rename: (from, to) => {
+          if (
+            !rejectedDisable &&
+            path.dirname(from) === path.join(schedulesDir, "enabled") &&
+            path.dirname(to) === path.join(schedulesDir, "disabled")
+          ) {
+            rejectedDisable = true;
+            return Effect.fail(permissionDenied("rename", from));
+          }
+          return fileSystem.rename(from, to);
+        },
+      });
+      yield* Effect.gen(function* () {
+        const delivered = yield* Deferred.make<void>();
+        const schedules = yield* make(schedulesDir);
+        const host: Schedule.ScheduleRunHost = {
+          prepare: (target) =>
+            Effect.succeed({ chatId: target.chatId, workspaceId: target.ownerWorkspaceId, cwd }),
+          deliver: () => Deferred.succeed(delivered, undefined).pipe(Effect.asVoid),
+          publish: () => Effect.die("Agent schedules must deliver their final response"),
+          runPrompt: (_target, runId) =>
+            Effect.succeed({
+              runId,
+              outcome: "completed",
+              events: [],
+              finalAssistantText: "complete",
+            }),
+        };
+        yield* TestClock.setTime(1_000);
+        yield* schedules.start(host);
+        const created = yield* schedules.create(caller, {
+          name: "disable retry",
+          enabled: true,
+          target: { kind: "current-chat" },
+          trigger: { kind: "once", at: 1_000 },
+          prompt: "complete once",
+        });
+        assert.strictEqual(created.kind, "ready");
+        if (created.kind !== "ready") return;
+        yield* Deferred.await(delivered);
+        const runFile = path.join(
+          schedulesDir,
+          "runs",
+          created.id,
+          `scheduled-1000-${created.definition.revision}`,
+          "run.json",
+        );
+        const completed = yield* awaitFinished(fileSystem, runFile);
+        assert.deepStrictEqual(completed.state.kind === "finished" && completed.state.outcome, {
+          kind: "completed",
+          finalAssistantText: "complete",
+        });
+        assert.isTrue(yield* fileSystem.exists(path.join(schedulesDir, "enabled", created.id)));
+
+        yield* TestClock.adjust("30 seconds");
+        yield* awaitExists(
+          fileSystem,
+          path.join(schedulesDir, "disabled", created.id, "meta.json"),
+        );
+        const retained = yield* awaitFinished(fileSystem, runFile);
+        assert.deepStrictEqual(retained.state.kind === "finished" && retained.state.outcome, {
+          kind: "completed",
+          finalAssistantText: "complete",
+        });
+      }).pipe(Effect.provide(Layer.succeed(FileSystem.FileSystem, failingFileSystem)));
+    }).pipe(Effect.provide(platformLayer), Effect.scoped),
+  );
+  it.effect("records the active phase for unexpected execution failures", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-run-phase-" });
+      const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
+      const cwd = AbsolutePath.make(root);
+      let rejectedDecision = false;
+      const failingFileSystem = FileSystem.FileSystem.of({
+        ...fileSystem,
+        writeFile: (file, data, options) => {
+          if (!rejectedDecision && path.basename(file).startsWith(".decision.json-")) {
+            rejectedDecision = true;
+            return Effect.fail(permissionDenied("writeFile", file));
+          }
+          return fileSystem.writeFile(file, data, options);
+        },
+      });
+      yield* Effect.gen(function* () {
+        const schedules = yield* make(schedulesDir);
+        const host: Schedule.ScheduleRunHost = {
+          prepare: (target) =>
+            Effect.succeed({ chatId: target.chatId, workspaceId: target.ownerWorkspaceId, cwd }),
+          deliver: () => Effect.die("Protocol failures must not deliver output"),
+          publish: () => Effect.die("Protocol failures must not publish output"),
+          runPrompt: () => Effect.die("Protocol failures must not invoke OMP"),
+        };
+        yield* TestClock.setTime(1_000);
+        yield* schedules.start(host);
+        const created = yield* schedules.create(caller, {
+          name: "phase retention",
+          enabled: true,
+          target: { kind: "current-chat" },
+          trigger: { kind: "once", at: 1_000 },
+          prompt: "unused",
+        });
+        assert.strictEqual(created.kind, "ready");
+        if (created.kind !== "ready") return;
+        yield* TestClock.adjust("30 seconds");
+        const failed = yield* awaitFinished(
+          fileSystem,
+          path.join(
+            schedulesDir,
+            "runs",
+            created.id,
+            `scheduled-1000-${created.definition.revision}`,
+            "run.json",
+          ),
+        );
+        assert.deepInclude(failed.state.kind === "finished" ? failed.state.outcome : {}, {
+          kind: "failed",
+          stage: "protocol",
+        });
+      }).pipe(Effect.provide(Layer.succeed(FileSystem.FileSystem, failingFileSystem)));
     }).pipe(Effect.provide(platformLayer), Effect.scoped),
   );
 });

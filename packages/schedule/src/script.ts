@@ -165,12 +165,17 @@ export const runScript = Effect.fn("Schedules.runScript")(function* (
           signal.addEventListener("abort", onAbort, { once: true });
           if (signal.aborted) onAbort();
           const timeout = setTimeout(() => {
+            if (child.exitCode !== null) return;
             timedOut = true;
-            terminate();
+            child.kill("SIGTERM");
             forceKill = setTimeout(() => {
               if (child.exitCode === null) child.kill("SIGKILL");
             }, 1_000);
           }, timeoutMillis);
+          const exited = child.exited.finally(() => {
+            clearTimeout(timeout);
+            clearTimeout(forceKill);
+          });
           try {
             const stdoutCapture = captureStream(child.stdout);
             const stderrCapture = captureStream(child.stderr);
@@ -179,7 +184,7 @@ export const runScript = Effect.fn("Schedules.runScript")(function* (
             const [stdout, stderr, exitCode] = await Promise.all([
               stdoutCapture,
               stderrCapture,
-              child.exited,
+              exited,
             ]);
             return {
               stdout,

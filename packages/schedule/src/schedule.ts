@@ -302,14 +302,32 @@ export const make = Effect.fn("Schedules.make")(function* (
   const finish = Effect.fn("Schedules.finishRun")(function* (
     run: Schedule.ScheduleRunLifecycle,
     outcome: Schedule.TerminalOutcome,
-    definition: Schedule.ScheduleDefinition,
   ) {
+    if (run.state.kind === "finished") return run;
     const terminal = toFinished(run, yield* Clock.currentTimeMillis, outcome);
     yield* writeRun(storage, terminal, yield* transactionId());
+    return terminal;
+  });
+
+  const finishFallback = Effect.fn("Schedules.finishRunFallback")(function* (
+    run: Schedule.ScheduleRunLifecycle,
+    outcome: Schedule.TerminalOutcome,
+  ) {
+    if (run.state.kind === "finished") return run;
+    const durable = (yield* readRuns(storage, run.scheduleId)).find(
+      (candidate) => candidate.id === run.id,
+    );
+    if (durable?.state.kind === "finished") return durable;
+    return yield* finish(run, outcome);
+  });
+
+  const disableFinishedOnce = Effect.fn("Schedules.disableFinishedOnce")(function* (
+    run: Schedule.ScheduleRunLifecycle,
+    definition: Schedule.ScheduleDefinition,
+  ) {
     if (definition.trigger.kind === "once" && definition.revision === run.definitionRevision) {
       yield* mutation.withPermit(disableDefinition(run.scheduleId, run.definitionRevision));
     }
-    return terminal;
   });
 
   const executeRun = Effect.fn("Schedules.executeRun")(function* (
@@ -319,137 +337,169 @@ export const make = Effect.fn("Schedules.make")(function* (
     source: Schedule.ScheduleSource,
   ) {
     let current = run;
+    let failureStage: Extract<Schedule.TerminalOutcome, { readonly kind: "failed" }>["stage"] =
+      "target";
+    const complete = Effect.fn("Schedules.completeRun")(function* (
+      outcome: Schedule.TerminalOutcome,
+    ) {
+      current = yield* finish(current, outcome);
+      yield* disableFinishedOnce(current, definition);
+      return current;
+    });
     const fail = (
       stage: Extract<Schedule.TerminalOutcome, { readonly kind: "failed" }>["stage"],
       message: string,
-    ) => finish(current, { kind: "failed", stage, message }, definition);
-
-    const targetResult = yield* host.prepare(run.plannedTarget).pipe(Effect.result);
-    if (Result.isFailure(targetResult)) {
-      yield* fail("target", targetResult.failure.message);
-      return;
-    }
-    const target = targetResult.success;
-    current = {
-      ...scheduleRunBase(run),
-      state: { kind: "target-resolved", target },
+    ) => {
+      failureStage = stage;
+      return complete({ kind: "failed", stage, message });
     };
-    yield* writeRun(storage, current, yield* transactionId());
-    yield* writeArtifactString(
-      storage,
-      current,
-      "target/result.json",
-      JSON.stringify({ chatId: target.chatId, workspaceId: target.workspaceId, cwd: target.cwd }),
-    );
 
-    let decision: Schedule.ScriptDecision;
-    if (source.script === null) {
-      decision = { agent: true };
-      yield* writeArtifactString(storage, current, "decision.json", JSON.stringify(decision));
-    } else {
+    yield* Effect.gen(function* () {
+      const targetResult = yield* host.prepare(run.plannedTarget).pipe(Effect.result);
+      if (Result.isFailure(targetResult)) {
+        yield* fail("target", targetResult.failure.message);
+        return;
+      }
+      const target = targetResult.success;
       current = {
-        ...scheduleRunBase(current),
-        state: { kind: "running-script", target, startedAt: yield* Clock.currentTimeMillis },
+        ...scheduleRunBase(run),
+        state: { kind: "target-resolved", target },
       };
       yield* writeRun(storage, current, yield* transactionId());
-      const script = yield* runScript(
-        storage,
-        executable,
-        current,
-        target,
-        definition.scriptTimeoutMs ?? Schedule.DEFAULT_SCRIPT_TIMEOUT_MS,
-      ).pipe(Effect.result);
-      if (Result.isFailure(script)) {
-        const stage = script.failure._tag === "ScriptRunError" ? script.failure.stage : "script";
-        yield* fail(stage, script.failure.message);
-        return;
-      }
-      decision = script.success.decision;
-    }
-
-    if (!decision.agent) {
-      if (decision.content === undefined) {
-        yield* finish(current, { kind: "skipped" }, definition);
-        return;
-      }
-      const published = yield* host.publish(target.chatId, decision.content).pipe(Effect.result);
-      if (Result.isFailure(published)) {
-        yield* fail("publish", published.failure.message);
-        return;
-      }
-      yield* finish(current, { kind: "published", content: decision.content }, definition);
-      return;
-    }
-
-    const request =
-      decision.content === undefined
-        ? source.prompt
-        : source.prompt === null
-          ? decision.content
-          : `${decision.content}\n\n${source.prompt}`;
-    if (request === null) {
-      yield* fail("protocol", "Script requested an agent run without providing input");
-      return;
-    }
-    yield* writeArtifactString(storage, current, "omp/request.md", request);
-    current = {
-      ...scheduleRunBase(current),
-      state: { kind: "running-omp", target, startedAt: yield* Clock.currentTimeMillis },
-    };
-    yield* writeRun(storage, current, yield* transactionId());
-    yield* Effect.all(
-      [
-        writeArtifactString(storage, current, "omp/events.jsonl", ""),
-        writeArtifactString(storage, current, "omp/final.md", ""),
-        writeArtifactString(
-          storage,
-          current,
-          "omp/result.json",
-          JSON.stringify({ kind: "started" }),
-        ),
-      ],
-      { concurrency: "unbounded", discard: true },
-    );
-    const captured = yield* host
-      .runPrompt(target.chatId, current.id, request, (event) =>
-        appendArtifactString(
-          storage,
-          current,
-          "omp/events.jsonl",
-          `${JSON.stringify(event)}\n`,
-        ).pipe(
-          Effect.mapError((error) => new Schedule.ScheduleHostError({ message: error.message })),
-        ),
-      )
-      .pipe(Effect.result);
-    if (Result.isFailure(captured)) {
       yield* writeArtifactString(
         storage,
         current,
-        "omp/result.json",
-        JSON.stringify({ kind: "failed", message: captured.failure.message }),
+        "target/result.json",
+        JSON.stringify({ chatId: target.chatId, workspaceId: target.workspaceId, cwd: target.cwd }),
       );
-      yield* fail("omp", captured.failure.message);
-      return;
-    }
-    const text = captured.success.finalAssistantText;
-    yield* Effect.all(
-      [
-        writeArtifactString(storage, current, "omp/final.md", text),
-        writeArtifactString(storage, current, "omp/result.json", JSON.stringify(captured.success)),
-      ],
-      { concurrency: "unbounded", discard: true },
+      failureStage = "protocol";
+
+      let decision: Schedule.ScriptDecision;
+      if (source.script === null) {
+        decision = { agent: true };
+        yield* writeArtifactString(storage, current, "decision.json", JSON.stringify(decision));
+      } else {
+        failureStage = "script";
+        current = {
+          ...scheduleRunBase(current),
+          state: { kind: "running-script", target, startedAt: yield* Clock.currentTimeMillis },
+        };
+        yield* writeRun(storage, current, yield* transactionId());
+        const script = yield* runScript(
+          storage,
+          executable,
+          current,
+          target,
+          definition.scriptTimeoutMs ?? Schedule.DEFAULT_SCRIPT_TIMEOUT_MS,
+        ).pipe(Effect.result);
+        if (Result.isFailure(script)) {
+          const stage = script.failure._tag === "ScriptRunError" ? script.failure.stage : "script";
+          yield* fail(stage, script.failure.message);
+          return;
+        }
+        decision = script.success.decision;
+      }
+
+      if (!decision.agent) {
+        if (decision.content === undefined) {
+          yield* complete({ kind: "skipped" });
+          return;
+        }
+        failureStage = "publish";
+        const published = yield* host.publish(target.chatId, decision.content).pipe(Effect.result);
+        if (Result.isFailure(published)) {
+          yield* fail("publish", published.failure.message);
+          return;
+        }
+        yield* complete({ kind: "published", content: decision.content });
+        return;
+      }
+
+      const request =
+        decision.content === undefined
+          ? source.prompt
+          : source.prompt === null
+            ? decision.content
+            : `${decision.content}\n\n${source.prompt}`;
+      if (request === null) {
+        yield* fail("protocol", "Script requested an agent run without providing input");
+        return;
+      }
+      failureStage = "omp";
+      yield* writeArtifactString(storage, current, "omp/request.md", request);
+      current = {
+        ...scheduleRunBase(current),
+        state: { kind: "running-omp", target, startedAt: yield* Clock.currentTimeMillis },
+      };
+      yield* writeRun(storage, current, yield* transactionId());
+      yield* Effect.all(
+        [
+          writeArtifactString(storage, current, "omp/events.jsonl", ""),
+          writeArtifactString(storage, current, "omp/final.md", ""),
+          writeArtifactString(
+            storage,
+            current,
+            "omp/result.json",
+            JSON.stringify({ kind: "started" }),
+          ),
+        ],
+        { concurrency: "unbounded", discard: true },
+      );
+      const captured = yield* host
+        .runPrompt(target.chatId, current.id, request, (event) =>
+          appendArtifactString(
+            storage,
+            current,
+            "omp/events.jsonl",
+            `${JSON.stringify(event)}\n`,
+          ).pipe(
+            Effect.mapError((error) => new Schedule.ScheduleHostError({ message: error.message })),
+          ),
+        )
+        .pipe(Effect.result);
+      if (Result.isFailure(captured)) {
+        yield* writeArtifactString(
+          storage,
+          current,
+          "omp/result.json",
+          JSON.stringify({ kind: "failed", message: captured.failure.message }),
+        );
+        yield* fail("omp", captured.failure.message);
+        return;
+      }
+      const text = captured.success.finalAssistantText;
+      yield* Effect.all(
+        [
+          writeArtifactString(storage, current, "omp/final.md", text),
+          writeArtifactString(
+            storage,
+            current,
+            "omp/result.json",
+            JSON.stringify(captured.success),
+          ),
+        ],
+        { concurrency: "unbounded", discard: true },
+      );
+      if (captured.success.outcome !== "completed") {
+        yield* fail("omp", `OMP run ${captured.success.outcome}`);
+        return;
+      }
+      failureStage = "publish";
+      const delivery = yield* host.deliver(target.chatId, text).pipe(Effect.result);
+      if (Result.isFailure(delivery)) {
+        yield* fail("publish", delivery.failure.message);
+        return;
+      }
+      yield* complete({ kind: "completed", finalAssistantText: text });
+    }).pipe(
+      Effect.catch((error) =>
+        finishFallback(current, {
+          kind: "failed",
+          stage: failureStage,
+          message: error.message,
+        }).pipe(Effect.asVoid),
+      ),
     );
-    if (captured.success.outcome !== "completed") {
-      yield* fail("omp", `OMP run ${captured.success.outcome}`);
-      return;
-    }
-    const delivery = yield* host.deliver(target.chatId, text).pipe(Effect.result);
-    if (Result.isFailure(delivery)) {
-      yield* fail("publish", delivery.failure.message);
-      return;
-    }
-    yield* finish(current, { kind: "completed", finalAssistantText: text }, definition);
   });
 
   const claim = Effect.fn("Schedules.claim")(function* (
@@ -541,37 +591,19 @@ export const make = Effect.fn("Schedules.make")(function* (
 
     for (const item of claimed) {
       if (item.missed) {
-        yield* finish(
-          item.run,
-          {
-            kind: "missed",
-            scheduledFor: item.run.source.scheduledFor,
-            observedAt: yield* Clock.currentTimeMillis,
-          },
-          item.definition,
-        );
+        const terminal = yield* finish(item.run, {
+          kind: "missed",
+          scheduledFor: item.run.source.scheduledFor,
+          observedAt: yield* Clock.currentTimeMillis,
+        });
+        yield* disableFinishedOnce(terminal, item.definition);
       } else {
         yield* executeRun(host, item.run, item.definition, item.source).pipe(
-          Effect.catch((error) =>
-            finish(
-              item.run,
-              {
-                kind: "failed",
-                stage: "target",
-                message: error.message,
-              },
-              item.definition,
-            ).pipe(Effect.asVoid),
-          ),
           Effect.onInterrupt(() =>
-            finish(
-              item.run,
-              {
-                kind: "interrupted",
-                phase: "scheduler-scope",
-              },
-              item.definition,
-            ).pipe(Effect.asVoid),
+            finishFallback(item.run, {
+              kind: "interrupted",
+              phase: "scheduler-scope",
+            }).pipe(Effect.asVoid),
           ),
           Effect.forkScoped({ startImmediately: true }),
         );
@@ -583,14 +615,11 @@ export const make = Effect.fn("Schedules.make")(function* (
     const runs = yield* readRuns(storage);
     for (const run of runs) {
       const definition = yield* readRunDefinition(storage, run);
-      if (run.state.kind !== "finished") {
-        yield* finish(run, { kind: "interrupted", phase: run.state.kind }, definition);
-      } else if (
-        definition.trigger.kind === "once" &&
-        definition.revision === run.definitionRevision
-      ) {
-        yield* mutation.withPermit(disableDefinition(run.scheduleId, run.definitionRevision));
-      }
+      const terminal =
+        run.state.kind === "finished"
+          ? run
+          : yield* finish(run, { kind: "interrupted", phase: run.state.kind });
+      yield* disableFinishedOnce(terminal, definition);
     }
   });
 

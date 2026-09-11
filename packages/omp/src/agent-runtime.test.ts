@@ -3,6 +3,7 @@ import * as BunPath from "@effect/platform-bun/BunPath";
 import { assert, describe, it } from "@effect/vitest";
 import * as OmpSessionLoader from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import * as OmpSessionManager from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import type * as AgentEvent from "@pico/contract/agent-event";
 import * as Agent from "@pico/contract/agent-message";
 import type { ContextUsage, ShakeMode, ShakeResult } from "@pico/contract/agent-runtime";
 import * as Chat from "@pico/contract/chat-model";
@@ -749,6 +750,80 @@ describe("AgentRuntime", () => {
       }),
     ),
   );
+  it.effect("forwards delayed session titles while a scheduled run is captured", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const captureStarted = yield* Deferred.make<void>();
+        let emitEvent: ((event: AgentEvent.AgentEvent) => void) | undefined;
+        let completeCapture: (() => void) | undefined;
+        const pool = yield* makeSessionPool({
+          factory: {
+            open: (_id, emit) => {
+              emitEvent = emit;
+              return Effect.succeed({
+                session: {
+                  settleInFlightMessagePersistence: () => Promise.resolve(),
+                  abort: () => Promise.resolve(),
+                  beginDispose: () => {},
+                  dispose: () => Promise.resolve(),
+                },
+                sendPrompt: () => {
+                  emit({ type: "run-started" });
+                  const pending = new Promise<void>((resolve) => {
+                    completeCapture = () => {
+                      emit({ type: "run-finished", outcome: "completed" });
+                      resolve();
+                    };
+                  });
+                  Effect.runSync(Deferred.succeed(captureStarted, undefined));
+                  return pending;
+                },
+                shake: async (mode) => shakeResult(mode),
+                appendAssistantMessage: () => Promise.resolve(),
+                contextUsage: () => ({ kind: "unavailable" }),
+                unsubscribe: () => {},
+              });
+            },
+          },
+          loadTranscript: () => Effect.succeed([]),
+        });
+        const forwarded = yield* pool.events.pipe(
+          Stream.take(1),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        const capturedTypes: Array<string> = [];
+        const capture = yield* pool
+          .sendCaptured(
+            chatId,
+            Schedule.ScheduleRunId.make("scheduled-1000-018f47a0-0000-7000-8000-000000000003"),
+            prompt("scheduled"),
+            (event) =>
+              Effect.sync(() => {
+                capturedTypes.push(event.type);
+              }),
+          )
+          .pipe(Effect.forkChild);
+        yield* Deferred.await(captureStarted);
+        if (emitEvent === undefined || completeCapture === undefined) {
+          return yield* Effect.die("Session controls were not initialized");
+        }
+        emitEvent({ type: "title-changed", title: "Delayed title" });
+        completeCapture();
+        const result = yield* Fiber.join(capture);
+        yield* pool.drain();
+        assert.deepStrictEqual(capturedTypes, ["run-started", "run-finished"]);
+        assert.deepStrictEqual(
+          result.events.map((event) => event.type),
+          ["run-started", "run-finished"],
+        );
+        assert.deepStrictEqual(
+          (yield* Fiber.join(forwarded)).map((envelope) => envelope.event),
+          [{ type: "title-changed", title: "Delayed title" }],
+        );
+      }),
+    ),
+  );
   it.effect("keeps capture failures isolated and preserves the session forwarder", () =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -878,7 +953,7 @@ describe("AgentRuntime", () => {
         yield* Fiber.interrupt(capture);
         yield* pool.send(chatId, prompt("ordinary"));
         yield* pool.drain();
-        assert.deepStrictEqual(forwarded, ["title-changed"]);
+        assert.deepStrictEqual(forwarded, ["title-changed", "title-changed"]);
       }),
     ),
   );

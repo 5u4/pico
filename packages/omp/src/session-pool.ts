@@ -217,7 +217,7 @@ const acquireEntry = Effect.fn("SessionPool.acquireEntry")(function* (
     Stream.runForEach((item) => {
       if (item.kind === "barrier") return Deferred.succeed(item.completed, undefined);
       const handler = MutableRef.get(capture);
-      return handler === null
+      return handler === null || item.event.type === "title-changed"
         ? Queue.offer(output, { kind: "event", envelope: { chatId, event: item.event } }).pipe(
             Effect.asVoid,
           )

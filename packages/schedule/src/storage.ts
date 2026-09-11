@@ -88,23 +88,58 @@ export const roots = (storage: Storage) => ({
   runs: storage.path.join(storage.schedulesDir, "runs"),
   staging: storage.path.join(storage.schedulesDir, ".staging"),
 });
+const inspectDirectory = Effect.fn("Schedules.inspectDirectory")(function* (
+  storage: Storage,
+  directory: string,
+  label: string,
+) {
+  const exists = yield* storage.fileSystem
+    .exists(directory)
+    .pipe(mapIo(`Failed to inspect ${label}`));
+  if (!exists) return false;
+  yield* ensureDirectPath(storage, directory, label);
+  const info = yield* storage.fileSystem.stat(directory).pipe(mapIo(`Failed to inspect ${label}`));
+  if (info.type !== "Directory") {
+    return yield* new Schedule.ScheduleError({
+      kind: "corrupt",
+      message: `${label} must be a directory and must not be a symbolic link`,
+    });
+  }
+  return true;
+});
+
+const createDirectory = Effect.fn("Schedules.createDirectory")(function* (
+  storage: Storage,
+  directory: string,
+  label: string,
+) {
+  const parent = storage.path.dirname(directory);
+  if (!(yield* inspectDirectory(storage, parent, `${label} parent`))) {
+    return yield* new Schedule.ScheduleError({
+      kind: "corrupt",
+      message: `${label} parent must exist before the directory is created`,
+    });
+  }
+  yield* storage.fileSystem
+    .makeDirectory(directory, { mode: 0o700 })
+    .pipe(mapIo(`Failed to create ${label}`));
+  yield* inspectDirectory(storage, directory, label);
+});
 
 export const bootstrap = Effect.fn("Schedules.bootstrap")(function* (storage: Storage) {
   const value = roots(storage);
-  const directories = [
-    storage.schedulesDir,
-    value.enabled,
-    value.disabled,
-    value.runs,
-    value.staging,
-  ];
-  for (const directory of directories) {
-    yield* storage.fileSystem
-      .makeDirectory(directory, { recursive: true, mode: 0o700 })
-      .pipe(mapIo("Failed to create schedule directory"));
+  if (!(yield* inspectDirectory(storage, storage.schedulesDir, "schedule storage directory"))) {
+    yield* createDirectory(storage, storage.schedulesDir, "schedule storage directory");
   }
-  for (const directory of directories) {
-    yield* ensureDirectPath(storage, directory, "schedule storage directory");
+  const children = [value.enabled, value.disabled, value.runs, value.staging];
+  const missing: Array<string> = [];
+  for (const directory of children) {
+    if (!(yield* inspectDirectory(storage, directory, "schedule storage directory"))) {
+      missing.push(directory);
+    }
+  }
+  for (const directory of missing) {
+    yield* createDirectory(storage, directory, "schedule storage directory");
   }
 
   const staged = yield* storage.fileSystem
@@ -395,6 +430,7 @@ export const replaceDefinition = Effect.fn("Schedules.replaceDefinition")(functi
       message: "Invalid schedules cannot be updated",
     });
   }
+  const currentDirectory = current.directory;
   const value = roots(storage);
   const transaction = storage.path.join(value.staging, `replace-${transactionId}`);
   const next = storage.path.join(transaction, "next");
@@ -410,21 +446,25 @@ export const replaceDefinition = Effect.fn("Schedules.replaceDefinition")(functi
     )
     .pipe(mapIo("Failed to stage schedule replacement journal"));
   yield* writeDefinitionDirectory(storage, next, definition, source);
-  yield* storage.fileSystem
-    .rename(current.directory, previous)
-    .pipe(mapIo("Failed to retain previous schedule definition"));
-  const destination = storage.path.join(
-    current.view.state === "enabled" ? value.enabled : value.disabled,
-    current.view.id,
-  );
-  yield* storage.fileSystem.rename(next, destination).pipe(
-    Effect.tapError(() =>
-      ignoreCleanupFailure(
-        "Failed to restore retained schedule definition",
-        storage.fileSystem.rename(previous, destination),
-      ),
-    ),
-    mapIo("Failed to install schedule replacement"),
+  yield* Effect.uninterruptible(
+    Effect.gen(function* () {
+      yield* storage.fileSystem
+        .rename(currentDirectory, previous)
+        .pipe(mapIo("Failed to retain previous schedule definition"));
+      const destination = storage.path.join(
+        current.view.state === "enabled" ? value.enabled : value.disabled,
+        current.view.id,
+      );
+      yield* storage.fileSystem.rename(next, destination).pipe(
+        Effect.tapError(() =>
+          ignoreCleanupFailure(
+            "Failed to restore retained schedule definition",
+            storage.fileSystem.rename(previous, destination),
+          ),
+        ),
+        mapIo("Failed to install schedule replacement"),
+      );
+    }),
   );
   yield* storage.fileSystem
     .remove(transaction, { recursive: true, force: true })
@@ -724,50 +764,82 @@ export const appendArtifactString = Effect.fn("Schedules.appendArtifactString")(
   content: string,
 ) {
   const file = yield* prepareRunFile(storage, run, relative);
-  const backup = storage.path.join(
+  const temporary = storage.path.join(
     storage.path.dirname(file),
     `.${storage.path.basename(file)}-${yield* storage.temporaryId()}.append`,
   );
-  yield* storage.fileSystem.rename(file, backup).pipe(mapIo("Failed to isolate run append target"));
-  const restore = ignoreCleanupFailure(
-    "Failed to restore run append target",
-    storage.fileSystem.rename(backup, file),
+  const cleanup = ignoreCleanupFailure(
+    "Failed to remove temporary run append target",
+    storage.fileSystem.remove(temporary, { force: true }),
   );
-  const expected = yield* ensureRegularDestination(storage, backup, `run asset ${relative}`).pipe(
-    Effect.tapError(() => restore),
-  );
-  if (expected === undefined) {
-    yield* restore;
-    return yield* io("Run append target disappeared before it could be opened");
-  }
-  yield* Effect.scoped(
-    Effect.gen(function* () {
-      const handle = yield* storage.fileSystem
-        .open(backup, { flag: "r+", mode: 0o600 })
-        .pipe(mapIo("Failed to open run append target"));
-      const actual = yield* handle.stat.pipe(mapIo("Failed to inspect opened append target"));
-      const expectedInode = expected.ino._tag === "Some" ? expected.ino.value : undefined;
-      const actualInode = actual.ino._tag === "Some" ? actual.ino.value : undefined;
-      if (
-        actual.type !== "File" ||
-        actual.dev !== expected.dev ||
-        expectedInode !== actualInode ||
-        actual.size !== expected.size
-      ) {
-        return yield* new Schedule.ScheduleError({
-          kind: "corrupt",
-          message: `Run asset ${relative} changed before append`,
-        });
-      }
-      yield* handle.seek(actual.size, "start");
-      yield* handle
-        .writeAll(new TextEncoder().encode(content))
-        .pipe(mapIo("Failed to append run artifact"));
-    }),
-  ).pipe(Effect.tapError(() => restore));
-  yield* storage.fileSystem.rename(backup, file).pipe(
-    Effect.tapError(() => restore),
-    mapIo("Failed to commit run append"),
+  yield* Effect.uninterruptibleMask((restore) =>
+    restore(
+      Effect.gen(function* () {
+        const source = yield* ensureRegularDestination(storage, file, `run asset ${relative}`);
+        if (source === undefined) {
+          return yield* io("Run append target disappeared before it could be copied");
+        }
+        yield* storage.fileSystem
+          .copyFile(file, temporary)
+          .pipe(mapIo("Failed to copy run append target"));
+        const copiedSource = yield* ensureRegularDestination(
+          storage,
+          file,
+          `run asset ${relative}`,
+        );
+        const expected = yield* ensureRegularDestination(
+          storage,
+          temporary,
+          `temporary run asset ${relative}`,
+        );
+        const sourceInode = source.ino._tag === "Some" ? source.ino.value : undefined;
+        const copiedSourceInode =
+          copiedSource?.ino._tag === "Some" ? copiedSource.ino.value : undefined;
+        if (
+          copiedSource === undefined ||
+          copiedSource.type !== "File" ||
+          copiedSource.dev !== source.dev ||
+          copiedSourceInode !== sourceInode ||
+          copiedSource.size !== source.size ||
+          expected === undefined
+        ) {
+          return yield* new Schedule.ScheduleError({
+            kind: "corrupt",
+            message: `Run asset ${relative} changed while preparing append`,
+          });
+        }
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const handle = yield* storage.fileSystem
+              .open(temporary, { flag: "r+", mode: 0o600 })
+              .pipe(mapIo("Failed to open temporary run append target"));
+            const actual = yield* handle.stat.pipe(
+              mapIo("Failed to inspect opened run append target"),
+            );
+            const expectedInode = expected.ino._tag === "Some" ? expected.ino.value : undefined;
+            const actualInode = actual.ino._tag === "Some" ? actual.ino.value : undefined;
+            if (
+              actual.type !== "File" ||
+              actual.dev !== expected.dev ||
+              expectedInode !== actualInode ||
+              actual.size !== expected.size
+            ) {
+              return yield* new Schedule.ScheduleError({
+                kind: "corrupt",
+                message: `Run asset ${relative} changed before append`,
+              });
+            }
+            yield* handle.seek(actual.size, "start");
+            yield* handle
+              .writeAll(new TextEncoder().encode(content))
+              .pipe(mapIo("Failed to append run artifact"));
+          }),
+        );
+        yield* storage.fileSystem
+          .rename(temporary, file)
+          .pipe(mapIo("Failed to commit run append"));
+      }),
+    ).pipe(Effect.ensuring(cleanup)),
   );
 });
 

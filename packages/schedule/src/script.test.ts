@@ -25,6 +25,7 @@ const decodeResult = Schema.decodeUnknownSync(
   Schema.fromJsonString(
     Schema.Struct({
       timeoutMillis: Schema.Int,
+      timedOut: Schema.Boolean,
       stdout: Schema.Struct({ totalBytes: Schema.Natural, truncated: Schema.Boolean }),
     }),
   ),
@@ -177,6 +178,47 @@ describe("schedule script runner", () => {
       assert.strictEqual(timeoutError.stage, "script");
       assert.include(timeoutError.message, "timed out after 10 milliseconds");
       assert.strictEqual((yield* readFailedDecision(timeoutRun.id)).kind, "failed");
+      const inheritedPipeRun: Schedule.ScheduleRunLifecycle = {
+        ...run,
+        id: Schedule.ScheduleRunId.make("scheduled-4500-018f47a0-0000-7000-8000-000000000004"),
+        source: { kind: "scheduled", scheduledFor: 4_500 },
+      };
+      yield* publishRun(
+        storage,
+        inheritedPipeRun,
+        definition,
+        {
+          script: `
+const descendant = Bun.spawn({
+  cmd: [process.execPath, "-e", "await Bun.sleep(500)"],
+  stdout: "inherit",
+  stderr: "inherit",
+});
+descendant.unref();
+process.stdout.write(JSON.stringify({ agent: false }));
+`,
+          prompt: null,
+        },
+        "018f47a0-0000-7000-8000-000000000017",
+      );
+      const inheritedPipe = yield* runScript(
+        storage,
+        process.execPath,
+        inheritedPipeRun,
+        target,
+        100,
+      );
+      assert.deepStrictEqual(inheritedPipe.decision, { agent: false });
+      const inheritedPipeResult = decodeResult(
+        yield* fileSystem.readFileString(
+          path.join(
+            runDirectory(storage, scheduleId, inheritedPipeRun.id),
+            "script",
+            "result.json",
+          ),
+        ),
+      );
+      assert.isFalse(inheritedPipeResult.timedOut);
 
       const spawnRun: Schedule.ScheduleRunLifecycle = {
         ...run,
