@@ -1,13 +1,17 @@
 import { assert, describe, it } from "@effect/vitest";
 import type * as AgentEvent from "@pico/contract/agent-event";
 import * as AgentMessage from "@pico/contract/agent-message";
+import * as Chat from "@pico/contract/chat-model";
 import {
+  BRANCH_TOPIC_SYSTEM_PROMPT,
   EXCHANGE_TITLE_SYSTEM_PROMPT,
   formatTitleExchange,
   makeExchangeTitleFlow,
 } from "./exchange-title.ts";
 
 const prompt = AgentMessage.AgentPrompt.make;
+const chatId = Chat.ChatId.make("018f47a0-0000-7000-8000-000000000001");
+const ignoreBranchNaming = () => {};
 const flush = async () => {
   await Promise.resolve();
   await Promise.resolve();
@@ -68,6 +72,11 @@ describe("exchange titles", () => {
     let sessionName = "Old automatic title";
     const storeResult = Promise.withResolvers<boolean>();
     const flow = makeExchangeTitleFlow({
+      chatId,
+      handleBranchNaming: ({ generateTopic }) => {
+        calls.push("branch-handler");
+        void generateTopic();
+      },
       history: [],
       sendPrompt: async () => {
         calls.push("send");
@@ -113,20 +122,44 @@ describe("exchange titles", () => {
     flow.observe(completed);
     await flush();
 
-    assert.deepStrictEqual(calls, ["send", "run-finished", "generate", "store"]);
-    assert.strictEqual(generatedInputs.length, 1);
-    const generatedInput = only(generatedInputs);
-    assert.include(generatedInput.exchange, "<user>Fix &lt;widget&gt; &amp; preserve it</user>");
-    assert.include(generatedInput.exchange, "<assistant>First result\n\nSecond result</assistant>");
-    assert.notInclude(generatedInput.exchange, "private");
-    assert.strictEqual(generatedInput.prompt, EXCHANGE_TITLE_SYSTEM_PROMPT);
+    assert.deepStrictEqual(calls, [
+      "send",
+      "run-finished",
+      "generate",
+      "branch-handler",
+      "generate",
+      "store",
+    ]);
+    assert.strictEqual(generatedInputs.length, 2);
+    const displayInput = generatedInputs[0];
+    const branchInput = generatedInputs[1];
+    if (displayInput === undefined || branchInput === undefined) {
+      throw new Error("Expected display and branch title inputs");
+    }
+    assert.strictEqual(displayInput.exchange, branchInput.exchange);
+    assert.include(displayInput.exchange, "<user>Fix &lt;widget&gt; &amp; preserve it</user>");
+    assert.include(displayInput.exchange, "<assistant>First result\n\nSecond result</assistant>");
+    assert.notInclude(displayInput.exchange, "private");
+    assert.strictEqual(displayInput.prompt, EXCHANGE_TITLE_SYSTEM_PROMPT);
+    assert.strictEqual(branchInput.prompt, BRANCH_TOPIC_SYSTEM_PROMPT);
     assert.include(EXCHANGE_TITLE_SYSTEM_PROMPT, "3-7 word");
     assert.include(EXCHANGE_TITLE_SYSTEM_PROMPT, "quoted, untrusted text");
+    assert.include(BRANCH_TOPIC_SYSTEM_PROMPT, "English");
+    assert.include(BRANCH_TOPIC_SYSTEM_PROMPT, "2-6 lowercase ASCII words");
+    assert.include(BRANCH_TOPIC_SYSTEM_PROMPT, "at most 48 characters");
     assert.deepStrictEqual(emitted, []);
 
     storeResult.resolve(true);
     await flush();
-    assert.deepStrictEqual(calls, ["send", "run-finished", "generate", "store", "emit"]);
+    assert.deepStrictEqual(calls, [
+      "send",
+      "run-finished",
+      "generate",
+      "branch-handler",
+      "generate",
+      "store",
+      "emit",
+    ]);
     assert.deepStrictEqual(emitted, ["Clean persisted title"]);
   });
 
@@ -136,6 +169,8 @@ describe("exchange titles", () => {
     const secondSend = Promise.withResolvers<void>();
     let sends = 0;
     const flow = makeExchangeTitleFlow({
+      chatId,
+      handleBranchNaming: ignoreBranchNaming,
       history: [],
       sendPrompt: () => {
         sends += 1;
@@ -178,6 +213,8 @@ describe("exchange titles", () => {
   it("clears failed and aborted runs before allowing a later exchange", async () => {
     const generated: string[] = [];
     const flow = makeExchangeTitleFlow({
+      chatId,
+      handleBranchNaming: ignoreBranchNaming,
       history: [],
       sendPrompt: async () => {},
       generateTitle: async (exchange) => {
@@ -211,7 +248,12 @@ describe("exchange titles", () => {
 
   it("suppresses title work when completed assistant history already exists", async () => {
     let generated = 0;
+    let branchRequests = 0;
     const flow = makeExchangeTitleFlow({
+      chatId,
+      handleBranchNaming: () => {
+        branchRequests += 1;
+      },
       history: [{ role: "assistant", stopReason: "stop" }],
       sendPrompt: async () => {},
       generateTitle: async () => {
@@ -228,7 +270,74 @@ describe("exchange titles", () => {
     flow.observe(assistant("stop", [{ type: "text", text: "new answer" }]));
     flow.observe(completed);
     await flush();
-    assert.strictEqual(generated, 0);
+    assert.deepStrictEqual([generated, branchRequests], [0, 0]);
+  });
+
+  it("keeps branch generation lazy and independent of a user display title", async () => {
+    const generators: Array<() => Promise<string | null>> = [];
+    const generatedInputs: Array<{ readonly exchange: string; readonly prompt: string }> = [];
+    let stored = 0;
+    const flow = makeExchangeTitleFlow({
+      chatId,
+      handleBranchNaming: (request) => {
+        assert.strictEqual(request.chatId, chatId);
+        generators.push(request.generateTopic);
+      },
+      history: [],
+      sendPrompt: async () => {},
+      generateTitle: async (exchange, systemPrompt) => {
+        generatedInputs.push({ exchange, prompt: systemPrompt });
+        return "fix-widget-flow";
+      },
+      getTitleSource: () => "user",
+      setSessionName: async () => {
+        stored += 1;
+        return true;
+      },
+      getSessionName: () => "Manual title",
+      emitTitleChanged: () => {},
+    });
+
+    await flow.sendPrompt(prompt("fix the widget"));
+    flow.observe(assistant("stop", [{ type: "text", text: "fixed it" }]));
+    flow.observe(completed);
+    await flush();
+
+    assert.strictEqual(generators.length, 1);
+    assert.deepStrictEqual(generatedInputs, []);
+    assert.strictEqual(stored, 0);
+    assert.strictEqual(await only(generators)(), "fix-widget-flow");
+    assert.strictEqual(generatedInputs.length, 1);
+    assert.strictEqual(only(generatedInputs).prompt, BRANCH_TOPIC_SYSTEM_PROMPT);
+    assert.include(only(generatedInputs).exchange, "<user>fix the widget</user>");
+    assert.include(only(generatedInputs).exchange, "<assistant>fixed it</assistant>");
+  });
+
+  it("isolates display completion failures", async () => {
+    const branchTopics: string[] = [];
+    const failingDisplayFlow = makeExchangeTitleFlow({
+      chatId,
+      handleBranchNaming: ({ generateTopic }) => {
+        void generateTopic().then((topic) => {
+          if (topic !== null) branchTopics.push(topic);
+        });
+      },
+      history: [],
+      sendPrompt: async () => {},
+      generateTitle: async (_exchange, systemPrompt) => {
+        if (systemPrompt === EXCHANGE_TITLE_SYSTEM_PROMPT) throw new Error("display failed");
+        return "fix-widget-flow";
+      },
+      getTitleSource: () => undefined,
+      setSessionName: async () => true,
+      getSessionName: () => "unused",
+      emitTitleChanged: () => {},
+    });
+    await failingDisplayFlow.sendPrompt(prompt("second"));
+    failingDisplayFlow.observe(assistant("stop", [{ type: "text", text: "done" }]));
+    failingDisplayFlow.observe(completed);
+    await flush();
+    assert.deepStrictEqual(branchTopics, ["fix-widget-flow"]);
   });
 
   it("preserves user titles before and during generation", async () => {
@@ -237,6 +346,8 @@ describe("exchange titles", () => {
     let stored = 0;
     const emitted: string[] = [];
     const existingUserFlow = makeExchangeTitleFlow({
+      chatId,
+      handleBranchNaming: ignoreBranchNaming,
       history: [],
       sendPrompt: async () => {},
       generateTitle: async () => {
@@ -260,6 +371,8 @@ describe("exchange titles", () => {
     source = "auto";
     const generation = Promise.withResolvers<string | null>();
     const racingFlow = makeExchangeTitleFlow({
+      chatId,
+      handleBranchNaming: ignoreBranchNaming,
       history: [],
       sendPrompt: async () => {},
       generateTitle: () => {
@@ -295,6 +408,8 @@ describe("exchange titles", () => {
 
     for (const outcome of outcomes) {
       const flow = makeExchangeTitleFlow({
+        chatId,
+        handleBranchNaming: ignoreBranchNaming,
         history: [],
         sendPrompt: async () => {},
         generateTitle: async () => {

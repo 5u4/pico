@@ -20,6 +20,26 @@ export interface ChatWorktreeOptions {
   readonly cwd: AbsolutePath;
 }
 
+export interface RenameChatBranchOptions extends ChatWorktreeOptions {
+  readonly prefix: string;
+  readonly topic: string;
+}
+
+export type RenameChatBranchResult =
+  | { readonly kind: "renamed" }
+  | { readonly kind: "already-renamed" }
+  | {
+      readonly kind: "skipped";
+      readonly reason:
+        | "not-managed"
+        | "already-absent"
+        | "invalid-target"
+        | "detached"
+        | "branch-changed"
+        | "remote-state"
+        | "target-exists";
+    };
+
 export type WorktreeInspection =
   | { readonly kind: "not-managed" }
   | { readonly kind: "managed"; readonly state: "absent" | "clean" | "dirty" };
@@ -49,6 +69,9 @@ export interface GitWorktree {
   readonly inspectChat: (
     options: ChatWorktreeOptions,
   ) => Effect.Effect<WorktreeInspection, GitError>;
+  readonly renameChatBranch: (
+    options: RenameChatBranchOptions,
+  ) => Effect.Effect<RenameChatBranchResult, GitError>;
   readonly removeChat: (
     options: RemoveChatWorktreeOptions,
   ) => Effect.Effect<RemoveChatWorktreeResult, GitError>;

@@ -8,6 +8,7 @@
     "./errors": "./src/errors.ts",
     "./application": "./src/application.ts",
     "./rpc": "./src/rpc.ts",
+    "./branch-naming": "./src/branch-naming.ts",
     "./worktree": "./src/worktree.ts",
     "./workspace-model": "./src/workspace-model.ts",
     "./workspace-repository": "./src/workspace-repository.ts",

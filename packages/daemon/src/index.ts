@@ -34,11 +34,14 @@ const daemonLayer = (paths: PicoPaths, config: Config.PicoConfig) =>
       const gitWorktree = yield* GitWorktree.make(paths.worktreesDir);
       const schedules = yield* ScheduleLayer.open(paths.schedulesDir);
       const persistence = PersistenceLayer.layer(paths.storeFile);
+      const branchNaming = ApplicationLayer.branchNamingLayer(gitWorktree).pipe(
+        Layer.provide(persistence),
+      );
       const application = ApplicationLayer.layer(gitWorktree).pipe(
         Layer.provide(Layer.merge(persistence, AgentSessionStoreLayer.layer(paths.sessionsDir))),
       );
       const agentRuntime = AgentRuntimeLayer.layer(paths.sessionsDir, schedules).pipe(
-        Layer.provide(persistence),
+        Layer.provide(Layer.merge(persistence, branchNaming)),
       );
       const core = Layer.merge(application, EventRouterLayer.layer).pipe(
         Layer.provide(agentRuntime),
