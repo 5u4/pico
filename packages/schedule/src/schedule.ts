@@ -1,6 +1,7 @@
 import * as Chat from "@pico/contract/chat-model";
 import type { AbsolutePath } from "@pico/contract/path";
 import * as Schedule from "@pico/contract/schedule";
+import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Cron from "effect/Cron";
 import * as Crypto from "effect/Crypto";
@@ -542,73 +543,102 @@ export const make = Effect.fn("Schedules.make")(function* (
   const scheduleCycle = Effect.fn("Schedules.scheduleCycle")(function* (
     host: Schedule.ScheduleRunHost,
   ): Effect.fn.Return<void, Schedule.ScheduleError, Scope.Scope> {
-    const claimed = yield* mutation.withPermit(
-      Effect.gen(function* () {
-        const now = yield* Clock.currentTimeMillis;
-        const schedules = yield* scanSchedules(storage);
-        const pending: Array<{
-          readonly run: Schedule.ScheduleRunLifecycle;
-          readonly definition: Schedule.ScheduleDefinition;
-          readonly source: Schedule.ScheduleSource;
-          readonly missed: boolean;
-        }> = [];
-        for (const loaded of schedules) {
-          if (loaded.view.kind !== "ready" || loaded.view.state !== "enabled") continue;
-          if (validateDefinition(loaded.view.definition) !== undefined) continue;
-          const view = loaded.view;
-          const existing = yield* readRuns(storage, view.id);
-          if (existing.some((run) => run.state.kind !== "finished")) continue;
-          const currentRuns = existing.filter(
-            (run) => run.definitionRevision === view.definition.revision,
-          );
-
-          let scheduledFor: number;
-          if (view.definition.trigger.kind === "once") {
-            scheduledFor = view.definition.trigger.at;
-            if (currentRuns.some((run) => run.source.scheduledFor === scheduledFor)) {
-              yield* disableDefinition(view.id, view.definition.revision);
-              continue;
-            }
-            if (scheduledFor > now) continue;
-          } else {
-            const latest = latestCronSlot(view.definition.trigger, now);
-            if (latest === undefined || latest <= view.definition.createdAt) continue;
-            scheduledFor = latest;
-            if (currentRuns.some((run) => run.source.scheduledFor === scheduledFor)) continue;
-          }
-
-          const run = yield* claim(view, { kind: "scheduled", scheduledFor });
-          pending.push({
-            run,
-            definition: view.definition,
-            source: view.source,
-            missed: now - scheduledFor > MISSED_GRACE_MILLIS,
-          });
-        }
-        return pending;
-      }),
+    const owned = new Set<Schedule.ScheduleRunLifecycle>();
+    const cleanupOwned = Effect.suspend(() =>
+      Effect.forEach(
+        [...owned.values()],
+        (run) =>
+          finishFallback(run, { kind: "interrupted", phase: "schedule-cycle" }).pipe(
+            Effect.asVoid,
+            Effect.catchCause((cause) =>
+              Effect.logError("Failed to finish an interrupted schedule claim", {
+                runId: run.id,
+                cause: Cause.pretty(cause),
+              }),
+            ),
+          ),
+        { discard: true },
+      ),
     );
 
-    for (const item of claimed) {
-      if (item.missed) {
-        const terminal = yield* finish(item.run, {
-          kind: "missed",
-          scheduledFor: item.run.source.scheduledFor,
-          observedAt: yield* Clock.currentTimeMillis,
-        });
-        yield* disableFinishedOnce(terminal, item.definition);
-      } else {
-        yield* executeRun(host, item.run, item.definition, item.source).pipe(
-          Effect.onInterrupt(() =>
-            finishFallback(item.run, {
-              kind: "interrupted",
-              phase: "scheduler-scope",
-            }).pipe(Effect.asVoid),
-          ),
-          Effect.forkScoped({ startImmediately: true }),
-        );
+    return yield* Effect.gen(function* () {
+      const claimed = yield* mutation.withPermit(
+        Effect.gen(function* () {
+          const now = yield* Clock.currentTimeMillis;
+          const schedules = yield* scanSchedules(storage);
+          const pending: Array<{
+            readonly run: Schedule.ScheduleRunLifecycle;
+            readonly definition: Schedule.ScheduleDefinition;
+            readonly source: Schedule.ScheduleSource;
+            readonly missed: boolean;
+          }> = [];
+          for (const loaded of schedules) {
+            if (loaded.view.kind !== "ready" || loaded.view.state !== "enabled") continue;
+            if (validateDefinition(loaded.view.definition) !== undefined) continue;
+            const view = loaded.view;
+            const existing = yield* readRuns(storage, view.id);
+            if (existing.some((run) => run.state.kind !== "finished")) continue;
+            const currentRuns = existing.filter(
+              (run) => run.definitionRevision === view.definition.revision,
+            );
+
+            let scheduledFor: number;
+            if (view.definition.trigger.kind === "once") {
+              scheduledFor = view.definition.trigger.at;
+              if (currentRuns.some((run) => run.source.scheduledFor === scheduledFor)) {
+                yield* disableDefinition(view.id, view.definition.revision);
+                continue;
+              }
+              if (scheduledFor > now) continue;
+            } else {
+              const latest = latestCronSlot(view.definition.trigger, now);
+              if (latest === undefined || latest <= view.definition.createdAt) continue;
+              scheduledFor = latest;
+              if (currentRuns.some((run) => run.source.scheduledFor === scheduledFor)) continue;
+            }
+
+            const run = yield* Effect.uninterruptible(
+              claim(view, { kind: "scheduled", scheduledFor }).pipe(
+                Effect.tap((published) => Effect.sync(() => owned.add(published))),
+              ),
+            );
+            pending.push({
+              run,
+              definition: view.definition,
+              source: view.source,
+              missed: now - scheduledFor > MISSED_GRACE_MILLIS,
+            });
+          }
+          return pending;
+        }),
+      );
+
+      for (const item of claimed) {
+        if (item.missed) {
+          const terminal = yield* finish(item.run, {
+            kind: "missed",
+            scheduledFor: item.run.source.scheduledFor,
+            observedAt: yield* Clock.currentTimeMillis,
+          });
+          yield* disableFinishedOnce(terminal, item.definition);
+          owned.delete(item.run);
+        } else {
+          yield* Effect.uninterruptible(
+            executeRun(host, item.run, item.definition, item.source).pipe(
+              Effect.onInterrupt(() =>
+                finishFallback(item.run, {
+                  kind: "interrupted",
+                  phase: "scheduler-scope",
+                }).pipe(Effect.asVoid),
+              ),
+              Effect.forkScoped({ startImmediately: true }),
+              Effect.tap(() => Effect.sync(() => owned.delete(item.run))),
+              Effect.asVoid,
+            ),
+          );
+        }
       }
-    }
+    }).pipe(Effect.ensuring(cleanupOwned));
   });
 
   const reconcile = Effect.fn("Schedules.reconcile")(function* () {

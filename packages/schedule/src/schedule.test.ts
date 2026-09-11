@@ -792,6 +792,101 @@ describe("Schedules", () => {
       assert.deepStrictEqual(yield* fileSystem.readDirectory(childSchedulesDir), ["enabled"]);
     }).pipe(Effect.provide(platformLayer), Effect.scoped),
   );
+  it.effect("rejects symlinked definition destination parents before publishing", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-definition-root-" });
+      const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
+      const outside = path.join(root, "outside");
+      const sentinel = path.join(outside, "sentinel");
+      const enabled = path.join(schedulesDir, "enabled");
+      const retainedEnabled = path.join(root, "retained-enabled");
+      const storage: Storage = {
+        fileSystem,
+        path,
+        schedulesDir,
+        temporaryId: () => Effect.succeed("018f47a0-0000-7000-8000-000000000090"),
+      };
+      const id = Schedule.ScheduleId.make("018f47a0-0000-7000-8000-000000000091");
+      const definition: Schedule.ScheduleDefinition = {
+        version: 1,
+        revision: Schedule.ScheduleRevision.make("018f47a0-0000-7000-8000-000000000092"),
+        name: "original",
+        ownerWorkspaceId: workspaceId,
+        createdByChatId: chatId,
+        createdAt: 0,
+        target: { kind: "chat", chatId },
+        trigger: { kind: "once", at: 1_000 },
+      };
+      const source: Schedule.ScheduleSource = { script: null, prompt: "original" };
+      yield* fileSystem.makeDirectory(outside);
+      yield* fileSystem.writeFileString(sentinel, "unchanged");
+      yield* bootstrap(storage);
+
+      yield* fileSystem.remove(enabled, { recursive: true });
+      yield* fileSystem.symlink(outside, enabled);
+      const createError = yield* publishDefinition(
+        storage,
+        id,
+        "enabled",
+        definition,
+        source,
+        "symlinked-create-parent",
+      ).pipe(Effect.flip);
+      assert.strictEqual(createError.kind, "corrupt");
+      assert.deepStrictEqual(yield* fileSystem.readDirectory(outside), ["sentinel"]);
+
+      yield* fileSystem.remove(enabled);
+      yield* fileSystem.makeDirectory(enabled, { mode: 0o700 });
+      yield* publishDefinition(storage, id, "enabled", definition, source, "original");
+      const current = yield* loadSchedule(storage, id);
+      if (current === undefined) return yield* Effect.die("Published definition disappeared");
+      const replacement: Schedule.ScheduleDefinition = {
+        ...definition,
+        revision: Schedule.ScheduleRevision.make("018f47a0-0000-7000-8000-000000000093"),
+        name: "replacement",
+      };
+      const transaction = path.join(schedulesDir, ".staging", "replace-symlinked-replace-parent");
+      const nextPrompt = path.join(transaction, "next", "prompt.md");
+      const previous = path.join(transaction, "previous");
+      let attemptedOriginalMove = false;
+      const swappedFileSystem = FileSystem.FileSystem.of({
+        ...fileSystem,
+        writeFileString: (file, contents, options) =>
+          fileSystem
+            .writeFileString(file, contents, options)
+            .pipe(
+              Effect.tap(() =>
+                file === nextPrompt
+                  ? fileSystem
+                      .rename(enabled, retainedEnabled)
+                      .pipe(Effect.andThen(fileSystem.symlink(outside, enabled)))
+                  : Effect.void,
+              ),
+            ),
+        rename: (from, to) => {
+          if (from === current.directory) attemptedOriginalMove = true;
+          return fileSystem.rename(from, to);
+        },
+      });
+      const replaceError = yield* replaceDefinition(
+        { ...storage, fileSystem: swappedFileSystem },
+        current,
+        replacement,
+        { script: null, prompt: "replacement" },
+        "symlinked-replace-parent",
+      ).pipe(Effect.flip);
+      assert.strictEqual(replaceError.kind, "corrupt");
+      assert.isFalse(attemptedOriginalMove);
+      assert.isFalse(yield* fileSystem.exists(previous));
+      assert.deepStrictEqual(yield* fileSystem.readDirectory(outside), ["sentinel"]);
+      const retained = yield* decodeDefinition(
+        yield* fileSystem.readFileString(path.join(retainedEnabled, id, "meta.json")),
+      );
+      assert.strictEqual(retained.revision, definition.revision);
+    }).pipe(Effect.provide(platformLayer), Effect.scoped),
+  );
   it.effect("keeps a definition canonical when replacement is interrupted during commit", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
@@ -1082,6 +1177,323 @@ describe("Schedules", () => {
           kind: "failed",
           stage: "protocol",
         });
+      }).pipe(Effect.provide(Layer.succeed(FileSystem.FileSystem, failingFileSystem)));
+    }).pipe(Effect.provide(platformLayer), Effect.scoped),
+  );
+  it.effect("rejects staging symlinks without writing outside schedule storage", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-staging-symlink-" });
+      const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
+      const outside = path.join(root, "outside");
+      const sentinel = path.join(outside, "sentinel");
+      const storage: Storage = {
+        fileSystem,
+        path,
+        schedulesDir,
+        temporaryId: () => Effect.succeed("018f47a0-0000-7000-8000-000000000060"),
+      };
+      const id = Schedule.ScheduleId.make("018f47a0-0000-7000-8000-000000000061");
+      const definition: Schedule.ScheduleDefinition = {
+        version: 1,
+        revision: Schedule.ScheduleRevision.make("018f47a0-0000-7000-8000-000000000062"),
+        name: "original",
+        ownerWorkspaceId: workspaceId,
+        createdByChatId: chatId,
+        createdAt: 0,
+        target: { kind: "chat", chatId },
+        trigger: { kind: "once", at: 1_000 },
+      };
+      const source: Schedule.ScheduleSource = { script: null, prompt: "original" };
+      const staging = path.join(schedulesDir, ".staging");
+      yield* fileSystem.makeDirectory(outside);
+      yield* fileSystem.writeFileString(sentinel, "unchanged");
+      yield* bootstrap(storage);
+
+      const definitionTransaction = path.join(staging, "definition-preexisting");
+      yield* fileSystem.symlink(outside, definitionTransaction);
+      const definitionError = yield* publishDefinition(
+        storage,
+        id,
+        "enabled",
+        definition,
+        source,
+        "preexisting",
+      ).pipe(Effect.flip);
+      assert.strictEqual(definitionError.kind, "corrupt");
+      assert.deepStrictEqual(yield* fileSystem.readDirectory(outside), ["sentinel"]);
+      assert.isFalse(yield* fileSystem.exists(path.join(schedulesDir, "enabled", id)));
+      yield* fileSystem.remove(definitionTransaction);
+
+      yield* publishDefinition(storage, id, "enabled", definition, source, "original");
+      const current = yield* loadSchedule(storage, id);
+      if (current === undefined) return yield* Effect.die("Published definition disappeared");
+      const replacement: Schedule.ScheduleDefinition = {
+        ...definition,
+        revision: Schedule.ScheduleRevision.make("018f47a0-0000-7000-8000-000000000063"),
+        name: "replacement",
+      };
+      const replacementTransaction = path.join(staging, "replace-preexisting");
+      yield* fileSystem.symlink(outside, replacementTransaction);
+      const replacementError = yield* replaceDefinition(
+        storage,
+        current,
+        replacement,
+        { script: null, prompt: "replacement" },
+        "preexisting",
+      ).pipe(Effect.flip);
+      assert.strictEqual(replacementError.kind, "corrupt");
+      assert.deepStrictEqual(yield* fileSystem.readDirectory(outside), ["sentinel"]);
+      const retained = yield* loadSchedule(storage, id);
+      assert.strictEqual(retained?.view.kind, "ready");
+      if (retained?.view.kind !== "ready") return;
+      assert.strictEqual(retained.view.definition.revision, definition.revision);
+      yield* fileSystem.remove(replacementTransaction);
+
+      yield* fileSystem.remove(staging, { recursive: true });
+      yield* fileSystem.symlink(outside, staging);
+      const parentError = yield* publishDefinition(
+        storage,
+        Schedule.ScheduleId.make("018f47a0-0000-7000-8000-000000000064"),
+        "enabled",
+        definition,
+        source,
+        "parent-replaced",
+      ).pipe(Effect.flip);
+      assert.strictEqual(parentError.kind, "corrupt");
+      assert.deepStrictEqual(yield* fileSystem.readDirectory(outside), ["sentinel"]);
+      yield* fileSystem.remove(staging);
+      yield* fileSystem.makeDirectory(staging, { mode: 0o700 });
+
+      const run: Schedule.ScheduleRunLifecycle = {
+        version: 1,
+        id: Schedule.ScheduleRunId.make(`scheduled-1000-${definition.revision}`),
+        scheduleId: id,
+        definitionRevision: definition.revision,
+        source: { kind: "scheduled", scheduledFor: 1_000 },
+        plannedTarget: { kind: "existing-chat", ownerWorkspaceId: workspaceId, chatId },
+        claimedAt: 1_000,
+        state: { kind: "claimed" },
+      };
+      const runTransaction = path.join(staging, "run-preexisting");
+      yield* fileSystem.symlink(outside, runTransaction);
+      const runError = yield* publishRun(storage, run, definition, source, "preexisting").pipe(
+        Effect.flip,
+      );
+      assert.strictEqual(runError.kind, "corrupt");
+      assert.deepStrictEqual(yield* fileSystem.readDirectory(outside), ["sentinel"]);
+      assert.isFalse(yield* fileSystem.exists(runDirectory(storage, id, run.id)));
+      yield* fileSystem.remove(runTransaction);
+
+      const inputTransactionId = "input-preexisting";
+      const inputTransaction = path.join(staging, `run-${inputTransactionId}`);
+      const input = path.join(inputTransaction, "input");
+      const injectedFileSystem = FileSystem.FileSystem.of({
+        ...fileSystem,
+        makeDirectory: (directory, options) =>
+          fileSystem
+            .makeDirectory(directory, options)
+            .pipe(
+              Effect.tap(() =>
+                directory === inputTransaction ? fileSystem.symlink(outside, input) : Effect.void,
+              ),
+            ),
+      });
+      const inputError = yield* publishRun(
+        { ...storage, fileSystem: injectedFileSystem },
+        run,
+        definition,
+        source,
+        inputTransactionId,
+      ).pipe(Effect.flip);
+      assert.strictEqual(inputError.kind, "corrupt");
+      assert.deepStrictEqual(yield* fileSystem.readDirectory(outside), ["sentinel"]);
+      assert.isFalse(yield* fileSystem.exists(runDirectory(storage, id, run.id)));
+      const canonical = yield* loadSchedule(storage, id);
+      assert.strictEqual(canonical?.view.kind, "ready");
+      if (canonical?.view.kind === "ready") {
+        assert.strictEqual(canonical.view.definition.revision, definition.revision);
+      }
+    }).pipe(Effect.provide(platformLayer), Effect.scoped),
+  );
+
+  it.effect("terminalizes an earlier claim when a later schedule history read fails", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "pico-cycle-read-failure-",
+      });
+      const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
+      const storage: Storage = {
+        fileSystem,
+        path,
+        schedulesDir,
+        temporaryId: () => Effect.succeed("018f47a0-0000-7000-8000-000000000070"),
+      };
+      const firstId = Schedule.ScheduleId.make("018f47a0-0000-7000-8000-000000000071");
+      const secondId = Schedule.ScheduleId.make("018f47a0-0000-7000-8000-000000000072");
+      const firstDefinition: Schedule.ScheduleDefinition = {
+        version: 1,
+        revision: Schedule.ScheduleRevision.make("018f47a0-0000-7000-8000-000000000073"),
+        name: "first",
+        ownerWorkspaceId: workspaceId,
+        createdByChatId: chatId,
+        createdAt: 0,
+        target: { kind: "chat", chatId },
+        trigger: { kind: "once", at: 1_000 },
+      };
+      const secondDefinition: Schedule.ScheduleDefinition = {
+        ...firstDefinition,
+        revision: Schedule.ScheduleRevision.make("018f47a0-0000-7000-8000-000000000074"),
+        name: "second",
+      };
+      yield* bootstrap(storage);
+      yield* publishDefinition(
+        storage,
+        firstId,
+        "enabled",
+        firstDefinition,
+        { script: null, prompt: "first" },
+        "first-definition",
+      );
+      yield* publishDefinition(
+        storage,
+        secondId,
+        "enabled",
+        secondDefinition,
+        { script: null, prompt: "second" },
+        "second-definition",
+      );
+      const firstRunId = Schedule.ScheduleRunId.make(`scheduled-1000-${firstDefinition.revision}`);
+      const firstRunDirectory = runDirectory(storage, firstId, firstRunId);
+      const secondRuns = path.join(schedulesDir, "runs", secondId);
+      yield* fileSystem.makeDirectory(secondRuns);
+      const failingFileSystem = FileSystem.FileSystem.of({
+        ...fileSystem,
+        readDirectory: (directory) =>
+          directory === secondRuns
+            ? fileSystem
+                .exists(firstRunDirectory)
+                .pipe(
+                  Effect.flatMap((firstClaimed) =>
+                    firstClaimed
+                      ? Effect.fail(permissionDenied("readDirectory", directory))
+                      : fileSystem.readDirectory(directory),
+                  ),
+                )
+            : fileSystem.readDirectory(directory),
+      });
+
+      yield* Effect.gen(function* () {
+        const schedules = yield* make(schedulesDir);
+        const host: Schedule.ScheduleRunHost = {
+          prepare: () => Effect.die("Claimed runs must not dispatch after the scan fails"),
+          deliver: () => Effect.die("Claimed runs must not dispatch after the scan fails"),
+          publish: () => Effect.die("Claimed runs must not dispatch after the scan fails"),
+          runPrompt: () => Effect.die("Claimed runs must not dispatch after the scan fails"),
+        };
+        yield* TestClock.setTime(1_000);
+        yield* schedules.start(host);
+        const terminal = yield* awaitFinished(fileSystem, path.join(firstRunDirectory, "run.json"));
+        assert.deepStrictEqual(terminal.state.kind === "finished" && terminal.state.outcome, {
+          kind: "interrupted",
+          phase: "schedule-cycle",
+        });
+        assert.deepStrictEqual(yield* fileSystem.readDirectory(secondRuns), []);
+      }).pipe(Effect.provide(Layer.succeed(FileSystem.FileSystem, failingFileSystem)));
+    }).pipe(Effect.provide(platformLayer), Effect.scoped),
+  );
+
+  it.effect("terminalizes every missed claim when one finalization fails", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "pico-cycle-missed-failure-",
+      });
+      const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
+      const storage: Storage = {
+        fileSystem,
+        path,
+        schedulesDir,
+        temporaryId: () => Effect.succeed("018f47a0-0000-7000-8000-000000000080"),
+      };
+      const firstId = Schedule.ScheduleId.make("018f47a0-0000-7000-8000-000000000081");
+      const secondId = Schedule.ScheduleId.make("018f47a0-0000-7000-8000-000000000082");
+      const firstDefinition: Schedule.ScheduleDefinition = {
+        version: 1,
+        revision: Schedule.ScheduleRevision.make("018f47a0-0000-7000-8000-000000000083"),
+        name: "first missed",
+        ownerWorkspaceId: workspaceId,
+        createdByChatId: chatId,
+        createdAt: 0,
+        target: { kind: "chat", chatId },
+        trigger: { kind: "once", at: 1_000 },
+      };
+      const secondDefinition: Schedule.ScheduleDefinition = {
+        ...firstDefinition,
+        revision: Schedule.ScheduleRevision.make("018f47a0-0000-7000-8000-000000000084"),
+        name: "second missed",
+      };
+      yield* bootstrap(storage);
+      yield* publishDefinition(
+        storage,
+        firstId,
+        "enabled",
+        firstDefinition,
+        { script: null, prompt: "first" },
+        "first-missed-definition",
+      );
+      yield* publishDefinition(
+        storage,
+        secondId,
+        "enabled",
+        secondDefinition,
+        { script: null, prompt: "second" },
+        "second-missed-definition",
+      );
+      const firstRunId = Schedule.ScheduleRunId.make(`scheduled-1000-${firstDefinition.revision}`);
+      const secondRunId = Schedule.ScheduleRunId.make(
+        `scheduled-1000-${secondDefinition.revision}`,
+      );
+      const firstRunFile = path.join(runDirectory(storage, firstId, firstRunId), "run.json");
+      const secondRunFile = path.join(runDirectory(storage, secondId, secondRunId), "run.json");
+      let rejectedFinalization = false;
+      const failingFileSystem = FileSystem.FileSystem.of({
+        ...fileSystem,
+        rename: (from, to) => {
+          if (
+            !rejectedFinalization &&
+            to === firstRunFile &&
+            path.basename(from).startsWith(".run.json-")
+          ) {
+            rejectedFinalization = true;
+            return Effect.fail(permissionDenied("rename", from));
+          }
+          return fileSystem.rename(from, to);
+        },
+      });
+
+      yield* Effect.gen(function* () {
+        const schedules = yield* make(schedulesDir);
+        const host: Schedule.ScheduleRunHost = {
+          prepare: () => Effect.die("Missed runs must not dispatch"),
+          deliver: () => Effect.die("Missed runs must not dispatch"),
+          publish: () => Effect.die("Missed runs must not dispatch"),
+          runPrompt: () => Effect.die("Missed runs must not dispatch"),
+        };
+        yield* TestClock.setTime(3 * 60 * 60 * 1_000);
+        yield* schedules.start(host);
+        const first = yield* awaitFinished(fileSystem, firstRunFile);
+        const second = yield* awaitFinished(fileSystem, secondRunFile);
+        for (const terminal of [first, second]) {
+          assert.deepStrictEqual(terminal.state.kind === "finished" && terminal.state.outcome, {
+            kind: "interrupted",
+            phase: "schedule-cycle",
+          });
+        }
       }).pipe(Effect.provide(Layer.succeed(FileSystem.FileSystem, failingFileSystem)));
     }).pipe(Effect.provide(platformLayer), Effect.scoped),
   );

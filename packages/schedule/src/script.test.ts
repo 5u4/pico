@@ -190,7 +190,7 @@ describe("schedule script runner", () => {
         {
           script: `
 const descendant = Bun.spawn({
-  cmd: [process.execPath, "-e", "await Bun.sleep(500)"],
+  cmd: [process.execPath, "-e", "await Bun.sleep(2000)"],
   stdout: "inherit",
   stderr: "inherit",
 });
@@ -206,8 +206,8 @@ process.stdout.write(JSON.stringify({ agent: false }));
         process.execPath,
         inheritedPipeRun,
         target,
-        100,
-      );
+        60_000,
+      ).pipe(Effect.timeout("750 millis"));
       assert.deepStrictEqual(inheritedPipe.decision, { agent: false });
       const inheritedPipeResult = decodeResult(
         yield* fileSystem.readFileString(
@@ -218,7 +218,52 @@ process.stdout.write(JSON.stringify({ agent: false }));
           ),
         ),
       );
+      assert.strictEqual(inheritedPipeResult.timeoutMillis, 60_000);
       assert.isFalse(inheritedPipeResult.timedOut);
+
+      const incompletePipeRun: Schedule.ScheduleRunLifecycle = {
+        ...run,
+        id: Schedule.ScheduleRunId.make("scheduled-4750-018f47a0-0000-7000-8000-000000000004"),
+        source: { kind: "scheduled", scheduledFor: 4_750 },
+      };
+      yield* publishRun(
+        storage,
+        incompletePipeRun,
+        definition,
+        {
+          script: `
+const descendant = Bun.spawn({
+  cmd: [process.execPath, "-e", "await Bun.sleep(2000)"],
+  stdout: "inherit",
+  stderr: "inherit",
+});
+descendant.unref();
+process.stdout.write("{");
+`,
+          prompt: null,
+        },
+        "018f47a0-0000-7000-8000-0000000000175",
+      );
+      const incompletePipeError = yield* runScript(
+        storage,
+        process.execPath,
+        incompletePipeRun,
+        target,
+        60_000,
+      ).pipe(Effect.timeout("750 millis"), Effect.flip);
+      assert.instanceOf(incompletePipeError, ScriptRunError);
+      if (!(incompletePipeError instanceof ScriptRunError)) return;
+      assert.strictEqual(incompletePipeError.stage, "protocol");
+      const incompletePipeResult = decodeResult(
+        yield* fileSystem.readFileString(
+          path.join(
+            runDirectory(storage, scheduleId, incompletePipeRun.id),
+            "script",
+            "result.json",
+          ),
+        ),
+      );
+      assert.isFalse(incompletePipeResult.timedOut);
 
       const spawnRun: Schedule.ScheduleRunLifecycle = {
         ...run,
@@ -318,6 +363,12 @@ process.stdout.write(JSON.stringify({ agent: false }));
         definition,
         {
           script: `
+const descendant = Bun.spawn({
+  cmd: [process.execPath, "-e", "await Bun.sleep(2000)"],
+  stdout: "inherit",
+  stderr: "inherit",
+});
+descendant.unref();
 process.on("SIGTERM", async () => {
   await Bun.write(${JSON.stringify(childStopped)}, "stopped");
   process.exit(0);
@@ -333,7 +384,7 @@ setInterval(() => {}, 1000);
         Effect.forkChild,
       );
       yield* awaitExists(fileSystem, childReady);
-      yield* Fiber.interrupt(interrupted);
+      yield* Fiber.interrupt(interrupted).pipe(Effect.timeout("750 millis"));
       yield* awaitExists(fileSystem, childStopped);
     }).pipe(Effect.provide(platformLayer), Effect.scoped),
   );

@@ -23,10 +23,12 @@ import * as Schedule from "@pico/contract/schedule";
 import * as Workspace from "@pico/contract/workspace-model";
 import { WorkspaceRepository } from "@pico/contract/workspace-repository";
 import type { GitWorktree } from "@pico/contract/worktree";
+import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -205,6 +207,28 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
       .pipe(Effect.mapError(failure("Failed to bind workspace")));
   });
 
+  const persistChat = Effect.fn("Application.persistChat")(function* (
+    input: CreateChat,
+    id: Chat.ChatId,
+    cwd: AbsolutePath,
+    createdAt: number,
+  ) {
+    return yield* Effect.acquireUseRelease(
+      sessions.create({ chatId: id, cwd }),
+      () => chats.create({ ...input, id, cwd, createdAt }),
+      (_, exit) =>
+        Exit.isFailure(exit)
+          ? sessions
+              .remove(id)
+              .pipe(
+                Effect.catchCause((cause) =>
+                  Effect.logError("Failed to roll back OMP session", Cause.pretty(cause)),
+                ),
+              )
+          : Effect.void,
+    );
+  });
+
   const createChatWithId = Effect.fn("Application.createChatWithId")(
     function* (input: CreateChat, id: Chat.ChatId, createdAt: number) {
       const maybeWorkspace = yield* workspaces.findById(input.workspaceId);
@@ -215,20 +239,17 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
       const workspace = maybeWorkspace.value;
       if (workspace.worktree === null) {
         const cwd = yield* resolveWorkspacePath("cwd", workspace.defaultCwd);
-        yield* sessions.create({ chatId: id, cwd });
-        return yield* chats.create({ ...input, id, cwd, createdAt });
+        return yield* persistChat(input, id, cwd, createdAt);
       }
 
-      const cwd = yield* gitWorktree.create(
+      return yield* gitWorktree.create(
         {
           chatId: id,
           repositoryCwd: workspace.defaultCwd,
           settings: workspace.worktree,
         },
-        (createdCwd) =>
-          sessions.create({ chatId: id, cwd: createdCwd }).pipe(Effect.as(createdCwd)),
+        (cwd) => persistChat(input, id, cwd, createdAt),
       );
-      return yield* chats.create({ ...input, id, cwd, createdAt });
     },
     Effect.mapError(failure("Failed to create chat")),
   );

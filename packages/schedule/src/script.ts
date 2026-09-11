@@ -17,6 +17,11 @@ interface Capture {
   readonly truncated: boolean;
 }
 
+interface StreamCapture {
+  readonly result: Promise<Capture>;
+  readonly cancel: () => Promise<void>;
+}
+
 export interface ScriptRun {
   readonly decision: Schedule.ScriptDecision;
   readonly stdout: Capture;
@@ -48,30 +53,50 @@ const failWithDecision = Effect.fn("Schedules.failScriptRun")(function* (
   return yield* error;
 });
 
-const captureStream = async (stream: ReadableStream<Uint8Array>): Promise<Capture> => {
+const captureStream = (stream: ReadableStream<Uint8Array>): StreamCapture => {
   const reader = stream.getReader();
   const chunks: Array<Uint8Array> = [];
   let retained = 0;
   let totalBytes = 0;
-  for (;;) {
-    const next = await reader.read();
-    if (next.done) break;
-    totalBytes += next.value.byteLength;
-    const available = CAPTURE_LIMIT - retained;
-    if (available > 0) {
-      const chunk =
-        next.value.byteLength <= available ? next.value : next.value.slice(0, available);
-      chunks.push(chunk);
-      retained += chunk.byteLength;
+  let cancelled = false;
+  let cancellation: Promise<void> | undefined;
+  const result = (async () => {
+    try {
+      for (;;) {
+        const next = await reader.read();
+        if (next.done) break;
+        totalBytes += next.value.byteLength;
+        const available = CAPTURE_LIMIT - retained;
+        if (available > 0) {
+          const chunk =
+            next.value.byteLength <= available ? next.value : next.value.slice(0, available);
+          chunks.push(chunk);
+          retained += chunk.byteLength;
+        }
+      }
+    } catch (cause) {
+      if (!cancelled) throw cause;
+    } finally {
+      reader.releaseLock();
     }
-  }
-  const bytes = new Uint8Array(retained);
-  let offset = 0;
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return { bytes, totalBytes, truncated: totalBytes > retained };
+    const bytes = new Uint8Array(retained);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    return { bytes, totalBytes, truncated: totalBytes > retained };
+  })();
+  return {
+    result,
+    cancel: () => {
+      cancelled = true;
+      cancellation ??= Promise.resolve()
+        .then(() => reader.cancel())
+        .catch(() => undefined);
+      return cancellation;
+    },
+  };
 };
 
 const curatedEnvironment = (
@@ -158,32 +183,36 @@ export const runScript = Effect.fn("Schedules.runScript")(function* (
         try: async (signal) => {
           let timedOut = false;
           let forceKill: ReturnType<typeof setTimeout> | undefined;
+          const stdoutCapture = captureStream(child.stdout);
+          const stderrCapture = captureStream(child.stderr);
+          const cancelCaptures = () =>
+            Promise.all([stdoutCapture.cancel(), stderrCapture.cancel()]).then(() => undefined);
+          const exited = child.exited.finally(cancelCaptures);
           const terminate = () => {
             if (child.exitCode === null) child.kill("SIGTERM");
           };
-          const onAbort = () => terminate();
+          const onAbort = () => {
+            terminate();
+            void cancelCaptures();
+          };
           signal.addEventListener("abort", onAbort, { once: true });
           if (signal.aborted) onAbort();
           const timeout = setTimeout(() => {
-            if (child.exitCode !== null) return;
-            timedOut = true;
-            child.kill("SIGTERM");
-            forceKill = setTimeout(() => {
-              if (child.exitCode === null) child.kill("SIGKILL");
-            }, 1_000);
+            if (child.exitCode === null) {
+              timedOut = true;
+              child.kill("SIGTERM");
+              forceKill = setTimeout(() => {
+                if (child.exitCode === null) child.kill("SIGKILL");
+              }, 1_000);
+            }
+            void cancelCaptures();
           }, timeoutMillis);
-          const exited = child.exited.finally(() => {
-            clearTimeout(timeout);
-            clearTimeout(forceKill);
-          });
           try {
-            const stdoutCapture = captureStream(child.stdout);
-            const stderrCapture = captureStream(child.stderr);
             child.stdin.write(stdin);
             child.stdin.end();
             const [stdout, stderr, exitCode] = await Promise.all([
-              stdoutCapture,
-              stderrCapture,
+              stdoutCapture.result,
+              stderrCapture.result,
               exited,
             ]);
             return {
@@ -197,6 +226,7 @@ export const runScript = Effect.fn("Schedules.runScript")(function* (
             signal.removeEventListener("abort", onAbort);
             clearTimeout(timeout);
             clearTimeout(forceKill);
+            void cancelCaptures();
           }
         },
         catch: (cause) =>

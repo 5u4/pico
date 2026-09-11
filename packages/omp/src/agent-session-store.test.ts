@@ -16,7 +16,7 @@ const platformLayer = Layer.merge(BunFileSystem.layer, BunPath.layer);
 const chatId = Chat.ChatId.make("018f47a0-0000-7000-8000-000000000001");
 
 describe("AgentSessionStore", () => {
-  it.effect("creates a valid OMP journal and preserves it on collision", () =>
+  it.effect("creates, removes, and preserves an OMP journal on collision", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
@@ -44,6 +44,9 @@ describe("AgentSessionStore", () => {
         const beforeCollision = yield* fileSystem.readFile(sessionFile);
         assert.instanceOf(yield* sessions.create({ chatId, cwd }).pipe(Effect.flip), AgentError);
         assert.deepStrictEqual(yield* fileSystem.readFile(sessionFile), beforeCollision);
+        yield* sessions.remove(chatId);
+        assert.isFalse(yield* fileSystem.exists(sessionFile));
+        yield* sessions.remove(chatId);
       }).pipe(Effect.provide(layer(sessionsDir)));
     }).pipe(Effect.provide(platformLayer), Effect.scoped),
   );

@@ -17,6 +17,7 @@ import {
   AgentError,
   ApplicationError,
   ChatClosed,
+  PersistenceError,
   WorkspaceBindingInvalid,
 } from "@pico/contract/errors";
 import { AbsolutePath } from "@pico/contract/path";
@@ -89,6 +90,7 @@ describe("Application", () => {
                 );
                 createdSessions.push(input);
               }),
+            remove: () => Effect.void,
           });
         }),
       ).pipe(Layer.provide(persistenceLayer));
@@ -462,6 +464,7 @@ describe("Application", () => {
             Effect.sync(() => {
               createdSessions.push(input);
             }),
+          remove: () => Effect.void,
         }),
       );
       const runtimeLayer = Layer.succeed(
@@ -772,7 +775,7 @@ describe("Application", () => {
       ).pipe(Layer.provide(persistenceLayer));
       const sessionsLayer = Layer.succeed(
         AgentSessionStore,
-        AgentSessionStore.of({ create: () => Effect.void }),
+        AgentSessionStore.of({ create: () => Effect.void, remove: () => Effect.void }),
       );
       const gitWorktree: GitWorktree = {
         validate: () => Effect.void,
@@ -914,7 +917,7 @@ describe("Application", () => {
       ).pipe(Layer.provide(persistenceLayer));
       const sessionsLayer = Layer.succeed(
         AgentSessionStore,
-        AgentSessionStore.of({ create: () => Effect.void }),
+        AgentSessionStore.of({ create: () => Effect.void, remove: () => Effect.void }),
       );
       const gitWorktree: GitWorktree = {
         validate: () => Effect.void,
@@ -999,6 +1002,146 @@ describe("Application", () => {
         Effect.provide(persistenceLayer),
         Effect.provide(runtimeLayer),
         Effect.provide(sessionsLayer),
+        Effect.provide(BunCrypto.layer),
+        Effect.scoped,
+      );
+    }).pipe(Effect.provide(platformLayer)),
+  );
+  it.effect("rolls back direct and worktree resources when chat insertion fails", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const temporaryDirectory = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "pico-chat-rollback-",
+      });
+      const directCwd = AbsolutePath.make(path.join(temporaryDirectory, "direct"));
+      const repositoryCwd = AbsolutePath.make(path.join(temporaryDirectory, "repository"));
+      const worktreeCwd = AbsolutePath.make(path.join(temporaryDirectory, "worktree"));
+      const sessionsDir = path.join(temporaryDirectory, "sessions");
+      const branchMarker = path.join(temporaryDirectory, "worktree-branch");
+      const storeFile = AbsolutePath.make(path.join(temporaryDirectory, "store.db"));
+      yield* fileSystem.makeDirectory(directCwd);
+      yield* fileSystem.makeDirectory(repositoryCwd);
+      yield* fileSystem.makeDirectory(sessionsDir);
+
+      const persistenceLayer = Persistence.layer(storeFile);
+      const failingChats = Layer.effect(
+        ChatRepository,
+        Effect.gen(function* () {
+          const chats = yield* ChatRepository;
+          return ChatRepository.of({
+            ...chats,
+            create: () =>
+              Effect.fail(new PersistenceError({ message: "database insert rejected" })),
+          });
+        }),
+      ).pipe(Layer.provide(persistenceLayer));
+      const repositories = Layer.merge(persistenceLayer, failingChats);
+      const createdSessionIds: Array<Chat.ChatId> = [];
+      const sessionsLayer = Layer.succeed(
+        AgentSessionStore,
+        AgentSessionStore.of({
+          create: ({ chatId }) =>
+            Effect.sync(() => {
+              createdSessionIds.push(chatId);
+            }).pipe(
+              Effect.andThen(
+                fileSystem
+                  .writeFileString(path.join(sessionsDir, `${chatId}.jsonl`), "session")
+                  .pipe(Effect.orDie),
+              ),
+            ),
+          remove: (chatId) =>
+            fileSystem
+              .remove(path.join(sessionsDir, `${chatId}.jsonl`), { force: true })
+              .pipe(Effect.orDie),
+        }),
+      );
+      const runtimeLayer = Layer.succeed(
+        AgentRuntime,
+        AgentRuntime.of({
+          events: Stream.empty,
+          drain: () => Effect.void,
+          transcript: () => Effect.die("unexpected transcript read"),
+          send: () => Effect.die("unexpected runtime send"),
+          sendCaptured: () => Effect.die("unexpected captured runtime send"),
+          deliver: () => Effect.die("unexpected scheduled delivery"),
+          publish: () => Effect.die("unexpected scheduled publish"),
+          abort: () => Effect.die("unexpected runtime abort"),
+          contextUsage: () => Effect.die("unexpected runtime context read"),
+          shake: () => Effect.die("unexpected runtime shake"),
+          close: () => Effect.die("unexpected runtime close"),
+        }),
+      );
+      const gitWorktree: GitWorktree = {
+        validate: () => Effect.void,
+        create: (_options, use) =>
+          Effect.gen(function* () {
+            yield* fileSystem.makeDirectory(worktreeCwd).pipe(Effect.orDie);
+            yield* fileSystem.writeFileString(branchMarker, "created").pipe(Effect.orDie);
+            return yield* use(worktreeCwd).pipe(
+              Effect.tapError(() =>
+                Effect.all(
+                  [
+                    fileSystem.remove(worktreeCwd, { recursive: true, force: true }),
+                    fileSystem.remove(branchMarker, { force: true }),
+                  ],
+                  { discard: true },
+                ).pipe(Effect.orDie),
+              ),
+            );
+          }),
+        inspectChat: () => Effect.succeed({ kind: "not-managed" }),
+        removeChat: () => Effect.die("unexpected worktree removal"),
+      };
+
+      yield* Effect.gen(function* () {
+        const application = yield* Application;
+        const chats = yield* ChatRepository;
+        const direct = yield* application.createWorkspace({
+          name: "direct",
+          binding: null,
+          defaultCwd: directCwd,
+          worktree: null,
+        });
+        const directError = yield* application
+          .createChat({ workspaceId: direct.id, externalId: null })
+          .pipe(Effect.flip);
+        assertApplicationError(directError, "Failed to create chat");
+        const directSessionId = createdSessionIds[0];
+        if (directSessionId === undefined) {
+          return yield* Effect.die("Direct session was not created");
+        }
+        assert.isFalse(
+          yield* fileSystem.exists(path.join(sessionsDir, `${directSessionId}.jsonl`)),
+        );
+        assert.isTrue(Option.isNone(yield* chats.findById(directSessionId)));
+
+        const worktree = yield* application.createWorkspace({
+          name: "worktree",
+          binding: null,
+          defaultCwd: repositoryCwd,
+          worktree: { branch: "main", prefix: "chat/" },
+        });
+        const worktreeError = yield* application
+          .createChat({ workspaceId: worktree.id, externalId: null })
+          .pipe(Effect.flip);
+        assertApplicationError(worktreeError, "Failed to create chat");
+        const worktreeSessionId = createdSessionIds[1];
+        if (worktreeSessionId === undefined) {
+          return yield* Effect.die("Worktree session was not created");
+        }
+        assert.isFalse(
+          yield* fileSystem.exists(path.join(sessionsDir, `${worktreeSessionId}.jsonl`)),
+        );
+        assert.isFalse(yield* fileSystem.exists(worktreeCwd));
+        assert.isFalse(yield* fileSystem.exists(branchMarker));
+        assert.isTrue(Option.isNone(yield* chats.findById(worktreeSessionId)));
+      }).pipe(
+        Effect.provide(ApplicationLayer.layer(gitWorktree)),
+        Effect.provide(repositories),
+        Effect.provide(sessionsLayer),
+        Effect.provide(runtimeLayer),
         Effect.provide(BunCrypto.layer),
         Effect.scoped,
       );

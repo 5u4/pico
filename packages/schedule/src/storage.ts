@@ -126,6 +126,43 @@ const createDirectory = Effect.fn("Schedules.createDirectory")(function* (
   yield* inspectDirectory(storage, directory, label);
 });
 
+const prepareStagingDirectory = Effect.fn("Schedules.prepareStagingDirectory")(function* (
+  storage: Storage,
+  name: string,
+  children: ReadonlyArray<string> = [],
+) {
+  const staging = roots(storage).staging;
+  for (const entry of [
+    { directory: storage.schedulesDir, label: "schedule storage directory" },
+    { directory: staging, label: "schedule staging directory" },
+  ]) {
+    if (!(yield* inspectDirectory(storage, entry.directory, entry.label))) {
+      return yield* new Schedule.ScheduleError({
+        kind: "corrupt",
+        message: `${entry.label} must exist before staging`,
+      });
+    }
+  }
+
+  const transaction = storage.path.join(staging, name);
+  for (const directory of [
+    transaction,
+    ...children.map((child) => storage.path.join(transaction, child)),
+  ]) {
+    const exists = yield* storage.fileSystem
+      .exists(directory)
+      .pipe(mapIo("Failed to inspect schedule staging path"));
+    if (exists) {
+      return yield* new Schedule.ScheduleError({
+        kind: "corrupt",
+        message: "Schedule staging path must not already exist",
+      });
+    }
+    yield* createDirectory(storage, directory, "schedule staging directory");
+  }
+  return transaction;
+});
+
 export const bootstrap = Effect.fn("Schedules.bootstrap")(function* (storage: Storage) {
   const value = roots(storage);
   if (!(yield* inspectDirectory(storage, storage.schedulesDir, "schedule storage directory"))) {
@@ -375,9 +412,7 @@ const writeDefinitionDirectory = Effect.fn("Schedules.writeDefinitionDirectory")
   definition: Schedule.ScheduleDefinition,
   source: Schedule.ScheduleSource,
 ) {
-  yield* storage.fileSystem
-    .makeDirectory(directory, { recursive: true, mode: 0o700 })
-    .pipe(mapIo("Failed to stage schedule directory"));
+  yield* ensureDirectPath(storage, directory, "schedule staging directory");
   yield* storage.fileSystem
     .writeFileString(storage.path.join(directory, "meta.json"), JSON.stringify(definition), {
       flag: "wx",
@@ -411,9 +446,13 @@ export const publishDefinition = Effect.fn("Schedules.publishDefinition")(functi
   transactionId: string,
 ) {
   const value = roots(storage);
-  const stage = storage.path.join(value.staging, `definition-${transactionId}`);
-  const destination = storage.path.join(state === "enabled" ? value.enabled : value.disabled, id);
+  const stage = yield* prepareStagingDirectory(storage, `definition-${transactionId}`);
   yield* writeDefinitionDirectory(storage, stage, definition, source);
+  const destinationRoot = state === "enabled" ? value.enabled : value.disabled;
+  if (!(yield* inspectDirectory(storage, destinationRoot, "schedule state directory"))) {
+    return yield* invalid("Schedule state directory must exist before publication");
+  }
+  const destination = storage.path.join(destinationRoot, id);
   yield* storage.fileSystem.rename(stage, destination).pipe(mapIo("Failed to publish schedule"));
 });
 
@@ -432,12 +471,9 @@ export const replaceDefinition = Effect.fn("Schedules.replaceDefinition")(functi
   }
   const currentDirectory = current.directory;
   const value = roots(storage);
-  const transaction = storage.path.join(value.staging, `replace-${transactionId}`);
+  const transaction = yield* prepareStagingDirectory(storage, `replace-${transactionId}`, ["next"]);
   const next = storage.path.join(transaction, "next");
   const previous = storage.path.join(transaction, "previous");
-  yield* storage.fileSystem
-    .makeDirectory(transaction, { recursive: true, mode: 0o700 })
-    .pipe(mapIo("Failed to stage schedule replacement"));
   yield* storage.fileSystem
     .writeFileString(
       storage.path.join(transaction, "transaction.json"),
@@ -448,13 +484,14 @@ export const replaceDefinition = Effect.fn("Schedules.replaceDefinition")(functi
   yield* writeDefinitionDirectory(storage, next, definition, source);
   yield* Effect.uninterruptible(
     Effect.gen(function* () {
+      const destinationRoot = current.view.state === "enabled" ? value.enabled : value.disabled;
+      if (!(yield* inspectDirectory(storage, destinationRoot, "schedule state directory"))) {
+        return yield* invalid("Schedule state directory must exist before replacement");
+      }
       yield* storage.fileSystem
         .rename(currentDirectory, previous)
         .pipe(mapIo("Failed to retain previous schedule definition"));
-      const destination = storage.path.join(
-        current.view.state === "enabled" ? value.enabled : value.disabled,
-        current.view.id,
-      );
+      const destination = storage.path.join(destinationRoot, current.view.id);
       yield* storage.fileSystem.rename(next, destination).pipe(
         Effect.tapError(() =>
           ignoreCleanupFailure(
@@ -524,11 +561,8 @@ export const publishRun = Effect.fn("Schedules.publishRun")(function* (
   transactionId: string,
 ) {
   const value = roots(storage);
-  const stage = storage.path.join(value.staging, `run-${transactionId}`);
+  const stage = yield* prepareStagingDirectory(storage, `run-${transactionId}`, ["input"]);
   const input = storage.path.join(stage, "input");
-  yield* storage.fileSystem
-    .makeDirectory(input, { recursive: true, mode: 0o700 })
-    .pipe(mapIo("Failed to stage run"));
   yield* storage.fileSystem
     .writeFileString(storage.path.join(stage, "run.json"), JSON.stringify(run), {
       flag: "wx",
