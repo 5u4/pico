@@ -26,6 +26,8 @@ describe("AgentSessionStore", () => {
       const sessionsDir = AbsolutePath.make(path.join(temporaryDirectory, "sessions"));
       const cwd = AbsolutePath.make(path.join(temporaryDirectory, "workspace"));
       const sessionFile = path.join(sessionsDir, `${chatId}.jsonl`);
+      const attachmentsDirectory = path.join(sessionsDir, chatId, "attachments");
+      const attachmentFile = path.join(attachmentsDirectory, "original.png");
 
       yield* Effect.gen(function* () {
         const sessions = yield* AgentSessionStore;
@@ -41,11 +43,18 @@ describe("AgentSessionStore", () => {
         if (header?.type !== "session") return yield* Effect.die("missing OMP session header");
         assert.strictEqual(header.cwd, cwd);
 
+        yield* fileSystem.makeDirectory(attachmentsDirectory, { recursive: true, mode: 0o700 });
+        yield* fileSystem.writeFile(attachmentFile, Uint8Array.from([1, 2, 3]), { mode: 0o600 });
         const beforeCollision = yield* fileSystem.readFile(sessionFile);
         assert.instanceOf(yield* sessions.create({ chatId, cwd }).pipe(Effect.flip), AgentError);
         assert.deepStrictEqual(yield* fileSystem.readFile(sessionFile), beforeCollision);
+        assert.deepStrictEqual(
+          yield* fileSystem.readFile(attachmentFile),
+          Uint8Array.from([1, 2, 3]),
+        );
         yield* sessions.remove(chatId);
         assert.isFalse(yield* fileSystem.exists(sessionFile));
+        assert.isFalse(yield* fileSystem.exists(path.join(sessionsDir, chatId)));
         yield* sessions.remove(chatId);
       }).pipe(Effect.provide(layer(sessionsDir)));
     }).pipe(Effect.provide(platformLayer), Effect.scoped),

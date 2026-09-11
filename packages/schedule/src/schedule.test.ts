@@ -38,6 +38,7 @@ const workspaceId = Workspace.WorkspaceId.make("018f47a0-0000-7000-8000-00000000
 const chatId = Chat.ChatId.make("018f47a0-0000-7000-8000-000000000002");
 const otherWorkspaceId = Workspace.WorkspaceId.make("018f47a0-0000-7000-8000-000000000099");
 const caller: Schedule.ScheduleCaller = { workspaceId, chatId };
+const textPrompt = (text: string) => Agent.AgentPrompt.make({ text, attachments: [] });
 const decodeRun = Schema.decodeUnknownEffect(Schema.fromJsonString(Schedule.ScheduleRunLifecycle));
 const decodeDefinition = Schema.decodeUnknownEffect(
   Schema.fromJsonString(Schedule.ScheduleDefinition),
@@ -428,7 +429,7 @@ describe("Schedules", () => {
         publish: () => Effect.die("agent output must not be persisted twice"),
         runPrompt: (_target, runId, prompt, onEvent) =>
           Effect.gen(function* () {
-            assert.strictEqual(prompt, "Inspect the workspace.");
+            assert.deepStrictEqual(prompt, textPrompt("Inspect the workspace."));
             yield* onEvent({ type: "run-started" });
             yield* onEvent({
               type: "message-settled",
@@ -459,7 +460,7 @@ describe("Schedules", () => {
         enabled: false,
         target: { kind: "current-chat" },
         trigger: { kind: "cron", expression: "0 * * * *", timeZone: "UTC" },
-        prompt: Agent.AgentPrompt.make("Inspect the workspace."),
+        prompt: "Inspect the workspace.",
       });
       assert.strictEqual(created.kind, "ready");
       if (created.kind !== "ready") return;
@@ -498,7 +499,7 @@ describe("Schedules", () => {
       });
       const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
       const cwd = AbsolutePath.make(root);
-      const requests = new Map<Schedule.ScheduleRunId, string>();
+      const requests = new Map<Schedule.ScheduleRunId, Agent.AgentPrompt>();
       let deliveries = 0;
       const schedules = yield* make(schedulesDir);
       const host: Schedule.ScheduleRunHost = {
@@ -593,9 +594,12 @@ describe("Schedules", () => {
       assert.deepStrictEqual(skipRun.state.kind === "finished" && skipRun.state.outcome, {
         kind: "skipped",
       });
-      assert.strictEqual(requests.get(composedRun.id), "generated input\n\nstored prompt");
-      assert.strictEqual(requests.get(scriptOnlyRun.id), "script input");
-      assert.strictEqual(requests.get(storedPromptRun.id), "prompt input");
+      assert.deepStrictEqual(
+        requests.get(composedRun.id),
+        textPrompt("generated input\n\nstored prompt"),
+      );
+      assert.deepStrictEqual(requests.get(scriptOnlyRun.id), textPrompt("script input"));
+      assert.deepStrictEqual(requests.get(storedPromptRun.id), textPrompt("prompt input"));
       assert.isFalse(requests.has(skipRun.id));
       assert.isFalse(requests.has(missingInputRun.id));
       assert.deepInclude(

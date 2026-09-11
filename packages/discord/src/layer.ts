@@ -10,6 +10,8 @@ import * as Option from "effect/Option";
 import * as Redacted from "effect/Redacted";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
+import * as FetchHttpClient from "effect/unstable/http/FetchHttpClient";
+import * as HttpClient from "effect/unstable/http/HttpClient";
 import * as DiscordCommand from "./discord-command.ts";
 import * as DiscordInput from "./discord-input.ts";
 import * as DiscordOutput from "./discord-output.ts";
@@ -97,6 +99,7 @@ export const pumpOutput = Effect.fn("Discord.pumpOutput")(function* (
 
 const start = Effect.fn("Discord.start")(function* (config: DiscordConfig) {
   const eventRouter = yield* EventRouter;
+  const httpClient = yield* HttpClient.HttpClient;
   const allowedMentions = { parse: [], repliedUser: false };
 
   const bot = yield* Effect.try({
@@ -106,6 +109,12 @@ const start = Effect.fn("Discord.start")(function* (config: DiscordConfig) {
         intents:
           GatewayIntents.Guilds | GatewayIntents.GuildMessages | GatewayIntents.MessageContent,
         desiredProperties: {
+          attachment: {
+            contentType: true,
+            filename: true,
+            size: true,
+            url: true,
+          },
           channel: {
             guildId: true,
             id: true,
@@ -143,8 +152,15 @@ const start = Effect.fn("Discord.start")(function* (config: DiscordConfig) {
   bot.events.ready = ({ guilds }) => {
     for (const guildId of guilds) joinedGuildIds.add(guildId.toString());
   };
+  type InputMessage = Parameters<NonNullable<typeof bot.events.messageCreate>>[0];
+  type InputInteraction = Parameters<NonNullable<typeof bot.events.interactionCreate>>[0];
 
-  const resolveThreadId = yield* DiscordInput.install(bot, config, () => eventRouter.drain());
+  const resolveThreadId = yield* DiscordInput.install<InputMessage, InputInteraction>(
+    bot,
+    config,
+    () => eventRouter.drain(),
+    httpClient,
+  );
   const scope = yield* Scope.Scope;
   const dispatch = DiscordOutput.make(
     {
@@ -178,4 +194,11 @@ const start = Effect.fn("Discord.start")(function* (config: DiscordConfig) {
   yield* openBot(bot, config, joinedGuildIds);
 });
 
-export const layer = (config: DiscordConfig) => Layer.effectDiscard(start(config));
+export const layer = (config: DiscordConfig) =>
+  Layer.effectDiscard(start(config)).pipe(
+    Layer.provide(
+      FetchHttpClient.layer.pipe(
+        Layer.provide(Layer.succeed(FetchHttpClient.RequestInit, { redirect: "error" })),
+      ),
+    ),
+  );

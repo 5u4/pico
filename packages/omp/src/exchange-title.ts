@@ -118,7 +118,7 @@ export const makeExchangeTitleFlow = (options: ExchangeTitleOptions): ExchangeTi
       await options.sendPrompt(prompt);
       return;
     }
-    const claim: PromptClaim = { userText: capText(prompt) };
+    const claim: PromptClaim = { userText: capText(prompt.text) };
     claims.push(claim);
     try {
       await options.sendPrompt(prompt);

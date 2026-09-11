@@ -1,6 +1,7 @@
 import * as BunCrypto from "@effect/platform-bun/BunCrypto";
 import { assert, describe, it } from "@effect/vitest";
 import type { AgentEventEnvelope } from "@pico/contract/agent-event";
+import * as AgentMessage from "@pico/contract/agent-message";
 import type { ContextUsage } from "@pico/contract/agent-runtime";
 import { Application, type BindWorkspace } from "@pico/contract/application";
 import * as Chat from "@pico/contract/chat-model";
@@ -23,6 +24,8 @@ import * as Redacted from "effect/Redacted";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
+import * as HttpClient from "effect/unstable/http/HttpClient";
+import * as HttpClientResponse from "effect/unstable/http/HttpClientResponse";
 import {
   type DiscordInputBot,
   type DiscordInteraction,
@@ -44,6 +47,21 @@ const config = {
   showThinking: false,
 } as const;
 
+const pngBytes = Uint8Array.from(
+  Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+    "base64",
+  ),
+);
+const gifBytes = Uint8Array.from(
+  Buffer.from("R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==", "base64"),
+);
+const jpegBytes = Uint8Array.from(
+  Buffer.from(
+    "/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////2wBDAf//////////////////////////////////////////////////////////////////////////////////////wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAf/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIQAxAAAAF//8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABBQJ//8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAgBAwEBPwF//8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAgBAgEBPwF//8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQAGPwJ//8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPyF//9oADAMBAAIAAwAAABD/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAEDAQE/EB//xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAECAQE/EB//xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAE/EB//2Q==",
+    "base64",
+  ),
+);
 const message = (overrides: Partial<DiscordMessage> = {}): DiscordMessage => ({
   guildId: 1n,
   author: { id: 100n },
@@ -107,7 +125,7 @@ describe("Discord input", () => {
         const firstSent = yield* Deferred.make<void>();
         const secondSent = yield* Deferred.make<void>();
         const order: string[] = [];
-        const sent: string[] = [];
+        const sent: AgentMessage.AgentPrompt[] = [];
         let channelReads = 0;
         let resolveThreadId:
           | ((candidate: Chat.ChatId) => Effect.Effect<Option.Option<bigint>, unknown>)
@@ -199,14 +217,181 @@ describe("Discord input", () => {
           "create-chat",
           "send",
         ]);
-        assert.deepStrictEqual(sent, ["  hello   from pico  "]);
+        assert.deepStrictEqual(sent, [
+          AgentMessage.AgentPrompt.make({ text: "  hello   from pico  ", attachments: [] }),
+        ]);
         if (resolveThreadId === undefined) return yield* Effect.die("Resolver not installed");
         assert.strictEqual(Option.getOrUndefined(yield* resolveThreadId(chatId)), 20n);
 
         handleMessage(message({ channelId: 20n, id: 12n, content: "again" }));
         yield* Deferred.await(secondSent);
-        assert.deepStrictEqual(sent, ["  hello   from pico  ", "again"]);
+        assert.deepStrictEqual(sent, [
+          AgentMessage.AgentPrompt.make({ text: "  hello   from pico  ", attachments: [] }),
+          AgentMessage.AgentPrompt.make({ text: "again", attachments: [] }),
+        ]);
         assert.strictEqual(channelReads, 1);
+      }),
+    ),
+  );
+
+  it.effect("downloads ordered images before creating image-only and mixed chats", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const firstSent = yield* Deferred.make<void>();
+        const secondSent = yield* Deferred.make<void>();
+        const prompts: AgentMessage.AgentPrompt[] = [];
+        const fetched: string[] = [];
+        const threadNames: string[] = [];
+        const png = pngBytes;
+        const gif = gifBytes;
+        const jpeg = jpegBytes;
+        const bodies = new Map([
+          ["https://cdn.discordapp.com/first", png],
+          ["https://cdn.discordapp.com/second", gif],
+          ["https://cdn.discordapp.com/third", jpeg],
+        ]);
+        const httpClient = HttpClient.make((request, url) => {
+          const key = url.toString();
+          fetched.push(key);
+          const body = bodies.get(key);
+          return Effect.succeed(
+            HttpClientResponse.fromWeb(
+              request,
+              body === undefined
+                ? new Response(null, { status: 404 })
+                : new Response(Buffer.from(body)),
+            ),
+          );
+        });
+        const bot = {
+          id: 999n,
+          events: {},
+          helpers: {
+            getChannel: async () => ({
+              id: 10n,
+              guildId: 1n,
+              type: ChannelTypes.GuildText,
+              name: "general",
+            }),
+            sendMessage: async () => undefined,
+            editChannel: async () => undefined,
+            startThreadWithMessage: async (_channelId, _messageId, options) => {
+              threadNames.push(options.name);
+              return { id: 20n };
+            },
+          },
+        } satisfies DiscordInputBot;
+        const application = Application.of({
+          createWorkspace: () =>
+            Effect.succeed({
+              id: workspaceId,
+              name: "general",
+              binding: { platform: "discord", externalId: "10" },
+              defaultCwd,
+              worktree: null,
+              createdAt: 0,
+            }),
+          bindWorkspace: () => Effect.die("unexpected workspace binding"),
+          createChat: () =>
+            Effect.succeed({
+              id: chatId,
+              workspaceId,
+              cwd: defaultCwd,
+              externalId: "20",
+              createdAt: 0,
+              archivedAt: null,
+            }),
+          findWorkspaceByPlatformId: () => Effect.succeed(Option.none()),
+          findChatByPlatformId: () => Effect.die("unexpected chat lookup"),
+          findChatPlatformBinding: () => Effect.die("unexpected chat binding lookup"),
+          transcript: () => Effect.die("unexpected transcript read"),
+          sendMessage: (_chatId, prompt) =>
+            Effect.gen(function* () {
+              prompts.push(prompt);
+              yield* Deferred.succeed(prompts.length === 1 ? firstSent : secondSent, undefined);
+            }),
+          abort: () => Effect.die("unexpected chat abort"),
+          contextUsage: () => Effect.die("unexpected context read"),
+          shake: () => Effect.die("unexpected chat shake"),
+          closeChat: () => Effect.die("unexpected chat close"),
+        });
+
+        yield* install(bot, config, () => Effect.void, httpClient).pipe(
+          Effect.provideService(Application, application),
+          Effect.provide(BunCrypto.layer),
+        );
+        const handleMessage = handlerFor(bot);
+        handleMessage(
+          message({
+            content: "",
+            attachments: [
+              {
+                filename: " ../first.png\n",
+                contentType: "text/plain",
+                size: png.byteLength,
+                url: "https://cdn.discordapp.com/first",
+              },
+              {
+                filename: "second.gif",
+                contentType: "image/png",
+                size: gif.byteLength,
+                url: "https://cdn.discordapp.com/second",
+              },
+            ],
+          }),
+        );
+        yield* Deferred.await(firstSent);
+        assert.deepStrictEqual(prompts[0], {
+          text: "",
+          attachments: [
+            {
+              type: "image",
+              name: ".._first.png",
+              data: Buffer.from(png).toString("base64"),
+              mimeType: "image/png",
+            },
+            {
+              type: "image",
+              name: "second.gif",
+              data: Buffer.from(gif).toString("base64"),
+              mimeType: "image/gif",
+            },
+          ],
+        });
+        assert.deepStrictEqual(threadNames, [".._first.png"]);
+
+        handleMessage(
+          message({
+            channelId: 20n,
+            id: 12n,
+            content: "inspect this",
+            attachments: [
+              {
+                filename: "third.jpg",
+                size: jpeg.byteLength,
+                url: "https://cdn.discordapp.com/third",
+              },
+            ],
+          }),
+        );
+        yield* Deferred.await(secondSent);
+        assert.deepStrictEqual(prompts[1], {
+          text: "inspect this",
+          attachments: [
+            {
+              type: "image",
+              name: "third.jpg",
+              data: Buffer.from(jpeg).toString("base64"),
+              mimeType: "image/jpeg",
+            },
+          ],
+        });
+        assert.deepStrictEqual(fetched, [
+          "https://cdn.discordapp.com/first",
+          "https://cdn.discordapp.com/second",
+          "https://cdn.discordapp.com/third",
+        ]);
+        assert.deepStrictEqual(threadNames, [".._first.png"]);
       }),
     ),
   );
@@ -321,25 +506,50 @@ describe("Discord input", () => {
     ),
   );
 
-  it.effect("filters foreign input and preserves rejection precedence", () =>
+  it.effect("rejects invalid image batches before resolving or creating a chat", () =>
     Effect.scoped(
       Effect.gen(function* () {
-        let resolveRejection: (() => void) | undefined;
-        const rejected = new Promise<void>((resolve) => {
-          resolveRejection = resolve;
-        });
         const replies: string[] = [];
+        let resolveReply: ((reply: string) => void) | undefined;
+        let fetchCount = 0;
+        const png = pngBytes;
+        const httpClient = HttpClient.make((request, url) => {
+          fetchCount += 1;
+          let response: Response;
+          if (url.pathname.endsWith("/valid")) {
+            response = new Response(Buffer.from(png));
+          } else if (url.pathname.endsWith("/unsupported")) {
+            response = new Response("not an image");
+          } else if (url.pathname.endsWith("/streamed-oversize")) {
+            response = new Response(
+              new ReadableStream<Uint8Array>({
+                start(controller) {
+                  controller.enqueue(png);
+                  controller.enqueue(new Uint8Array(20 * 1024 * 1024));
+                  controller.close();
+                },
+              }),
+            );
+          } else {
+            response = new Response(null, { status: 500 });
+          }
+          return Effect.succeed(HttpClientResponse.fromWeb(request, response));
+        });
         const bot = {
           id: 999n,
           events: {},
           helpers: {
-            getChannel: async () => ({ id: 10n, type: ChannelTypes.GuildText }),
+            getChannel: async () => {
+              throw new Error("rejected input must not resolve a channel");
+            },
             sendMessage: async (_channelId, options) => {
               replies.push(options.content);
-              resolveRejection?.();
+              resolveReply?.(options.content);
             },
             editChannel: async () => undefined,
-            startThreadWithMessage: async () => ({ id: 20n }),
+            startThreadWithMessage: async () => {
+              throw new Error("rejected input must not create a thread");
+            },
           },
         } satisfies DiscordInputBot;
         const application = Application.of({
@@ -357,7 +567,7 @@ describe("Discord input", () => {
           closeChat: () => Effect.die("unexpected chat close"),
         });
 
-        yield* install(bot, config).pipe(
+        yield* install(bot, config, () => Effect.void, httpClient).pipe(
           Effect.provideService(Application, application),
           Effect.provide(BunCrypto.layer),
         );
@@ -366,11 +576,78 @@ describe("Discord input", () => {
         yield* Effect.yieldNow;
         assert.deepStrictEqual(replies, []);
 
-        handleMessage(message({ content: "   ", attachments: [{}] }));
-        yield* Effect.promise(() => rejected);
-        assert.deepStrictEqual(replies, [
-          "Attachments are not supported yet. Send the request as text.",
-        ]);
+        const invoke = (overrides: Partial<DiscordMessage>) =>
+          new Promise<string>((resolve) => {
+            resolveReply = resolve;
+            handleMessage(message(overrides));
+          });
+        const policy =
+          "Attach up to 10 PNG, JPEG, GIF, or WebP images. Each image must be 20 MiB or smaller, with 40 MiB total.";
+        const download = "I couldn't read every image attachment. Try sending the message again.";
+        const image = (url: string, size = png.byteLength) => ({
+          filename: "image.png",
+          size,
+          url,
+        });
+
+        assert.strictEqual(
+          yield* Effect.promise(() => invoke({ content: "   ", attachments: [] })),
+          "Send text or an image to start or continue a chat.",
+        );
+        assert.strictEqual(
+          yield* Effect.promise(() =>
+            invoke({
+              attachments: Array.from({ length: 11 }, () =>
+                image("https://cdn.discordapp.com/unsupported"),
+              ),
+            }),
+          ),
+          policy,
+        );
+        assert.strictEqual(
+          yield* Effect.promise(() =>
+            invoke({
+              attachments: [image("https://cdn.discordapp.com/unsupported", 20 * 1024 * 1024 + 1)],
+            }),
+          ),
+          policy,
+        );
+        assert.strictEqual(
+          yield* Effect.promise(() =>
+            invoke({ attachments: [image("http://cdn.discordapp.com/unsupported")] }),
+          ),
+          download,
+        );
+        assert.strictEqual(
+          yield* Effect.promise(() =>
+            invoke({ attachments: [image("https://example.com/unsupported")] }),
+          ),
+          download,
+        );
+        assert.strictEqual(
+          yield* Effect.promise(() =>
+            invoke({
+              attachments: [
+                image("https://cdn.discordapp.com/valid"),
+                image("https://cdn.discordapp.com/unsupported"),
+              ],
+            }),
+          ),
+          policy,
+        );
+        assert.strictEqual(
+          yield* Effect.promise(() =>
+            invoke({ attachments: [image("https://cdn.discordapp.com/streamed-oversize")] }),
+          ),
+          policy,
+        );
+        assert.strictEqual(
+          yield* Effect.promise(() =>
+            invoke({ attachments: [image("https://cdn.discordapp.com/failed")] }),
+          ),
+          download,
+        );
+        assert.strictEqual(fetchCount, 4);
       }),
     ),
   );

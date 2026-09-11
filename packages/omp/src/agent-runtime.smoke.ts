@@ -1,3 +1,4 @@
+import * as BunCrypto from "@effect/platform-bun/BunCrypto";
 import * as BunFileSystem from "@effect/platform-bun/BunFileSystem";
 import * as BunPath from "@effect/platform-bun/BunPath";
 import { assert, describe, it } from "@effect/vitest";
@@ -24,7 +25,7 @@ import * as AgentRuntimeLayer from "./layer.ts";
 const marker = "PICO_SMOKE_OK";
 const workspaceId = Workspace.WorkspaceId.make("018f47a0-0000-7000-8000-000000000001");
 const chatId = Chat.ChatId.make("018f47a0-0000-7000-8000-000000000002");
-const platformLayer = Layer.merge(BunFileSystem.layer, BunPath.layer);
+const platformLayer = Layer.mergeAll(BunCrypto.layer, BunFileSystem.layer, BunPath.layer);
 
 const smoke = Effect.fn("AgentRuntime.smoke")(function* () {
   const fileSystem = yield* FileSystem.FileSystem;
@@ -107,7 +108,10 @@ const smoke = Effect.fn("AgentRuntime.smoke")(function* () {
       [
         runtime.send(
           chatId,
-          AgentMessage.AgentPrompt.make(`Do not use tools. Reply with exactly ${marker}.`),
+          AgentMessage.AgentPrompt.make({
+            text: `Do not use tools. Reply with exactly ${marker}.`,
+            attachments: [],
+          }),
         ),
         Deferred.await(finished).pipe(Effect.timeout("1 minute")),
       ],

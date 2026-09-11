@@ -1,6 +1,31 @@
 import * as Schema from "effect/Schema";
 
-export const AgentPrompt = Schema.NonEmptyString;
+export const AgentImageMimeType = Schema.Literals([
+  "image/png",
+  "image/jpeg",
+  "image/gif",
+  "image/webp",
+]);
+export type AgentImageMimeType = typeof AgentImageMimeType.Type;
+
+export const AgentImageAttachment = Schema.Struct({
+  type: Schema.Literal("image"),
+  name: Schema.NonEmptyString,
+  data: Schema.NonEmptyString.check(Schema.isBase64()),
+  mimeType: AgentImageMimeType,
+});
+export type AgentImageAttachment = typeof AgentImageAttachment.Type;
+
+export const AgentPrompt = Schema.Struct({
+  text: Schema.String,
+  attachments: Schema.Array(AgentImageAttachment),
+}).check(
+  Schema.makeFilter((prompt) =>
+    prompt.text.trim().length > 0 || prompt.attachments.length > 0
+      ? undefined
+      : "a prompt with text or at least one image attachment",
+  ),
+);
 export type AgentPrompt = typeof AgentPrompt.Type;
 
 export const AgentText = Schema.Struct({

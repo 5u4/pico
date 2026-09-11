@@ -13,6 +13,7 @@ import { AgentError } from "@pico/contract/errors";
 import type { AbsolutePath } from "@pico/contract/path";
 import type * as Schedule from "@pico/contract/schedule";
 import * as Cause from "effect/Cause";
+import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -29,6 +30,7 @@ export const make = Effect.fn("AgentRuntime.make")(function* (
   schedules: Schedule.Schedules["Service"],
 ) {
   const fileSystem = yield* FileSystem.FileSystem;
+  const crypto = yield* Crypto.Crypto;
   const path = yield* Path.Path;
   const chatPlatforms = yield* ChatPlatformResolver;
   const branchNaming = yield* BranchNaming;
@@ -65,6 +67,8 @@ export const make = Effect.fn("AgentRuntime.make")(function* (
     factory: makeFactory(
       sessionsDir,
       path,
+      fileSystem,
+      crypto,
       chatPlatforms,
       authStorage,
       modelRegistry,
@@ -176,6 +180,8 @@ const normalizeContextUsage = (
 const makeFactory = (
   sessionsDir: AbsolutePath,
   path: Path.Path,
+  fileSystem: FileSystem.FileSystem,
+  crypto: Crypto.Crypto,
   chatPlatforms: ChatPlatformResolver["Service"],
   authStorage: Awaited<ReturnType<typeof OmpSdk.discoverAuthStorage>>,
   modelRegistry: OmpModelRegistry.ModelRegistry,
@@ -215,7 +221,7 @@ const makeFactory = (
       chatId: chat.id,
       handleBranchNaming,
       history: created.session.messages,
-      sendPrompt: makeOmpPromptSender(created.session),
+      sendPrompt: makeOmpPromptSender(created.session, fileSystem, path, crypto),
       generateTitle: (exchange, systemPrompt) =>
         created.session.generateTitle(exchange, systemPrompt),
       getTitleSource: () => created.session.sessionManager.titleSource,
