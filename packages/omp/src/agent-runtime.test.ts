@@ -41,6 +41,19 @@ const shakeResult = (mode: ShakeMode): ShakeResult => {
 };
 
 describe("AgentRuntime", () => {
+  it("hides ignored OMP events", () => {
+    assert.isUndefined(normalizeAgentEvent({ type: "config_warnings_changed" }));
+    assert.isUndefined(normalizeAgentEvent({ type: "advisor_yielded" }));
+    assert.isUndefined(
+      normalizeAgentEvent({
+        type: "tool_stream_update",
+        toolCallId: "call-1",
+        toolName: "read",
+        update: { output: "partial" },
+      }),
+    );
+  });
+
   it.effect("owns normalized events and one ordered session lifecycle", () =>
     Effect.gen(function* () {
       const toolArguments = { path: "before.ts" };

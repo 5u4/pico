@@ -237,6 +237,7 @@ export const normalizeAgentEvent = (event: AgentSessionEvent): AgentEvent | unde
     case "turn_end":
     case "message_start":
     case "tool_execution_update":
+    case "tool_stream_update":
     case "auto_compaction_start":
     case "auto_compaction_end":
     case "auto_retry_start":
@@ -244,7 +245,9 @@ export const normalizeAgentEvent = (event: AgentSessionEvent): AgentEvent | unde
     case "retry_fallback_applied":
     case "retry_fallback_succeeded":
     case "model_changed":
+    case "config_warnings_changed":
     case "advisor_cost_changed":
+    case "advisor_yielded":
     case "ttsr_triggered":
     case "todo_reminder":
     case "todo_auto_clear":

@@ -29,7 +29,7 @@ const makeFakeSession = (skill: Skill, enableSkillCommands: boolean) => {
     skills: [skill],
     promptCustomMessage: (message: CustomMessage, options?: CustomMessageOptions) => {
       customMessages.push({ message, options });
-      return Promise.resolve();
+      return Promise.resolve(true);
     },
     sendUserMessage: (prompt: LiteralPrompt) => {
       literalPrompts.push(prompt);
