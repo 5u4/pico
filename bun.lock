@@ -40,6 +40,7 @@
       "name": "@pico/cli",
       "dependencies": {
         "@effect/platform-bun": "catalog:",
+        "@oh-my-pi/pi-utils": "catalog:",
         "@pico/contract": "workspace:*",
         "@pico/daemon": "workspace:*",
         "effect": "catalog:",
@@ -208,6 +209,7 @@
     "@effect/vitest": "4.0.0-rc.112",
     "@oh-my-pi/pi-ai": "18.0.10",
     "@oh-my-pi/pi-coding-agent": "18.0.10",
+    "@oh-my-pi/pi-utils": "18.0.10",
     "@phosphor-icons/react": "2.1.10",
     "@tailwindcss/vite": "4.3.3",
     "@types/bun": "1.3.14",

@@ -1,4 +1,3 @@
-import * as BunRuntime from "@effect/platform-bun/BunRuntime";
 import * as BunServices from "@effect/platform-bun/BunServices";
 import { PicoRoot } from "@pico/contract/config";
 import * as Daemon from "@pico/daemon";
@@ -8,6 +7,7 @@ import * as Path from "effect/Path";
 import * as Argument from "effect/unstable/cli/Argument";
 import * as CliError from "effect/unstable/cli/CliError";
 import * as Command from "effect/unstable/cli/Command";
+import { awaitShutdown, runMain } from "./runtime.ts";
 
 const version = "0.0.0";
 
@@ -44,7 +44,7 @@ const root = Argument.string("root").pipe(
 
 const start = Command.make("start", { root }).pipe(
   Command.withHandler(({ root }) =>
-    Effect.scoped(Daemon.open(root).pipe(Effect.andThen(Effect.never))),
+    Effect.scoped(Daemon.open(root).pipe(Effect.andThen(awaitShutdown))),
   ),
   Command.withDescription("Start the daemon in the foreground"),
 );
@@ -56,4 +56,4 @@ const pico = Command.make("pico").pipe(
 
 const main = Command.run(pico, { version }).pipe(Effect.provide(BunServices.layer));
 
-BunRuntime.runMain(main);
+runMain(main);

@@ -4,6 +4,7 @@
   "type": "module",
   "dependencies": {
     "@effect/platform-bun": "catalog:",
+    "@oh-my-pi/pi-utils": "catalog:",
     "@pico/contract": "workspace:*",
     "@pico/daemon": "workspace:*",
     "effect": "catalog:"
