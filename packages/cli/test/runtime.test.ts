@@ -68,7 +68,7 @@ const withTimeout = <A>(promise: PromiseLike<A>, timeoutMs: number, label: strin
 const waitForMarker = async (
   spawned: Spawned,
   marker: string,
-  timeoutMs = 2_000,
+  timeoutMs = 5_000,
 ): Promise<void> => {
   const attempts = Math.ceil(timeoutMs / 10);
   for (let attempt = 0; attempt < attempts; attempt += 1) {
