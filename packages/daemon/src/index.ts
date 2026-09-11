@@ -19,12 +19,11 @@ import * as Option from "effect/Option";
 export const open = Effect.fn("Daemon.open")(function* (root: PicoRoot) {
   const paths = yield* ConfigRoot.open(root);
   const config = yield* Config.load(paths);
+  const loggingContext = yield* Layer.build(LoggingLayer.layer(paths.logsDir));
 
-  yield* Layer.build(
-    daemonLayer(paths, config).pipe(
-      Layer.tap(() => Effect.logInfo(`pico.daemon.ready root=${paths.root}`)),
-      Layer.provide(LoggingLayer.layer(paths.logsDir)),
-    ),
+  yield* Layer.build(daemonLayer(paths, config)).pipe(
+    Effect.andThen(Effect.logInfo(`pico.daemon.ready root=${paths.root}`)),
+    Effect.provide(loggingContext),
   );
 });
 
