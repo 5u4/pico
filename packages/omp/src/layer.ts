@@ -1,5 +1,4 @@
 import * as OmpModelRegistry from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import * as OmpSettings from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as OmpAgentRegistry from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import * as OmpSdk from "@oh-my-pi/pi-coding-agent/sdk";
 import type * as OmpAgentSession from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -9,7 +8,7 @@ import type * as OmpShake from "@oh-my-pi/pi-coding-agent/session/shake-types";
 import { AgentRuntime, type ContextUsage, type ShakeResult } from "@pico/contract/agent-runtime";
 import { BranchNaming, type BranchNamingHandler } from "@pico/contract/branch-naming";
 import type * as Chat from "@pico/contract/chat-model";
-import { ChatRepository } from "@pico/contract/chat-repository";
+import { ChatPlatformResolver } from "@pico/contract/chat-platform-resolver";
 import { AgentError } from "@pico/contract/errors";
 import type { AbsolutePath } from "@pico/contract/path";
 import type * as Schedule from "@pico/contract/schedule";
@@ -17,13 +16,13 @@ import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
-import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import { normalizeAgentEvent, normalizeTranscript } from "./agent-event.ts";
 import { makeExchangeTitleFlow } from "./exchange-title.ts";
 import { makeOmpPromptSender } from "./omp-prompt-sender.ts";
 import { make as makeScheduleExtension } from "./schedule-extension.ts";
 import { makeSessionPool, type OpenedSession, type SessionFactory } from "./session-pool.ts";
+import { prepareSessionSettings } from "./session-settings.ts";
 
 export const make = Effect.fn("AgentRuntime.make")(function* (
   sessionsDir: AbsolutePath,
@@ -31,7 +30,7 @@ export const make = Effect.fn("AgentRuntime.make")(function* (
 ) {
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const chats = yield* ChatRepository;
+  const chatPlatforms = yield* ChatPlatformResolver;
   const branchNaming = yield* BranchNaming;
 
   yield* fileSystem
@@ -66,7 +65,7 @@ export const make = Effect.fn("AgentRuntime.make")(function* (
     factory: makeFactory(
       sessionsDir,
       path,
-      chats,
+      chatPlatforms,
       authStorage,
       modelRegistry,
       schedules,
@@ -177,29 +176,16 @@ const normalizeContextUsage = (
 const makeFactory = (
   sessionsDir: AbsolutePath,
   path: Path.Path,
-  chats: ChatRepository["Service"],
+  chatPlatforms: ChatPlatformResolver["Service"],
   authStorage: Awaited<ReturnType<typeof OmpSdk.discoverAuthStorage>>,
   modelRegistry: OmpModelRegistry.ModelRegistry,
   schedules: Schedule.Schedules["Service"],
   handleBranchNaming: BranchNamingHandler,
 ): SessionFactory => ({
   open: Effect.fn("OmpSession.open")(function* (chatId, emit) {
-    const maybeChat = yield* chats
-      .findById(chatId)
-      .pipe(Effect.mapError((error) => agentError("Failed to resolve chat", error)));
-    if (Option.isNone(maybeChat)) {
-      return yield* new AgentError({ message: "Chat not found" });
-    }
-
-    const chat = maybeChat.value;
-    const sessionFile = path.join(sessionsDir, `${chatId}.jsonl`);
-    const settings = yield* promiseBoundary("Failed to load OMP settings", () =>
-      OmpSettings.Settings.loadIsolated({ cwd: chat.cwd }),
-    );
-    yield* syncBoundary("Failed to isolate OMP session settings", () => {
-      settings.override("async.enabled", false);
-      settings.override("title.refreshOnReplan", false);
-    });
+    const { chat, platform } = yield* chatPlatforms.resolve(chatId);
+    const sessionFile = path.join(sessionsDir, `${chat.id}.jsonl`);
+    const settings = yield* prepareSessionSettings(chat.cwd, platform);
 
     const manager = yield* promiseBoundary("Failed to open OMP session journal", () =>
       OmpSessionManager.SessionManager.open(sessionFile, sessionsDir, undefined, {
@@ -226,7 +212,7 @@ const makeFactory = (
     ).pipe(Effect.catch((error) => closeManagerAfterFailure(manager, error)));
 
     const titleFlow = makeExchangeTitleFlow({
-      chatId,
+      chatId: chat.id,
       handleBranchNaming,
       history: created.session.messages,
       sendPrompt: makeOmpPromptSender(created.session),

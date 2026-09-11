@@ -6,6 +6,7 @@ import * as AgentMessage from "@pico/contract/agent-message";
 import { AgentRuntime } from "@pico/contract/agent-runtime";
 import { BranchNaming } from "@pico/contract/branch-naming";
 import * as Chat from "@pico/contract/chat-model";
+import { ChatPlatformResolver } from "@pico/contract/chat-platform-resolver";
 import { ChatRepository } from "@pico/contract/chat-repository";
 import { AbsolutePath } from "@pico/contract/path";
 import { Schedules } from "@pico/contract/schedule";
@@ -32,6 +33,14 @@ const smoke = Effect.fn("AgentRuntime.smoke")(function* () {
   const storeFile = AbsolutePath.make(path.join(temporaryRoot, "pico.sqlite"));
   const sessionsDir = AbsolutePath.make(path.join(temporaryRoot, "sessions"));
   const cwd = AbsolutePath.make(process.cwd());
+  const resolvedChat: Chat.Chat = {
+    id: chatId,
+    workspaceId,
+    cwd,
+    externalId: null,
+    createdAt: 0,
+    archivedAt: null,
+  };
   const schedules = Schedules.of({
     create: () => Effect.die("unexpected schedule create"),
     list: () => Effect.die("unexpected schedule list"),
@@ -42,13 +51,26 @@ const smoke = Effect.fn("AgentRuntime.smoke")(function* () {
     start: () => Effect.die("unexpected scheduler start"),
   });
   const persistenceLayer = Persistence.layer(storeFile);
+  const chatPlatformResolver = Layer.succeed(
+    ChatPlatformResolver,
+    ChatPlatformResolver.of({
+      resolve: () =>
+        Effect.succeed({
+          chat: resolvedChat,
+          platform: null,
+        }),
+    }),
+  );
   const runtimeLayer = AgentRuntimeLayer.layer(sessionsDir, schedules).pipe(
     Layer.provide(
-      Layer.succeed(
-        BranchNaming,
-        BranchNaming.of({
-          handle: () => {},
-        }),
+      Layer.merge(
+        chatPlatformResolver,
+        Layer.succeed(
+          BranchNaming,
+          BranchNaming.of({
+            handle: () => {},
+          }),
+        ),
       ),
     ),
     Layer.provideMerge(persistenceLayer),
@@ -67,13 +89,7 @@ const smoke = Effect.fn("AgentRuntime.smoke")(function* () {
       worktree: null,
       createdAt: 0,
     });
-    yield* chats.create({
-      id: chatId,
-      workspaceId,
-      cwd,
-      externalId: null,
-      createdAt: 0,
-    });
+    yield* chats.create(resolvedChat);
 
     const finished =
       yield* Deferred.make<Extract<AgentEvent.AgentEvent, { readonly type: "run-finished" }>>();
