@@ -9,7 +9,7 @@ import {
   makeExchangeTitleFlow,
 } from "./exchange-title.ts";
 
-const prompt = AgentMessage.AgentPrompt.make;
+const prompt = (text: string) => AgentMessage.AgentPrompt.make({ text, attachments: [] });
 const chatId = Chat.ChatId.make("018f47a0-0000-7000-8000-000000000001");
 const ignoreBranchNaming = () => {};
 const flush = async () => {
@@ -100,7 +100,14 @@ describe("exchange titles", () => {
       },
     });
 
-    await flow.sendPrompt(prompt("Fix <widget> & preserve it"));
+    await flow.sendPrompt(
+      AgentMessage.AgentPrompt.make({
+        text: "Fix <widget> & preserve it",
+        attachments: [
+          { type: "image", name: "private.png", data: "cHJpdmF0ZQ==", mimeType: "image/png" },
+        ],
+      }),
+    );
     flow.observe(
       assistant("tool-use", [
         { type: "text", text: "intermediate" },
@@ -140,6 +147,8 @@ describe("exchange titles", () => {
     assert.include(displayInput.exchange, "<user>Fix &lt;widget&gt; &amp; preserve it</user>");
     assert.include(displayInput.exchange, "<assistant>First result\n\nSecond result</assistant>");
     assert.notInclude(displayInput.exchange, "private");
+    assert.notInclude(displayInput.exchange, "private.png");
+    assert.notInclude(displayInput.exchange, "cHJpdmF0ZQ==");
     assert.strictEqual(displayInput.prompt, EXCHANGE_TITLE_SYSTEM_PROMPT);
     assert.strictEqual(branchInput.prompt, BRANCH_TOPIC_SYSTEM_PROMPT);
     assert.include(EXCHANGE_TITLE_SYSTEM_PROMPT, "3-7 word");
@@ -161,6 +170,40 @@ describe("exchange titles", () => {
       "emit",
     ]);
     assert.deepStrictEqual(emitted, ["Clean persisted title"]);
+  });
+
+  it("describes image-only prompts without exposing attachment metadata", async () => {
+    const generated: string[] = [];
+    const flow = makeExchangeTitleFlow({
+      chatId,
+      handleBranchNaming: ignoreBranchNaming,
+      history: [],
+      sendPrompt: async () => {},
+      generateTitle: async (exchange) => {
+        generated.push(exchange);
+        return "Image request";
+      },
+      getTitleSource: () => undefined,
+      setSessionName: async () => true,
+      getSessionName: () => "Image request",
+      emitTitleChanged: () => {},
+    });
+
+    await flow.sendPrompt(
+      AgentMessage.AgentPrompt.make({
+        text: "",
+        attachments: [{ type: "image", name: "secret.png", data: "aQ==", mimeType: "image/png" }],
+      }),
+    );
+    flow.observe(assistant("stop", [{ type: "text", text: "analyzed" }]));
+    flow.observe(completed);
+    assert.strictEqual(generated.length, 1);
+
+    for (const exchange of generated) {
+      assert.include(exchange, "<user>[image attachment]</user>");
+      assert.notInclude(exchange, "secret.png");
+      assert.notInclude(exchange, "aQ==");
+    }
   });
 
   it("correlates concurrent sends by claim identity and spends once", async () => {

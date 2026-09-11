@@ -1,7 +1,7 @@
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import { assert, describe, it } from "@effect/vitest";
 import type * as AgentEvent from "@pico/contract/agent-event";
-import type * as AgentMessage from "@pico/contract/agent-message";
+import * as AgentMessage from "@pico/contract/agent-message";
 import { Application } from "@pico/contract/application";
 import * as Chat from "@pico/contract/chat-model";
 import { ChatClosed } from "@pico/contract/errors";
@@ -138,11 +138,27 @@ describe("RPC", () => {
         assert.deepStrictEqual(yield* client.Transcript({ chatId: firstChatId }), transcript);
         assert.deepStrictEqual(transcriptInputs, [firstChatId]);
 
-        yield* client.SendMessage({ chatId: firstChatId, prompt: "ship it" });
+        const prompt = AgentMessage.AgentPrompt.make({
+          text: "ship it",
+          attachments: [
+            {
+              type: "image",
+              name: "ship.png",
+              data: "iVBORw==",
+              mimeType: "image/png",
+            },
+          ],
+        });
+        yield* client.SendMessage({ chatId: firstChatId, prompt });
         yield* Deferred.await(sent);
-        assert.deepStrictEqual(sendInputs, [{ chatId: firstChatId, prompt: "ship it" }]);
+        assert.deepStrictEqual(sendInputs, [{ chatId: firstChatId, prompt }]);
         assert.instanceOf(
-          yield* client.SendMessage({ chatId: secondChatId, prompt: "too late" }).pipe(Effect.flip),
+          yield* client
+            .SendMessage({
+              chatId: secondChatId,
+              prompt: AgentMessage.AgentPrompt.make({ text: "too late", attachments: [] }),
+            })
+            .pipe(Effect.flip),
           ChatClosed,
         );
 

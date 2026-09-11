@@ -1,3 +1,4 @@
+import * as AgentMessage from "@pico/contract/agent-message";
 import * as Chat from "@pico/contract/chat-model";
 import type { AbsolutePath } from "@pico/contract/path";
 import * as Schedule from "@pico/contract/schedule";
@@ -447,15 +448,21 @@ const capture = Effect.fn("Schedules.capture")(function* (
         { concurrency: "unbounded", discard: true },
       );
       const captured = yield* host
-        .runPrompt(target.chatId, current.id, request, (event) =>
-          appendArtifactString(
-            storage,
-            current,
-            "omp/events.jsonl",
-            `${JSON.stringify(event)}\n`,
-          ).pipe(
-            Effect.mapError((error) => new Schedule.ScheduleHostError({ message: error.message })),
-          ),
+        .runPrompt(
+          target.chatId,
+          current.id,
+          AgentMessage.AgentPrompt.make({ text: request, attachments: [] }),
+          (event) =>
+            appendArtifactString(
+              storage,
+              current,
+              "omp/events.jsonl",
+              `${JSON.stringify(event)}\n`,
+            ).pipe(
+              Effect.mapError(
+                (error) => new Schedule.ScheduleHostError({ message: error.message }),
+              ),
+            ),
         )
         .pipe(Effect.result);
       if (Result.isFailure(captured)) {

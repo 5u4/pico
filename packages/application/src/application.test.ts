@@ -2,7 +2,7 @@ import * as BunCrypto from "@effect/platform-bun/BunCrypto";
 import * as BunFileSystem from "@effect/platform-bun/BunFileSystem";
 import * as BunPath from "@effect/platform-bun/BunPath";
 import { assert, describe, it } from "@effect/vitest";
-import type * as AgentMessage from "@pico/contract/agent-message";
+import * as AgentMessage from "@pico/contract/agent-message";
 import {
   AgentRuntime,
   type ContextUsage,
@@ -47,6 +47,7 @@ const platformLayer = Layer.merge(BunFileSystem.layer, BunPath.layer);
 const uuidV7 = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const missingWorkspaceId = Workspace.WorkspaceId.make("018f47a0-0000-7000-8000-000000000099");
 const missingChatId = Chat.ChatId.make("018f47a0-0000-7000-8000-000000000098");
+const textPrompt = (text: string) => AgentMessage.AgentPrompt.make({ text, attachments: [] });
 const runtimeTranscript: AgentMessage.AgentTranscript = [
   {
     role: "user",
@@ -77,7 +78,10 @@ describe("Application", () => {
       yield* fileSystem.makeDirectory(defaultCwd);
       const createdSessions: Array<CreateAgentSession> = [];
       const createdWorktrees: Array<CreateWorktreeOptions> = [];
-      const sentMessages: Array<{ readonly chatId: string; readonly content: string }> = [];
+      const sentMessages: Array<{
+        readonly chatId: string;
+        readonly content: string | AgentMessage.AgentPrompt;
+      }> = [];
       const transcriptChatIds: Array<Chat.ChatId> = [];
       const abortedChatIds: Array<Chat.ChatId> = [];
       const shakeInputs: Array<{ readonly chatId: Chat.ChatId; readonly mode: ShakeMode }> = [];
@@ -115,7 +119,7 @@ describe("Application", () => {
               ),
             ),
           send: (chatId, content) =>
-            content === "fail"
+            content.text === "fail"
               ? Effect.fail(new AgentError({ message: "runtime failed" }))
               : Effect.sync(() => {
                   sentMessages.push({ chatId, content });
@@ -297,14 +301,25 @@ describe("Application", () => {
         );
         assert.deepStrictEqual(transcriptChatIds, [discordChat.id, missingChatId]);
 
-        yield* application.sendMessage(discordChat.id, "hello");
-        yield* application.sendMessage(discordChat.id, "");
+        const attachedPrompt = AgentMessage.AgentPrompt.make({
+          text: "hello",
+          attachments: [
+            {
+              type: "image",
+              name: "diagram.png",
+              data: "iVBORw==",
+              mimeType: "image/png",
+            },
+          ],
+        });
+        yield* application.sendMessage(discordChat.id, attachedPrompt);
+        yield* application.sendMessage(discordChat.id, textPrompt("second"));
         assert.deepStrictEqual(sentMessages, [
-          { chatId: discordChat.id, content: "hello" },
-          { chatId: discordChat.id, content: "" },
+          { chatId: discordChat.id, content: attachedPrompt },
+          { chatId: discordChat.id, content: textPrompt("second") },
         ]);
         assertApplicationError(
-          yield* application.sendMessage(discordChat.id, "fail").pipe(Effect.flip),
+          yield* application.sendMessage(discordChat.id, textPrompt("fail")).pipe(Effect.flip),
           "Failed to send message",
         );
         yield* application.abort(discordChat.id);
@@ -382,7 +397,7 @@ describe("Application", () => {
         const captured = yield* scheduleHost.runPrompt(
           discordChat.id,
           runId,
-          "scheduled prompt",
+          textPrompt("scheduled prompt"),
           () => Effect.void,
         );
         assert.deepStrictEqual(captured, {
@@ -824,7 +839,7 @@ describe("Application", () => {
           .runPrompt(
             chat.id,
             Schedule.ScheduleRunId.make("scheduled-1000-018f47a0-0000-7000-8000-000000000003"),
-            "scheduled",
+            textPrompt("scheduled"),
             () => Effect.void,
           )
           .pipe(Effect.forkChild);
@@ -833,7 +848,9 @@ describe("Application", () => {
         assert.strictEqual(aborts, 1);
         assert.strictEqual((yield* Fiber.join(scheduled)).outcome, "aborted");
 
-        const send = yield* application.sendMessage(chat.id, "in flight").pipe(Effect.forkChild);
+        const send = yield* application
+          .sendMessage(chat.id, textPrompt("in flight"))
+          .pipe(Effect.forkChild);
         yield* Deferred.await(sendStarted);
         yield* TestClock.setTime(3_000);
         const closing = yield* application
@@ -849,7 +866,7 @@ describe("Application", () => {
         const chats = yield* ChatRepository;
         assert.strictEqual(Option.getOrThrow(yield* chats.findById(chat.id)).archivedAt, 3_000);
         assert.instanceOf(
-          yield* application.sendMessage(chat.id, "late").pipe(Effect.flip),
+          yield* application.sendMessage(chat.id, textPrompt("late")).pipe(Effect.flip),
           ChatClosed,
         );
         assert.instanceOf(yield* application.contextUsage(chat.id).pipe(Effect.flip), ChatClosed);
@@ -860,7 +877,7 @@ describe("Application", () => {
 
         const missingChatId = Chat.ChatId.make("018f47a0-0000-7000-8000-000000000099");
         assertApplicationError(
-          yield* application.sendMessage(missingChatId, "missing").pipe(Effect.flip),
+          yield* application.sendMessage(missingChatId, textPrompt("missing")).pipe(Effect.flip),
           "Chat not found",
         );
         assertApplicationError(

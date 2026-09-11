@@ -62,6 +62,10 @@ describe("schedule contract", () => {
       prompt: "Review.",
     });
     assert.throws(() => decodeCreate(common));
+    assert.throws(() => decodeCreate({ ...common, prompt: "   \n\t" }));
+    assert.throws(() =>
+      decodeCreate({ ...common, script: "process.stdout.write('{}')", prompt: "   " }),
+    );
     assert.throws(() => decodeTrigger({ kind: "once", at: 1, expression: "* * * * *" }));
     assert.deepStrictEqual(decodeTrigger({ kind: "once", at: Number.MAX_SAFE_INTEGER }), {
       kind: "once",

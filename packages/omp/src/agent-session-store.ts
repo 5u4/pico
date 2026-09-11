@@ -20,6 +20,15 @@ export const make = Effect.fn("AgentSessionStore.make")(function* (sessionsDir: 
     .makeDirectory(sessionsDir, { recursive: true, mode: 0o700 })
     .pipe(Effect.mapError((error) => agentError("Failed to create OMP sessions directory", error)));
 
+  const removeSessionFiles = (chatId: CreateAgentSession["chatId"]) =>
+    Effect.all(
+      [
+        fileSystem.remove(path.join(sessionsDir, `${chatId}.jsonl`), { force: true }),
+        fileSystem.remove(path.join(sessionsDir, chatId), { force: true, recursive: true }),
+      ],
+      { concurrency: "unbounded", discard: true },
+    );
+
   const create = Effect.fn("AgentSessionStore.create")(function* (input: CreateAgentSession) {
     const sessionFile = path.join(sessionsDir, `${input.chatId}.jsonl`);
     let reserved = false;
@@ -54,9 +63,7 @@ export const make = Effect.fn("AgentSessionStore.make")(function* (sessionsDir: 
           error instanceof AgentError ? error : agentError("Failed to create OMP session", error),
         ),
         Effect.tapError(() =>
-          reserved
-            ? fileSystem.remove(sessionFile, { force: true }).pipe(Effect.ignore)
-            : Effect.void,
+          reserved ? removeSessionFiles(input.chatId).pipe(Effect.ignore) : Effect.void,
         ),
       ),
     );
@@ -65,9 +72,9 @@ export const make = Effect.fn("AgentSessionStore.make")(function* (sessionsDir: 
   const remove = Effect.fn("AgentSessionStore.remove")(function* (
     chatId: CreateAgentSession["chatId"],
   ) {
-    yield* fileSystem
-      .remove(path.join(sessionsDir, `${chatId}.jsonl`), { force: true })
-      .pipe(Effect.mapError((error) => agentError("Failed to remove OMP session", error)));
+    yield* removeSessionFiles(chatId).pipe(
+      Effect.mapError((error) => agentError("Failed to remove OMP session", error)),
+    );
   });
 
   return AgentSessionStore.of({ create, remove });

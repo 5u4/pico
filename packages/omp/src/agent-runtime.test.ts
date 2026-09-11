@@ -23,7 +23,7 @@ import { makeSessionPool, type OpenedSession, type SessionFactory } from "./sess
 
 const platformLayer = Layer.merge(BunFileSystem.layer, BunPath.layer);
 const chatId = Chat.ChatId.make("018f47a0-0000-7000-8000-000000000001");
-const prompt = Agent.AgentPrompt.make;
+const prompt = (text: string) => Agent.AgentPrompt.make({ text, attachments: [] });
 
 const shakeResult = (mode: ShakeMode): ShakeResult => {
   switch (mode) {
@@ -95,8 +95,8 @@ describe("AgentRuntime", () => {
                 },
               },
               sendPrompt: (value) => {
-                if (value !== "acquire") {
-                  emit({ type: "notice", level: "info", message: value });
+                if (value.text !== "acquire") {
+                  emit({ type: "notice", level: "info", message: value.text });
                 }
                 return Promise.resolve();
               },

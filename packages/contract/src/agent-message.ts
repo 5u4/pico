@@ -1,6 +1,61 @@
 import * as Schema from "effect/Schema";
+export const MAX_AGENT_IMAGE_ATTACHMENTS = 10;
+export const MAX_AGENT_IMAGE_ATTACHMENT_BYTES = 20 * 1024 * 1024;
+export const MAX_AGENT_IMAGE_BYTES = 40 * 1024 * 1024;
+export const MAX_AGENT_IMAGE_EDGE = 16_384;
+export const MAX_AGENT_IMAGE_PIXELS = 40_000_000;
 
-export const AgentPrompt = Schema.NonEmptyString;
+const maximumBase64Length = (bytes: number) => Math.ceil(bytes / 3) * 4;
+
+const base64ByteLength = (data: string) => {
+  const padding = data.endsWith("==") ? 2 : data.endsWith("=") ? 1 : 0;
+  return (data.length / 4) * 3 - padding;
+};
+
+export const AgentImageMimeType = Schema.Literals([
+  "image/png",
+  "image/jpeg",
+  "image/gif",
+  "image/webp",
+]);
+export type AgentImageMimeType = typeof AgentImageMimeType.Type;
+
+export const AgentImageAttachment = Schema.Struct({
+  type: Schema.Literal("image"),
+  name: Schema.NonEmptyString,
+  data: Schema.NonEmptyString.check(
+    Schema.isBase64(),
+    Schema.isMaxLength(maximumBase64Length(MAX_AGENT_IMAGE_ATTACHMENT_BYTES)),
+  ),
+  mimeType: AgentImageMimeType,
+}).check(
+  Schema.makeFilter((attachment) =>
+    base64ByteLength(attachment.data) <= MAX_AGENT_IMAGE_ATTACHMENT_BYTES
+      ? undefined
+      : `an image attachment of at most ${MAX_AGENT_IMAGE_ATTACHMENT_BYTES} bytes`,
+  ),
+);
+export type AgentImageAttachment = typeof AgentImageAttachment.Type;
+
+export const AgentPrompt = Schema.Struct({
+  text: Schema.String,
+  attachments: Schema.Array(AgentImageAttachment).check(
+    Schema.isMaxLength(MAX_AGENT_IMAGE_ATTACHMENTS),
+  ),
+}).check(
+  Schema.makeFilter((prompt) => {
+    if (prompt.text.trim().length === 0 && prompt.attachments.length === 0) {
+      return "a prompt with text or at least one image attachment";
+    }
+    const attachmentBytes = prompt.attachments.reduce(
+      (total, attachment) => total + base64ByteLength(attachment.data),
+      0,
+    );
+    return attachmentBytes <= MAX_AGENT_IMAGE_BYTES
+      ? undefined
+      : `image attachments totaling at most ${MAX_AGENT_IMAGE_BYTES} bytes`;
+  }),
+);
 export type AgentPrompt = typeof AgentPrompt.Type;
 
 export const AgentText = Schema.Struct({

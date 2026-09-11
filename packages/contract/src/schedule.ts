@@ -63,16 +63,21 @@ export const MAX_SCRIPT_TIMEOUT_MS = 86_400_000;
 const ScriptTimeoutMs = Schema.Int.check(
   Schema.isBetween({ minimum: 1, maximum: MAX_SCRIPT_TIMEOUT_MS }),
 );
+const NonBlankString = Schema.NonEmptyString.check(
+  Schema.makeFilter((value) =>
+    value.trim().length > 0 ? undefined : "a string containing a non-whitespace character",
+  ),
+);
 
 const PromptSourceInputFields = {
   script: Schema.optional(Schema.NonEmptyString),
-  prompt: Schema.NonEmptyString,
+  prompt: NonBlankString,
   scriptTimeoutMs: Schema.optional(ScriptTimeoutMs),
 };
 
 const ScriptSourceInputFields = {
   script: Schema.NonEmptyString,
-  prompt: Schema.optional(Schema.NonEmptyString),
+  prompt: Schema.optional(NonBlankString),
   scriptTimeoutMs: Schema.optional(ScriptTimeoutMs),
 };
 
