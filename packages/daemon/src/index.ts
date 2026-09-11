@@ -37,11 +37,14 @@ const daemonLayer = (paths: PicoPaths, config: Config.PicoConfig) =>
       const branchNaming = ApplicationLayer.branchNamingLayer(gitWorktree).pipe(
         Layer.provide(persistence),
       );
+      const chatPlatformResolver = ApplicationLayer.chatPlatformResolverLayer.pipe(
+        Layer.provide(persistence),
+      );
       const application = ApplicationLayer.layer(gitWorktree).pipe(
         Layer.provide(Layer.merge(persistence, AgentSessionStoreLayer.layer(paths.sessionsDir))),
       );
       const agentRuntime = AgentRuntimeLayer.layer(paths.sessionsDir, schedules).pipe(
-        Layer.provide(Layer.merge(persistence, branchNaming)),
+        Layer.provide(Layer.merge(chatPlatformResolver, branchNaming)),
       );
       const core = Layer.merge(application, EventRouterLayer.layer).pipe(
         Layer.provide(agentRuntime),

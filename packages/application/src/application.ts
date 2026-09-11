@@ -17,6 +17,7 @@ import {
   type BranchNamingRequest,
 } from "@pico/contract/branch-naming";
 import * as Chat from "@pico/contract/chat-model";
+import { ChatPlatformResolver } from "@pico/contract/chat-platform-resolver";
 import { ChatRepository } from "@pico/contract/chat-repository";
 import {
   AgentError,
@@ -149,6 +150,43 @@ export const makeBranchNaming = Effect.fn("BranchNaming.make")(function* (
 
 export const branchNamingLayer = (gitWorktree: GitWorktree) =>
   Layer.effect(BranchNaming, makeBranchNaming(gitWorktree));
+
+const repositoryError = (message: string) => (cause: { readonly message: string }) =>
+  new AgentError({ message: `${message}: ${cause.message}` });
+
+const makeChatPlatformResolver = Effect.fn("ChatPlatformResolver.make")(function* () {
+  const chats = yield* ChatRepository;
+  const workspaces = yield* WorkspaceRepository;
+
+  const resolve = Effect.fn("ChatPlatformResolver.resolve")(function* (chatId: Chat.ChatId) {
+    const maybeChat = yield* chats
+      .findById(chatId)
+      .pipe(Effect.mapError(repositoryError("Failed to resolve chat")));
+    if (Option.isNone(maybeChat)) {
+      return yield* new AgentError({ message: "Chat not found" });
+    }
+
+    const chat = maybeChat.value;
+    const maybeWorkspace = yield* workspaces
+      .findById(chat.workspaceId)
+      .pipe(Effect.mapError(repositoryError("Failed to resolve chat workspace")));
+    if (Option.isNone(maybeWorkspace)) {
+      return yield* new AgentError({ message: "Chat workspace not found" });
+    }
+
+    return {
+      chat,
+      platform: maybeWorkspace.value.binding?.platform ?? null,
+    };
+  });
+
+  return ChatPlatformResolver.of({ resolve });
+});
+
+export const chatPlatformResolverLayer = Layer.effect(
+  ChatPlatformResolver,
+  makeChatPlatformResolver(),
+);
 
 const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) {
   const workspaces = yield* WorkspaceRepository;
