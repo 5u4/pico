@@ -1,4 +1,5 @@
 import type { ExtensionFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
+import { AbsolutePath } from "@pico/contract/path";
 import * as Schedule from "@pico/contract/schedule";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
@@ -13,7 +14,6 @@ export const scheduleToolNames = {
   list: "schedule_list",
   get: "schedule_get",
   update: "schedule_update",
-  setEnabled: "schedule_set_enabled",
   remove: "schedule_delete",
 } as const;
 interface OperationContext {
@@ -117,42 +117,34 @@ export const make =
     const scriptTimeoutMs = Type.Optional(
       Type.Integer({ minimum: 1, maximum: Schedule.MAX_SCRIPT_TIMEOUT_MS }),
     );
-    const script = Type.String({ minLength: 1 });
-    const prompt = Type.String({ minLength: 1 });
-    const scriptSource = {
-      script,
-      prompt: Type.Optional(prompt),
-      scriptTimeoutMs,
-    };
-    const promptSource = {
-      script: Type.Optional(script),
-      prompt,
-      scriptTimeoutMs,
-    };
-    const createFields = {
-      name: Type.String({ minLength: 1 }),
-      enabled: Type.Boolean(),
-      target,
-      trigger,
-    };
-    const updateFields = {
-      scheduleId,
-      name: Type.String({ minLength: 1 }),
-      target,
-      trigger,
-    };
-
     api.registerTool({
       name: scheduleToolNames.create,
       label: "Create schedule",
       description:
-        "Create a filesystem-backed schedule. script.js and prompt.md presence drives execution. Scripts return strict JSON {agent:boolean,content?:non-empty string} to skip, publish, or invoke OMP. Scripts write logs to stderr.",
+        "Create a schedule by copying sourceDirectory into Pico-owned storage. The absolute source directory needs script.js and/or prompt.md and may include helper files and subdirectories. Returns the editable sourceDirectory. Scripts return strict JSON {agent:boolean,content?:non-empty string} and log to stderr.",
       approval: "write",
-      parameters: Type.Union([
-        Type.Object({ ...createFields, ...scriptSource }, { additionalProperties: false }),
-        Type.Object({ ...createFields, ...promptSource }, { additionalProperties: false }),
-      ]),
-      execute: (_toolCallId, params) => execute("create", schedules.create(caller, params)),
+      parameters: Type.Object(
+        {
+          name: Type.String({ minLength: 1 }),
+          enabled: Type.Boolean(),
+          target,
+          trigger,
+          sourceDirectory: Type.String({
+            minLength: 1,
+            description: "Absolute path to the prepared source directory to copy.",
+          }),
+          scriptTimeoutMs,
+        },
+        { additionalProperties: false },
+      ),
+      execute: (_toolCallId, params) =>
+        execute(
+          "create",
+          schedules.create(caller, {
+            ...params,
+            sourceDirectory: AbsolutePath.make(params.sourceDirectory),
+          }),
+        ),
     });
 
     api.registerTool({
@@ -168,7 +160,8 @@ export const make =
     api.registerTool({
       name: scheduleToolNames.get,
       label: "Get schedule",
-      description: "Get one schedule and its complete prompt and script source.",
+      description:
+        "Get schedule metadata and the current editable sourceDirectory. Read and edit source files with filesystem tools.",
       approval: "read",
       parameters: Type.Object({ scheduleId }, { additionalProperties: false }),
       execute: (_toolCallId, params) =>
@@ -183,38 +176,23 @@ export const make =
       name: scheduleToolNames.update,
       label: "Update schedule",
       description:
-        "Replace one schedule definition and all source files. script.js runs first when present. Its strict JSON {agent:boolean,content?:non-empty string} chooses whether OMP runs. Scripts write logs to stderr.",
-      approval: "write",
-      parameters: Type.Union([
-        Type.Object({ ...updateFields, ...scriptSource }, { additionalProperties: false }),
-        Type.Object({ ...updateFields, ...promptSource }, { additionalProperties: false }),
-      ]),
-      execute: (_toolCallId, params) => {
-        const { scheduleId: id, ...input } = params;
-        return execute(
-          "update",
-          schedules.replace(caller, Schedule.ScheduleId.make(id), input),
-          id,
-        );
-      },
-    });
-
-    api.registerTool({
-      name: scheduleToolNames.setEnabled,
-      label: "Set schedule enabled state",
-      description:
-        "Enable or disable one schedule without changing its definition. Use this to disable a schedule while retaining the definition and run history.",
+        "Update only supplied metadata fields, including enabled to pause or resume. Source files and omitted fields stay unchanged. Enable/disable moves sourceDirectory; use the returned current path for subsequent file edits.",
       approval: "write",
       parameters: Type.Object(
-        { scheduleId, enabled: Type.Boolean() },
+        {
+          scheduleId,
+          name: Type.Optional(Type.String({ minLength: 1 })),
+          enabled: Type.Optional(Type.Boolean()),
+          target: Type.Optional(target),
+          trigger: Type.Optional(trigger),
+          scriptTimeoutMs,
+        },
         { additionalProperties: false },
       ),
-      execute: (_toolCallId, params) =>
-        execute(
-          "setEnabled",
-          schedules.setEnabled(caller, Schedule.ScheduleId.make(params.scheduleId), params.enabled),
-          params.scheduleId,
-        ),
+      execute: (_toolCallId, params) => {
+        const { scheduleId: id, ...input } = params;
+        return execute("update", schedules.update(caller, Schedule.ScheduleId.make(id), input), id);
+      },
     });
 
     api.registerTool({

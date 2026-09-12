@@ -1,6 +1,8 @@
+import { AbsolutePath } from "@pico/contract/path";
 import * as Schedule from "@pico/contract/schedule";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import type * as FileSystem from "effect/FileSystem";
 import type * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
@@ -14,10 +16,16 @@ export interface Storage {
   readonly temporaryId: () => Effect.Effect<string, Schedule.ScheduleError>;
 }
 
+export interface SourceTree {
+  readonly files: ReadonlyMap<string, Uint8Array>;
+  readonly directories: ReadonlyArray<string>;
+}
+
 export interface LoadedSchedule {
   readonly view: Schedule.ScheduleView;
   readonly ownerWorkspaceId: string | null;
   readonly directory: string | null;
+  readonly source: SourceTree | null;
 }
 
 const ownerSchema = Schema.fromJsonString(
@@ -25,6 +33,18 @@ const ownerSchema = Schema.fromJsonString(
 );
 const definitionJson = Schema.fromJsonString(Schedule.ScheduleDefinition);
 const runJson = Schema.fromJsonString(Schedule.ScheduleRunLifecycle);
+const updateTransactionJson = Schema.fromJsonString(
+  Schema.Struct({
+    kind: Schema.Literal("update"),
+    id: Schedule.ScheduleId,
+    state: Schedule.ScheduleEnabledState,
+    nextState: Schedule.ScheduleEnabledState,
+    revision: Schedule.ScheduleRevision,
+  }),
+);
+const decodeUpdateTransaction = Schema.decodeUnknownOption(updateTransactionJson, {
+  onExcessProperty: "error",
+});
 const replaceTransactionJson = Schema.fromJsonString(
   Schema.Struct({
     kind: Schema.Literal("replace"),
@@ -179,6 +199,151 @@ const prepareStagingDirectory = Effect.fn("Schedules.prepareStagingDirectory")(f
   return transaction;
 });
 
+const reconcileUpdate = Effect.fn("Schedules.reconcileUpdate")(function* (
+  storage: Storage,
+  transaction: string,
+  entries: ReadonlyArray<string>,
+) {
+  if (!entries.includes("transaction.json")) return;
+  const journal = decodeUpdateTransaction(
+    yield* readDirectFileString(
+      storage,
+      storage.path.join(transaction, "transaction.json"),
+      "schedule update journal",
+    ),
+  );
+  if (journal._tag === "None") {
+    return yield* new Schedule.ScheduleError({
+      kind: "corrupt",
+      message: "Invalid schedule update journal",
+    });
+  }
+  if (!entries.includes("next.json")) return;
+  const value = roots(storage);
+  const original = storage.path.join(value[journal.value.state], journal.value.id);
+  const destination = storage.path.join(value[journal.value.nextState], journal.value.id);
+  if (original !== destination) {
+    yield* ensureDirectPath(storage, value[journal.value.state], "schedule state directory");
+    yield* ensureDirectPath(storage, value[journal.value.nextState], "schedule state directory");
+    const originalExists = yield* inspectDirectory(storage, original, "update origin");
+    const destinationExists = yield* inspectDirectory(storage, destination, "update destination");
+    if (originalExists && destinationExists) {
+      return yield* new Schedule.ScheduleError({
+        kind: "corrupt",
+        message: "Schedule update exists in both enabled and disabled directories",
+      });
+    }
+    if (!originalExists && destinationExists) {
+      const definition = yield* decodeDefinition(
+        yield* readDirectFileString(
+          storage,
+          storage.path.join(destination, "meta.json"),
+          "updated schedule metadata",
+        ),
+      ).pipe(Effect.mapError(() => invalid("Invalid updated schedule metadata")));
+      if (definition.revision !== journal.value.revision) {
+        yield* storage.fileSystem
+          .rename(destination, original)
+          .pipe(mapIo("Failed to recover schedule state"));
+        yield* Effect.logInfo("Schedule update recovered").pipe(
+          Effect.annotateLogs({
+            component: "schedule",
+            operation: "update",
+            phase: "update-recovery",
+            scheduleId: journal.value.id,
+            state: journal.value.state,
+          }),
+        );
+      }
+    }
+  }
+  yield* storage.fileSystem
+    .remove(storage.path.join(transaction, "next.json"), { force: true })
+    .pipe(mapIo("Failed to clear recovered schedule update"));
+});
+
+export const reconcileUpdates = Effect.fn("Schedules.reconcileUpdates")(function* (
+  storage: Storage,
+) {
+  const staging = roots(storage).staging;
+  yield* ensureDirectPath(storage, staging, "schedule staging directory");
+  const names = yield* storage.fileSystem
+    .readDirectory(staging)
+    .pipe(mapIo("Failed to inspect schedule staging directory"));
+  for (const name of names) {
+    if (!name.startsWith("update-")) continue;
+    const transaction = storage.path.join(staging, name);
+    yield* ensureDirectPath(storage, transaction, "schedule staging transaction");
+    const entries = yield* storage.fileSystem
+      .readDirectory(transaction)
+      .pipe(mapIo("Failed to inspect schedule staging transaction"));
+    yield* reconcileUpdate(storage, transaction, entries);
+  }
+});
+
+const recoverReplacement = Effect.fn("Schedules.recoverReplacement")(function* (
+  storage: Storage,
+  transaction: string,
+  entries: ReadonlyArray<string>,
+) {
+  if (!entries.includes("transaction.json")) {
+    if (entries.includes("previous")) {
+      return yield* new Schedule.ScheduleError({
+        kind: "corrupt",
+        message: "Retained schedule definition has no replacement journal",
+      });
+    }
+    return;
+  }
+  const journal = decodeReplaceTransaction(
+    yield* readDirectFileString(
+      storage,
+      storage.path.join(transaction, "transaction.json"),
+      "schedule replacement journal",
+    ),
+  );
+  if (journal._tag === "None") {
+    return yield* new Schedule.ScheduleError({
+      kind: "corrupt",
+      message: "Invalid schedule replacement journal",
+    });
+  }
+  const value = roots(storage);
+  const destination = storage.path.join(value[journal.value.state], journal.value.id);
+  const other = storage.path.join(
+    value[journal.value.state === "enabled" ? "disabled" : "enabled"],
+    journal.value.id,
+  );
+  const previous = storage.path.join(transaction, "previous");
+  const destinationExists = yield* inspectDirectory(
+    storage,
+    destination,
+    "replacement destination",
+  );
+  const otherExists = yield* inspectDirectory(storage, other, "replacement destination");
+  const previousExists = yield* inspectDirectory(storage, previous, "retained schedule definition");
+  if (!destinationExists && !otherExists) {
+    if (!previousExists) {
+      return yield* new Schedule.ScheduleError({
+        kind: "corrupt",
+        message: "Schedule replacement has no canonical or retained definition",
+      });
+    }
+    yield* storage.fileSystem
+      .rename(previous, destination)
+      .pipe(mapIo("Failed to recover retained schedule definition"));
+    yield* Effect.logInfo("Schedule replacement recovered").pipe(
+      Effect.annotateLogs({
+        component: "schedule",
+        operation: "bootstrap",
+        phase: "replacement-recovery",
+        scheduleId: journal.value.id,
+        state: journal.value.state,
+      }),
+    );
+  }
+});
+
 export const bootstrap = Effect.fn("Schedules.bootstrap")(function* (storage: Storage) {
   const value = roots(storage);
   if (!(yield* inspectDirectory(storage, storage.schedulesDir, "schedule storage directory"))) {
@@ -199,61 +364,29 @@ export const bootstrap = Effect.fn("Schedules.bootstrap")(function* (storage: St
     .readDirectory(value.staging)
     .pipe(mapIo("Failed to inspect schedule staging directory"));
   for (const name of staged) {
+    if (
+      !(
+        name.startsWith("definition-") ||
+        name.startsWith("run-") ||
+        name.startsWith("update-") ||
+        name.startsWith("replace-")
+      )
+    ) {
+      return yield* new Schedule.ScheduleError({
+        kind: "corrupt",
+        message:
+          "Unrecognized schedule staging transaction; inspect retained data before removing it",
+      });
+    }
     const transaction = storage.path.join(value.staging, name);
     yield* ensureDirectPath(storage, transaction, "schedule staging transaction");
-    const journalFile = storage.path.join(transaction, "transaction.json");
     const entries = yield* storage.fileSystem
       .readDirectory(transaction)
       .pipe(mapIo("Failed to inspect schedule staging transaction"));
-    if (!entries.includes("transaction.json")) {
-      if (entries.includes("previous")) {
-        return yield* new Schedule.ScheduleError({
-          kind: "corrupt",
-          message: "Retained schedule definition has no replacement journal",
-        });
-      }
-    } else {
-      const journalSource = yield* readDirectFileString(
-        storage,
-        journalFile,
-        "schedule replacement journal",
-      );
-      const journal = decodeReplaceTransaction(journalSource);
-      if (journal._tag === "None") {
-        return yield* new Schedule.ScheduleError({
-          kind: "corrupt",
-          message: "Invalid schedule replacement journal",
-        });
-      }
-      const destination = storage.path.join(
-        journal.value.state === "enabled" ? value.enabled : value.disabled,
-        journal.value.id,
-      );
-      const previous = storage.path.join(transaction, "previous");
-      const destinationExists = yield* inspectDirectory(
-        storage,
-        destination,
-        "replacement destination",
-      );
-      const previousExists = yield* inspectDirectory(
-        storage,
-        previous,
-        "retained schedule definition",
-      );
-      if (!destinationExists && previousExists) {
-        yield* storage.fileSystem
-          .rename(previous, destination)
-          .pipe(mapIo("Failed to recover retained schedule definition"));
-        yield* Effect.logInfo("Schedule replacement recovered").pipe(
-          Effect.annotateLogs({
-            component: "schedule",
-            operation: "bootstrap",
-            phase: "replacement-recovery",
-            scheduleId: journal.value.id,
-            state: journal.value.state,
-          }),
-        );
-      }
+    if (name.startsWith("update-")) {
+      yield* reconcileUpdate(storage, transaction, entries);
+    } else if (name.startsWith("replace-")) {
+      yield* recoverReplacement(storage, transaction, entries);
     }
     yield* storage.fileSystem
       .remove(transaction, { recursive: true, force: true })
@@ -302,7 +435,101 @@ export const ensureRunAsset = Effect.fn("Schedules.ensureRunAsset")(function* (
   yield* ensureDirectPath(storage, candidate, `run asset ${relative}`);
 });
 
-const definitionFiles = new Set(["meta.json", "script.js", "prompt.md"]);
+export const loadSourceTree = Effect.fn("Schedules.loadSourceTree")(function* (
+  storage: Storage,
+  directory: string,
+  owned = false,
+): Effect.fn.Return<SourceTree, Schedule.ScheduleError> {
+  if (!storage.path.isAbsolute(directory)) {
+    return yield* invalid("sourceDirectory must be an absolute path");
+  }
+  if (!(yield* inspectDirectory(storage, directory, "schedule source directory"))) {
+    return yield* invalid("sourceDirectory must name an existing directory");
+  }
+  const files = new Map<string, Uint8Array>();
+  const directories: Array<string> = [];
+  const pending = [""];
+  for (const relativeDirectory of pending) {
+    const current = storage.path.join(directory, relativeDirectory);
+    yield* ensureDirectPath(storage, current, "schedule source directory");
+    const names = yield* storage.fileSystem
+      .readDirectory(current)
+      .pipe(mapIo("Failed to read schedule source directory"));
+    for (const name of names) {
+      if (name === "." || name === ".." || storage.path.basename(name) !== name) {
+        return yield* invalid(`Invalid source entry name: ${name}`);
+      }
+      if (relativeDirectory === "" && name === "meta.json") {
+        if (owned) continue;
+        return yield* invalid(
+          "meta.json is reserved for Pico metadata; remove it from sourceDirectory",
+        );
+      }
+      if (relativeDirectory === "" && name === "definition.json") {
+        return yield* invalid(
+          "definition.json is reserved for run metadata; rename the source asset",
+        );
+      }
+      const relative = storage.path.join(relativeDirectory, name);
+      const asset = storage.path.join(directory, relative);
+      yield* ensureDirectPath(storage, asset, `Source asset ${relative}`).pipe(
+        Effect.mapError(() =>
+          invalid(`Cannot read source asset ${relative}; symbolic links are not supported`),
+        ),
+      );
+      const info = yield* storage.fileSystem
+        .stat(asset)
+        .pipe(mapIo(`Failed to inspect source asset ${relative}`));
+      if (info.type === "Directory") {
+        directories.push(relative);
+        pending.push(relative);
+      } else if (info.type === "File") {
+        const content = yield* storage.fileSystem
+          .readFile(asset)
+          .pipe(mapIo(`Failed to read source asset ${relative}`));
+        files.set(relative, content);
+      } else {
+        return yield* invalid(
+          `Source asset ${relative} must be a regular file or directory; links and special files are not supported`,
+        );
+      }
+    }
+  }
+  if (!files.has("script.js") && !files.has("prompt.md")) {
+    return yield* invalid("sourceDirectory requires script.js and/or prompt.md at its root");
+  }
+  for (const name of ["script.js", "prompt.md"]) {
+    const content = files.get(name);
+    if (
+      directories.includes(name) ||
+      (content !== undefined && new TextDecoder().decode(content).trim() === "")
+    ) {
+      return yield* invalid(`${name} must be a nonblank regular file`);
+    }
+  }
+  return { files, directories };
+});
+
+const writeSourceTree = Effect.fn("Schedules.writeSourceTree")(function* (
+  storage: Storage,
+  directory: string,
+  source: SourceTree,
+) {
+  for (const relative of source.directories) {
+    yield* createDirectory(
+      storage,
+      storage.path.join(directory, relative),
+      "schedule source directory",
+    );
+  }
+  for (const [relative, content] of source.files) {
+    const file = storage.path.join(directory, relative);
+    yield* ensureDirectPath(storage, storage.path.dirname(file), "schedule source directory");
+    yield* storage.fileSystem
+      .writeFile(file, content, { flag: "wx", mode: 0o600 })
+      .pipe(mapIo("Failed to copy schedule source asset"));
+  }
+});
 
 const ownerFromSource = (source: string) => {
   const decoded = decodeOwner(source);
@@ -316,9 +543,16 @@ const invalidLoaded = (
   ownerWorkspaceId: string | null,
   directory: string | null,
 ): LoadedSchedule => ({
-  view: { kind: "invalid", id, state, error: message },
+  view: {
+    kind: "invalid",
+    id,
+    state,
+    error: message,
+    sourceDirectory: directory === null ? null : AbsolutePath.make(directory),
+  },
   ownerWorkspaceId,
   directory,
+  source: null,
 });
 
 export const loadSchedule = Effect.fn("Schedules.loadSchedule")(function* (
@@ -379,43 +613,18 @@ export const loadSchedule = Effect.fn("Schedules.loadSchedule")(function* (
     const definition = yield* decodeDefinition(metaSource).pipe(
       Effect.mapError(() => invalid("Invalid schedule metadata")),
     );
-    const names = yield* storage.fileSystem
-      .readDirectory(directory)
-      .pipe(mapIo("Failed to inspect schedule assets"));
-    const present = new Set(names);
-    if (
-      names.some((name: string) => !definitionFiles.has(name)) ||
-      !present.has("meta.json") ||
-      (!present.has("script.js") && !present.has("prompt.md"))
-    ) {
-      return yield* invalid(
-        "Schedule definitions require meta.json and at least one of script.js or prompt.md, with no other files",
-      );
-    }
-    const script = present.has("script.js")
-      ? yield* readDirectFileString(
-          storage,
-          storage.path.join(directory, "script.js"),
-          "schedule script",
-        )
-      : null;
-    const prompt = present.has("prompt.md")
-      ? yield* readDirectFileString(
-          storage,
-          storage.path.join(directory, "prompt.md"),
-          "schedule prompt",
-        )
-      : null;
+    const source = yield* loadSourceTree(storage, directory, true);
     return {
       view: {
         kind: "ready",
         id,
         state,
         definition,
-        source: { script, prompt },
+        sourceDirectory: AbsolutePath.make(directory),
       },
       ownerWorkspaceId: definition.ownerWorkspaceId,
       directory,
+      source,
     } satisfies LoadedSchedule;
   }).pipe(Effect.result);
 
@@ -448,7 +657,7 @@ const writeDefinitionDirectory = Effect.fn("Schedules.writeDefinitionDirectory")
   storage: Storage,
   directory: string,
   definition: Schedule.ScheduleDefinition,
-  source: Schedule.ScheduleSource,
+  source: SourceTree,
 ) {
   yield* ensureDirectPath(storage, directory, "schedule staging directory");
   yield* storage.fileSystem
@@ -457,22 +666,7 @@ const writeDefinitionDirectory = Effect.fn("Schedules.writeDefinitionDirectory")
       mode: 0o600,
     })
     .pipe(mapIo("Failed to stage schedule metadata"));
-  if (source.script !== null) {
-    yield* storage.fileSystem
-      .writeFileString(storage.path.join(directory, "script.js"), source.script, {
-        flag: "wx",
-        mode: 0o600,
-      })
-      .pipe(mapIo("Failed to stage schedule script"));
-  }
-  if (source.prompt !== null) {
-    yield* storage.fileSystem
-      .writeFileString(storage.path.join(directory, "prompt.md"), source.prompt, {
-        flag: "wx",
-        mode: 0o600,
-      })
-      .pipe(mapIo("Failed to stage schedule prompt"));
-  }
+  yield* writeSourceTree(storage, directory, source);
 });
 
 export const publishDefinition = Effect.fn("Schedules.publishDefinition")(function* (
@@ -480,7 +674,7 @@ export const publishDefinition = Effect.fn("Schedules.publishDefinition")(functi
   id: Schedule.ScheduleId,
   state: Schedule.ScheduleEnabledState,
   definition: Schedule.ScheduleDefinition,
-  source: Schedule.ScheduleSource,
+  source: SourceTree,
   transactionId: string,
 ) {
   const value = roots(storage);
@@ -494,68 +688,83 @@ export const publishDefinition = Effect.fn("Schedules.publishDefinition")(functi
   yield* storage.fileSystem.rename(stage, destination).pipe(mapIo("Failed to publish schedule"));
 });
 
-export const replaceDefinition = Effect.fn("Schedules.replaceDefinition")(function* (
+export const updateDefinition = Effect.fn("Schedules.updateDefinition")(function* (
   storage: Storage,
   current: LoadedSchedule,
   definition: Schedule.ScheduleDefinition,
-  source: Schedule.ScheduleSource,
+  state: Schedule.ScheduleEnabledState,
   transactionId: string,
 ) {
   if (current.view.kind !== "ready" || current.directory === null) {
-    return yield* new Schedule.ScheduleError({
-      kind: "invalid",
-      message: "Invalid schedules cannot be updated",
-    });
+    return yield* invalid("Invalid schedules cannot be updated");
   }
-  const currentDirectory = current.directory;
+  const original = current.directory;
+  const originalState = current.view.state;
   const value = roots(storage);
-  const transaction = yield* prepareStagingDirectory(storage, `replace-${transactionId}`, ["next"]);
-  const next = storage.path.join(transaction, "next");
-  const previous = storage.path.join(transaction, "previous");
-  yield* storage.fileSystem
-    .writeFileString(
-      storage.path.join(transaction, "transaction.json"),
-      JSON.stringify({ kind: "replace", id: current.view.id, state: current.view.state }),
-      { flag: "wx", mode: 0o600 },
-    )
-    .pipe(mapIo("Failed to stage schedule replacement journal"));
-  yield* writeDefinitionDirectory(storage, next, definition, source);
-  yield* Effect.uninterruptible(
-    Effect.gen(function* () {
-      const destinationRoot = current.view.state === "enabled" ? value.enabled : value.disabled;
-      if (!(yield* inspectDirectory(storage, destinationRoot, "schedule state directory"))) {
-        return yield* invalid("Schedule state directory must exist before replacement");
-      }
-      yield* storage.fileSystem
-        .rename(currentDirectory, previous)
-        .pipe(mapIo("Failed to retain previous schedule definition"));
-      const destination = storage.path.join(destinationRoot, current.view.id);
-      yield* storage.fileSystem.rename(next, destination).pipe(
-        Effect.tapError(() =>
-          ignoreCleanupFailure(
-            "Failed to restore retained schedule definition",
-            storage.fileSystem.rename(previous, destination),
-            {
-              operation: "replace",
-              phase: "rollback",
-              scheduleId: current.view.id,
-              definitionRevision: definition.revision,
-            },
-          ),
+  const transaction = yield* prepareStagingDirectory(storage, `update-${transactionId}`);
+  const next = storage.path.join(transaction, "next.json");
+  const destination = storage.path.join(value[state], current.view.id);
+  let moved = false;
+  yield* Effect.uninterruptibleMask((restore) =>
+    restore(
+      Effect.gen(function* () {
+        yield* storage.fileSystem
+          .writeFileString(next, JSON.stringify(definition), {
+            flag: "wx",
+            mode: 0o600,
+          })
+          .pipe(mapIo("Failed to stage schedule metadata"));
+        yield* storage.fileSystem
+          .writeFileString(
+            storage.path.join(transaction, "transaction.json"),
+            JSON.stringify({
+              kind: "update",
+              id: current.view.id,
+              state: originalState,
+              nextState: state,
+              revision: definition.revision,
+            }),
+            { flag: "wx", mode: 0o600 },
+          )
+          .pipe(mapIo("Failed to stage schedule update journal"));
+      }),
+    ).pipe(
+      Effect.andThen(
+        Effect.gen(function* () {
+          yield* ensureDirectPath(storage, value[originalState], "schedule state directory");
+          yield* moveDefinition(storage, current, state);
+          moved = destination !== original;
+          const metadata = storage.path.join(destination, "meta.json");
+          yield* ensureRegularDestination(storage, metadata, "schedule metadata");
+          yield* storage.fileSystem
+            .rename(next, metadata)
+            .pipe(mapIo("Failed to install schedule metadata"));
+        }),
+      ),
+      Effect.onExit((exit) =>
+        ignoreCleanupFailure(
+          Exit.isFailure(exit)
+            ? "Failed to roll back schedule update"
+            : "Failed to remove schedule update staging",
+          Effect.gen(function* () {
+            if (Exit.isFailure(exit)) {
+              if (moved) {
+                yield* ensureDirectPath(storage, value[originalState], "schedule state directory");
+                yield* storage.fileSystem.rename(destination, original);
+              }
+              yield* storage.fileSystem.remove(next, { force: true });
+            }
+            yield* storage.fileSystem.remove(transaction, { recursive: true, force: true });
+          }),
+          {
+            operation: "update",
+            phase: Exit.isFailure(exit) ? "rollback" : "cleanup",
+            scheduleId: current.view.id,
+            definitionRevision: definition.revision,
+          },
         ),
-        mapIo("Failed to install schedule replacement"),
-      );
-    }),
-  );
-  yield* ignoreCleanupFailure(
-    "Failed to remove schedule replacement staging",
-    storage.fileSystem.remove(transaction, { recursive: true, force: true }),
-    {
-      operation: "replace",
-      phase: "cleanup",
-      scheduleId: current.view.id,
-      definitionRevision: definition.revision,
-    },
+      ),
+    ),
   );
 });
 
@@ -612,7 +821,7 @@ export const publishRun = Effect.fn("Schedules.publishRun")(function* (
   storage: Storage,
   run: Schedule.ScheduleRunLifecycle,
   definition: Schedule.ScheduleDefinition,
-  source: Schedule.ScheduleSource,
+  source: SourceTree,
   transactionId: string,
 ) {
   const value = roots(storage);
@@ -630,22 +839,7 @@ export const publishRun = Effect.fn("Schedules.publishRun")(function* (
       mode: 0o600,
     })
     .pipe(mapIo("Failed to snapshot run definition"));
-  if (source.script !== null) {
-    yield* storage.fileSystem
-      .writeFileString(storage.path.join(input, "script.js"), source.script, {
-        flag: "wx",
-        mode: 0o600,
-      })
-      .pipe(mapIo("Failed to snapshot run script"));
-  }
-  if (source.prompt !== null) {
-    yield* storage.fileSystem
-      .writeFileString(storage.path.join(input, "prompt.md"), source.prompt, {
-        flag: "wx",
-        mode: 0o600,
-      })
-      .pipe(mapIo("Failed to snapshot run prompt"));
-  }
+  yield* writeSourceTree(storage, input, source);
   const parent = storage.path.join(value.runs, run.scheduleId);
   yield* ensureDirectPath(storage, value.runs, "run storage directory");
   const parentExists = yield* storage.fileSystem

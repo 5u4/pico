@@ -63,23 +63,6 @@ export const MAX_SCRIPT_TIMEOUT_MS = 86_400_000;
 const ScriptTimeoutMs = Schema.Int.check(
   Schema.isBetween({ minimum: 1, maximum: MAX_SCRIPT_TIMEOUT_MS }),
 );
-const NonBlankString = Schema.NonEmptyString.check(
-  Schema.makeFilter((value) =>
-    value.trim().length > 0 ? undefined : "a string containing a non-whitespace character",
-  ),
-);
-
-const PromptSourceInputFields = {
-  script: Schema.optional(Schema.NonEmptyString),
-  prompt: NonBlankString,
-  scriptTimeoutMs: Schema.optional(ScriptTimeoutMs),
-};
-
-const ScriptSourceInputFields = {
-  script: Schema.NonEmptyString,
-  prompt: Schema.optional(NonBlankString),
-  scriptTimeoutMs: Schema.optional(ScriptTimeoutMs),
-};
 
 export const ScriptDecision = Schema.Struct({
   agent: Schema.Boolean,
@@ -100,18 +83,12 @@ export const ScheduleDefinition = Schema.Struct({
 });
 export type ScheduleDefinition = typeof ScheduleDefinition.Type;
 
-export const ScheduleSource = Schema.Struct({
-  script: Schema.NullOr(Schema.String),
-  prompt: Schema.NullOr(Schema.String),
-});
-export type ScheduleSource = typeof ScheduleSource.Type;
-
 export const ReadyScheduleView = Schema.Struct({
   kind: Schema.Literal("ready"),
   id: ScheduleId,
   state: ScheduleEnabledState,
   definition: ScheduleDefinition,
-  source: ScheduleSource,
+  sourceDirectory: AbsolutePath,
 });
 export type ReadyScheduleView = typeof ReadyScheduleView.Type;
 
@@ -120,6 +97,7 @@ export const InvalidScheduleView = Schema.Struct({
   id: ScheduleId,
   state: Schema.Literals(["enabled", "disabled", "conflicted"]),
   error: Schema.String,
+  sourceDirectory: Schema.NullOr(AbsolutePath),
 });
 export type InvalidScheduleView = typeof InvalidScheduleView.Type;
 
@@ -209,28 +187,24 @@ export const ScheduleRunLifecycle = Schema.Union([
 ]);
 export type ScheduleRunLifecycle = typeof ScheduleRunLifecycle.Type;
 
-const CreateScheduleFields = {
+export const CreateSchedule = Schema.Struct({
   name: Schema.NonEmptyString,
   enabled: Schema.Boolean,
   target: ScheduleTargetInput,
   trigger: ScheduleTrigger,
-};
-export const CreateSchedule = Schema.Union([
-  Schema.Struct({ ...CreateScheduleFields, ...ScriptSourceInputFields }),
-  Schema.Struct({ ...CreateScheduleFields, ...PromptSourceInputFields }),
-]);
+  sourceDirectory: AbsolutePath,
+  scriptTimeoutMs: Schema.optional(ScriptTimeoutMs),
+});
 export type CreateSchedule = typeof CreateSchedule.Type;
 
-const ReplaceScheduleFields = {
-  name: Schema.NonEmptyString,
-  target: ScheduleTargetInput,
-  trigger: ScheduleTrigger,
-};
-export const ReplaceSchedule = Schema.Union([
-  Schema.Struct({ ...ReplaceScheduleFields, ...ScriptSourceInputFields }),
-  Schema.Struct({ ...ReplaceScheduleFields, ...PromptSourceInputFields }),
-]);
-export type ReplaceSchedule = typeof ReplaceSchedule.Type;
+export const UpdateSchedule = Schema.Struct({
+  name: Schema.optional(Schema.NonEmptyString),
+  enabled: Schema.optional(Schema.Boolean),
+  target: Schema.optional(ScheduleTargetInput),
+  trigger: Schema.optional(ScheduleTrigger),
+  scriptTimeoutMs: Schema.optional(ScriptTimeoutMs),
+});
+export type UpdateSchedule = typeof UpdateSchedule.Type;
 
 export interface ScheduleCaller {
   readonly chatId: typeof ChatId.Type;
@@ -276,6 +250,7 @@ export class ScheduleRunHostService extends Context.Service<
 export class Schedules extends Context.Service<
   Schedules,
   {
+    /** OMP calls this after preparing and checking a source directory. */
     readonly create: (
       caller: ScheduleCaller,
       input: CreateSchedule,
@@ -283,19 +258,16 @@ export class Schedules extends Context.Service<
     readonly list: (
       caller: ScheduleCaller,
     ) => Effect.Effect<ReadonlyArray<ScheduleView>, ScheduleError>;
+    /** OMP calls this before reading or editing the current managed directory. */
     readonly get: (
       caller: ScheduleCaller,
       id: ScheduleId,
     ) => Effect.Effect<ScheduleView, ScheduleError>;
-    readonly replace: (
+    /** OMP calls this when changing schedule metadata or enabled state. */
+    readonly update: (
       caller: ScheduleCaller,
       id: ScheduleId,
-      input: ReplaceSchedule,
-    ) => Effect.Effect<ScheduleView, ScheduleError>;
-    readonly setEnabled: (
-      caller: ScheduleCaller,
-      id: ScheduleId,
-      enabled: boolean,
+      input: UpdateSchedule,
     ) => Effect.Effect<ScheduleView, ScheduleError>;
     readonly remove: (caller: ScheduleCaller, id: ScheduleId) => Effect.Effect<void, ScheduleError>;
     readonly start: (host: ScheduleRunHost) => Effect.Effect<void, ScheduleError, Scope.Scope>;

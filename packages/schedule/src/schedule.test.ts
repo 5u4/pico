@@ -30,9 +30,10 @@ import {
   publishDefinition,
   publishRun,
   readRuns,
-  replaceDefinition,
   runDirectory,
+  type SourceTree,
   type Storage,
+  updateDefinition,
   writeArtifactString,
 } from "./storage.ts";
 
@@ -49,6 +50,37 @@ const decodeDefinition = Schema.decodeUnknownEffect(
 const decodeScriptResult = Schema.decodeUnknownEffect(
   Schema.fromJsonString(Schema.Struct({ timeoutMillis: Schema.Int })),
 );
+
+const sourceTree = (
+  files: Readonly<Record<string, string | Uint8Array>>,
+  directories: ReadonlyArray<string> = [],
+): SourceTree => ({
+  files: new Map(
+    Object.entries(files).map(([name, contents]) => [
+      name,
+      typeof contents === "string" ? new TextEncoder().encode(contents) : contents,
+    ]),
+  ),
+  directories,
+});
+
+const prepareSource = Effect.fn("Schedules.test.prepareSource")(function* (
+  files: Readonly<Record<string, string | Uint8Array>>,
+  directories: ReadonlyArray<string> = [],
+) {
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const directory = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-schedule-source-" });
+  for (const name of directories) {
+    yield* fileSystem.makeDirectory(path.join(directory, name), { recursive: true });
+  }
+  for (const [name, contents] of sourceTree(files).files) {
+    const file = path.join(directory, name);
+    yield* fileSystem.makeDirectory(path.dirname(file), { recursive: true });
+    yield* fileSystem.writeFile(file, contents);
+  }
+  return AbsolutePath.make(directory);
+});
 
 const awaitFinished = Effect.fn("Schedules.test.awaitFinished")(function* (
   fileSystem: FileSystem.FileSystem,
@@ -134,7 +166,7 @@ describe("Schedules", () => {
           enabled: false,
           target: { kind: "current-chat" },
           trigger: { kind: "once", at: 1_000 },
-          prompt: "ship it",
+          sourceDirectory: yield* prepareSource({ "prompt.md": "ship it" }),
         });
         assert.strictEqual(created.kind, "ready");
         assert.deepStrictEqual(yield* schedules.list(caller), [created]);
@@ -194,8 +226,10 @@ describe("Schedules", () => {
           enabled: true,
           target: { kind: "current-chat" },
           trigger: { kind: "once", at: 1_000 },
-          script:
-            'let input="";for await(const chunk of Bun.stdin.stream())input+=new TextDecoder().decode(chunk);JSON.parse(input);process.stdout.write(JSON.stringify({agent:false,content:"done"}));',
+          sourceDirectory: yield* prepareSource({
+            "script.js":
+              'let input="";for await(const chunk of Bun.stdin.stream())input+=new TextDecoder().decode(chunk);JSON.parse(input);process.stdout.write(JSON.stringify({agent:false,content:"done"}));',
+          }),
           scriptTimeoutMs: 12_345,
         });
         assert.strictEqual(created.kind, "ready");
@@ -236,17 +270,19 @@ describe("Schedules", () => {
         assert.strictEqual(scriptResult.timeoutMillis, 12_345);
         const disabledMetadata = path.join(schedulesDir, "disabled", created.id, "meta.json");
         yield* awaitExists(fileSystem, disabledMetadata);
-        const replaced = yield* schedules.replace(caller, created.id, {
-          name: "one shot replacement",
-          target: { kind: "current-chat" },
-          trigger: { kind: "once", at: 1_000 },
-          script: 'process.stdout.write(JSON.stringify({agent:false,content:"done again"}));',
-          scriptTimeoutMs: 12_345,
+        const disabled = yield* schedules.get(caller, created.id);
+        if (disabled.kind !== "ready") return yield* Effect.die("Completed schedule disappeared");
+        yield* fileSystem.writeFileString(
+          path.join(disabled.sourceDirectory, "script.js"),
+          'process.stdout.write(JSON.stringify({agent:false,content:"done again"}));',
+        );
+        const replaced = yield* schedules.update(caller, created.id, {
+          name: "one shot updated",
         });
         assert.strictEqual(replaced.kind, "ready");
         if (replaced.kind !== "ready") return;
         assert.notStrictEqual(replaced.definition.revision, created.definition.revision);
-        yield* schedules.setEnabled(caller, created.id, true);
+        yield* schedules.update(caller, created.id, { enabled: true });
         assert.strictEqual(yield* Queue.take(published), "done again");
         const replacementRunId = Schedule.ScheduleRunId.make(
           `scheduled-1000-${replaced.definition.revision}`,
@@ -270,108 +306,264 @@ describe("Schedules", () => {
       }).pipe(Effect.provide(platformLayer), Effect.scoped),
   );
 
-  it.effect("replaces complete assets and keeps invalid external edits visible", () =>
+  it.effect(
+    "copies prepared sources and preserves source bytes and omitted metadata across updates",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "pico-schedule-storage-",
+        });
+        const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
+        const schedules = yield* open(schedulesDir);
+        const script = 'import { content } from "./lib/helper.js";process.stdout.write(content);';
+        const helper = 'export const content = "original";';
+        const asset = new Uint8Array([0, 255, 128, 10]);
+        const sourceDirectory = yield* prepareSource(
+          {
+            "script.js": script,
+            "prompt.md": "Run the update.",
+            "lib/helper.js": helper,
+            "assets/data.bin": asset,
+          },
+          ["cache/empty"],
+        );
+        const created = yield* schedules.create(caller, {
+          name: "editable",
+          enabled: false,
+          target: { kind: "current-chat" },
+          trigger: { kind: "once", at: 10_000 },
+          sourceDirectory,
+          scriptTimeoutMs: 5_000,
+        });
+        assert.strictEqual(created.kind, "ready");
+        if (created.kind !== "ready") return;
+        const directory = AbsolutePath.make(path.join(schedulesDir, "disabled", created.id));
+        assert.strictEqual(created.sourceDirectory, directory);
+        assert.notStrictEqual(created.sourceDirectory, sourceDirectory);
+        yield* fileSystem.writeFileString(path.join(sourceDirectory, "script.js"), "changed input");
+        yield* fileSystem.remove(path.join(sourceDirectory, "lib"), { recursive: true });
+
+        const updated = yield* schedules.update(caller, created.id, { name: "updated" });
+        assert.strictEqual(updated.kind, "ready");
+        if (updated.kind !== "ready") return;
+        assert.deepStrictEqual(updated.definition, {
+          ...created.definition,
+          name: "updated",
+          revision: updated.definition.revision,
+        });
+        assert.notStrictEqual(updated.definition.revision, created.definition.revision);
+        assert.strictEqual(updated.sourceDirectory, directory);
+        assert.strictEqual(
+          yield* fileSystem.readFileString(path.join(directory, "script.js")),
+          script,
+        );
+        assert.strictEqual(
+          yield* fileSystem.readFileString(path.join(directory, "lib/helper.js")),
+          helper,
+        );
+        assert.strictEqual(
+          yield* fileSystem.readFileString(path.join(directory, "prompt.md")),
+          "Run the update.",
+        );
+        assert.deepStrictEqual(
+          yield* fileSystem.readFile(path.join(directory, "assets/data.bin")),
+          asset,
+        );
+        assert.deepStrictEqual(
+          yield* fileSystem.readDirectory(path.join(directory, "cache/empty")),
+          [],
+        );
+
+        const enabled = yield* schedules.update(caller, created.id, { enabled: true });
+        assert.strictEqual(enabled.kind, "ready");
+        if (enabled.kind !== "ready") return;
+        assert.strictEqual(enabled.sourceDirectory, path.join(schedulesDir, "enabled", created.id));
+        assert.strictEqual(enabled.definition.revision, updated.definition.revision);
+        assert.isFalse(yield* fileSystem.exists(directory));
+        assert.deepStrictEqual(yield* schedules.get(caller, created.id), enabled);
+        assert.deepStrictEqual(yield* schedules.list(caller), [enabled]);
+
+        yield* fileSystem.writeFileString(
+          path.join(enabled.sourceDirectory, "prompt.md"),
+          "Edited in place.",
+        );
+        const disabled = yield* schedules.update(caller, created.id, { enabled: false });
+        assert.strictEqual(disabled.kind, "ready");
+        if (disabled.kind !== "ready") return;
+        assert.strictEqual(disabled.sourceDirectory, directory);
+        assert.strictEqual(disabled.definition.revision, updated.definition.revision);
+        assert.strictEqual(
+          yield* fileSystem.readFileString(path.join(disabled.sourceDirectory, "prompt.md")),
+          "Edited in place.",
+        );
+        assert.deepStrictEqual(yield* schedules.get(caller, created.id), disabled);
+        assert.deepStrictEqual(yield* schedules.list(caller), [disabled]);
+      }).pipe(Effect.provide(platformLayer), Effect.scoped),
+  );
+
+  it.effect("returns repair paths for invalid metadata and entrypoints across state changes", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-schedule-storage-" });
-      const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
-      const cwd = AbsolutePath.make(root);
-      const schedules = yield* make(schedulesDir);
-      const host: Schedule.ScheduleRunHost = {
-        prepare: () => Effect.succeed({ chatId, workspaceId, cwd }),
-        deliver: () => Effect.void,
-        publish: () => Effect.void,
-        runPrompt: (_chatId, runId) =>
-          Effect.succeed({
-            runId,
-            outcome: "completed",
-            events: [],
-            finalAssistantText: "ok",
-          }),
-      };
-      yield* schedules.start(host);
+      const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-schedule-invalid-" });
+      const schedules = yield* open(AbsolutePath.make(path.join(root, "schedules")));
       const created = yield* schedules.create(caller, {
         name: "editable",
-        enabled: false,
+        enabled: true,
         target: { kind: "current-chat" },
         trigger: { kind: "once", at: 10_000 },
-        script: "process.stdout.write('{}')",
+        sourceDirectory: yield* prepareSource({ "prompt.md": "Run the update." }),
       });
       assert.strictEqual(created.kind, "ready");
       if (created.kind !== "ready") return;
-      const createdDefinition = yield* decodeDefinition(
-        yield* fileSystem.readFileString(
-          path.join(schedulesDir, "disabled", created.id, "meta.json"),
-        ),
-      );
-      assert.strictEqual(createdDefinition.scriptTimeoutMs, undefined);
-
-      const updated = yield* schedules.replace(caller, created.id, {
-        name: "updated",
-        target: { kind: "current-chat" },
-        trigger: { kind: "once", at: 20_000 },
-        prompt: "Run the update.",
-        scriptTimeoutMs: 5_000,
-      });
-      assert.strictEqual(updated.kind, "ready");
-      const directory = path.join(schedulesDir, "disabled", created.id);
-      assert.isFalse(yield* fileSystem.exists(path.join(directory, "script.js")));
-      assert.strictEqual(
-        yield* fileSystem.readFileString(path.join(directory, "prompt.md")),
-        "Run the update.",
-      );
-      const replacedDefinition = yield* decodeDefinition(
-        yield* fileSystem.readFileString(path.join(directory, "meta.json")),
-      );
-      assert.strictEqual(replacedDefinition.scriptTimeoutMs, 5_000);
-      const defaulted = yield* schedules.replace(caller, created.id, {
-        name: "defaulted",
-        target: { kind: "current-chat" },
-        trigger: { kind: "once", at: 30_000 },
-        script: "process.stdout.write('{}')",
-        prompt: "Run with content.",
-      });
-      assert.strictEqual(defaulted.kind, "ready");
-      const defaultedDefinition = yield* decodeDefinition(
-        yield* fileSystem.readFileString(path.join(directory, "meta.json")),
-      );
-      assert.strictEqual(defaultedDefinition.scriptTimeoutMs, undefined);
-      assert.isTrue(yield* fileSystem.exists(path.join(directory, "script.js")));
-      assert.isTrue(yield* fileSystem.exists(path.join(directory, "prompt.md")));
-      const updatedDefinition =
-        defaulted.kind === "ready" ? defaulted.definition : created.definition;
+      const directory = created.sourceDirectory;
       yield* fileSystem.writeFileString(
         path.join(directory, "meta.json"),
         JSON.stringify({
-          ...updatedDefinition,
+          ...created.definition,
           target: { kind: "workspace", workspaceId: otherWorkspaceId },
         }),
       );
-      const crossWorkspace = yield* schedules.list(caller);
-      assert.strictEqual(crossWorkspace[0]?.kind, "invalid");
-
-      const definition = updatedDefinition;
+      const invalidTarget = yield* schedules.get(caller, created.id);
+      assert.strictEqual(invalidTarget.kind, "invalid");
+      assert.strictEqual(invalidTarget.sourceDirectory, directory);
       yield* fileSystem.writeFileString(
         path.join(directory, "meta.json"),
-        JSON.stringify({ ...definition, name: "" }),
+        JSON.stringify({ ...created.definition, name: "" }),
       );
       const listed = yield* schedules.list(caller);
       assert.strictEqual(listed.length, 1);
       assert.strictEqual(listed[0]?.kind, "invalid");
+      assert.strictEqual(listed[0]?.sourceDirectory, directory);
       yield* fileSystem.writeFileString(
         path.join(directory, "meta.json"),
-        JSON.stringify(updatedDefinition),
+        JSON.stringify(created.definition),
       );
-      yield* fileSystem.writeFileString(path.join(directory, "extra.txt"), "invalid");
-      const extraFile = yield* schedules.list(caller);
-      assert.strictEqual(extraFile[0]?.kind, "invalid");
-
-      yield* fileSystem.remove(path.join(directory, "extra.txt"));
-      yield* fileSystem.remove(path.join(directory, "script.js"));
+      yield* fileSystem.writeFileString(path.join(directory, "extra.txt"), "helper");
+      assert.strictEqual((yield* schedules.list(caller))[0]?.kind, "ready");
       yield* fileSystem.remove(path.join(directory, "prompt.md"));
-      const noSource = yield* schedules.list(caller);
-      assert.strictEqual(noSource[0]?.kind, "invalid");
+      const missingEntrypoint = yield* schedules.get(caller, created.id);
+      assert.strictEqual(missingEntrypoint.kind, "invalid");
+      assert.strictEqual(missingEntrypoint.sourceDirectory, directory);
+      const paused = yield* schedules.update(caller, created.id, { enabled: false });
+      assert.strictEqual(paused.kind, "invalid");
+      assert.strictEqual(paused.state, "disabled");
+      assert.strictEqual(
+        paused.sourceDirectory,
+        path.join(root, "schedules", "disabled", created.id),
+      );
+      assert.deepStrictEqual(yield* schedules.get(caller, created.id), paused);
+      if (paused.sourceDirectory === null) return yield* Effect.die("Missing repair directory");
+      assert.isFalse(yield* fileSystem.exists(directory));
+      yield* fileSystem.writeFileString(path.join(paused.sourceDirectory, "prompt.md"), " \n\t");
+      const blankEntrypoint = yield* schedules.get(caller, created.id);
+      assert.strictEqual(blankEntrypoint.kind, "invalid");
+      assert.strictEqual(blankEntrypoint.sourceDirectory, paused.sourceDirectory);
+      yield* fileSystem.writeFileString(
+        path.join(paused.sourceDirectory, "prompt.md"),
+        "Repaired.",
+      );
+      const resumed = yield* schedules.update(caller, created.id, { enabled: true });
+      assert.strictEqual(resumed.kind, "ready");
+      assert.strictEqual(resumed.sourceDirectory, directory);
+      assert.strictEqual(
+        yield* fileSystem.readFileString(path.join(directory, "prompt.md")),
+        "Repaired.",
+      );
+    }).pipe(Effect.provide(platformLayer), Effect.scoped),
+  );
+
+  it.effect("returns no single repair directory for conflicting owned definitions", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-schedule-conflict-" });
+      const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
+      const schedules = yield* open(schedulesDir);
+      const created = yield* schedules.create(caller, {
+        name: "conflicted",
+        enabled: false,
+        target: { kind: "current-chat" },
+        trigger: { kind: "once", at: 10_000 },
+        sourceDirectory: yield* prepareSource({ "prompt.md": "Retain both definitions." }),
+      });
+      if (created.kind !== "ready") return yield* Effect.die("Created schedule is invalid");
+      const duplicate = path.join(schedulesDir, "enabled", created.id);
+      yield* fileSystem.makeDirectory(duplicate);
+      yield* fileSystem.writeFileString(
+        path.join(duplicate, "meta.json"),
+        JSON.stringify(created.definition),
+      );
+      const conflicted = yield* schedules.get(caller, created.id);
+      assert.strictEqual(conflicted.kind, "invalid");
+      assert.strictEqual(conflicted.state, "conflicted");
+      assert.strictEqual(conflicted.sourceDirectory, null);
+      assert.deepStrictEqual(yield* schedules.list(caller), [conflicted]);
+      const error = yield* schedules
+        .update(caller, created.id, { enabled: false })
+        .pipe(Effect.flip);
+      assert.strictEqual(error.kind, "conflict");
+      assert.isTrue(yield* fileSystem.exists(duplicate));
+      assert.isTrue(yield* fileSystem.exists(created.sourceDirectory));
+    }).pipe(Effect.provide(platformLayer), Effect.scoped),
+  );
+
+  it.effect("repairs an invalid cron and enables the proposed definition in one update", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "pico-schedule-repair-cron-",
+      });
+      const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
+      const schedules = yield* open(schedulesDir);
+      const created = yield* schedules.create(caller, {
+        name: "repair cron",
+        enabled: false,
+        target: { kind: "current-chat" },
+        trigger: { kind: "once", at: 10_000 },
+        sourceDirectory: yield* prepareSource({ "prompt.md": "Check the schedule." }),
+        scriptTimeoutMs: 5_000,
+      });
+      if (created.kind !== "ready") return yield* Effect.die("Created schedule is invalid");
+      yield* fileSystem.writeFileString(
+        path.join(created.sourceDirectory, "meta.json"),
+        JSON.stringify({
+          ...created.definition,
+          trigger: { kind: "cron", expression: "99 * * * *", timeZone: "UTC" },
+        }),
+      );
+      const invalid = yield* schedules.get(caller, created.id);
+      assert.strictEqual(invalid.kind, "invalid");
+      assert.strictEqual(invalid.sourceDirectory, created.sourceDirectory);
+      const unchangedTrigger = yield* schedules
+        .update(caller, created.id, {
+          name: "still invalid",
+          enabled: true,
+        })
+        .pipe(Effect.flip);
+      assert.strictEqual(unchangedTrigger.kind, "invalid");
+      assert.deepStrictEqual(yield* schedules.get(caller, created.id), invalid);
+      const trigger = {
+        kind: "cron",
+        expression: "0 9 * * *",
+        timeZone: "UTC",
+      } satisfies Schedule.ScheduleTrigger;
+      const repaired = yield* schedules.update(caller, created.id, { trigger, enabled: true });
+      assert.strictEqual(repaired.kind, "ready");
+      if (repaired.kind !== "ready") return yield* Effect.die("Repaired schedule is invalid");
+      assert.strictEqual(repaired.state, "enabled");
+      assert.strictEqual(repaired.sourceDirectory, path.join(schedulesDir, "enabled", created.id));
+      assert.deepStrictEqual(repaired.definition, {
+        ...created.definition,
+        trigger,
+        revision: repaired.definition.revision,
+      });
+      assert.notStrictEqual(repaired.definition.revision, created.definition.revision);
+      const restarted = yield* open(schedulesDir);
+      assert.deepStrictEqual(yield* restarted.get(caller, created.id), repaired);
     }).pipe(Effect.provide(platformLayer), Effect.scoped),
   );
 
@@ -418,7 +610,7 @@ describe("Schedules", () => {
         storage,
         run,
         definition,
-        { script: null, prompt: "identity" },
+        sourceTree({ "prompt.md": "identity" }),
         "018f47a0-0000-7000-8000-000000000006",
       );
       assert.deepStrictEqual(yield* readRuns(storage), [run]);
@@ -496,12 +688,12 @@ describe("Schedules", () => {
         enabled: false,
         target: { kind: "current-chat" },
         trigger: { kind: "cron", expression: "0 * * * *", timeZone: "UTC" },
-        prompt: "Inspect the workspace.",
+        sourceDirectory: yield* prepareSource({ "prompt.md": "Inspect the workspace." }),
       });
       assert.strictEqual(created.kind, "ready");
       if (created.kind !== "ready") return;
       yield* TestClock.setTime(3 * 60 * 60 * 1_000 + 30_000);
-      yield* schedules.setEnabled(caller, created.id, true);
+      yield* schedules.update(caller, created.id, { enabled: true });
       const scheduleRuns = path.join(schedulesDir, "runs", created.id);
       yield* awaitExists(fileSystem, scheduleRuns);
       yield* Deferred.await(invoked);
@@ -564,37 +756,48 @@ describe("Schedules", () => {
         enabled: true,
         target: { kind: "current-chat" },
         trigger: { kind: "once", at: 1_000 },
-        script: "process.stdout.write(JSON.stringify({agent:false}))",
+        sourceDirectory: yield* prepareSource({
+          "script.js": "process.stdout.write(JSON.stringify({agent:false}))",
+        }),
       });
       const composed = yield* schedules.create(caller, {
         name: "composed",
         enabled: true,
         target: { kind: "current-chat" },
         trigger: { kind: "once", at: 1_000 },
-        script: 'process.stdout.write(JSON.stringify({agent:true,content:"generated input"}))',
-        prompt: "stored prompt",
+        sourceDirectory: yield* prepareSource({
+          "script.js":
+            'process.stdout.write(JSON.stringify({agent:true,content:"generated input"}))',
+          "prompt.md": "stored prompt",
+        }),
       });
       const scriptOnly = yield* schedules.create(caller, {
         name: "script only",
         enabled: true,
         target: { kind: "current-chat" },
         trigger: { kind: "once", at: 1_000 },
-        script: 'process.stdout.write(JSON.stringify({agent:true,content:"script input"}))',
+        sourceDirectory: yield* prepareSource({
+          "script.js": 'process.stdout.write(JSON.stringify({agent:true,content:"script input"}))',
+        }),
       });
       const storedPrompt = yield* schedules.create(caller, {
         name: "stored prompt",
         enabled: true,
         target: { kind: "current-chat" },
         trigger: { kind: "once", at: 1_000 },
-        script: "process.stdout.write(JSON.stringify({agent:true}))",
-        prompt: "prompt input",
+        sourceDirectory: yield* prepareSource({
+          "script.js": "process.stdout.write(JSON.stringify({agent:true}))",
+          "prompt.md": "prompt input",
+        }),
       });
       const missingInput = yield* schedules.create(caller, {
         name: "missing input",
         enabled: true,
         target: { kind: "current-chat" },
         trigger: { kind: "once", at: 1_000 },
-        script: "process.stdout.write(JSON.stringify({agent:true}))",
+        sourceDirectory: yield* prepareSource({
+          "script.js": "process.stdout.write(JSON.stringify({agent:true}))",
+        }),
       });
       for (const created of [skip, composed, scriptOnly, storedPrompt, missingInput]) {
         assert.strictEqual(created.kind, "ready");
@@ -645,7 +848,110 @@ describe("Schedules", () => {
       assert.strictEqual(deliveries, 3);
     }).pipe(Effect.provide(platformLayer), Effect.scoped),
   );
-  it.effect("does not let an old run disable a replacement definition", () =>
+  it.effect(
+    "executes claimed helper imports from an unchanged source snapshot after live edits",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-source-snapshot-" });
+        const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
+        const prepareStarted = yield* Deferred.make<void>();
+        const releasePrepare = yield* Deferred.make<void>();
+        const published = yield* Queue.unbounded<string>();
+        const schedules = yield* open(schedulesDir);
+        yield* TestClock.setTime(1_000);
+        yield* schedules.start({
+          prepare: () =>
+            Deferred.succeed(prepareStarted, undefined).pipe(
+              Effect.andThen(Deferred.await(releasePrepare)),
+              Effect.as({ chatId, workspaceId, cwd: AbsolutePath.make(root) }),
+            ),
+          deliver: () => Effect.die("Script decisions must publish without OMP"),
+          publish: (_chatId, content) => Queue.offer(published, content).pipe(Effect.asVoid),
+          runPrompt: () => Effect.die("Script decisions must not run OMP"),
+        });
+        const script =
+          'import { content } from "./lib/helper.js";process.stdout.write(JSON.stringify({agent:false,content}));';
+        const helper = 'export const content = "original helper";';
+        const asset = new Uint8Array([0, 255, 10, 128]);
+        const created = yield* schedules.create(caller, {
+          name: "snapshot",
+          enabled: true,
+          target: { kind: "current-chat" },
+          trigger: { kind: "once", at: 1_000 },
+          sourceDirectory: yield* prepareSource(
+            {
+              "script.js": script,
+              "prompt.md": "original prompt",
+              "lib/helper.js": helper,
+              "assets/data.bin": asset,
+            },
+            ["cache/empty"],
+          ),
+        });
+        assert.strictEqual(created.kind, "ready");
+        if (created.kind !== "ready") return;
+        yield* TestClock.adjust("30 seconds");
+        yield* Deferred.await(prepareStarted);
+        yield* fileSystem.writeFileString(
+          path.join(created.sourceDirectory, "lib/helper.js"),
+          'export const content = "edited helper";',
+        );
+        yield* fileSystem.writeFile(
+          path.join(created.sourceDirectory, "assets/data.bin"),
+          new Uint8Array([42]),
+        );
+        yield* fileSystem.writeFileString(
+          path.join(created.sourceDirectory, "prompt.md"),
+          "edited prompt",
+        );
+        const updated = yield* schedules.update(caller, created.id, {
+          name: "edited metadata",
+          enabled: false,
+        });
+        assert.strictEqual(updated.kind, "ready");
+        if (updated.kind !== "ready") return;
+        assert.notStrictEqual(updated.definition.revision, created.definition.revision);
+        yield* Deferred.succeed(releasePrepare, undefined);
+        assert.strictEqual(yield* Queue.take(published), "original helper");
+        const runId = `scheduled-1000-${created.definition.revision}`;
+        const directory = path.join(schedulesDir, "runs", created.id, runId);
+        const finished = yield* awaitFinished(fileSystem, path.join(directory, "run.json"));
+        assert.deepStrictEqual(finished.state.kind === "finished" && finished.state.outcome, {
+          kind: "published",
+          content: "original helper",
+        });
+        assert.strictEqual(
+          yield* fileSystem.readFileString(path.join(directory, "input", "lib/helper.js")),
+          helper,
+        );
+        assert.strictEqual(
+          yield* fileSystem.readFileString(path.join(directory, "input", "script.js")),
+          script,
+        );
+        assert.strictEqual(
+          yield* fileSystem.readFileString(path.join(directory, "input", "prompt.md")),
+          "original prompt",
+        );
+        assert.deepStrictEqual(
+          yield* fileSystem.readFile(path.join(directory, "input", "assets/data.bin")),
+          asset,
+        );
+        assert.deepStrictEqual(
+          yield* fileSystem.readDirectory(path.join(directory, "input", "cache/empty")),
+          [],
+        );
+        assert.deepStrictEqual(
+          yield* decodeDefinition(
+            yield* fileSystem.readFileString(path.join(directory, "input", "definition.json")),
+          ),
+          created.definition,
+        );
+      }).pipe(Effect.provide(platformLayer), Effect.scoped),
+  );
+
+  it.effect("does not let an old run disable an updated definition", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
@@ -679,18 +985,20 @@ describe("Schedules", () => {
         enabled: true,
         target: { kind: "current-chat" },
         trigger: { kind: "once", at: 1_000 },
-        prompt: "old prompt",
+        sourceDirectory: yield* prepareSource({ "prompt.md": "old prompt" }),
       });
       assert.strictEqual(created.kind, "ready");
       if (created.kind !== "ready") return;
       yield* TestClock.adjust("30 seconds");
       yield* Deferred.await(prepareStarted);
 
-      const replaced = yield* schedules.replace(caller, created.id, {
+      yield* fileSystem.writeFileString(
+        path.join(created.sourceDirectory, "prompt.md"),
+        "new prompt",
+      );
+      const replaced = yield* schedules.update(caller, created.id, {
         name: "new cron",
-        target: { kind: "current-chat" },
         trigger: { kind: "cron", expression: "* * * * *", timeZone: "UTC" },
-        prompt: "new prompt",
       });
       assert.strictEqual(replaced.kind, "ready");
       if (replaced.kind !== "ready") return;
@@ -757,12 +1065,122 @@ describe("Schedules", () => {
         enabled: true,
         target: { kind: "current-chat" },
         trigger: { kind: "once", at: 30_000 },
-        prompt: "still alive",
+        sourceDirectory: yield* prepareSource({ "prompt.md": "still alive" }),
       });
       assert.strictEqual(created.kind, "ready");
       yield* TestClock.adjust("30 seconds");
       yield* Deferred.await(invoked);
     }).pipe(Effect.provide(platformLayer), Effect.scoped),
+  );
+
+  it.effect(
+    "rejects authored source symlinks, reserved names, and missing or blank entrypoints",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-source-unsafe-" });
+        const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
+        const schedules = yield* open(schedulesDir);
+        const outside = path.join(root, "outside.txt");
+        yield* fileSystem.writeFileString(outside, "unchanged");
+        const outsideDirectory = yield* prepareSource({
+          "prompt.md": "valid external source",
+          "helper.js": "export const value = 1;",
+        });
+        const invalidSources = [
+          yield* prepareSource({ "lib/helper.js": "export const value = 1;" }),
+          yield* prepareSource({ "prompt.md": " \n\t" }),
+          yield* prepareSource({ "script.js": "\n" }),
+          yield* prepareSource({ "prompt.md": "valid", "meta.json": "{}" }),
+          yield* prepareSource({ "script.js": "void 0;", "definition.json": "{}" }),
+          yield* prepareSource({ "prompt.md": "valid" }, ["meta.json"]),
+          yield* prepareSource({ "prompt.md": "valid" }, ["definition.json"]),
+          yield* prepareSource({}, ["prompt.md"]),
+        ];
+        for (const link of [
+          { entry: "prompt.md", target: outside },
+          { entry: "lib/helper.js", target: outside },
+          { entry: "lib/dangling.js", target: path.join(root, "missing.js") },
+          { entry: "lib", target: outsideDirectory },
+        ]) {
+          const directory = yield* prepareSource({ "prompt.md": "valid" });
+          const destination = path.join(directory, link.entry);
+          yield* fileSystem.makeDirectory(path.dirname(destination), { recursive: true });
+          if (link.entry === "prompt.md") yield* fileSystem.remove(destination);
+          yield* fileSystem.symlink(link.target, destination);
+          invalidSources.push(directory);
+        }
+        const linkedRoot = AbsolutePath.make(path.join(root, "linked-source"));
+        yield* fileSystem.symlink(outsideDirectory, linkedRoot);
+        invalidSources.push(linkedRoot);
+        for (const sourceDirectory of invalidSources) {
+          const error = yield* schedules
+            .create(caller, {
+              name: "unsafe source",
+              enabled: false,
+              target: { kind: "current-chat" },
+              trigger: { kind: "once", at: 1_000 },
+              sourceDirectory,
+            })
+            .pipe(Effect.flip);
+          assert.instanceOf(error, Schedule.ScheduleError);
+        }
+        assert.deepStrictEqual(yield* schedules.list(caller), []);
+        assert.strictEqual(yield* fileSystem.readFileString(outside), "unchanged");
+        assert.deepStrictEqual((yield* fileSystem.readDirectory(outsideDirectory)).sort(), [
+          "helper.js",
+          "prompt.md",
+        ]);
+      }).pipe(Effect.provide(platformLayer), Effect.scoped),
+  );
+
+  it.effect(
+    "rejects dangling helper links and reserved snapshot names added to owned sources",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "pico-owned-source-unsafe-",
+        });
+        const schedules = yield* open(AbsolutePath.make(path.join(root, "schedules")));
+        const created = yield* schedules.create(caller, {
+          name: "owned source",
+          enabled: false,
+          target: { kind: "current-chat" },
+          trigger: { kind: "once", at: 1_000 },
+          sourceDirectory: yield* prepareSource({ "prompt.md": "valid" }, ["lib"]),
+        });
+        assert.strictEqual(created.kind, "ready");
+        if (created.kind !== "ready") return;
+        const dangling = path.join(created.sourceDirectory, "lib/helper.js");
+        yield* fileSystem.symlink(path.join(root, "missing.js"), dangling);
+        const invalid = yield* schedules.get(caller, created.id);
+        assert.strictEqual(invalid.kind, "invalid");
+        assert.strictEqual(invalid.sourceDirectory, created.sourceDirectory);
+        const error = yield* schedules
+          .update(caller, created.id, {
+            enabled: true,
+            trigger: { kind: "cron", expression: "0 9 * * *", timeZone: "UTC" },
+          })
+          .pipe(Effect.flip);
+        assert.strictEqual(error.kind, "invalid");
+        assert.deepStrictEqual(
+          yield* decodeDefinition(
+            yield* fileSystem.readFileString(path.join(created.sourceDirectory, "meta.json")),
+          ),
+          created.definition,
+        );
+        yield* fileSystem.remove(dangling);
+        yield* fileSystem.writeFileString(
+          path.join(created.sourceDirectory, "definition.json"),
+          "{}",
+        );
+        assert.strictEqual((yield* schedules.list(caller))[0]?.kind, "invalid");
+        yield* fileSystem.remove(path.join(created.sourceDirectory, "definition.json"));
+        assert.strictEqual((yield* schedules.get(caller, created.id)).kind, "ready");
+      }).pipe(Effect.provide(platformLayer), Effect.scoped),
   );
 
   it.effect("rejects symlinked metadata and append destinations", () =>
@@ -811,7 +1229,7 @@ describe("Schedules", () => {
         enabled: true,
         target: { kind: "current-chat" },
         trigger: { kind: "once", at: 1_000 },
-        prompt: "capture",
+        sourceDirectory: yield* prepareSource({ "prompt.md": "capture" }),
       });
       assert.strictEqual(created.kind, "ready");
       if (created.kind !== "ready") return;
@@ -877,7 +1295,7 @@ describe("Schedules", () => {
       assert.deepStrictEqual(yield* fileSystem.readDirectory(childSchedulesDir), ["enabled"]);
     }).pipe(Effect.provide(platformLayer), Effect.scoped),
   );
-  it.effect("rejects symlinked definition destination parents before publishing", () =>
+  it.effect("rejects symlinked definition destination parents before publishing or updating", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
@@ -904,7 +1322,7 @@ describe("Schedules", () => {
         target: { kind: "chat", chatId },
         trigger: { kind: "once", at: 1_000 },
       };
-      const source: Schedule.ScheduleSource = { script: null, prompt: "original" };
+      const source = sourceTree({ "prompt.md": "original" });
       yield* fileSystem.makeDirectory(outside);
       yield* fileSystem.writeFileString(sentinel, "unchanged");
       yield* bootstrap(storage);
@@ -932,10 +1350,8 @@ describe("Schedules", () => {
         revision: Schedule.ScheduleRevision.make("018f47a0-0000-7000-8000-000000000093"),
         name: "replacement",
       };
-      const transaction = path.join(schedulesDir, ".staging", "replace-symlinked-replace-parent");
-      const nextPrompt = path.join(transaction, "next", "prompt.md");
-      const previous = path.join(transaction, "previous");
-      let attemptedOriginalMove = false;
+      const transaction = path.join(schedulesDir, ".staging", "update-symlinked-update-parent");
+      const nextMetadata = path.join(transaction, "next.json");
       const swappedFileSystem = FileSystem.FileSystem.of({
         ...fileSystem,
         writeFileString: (file, contents, options) =>
@@ -943,28 +1359,22 @@ describe("Schedules", () => {
             .writeFileString(file, contents, options)
             .pipe(
               Effect.tap(() =>
-                file === nextPrompt
+                file === nextMetadata
                   ? fileSystem
                       .rename(enabled, retainedEnabled)
                       .pipe(Effect.andThen(fileSystem.symlink(outside, enabled)))
                   : Effect.void,
               ),
             ),
-        rename: (from, to) => {
-          if (from === current.directory) attemptedOriginalMove = true;
-          return fileSystem.rename(from, to);
-        },
       });
-      const replaceError = yield* replaceDefinition(
+      const updateError = yield* updateDefinition(
         { ...storage, fileSystem: swappedFileSystem },
         current,
         replacement,
-        { script: null, prompt: "replacement" },
-        "symlinked-replace-parent",
+        "enabled",
+        "symlinked-update-parent",
       ).pipe(Effect.flip);
-      assert.strictEqual(replaceError.kind, "corrupt");
-      assert.isFalse(attemptedOriginalMove);
-      assert.isFalse(yield* fileSystem.exists(previous));
+      assert.strictEqual(updateError.kind, "corrupt");
       assert.deepStrictEqual(yield* fileSystem.readDirectory(outside), ["sentinel"]);
       const retained = yield* decodeDefinition(
         yield* fileSystem.readFileString(path.join(retainedEnabled, id, "meta.json")),
@@ -1005,7 +1415,7 @@ describe("Schedules", () => {
         id,
         "enabled",
         definition,
-        { script: null, prompt: "move me" },
+        sourceTree({ "prompt.md": "move me" }),
         "move-source",
       );
       const loaded = yield* loadSchedule(storage, id);
@@ -1020,11 +1430,11 @@ describe("Schedules", () => {
       assert.isTrue(yield* fileSystem.exists(path.join(schedulesDir, "enabled", id, "meta.json")));
     }).pipe(Effect.provide(platformLayer), Effect.scoped),
   );
-  it.effect("keeps a definition canonical when replacement is interrupted during commit", () =>
+  it.effect("keeps metadata and source canonical when an update is interrupted during commit", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-replace-interrupt-" });
+      const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-update-interrupt-" });
       const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
       const storage: Storage = {
         fileSystem,
@@ -1049,7 +1459,7 @@ describe("Schedules", () => {
         id,
         "enabled",
         original,
-        { script: null, prompt: "original" },
+        sourceTree({ "prompt.md": "original" }),
         "018f47a0-0000-7000-8000-000000000044",
       );
       const current = yield* loadSchedule(storage, id);
@@ -1059,37 +1469,47 @@ describe("Schedules", () => {
         revision: Schedule.ScheduleRevision.make("018f47a0-0000-7000-8000-000000000045"),
         name: "replacement",
       };
-      const secondRenameStarted = yield* Deferred.make<void>();
-      const releaseSecondRename = yield* Deferred.make<void>();
-      const destination = path.join(schedulesDir, "enabled", id);
+      const commitStarted = yield* Deferred.make<void>();
+      const releaseCommit = yield* Deferred.make<void>();
+      const destination = path.join(schedulesDir, "disabled", id);
       const next = path.join(
         schedulesDir,
         ".staging",
-        "replace-018f47a0-0000-7000-8000-000000000046",
-        "next",
+        "update-018f47a0-0000-7000-8000-000000000046",
+        "next.json",
       );
       const interruptedFileSystem = FileSystem.FileSystem.of({
         ...fileSystem,
         rename: (from, to) =>
-          from === next && to === destination
-            ? Deferred.succeed(secondRenameStarted, undefined).pipe(
-                Effect.andThen(Deferred.await(releaseSecondRename)),
+          from === next && to === path.join(destination, "meta.json")
+            ? Deferred.succeed(commitStarted, undefined).pipe(
+                Effect.andThen(Deferred.await(releaseCommit)),
                 Effect.andThen(fileSystem.rename(from, to)),
               )
             : fileSystem.rename(from, to),
       });
       const interruptedStorage: Storage = { ...storage, fileSystem: interruptedFileSystem };
-      const fiber = yield* replaceDefinition(
+      const fiber = yield* updateDefinition(
         interruptedStorage,
         current,
         replacement,
-        { script: null, prompt: "replacement" },
+        "disabled",
         "018f47a0-0000-7000-8000-000000000046",
       ).pipe(Effect.forkChild);
-      yield* Deferred.await(secondRenameStarted);
+      yield* Deferred.await(commitStarted);
+      assert.deepStrictEqual(
+        yield* decodeDefinition(
+          yield* fileSystem.readFileString(path.join(destination, "meta.json")),
+        ),
+        original,
+      );
+      assert.strictEqual(
+        yield* fileSystem.readFileString(path.join(destination, "prompt.md")),
+        "original",
+      );
       const interruption = yield* Fiber.interrupt(fiber).pipe(Effect.forkChild);
       yield* Effect.yieldNow;
-      yield* Deferred.succeed(releaseSecondRename, undefined);
+      yield* Deferred.succeed(releaseCommit, undefined);
       yield* Fiber.join(interruption);
 
       const loaded = yield* loadSchedule(storage, id);
@@ -1097,82 +1517,474 @@ describe("Schedules", () => {
       if (loaded?.view.kind !== "ready") return;
       assert.strictEqual(loaded.view.definition.revision, replacement.revision);
       assert.strictEqual(loaded.view.definition.name, "replacement");
+      assert.strictEqual(loaded.view.state, "disabled");
+      assert.strictEqual(loaded.view.sourceDirectory, destination);
+      assert.strictEqual(
+        yield* fileSystem.readFileString(path.join(destination, "prompt.md")),
+        "original",
+      );
     }).pipe(Effect.provide(platformLayer), Effect.scoped),
   );
-  it.effect("keeps a committed replacement successful when staging cleanup fails", () =>
+  it.effect(
+    "retains a committed metadata update when cleanup fails and recovers it on restart",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-update-cleanup-" });
+        const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
+        const staging = path.join(schedulesDir, ".staging");
+        const logs = yield* captureLogs();
+        let retainedTransaction: string | undefined;
+        const failingFileSystem = FileSystem.FileSystem.of({
+          ...fileSystem,
+          remove: (file, options) => {
+            if (path.dirname(file) !== staging || !path.basename(file).startsWith("update-")) {
+              return fileSystem.remove(file, options);
+            }
+            retainedTransaction = file;
+            return Effect.fail(permissionDenied("remove", "private cleanup cause"));
+          },
+        });
+        const schedules = yield* open(schedulesDir).pipe(
+          Effect.provideService(FileSystem.FileSystem, failingFileSystem),
+        );
+        const created = yield* schedules.create(caller, {
+          name: "private original",
+          enabled: false,
+          target: { kind: "current-chat" },
+          trigger: { kind: "once", at: 10_000 },
+          sourceDirectory: yield* prepareSource({ "prompt.md": "private original prompt" }),
+        });
+        assert.strictEqual(created.kind, "ready");
+        if (created.kind !== "ready") return;
+        const updated = yield* schedules
+          .update(caller, created.id, {
+            name: "private updated",
+            enabled: true,
+            trigger: { kind: "once", at: 20_000 },
+          })
+          .pipe(Effect.provide(logs.layer));
+        assert.strictEqual(updated.kind, "ready");
+        if (updated.kind !== "ready") return;
+        assert.notStrictEqual(updated.definition.revision, created.definition.revision);
+        assert.strictEqual(updated.definition.name, "private updated");
+        assert.deepStrictEqual(yield* schedules.list(caller), [updated]);
+        assert.strictEqual(
+          yield* fileSystem.readFileString(path.join(updated.sourceDirectory, "prompt.md")),
+          "private original prompt",
+        );
+        if (retainedTransaction === undefined) {
+          return yield* Effect.die("Update cleanup was not attempted");
+        }
+        assert.isTrue(yield* fileSystem.exists(path.join(retainedTransaction, "transaction.json")));
+        const errors = logs.entries.filter((entry) => entry.level === "Error");
+        assert.strictEqual(errors.length, 1);
+        assert.deepInclude(errors[0]?.annotations, {
+          component: "schedule",
+          operation: "update",
+          phase: "cleanup",
+          scheduleId: created.id,
+          definitionRevision: updated.definition.revision,
+          category: "io",
+        });
+        assert.notInclude(JSON.stringify(logs.entries), "private");
+        assert.notInclude(JSON.stringify(logs.entries), root);
+        const latest = yield* schedules.update(caller, created.id, { name: "latest" });
+        assert.strictEqual(latest.kind, "ready");
+        if (latest.kind !== "ready") return;
+        assert.strictEqual(latest.state, "enabled");
+        const restarted = yield* open(schedulesDir);
+        assert.deepStrictEqual(yield* restarted.get(caller, created.id), latest);
+        assert.isFalse(yield* fileSystem.exists(retainedTransaction));
+      }).pipe(Effect.provide(platformLayer), Effect.scoped),
+  );
+  it.effect("keeps a later pause after an earlier metadata state move fails", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-replace-cleanup-" });
+      const root = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "pico-update-move-failure-",
+      });
       const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
-      const staging = path.join(schedulesDir, ".staging");
-      const logs = yield* captureLogs();
-      let retainedTransaction: string | undefined;
+      const enabled = path.join(schedulesDir, "enabled");
+      const disabled = path.join(schedulesDir, "disabled");
+      let rejectMove = true;
       const failingFileSystem = FileSystem.FileSystem.of({
         ...fileSystem,
-        remove: (file, options) => {
-          if (path.dirname(file) !== staging || !path.basename(file).startsWith("replace-")) {
-            return fileSystem.remove(file, options);
-          }
-          retainedTransaction = file;
-          return Effect.fail(permissionDenied("remove", "private cleanup cause"));
-        },
+        rename: (from, to) =>
+          rejectMove && path.dirname(from) === enabled && path.dirname(to) === disabled
+            ? Effect.fail(permissionDenied("rename", from))
+            : fileSystem.rename(from, to),
       });
       const schedules = yield* open(schedulesDir).pipe(
         Effect.provideService(FileSystem.FileSystem, failingFileSystem),
       );
       const created = yield* schedules.create(caller, {
-        name: "private original",
+        name: "keep paused",
+        enabled: true,
+        target: { kind: "current-chat" },
+        trigger: { kind: "once", at: 10_000 },
+        sourceDirectory: yield* prepareSource({ "prompt.md": "Original source." }),
+      });
+      if (created.kind !== "ready") return yield* Effect.die("Created schedule is invalid");
+      const error = yield* schedules
+        .update(caller, created.id, {
+          name: "not committed",
+          enabled: false,
+        })
+        .pipe(Effect.flip);
+      assert.strictEqual(error.kind, "io");
+      assert.deepStrictEqual(yield* schedules.get(caller, created.id), created);
+      rejectMove = false;
+      const paused = yield* schedules.update(caller, created.id, { enabled: false });
+      assert.strictEqual(paused.kind, "ready");
+      if (paused.kind !== "ready") return yield* Effect.die("Paused schedule is invalid");
+      assert.strictEqual(paused.state, "disabled");
+      assert.deepStrictEqual(paused.definition, created.definition);
+      const restarted = yield* open(schedulesDir);
+      assert.deepStrictEqual(yield* restarted.get(caller, created.id), paused);
+      assert.strictEqual(
+        yield* fileSystem.readFileString(path.join(paused.sourceDirectory, "prompt.md")),
+        "Original source.",
+      );
+    }).pipe(Effect.provide(platformLayer), Effect.scoped),
+  );
+
+  it.effect("reconciles a retained rollback before accepting another mutation", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-update-retained-" });
+      const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
+      const enabled = path.join(schedulesDir, "enabled");
+      const disabled = path.join(schedulesDir, "disabled");
+      let rejectCommitAndRollback = true;
+      const failingFileSystem = FileSystem.FileSystem.of({
+        ...fileSystem,
+        rename: (from, to) =>
+          rejectCommitAndRollback &&
+          (path.basename(from) === "next.json" ||
+            (path.dirname(from) === disabled && path.dirname(to) === enabled))
+            ? Effect.fail(permissionDenied("rename", from))
+            : fileSystem.rename(from, to),
+      });
+      const schedules = yield* open(schedulesDir).pipe(
+        Effect.provideService(FileSystem.FileSystem, failingFileSystem),
+      );
+      const created = yield* schedules.create(caller, {
+        name: "original",
+        enabled: true,
+        target: { kind: "current-chat" },
+        trigger: { kind: "once", at: 10_000 },
+        sourceDirectory: yield* prepareSource({ "prompt.md": "Original source." }),
+      });
+      if (created.kind !== "ready") return yield* Effect.die("Created schedule is invalid");
+      const failed = yield* schedules
+        .update(caller, created.id, {
+          name: "uncommitted",
+          enabled: false,
+        })
+        .pipe(Effect.flip);
+      assert.strictEqual(failed.kind, "io");
+      const blocked = yield* schedules
+        .update(caller, created.id, { enabled: false })
+        .pipe(Effect.flip);
+      assert.strictEqual(blocked.kind, "io");
+      rejectCommitAndRollback = false;
+      const recovered = yield* schedules.update(caller, created.id, { name: "after recovery" });
+      assert.strictEqual(recovered.kind, "ready");
+      if (recovered.kind !== "ready") return yield* Effect.die("Recovered schedule is invalid");
+      assert.strictEqual(recovered.state, "enabled");
+      assert.strictEqual(recovered.sourceDirectory, created.sourceDirectory);
+      assert.strictEqual(recovered.definition.name, "after recovery");
+      assert.strictEqual(
+        yield* fileSystem.readFileString(path.join(recovered.sourceDirectory, "prompt.md")),
+        "Original source.",
+      );
+      const paused = yield* schedules.update(caller, created.id, { enabled: false });
+      assert.strictEqual(paused.state, "disabled");
+      const restarted = yield* open(schedulesDir);
+      assert.deepStrictEqual(yield* restarted.get(caller, created.id), paused);
+    }).pipe(Effect.provide(platformLayer), Effect.scoped),
+  );
+
+  it.effect("rolls back a state move when the metadata commit fails", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-update-rollback-" });
+      const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
+      const storage: Storage = {
+        fileSystem,
+        path,
+        schedulesDir,
+        temporaryId: () => Effect.succeed("unused"),
+      };
+      yield* bootstrap(storage);
+      const id = Schedule.ScheduleId.make("018f47a0-0000-7000-8000-000000000101");
+      const definition: Schedule.ScheduleDefinition = {
+        version: 1,
+        revision: Schedule.ScheduleRevision.make("018f47a0-0000-7000-8000-000000000102"),
+        name: "original",
+        ownerWorkspaceId: workspaceId,
+        createdByChatId: chatId,
+        createdAt: 0,
+        target: { kind: "chat", chatId },
+        trigger: { kind: "once", at: 1_000 },
+      };
+      yield* publishDefinition(
+        storage,
+        id,
+        "enabled",
+        definition,
+        sourceTree({ "prompt.md": "original", "lib/helper.js": "export const value = 1;" }, [
+          "lib",
+        ]),
+        "original",
+      );
+      const current = yield* loadSchedule(storage, id);
+      if (current === undefined) return yield* Effect.die("Published definition disappeared");
+      const updated: Schedule.ScheduleDefinition = {
+        ...definition,
+        revision: Schedule.ScheduleRevision.make("018f47a0-0000-7000-8000-000000000103"),
+        name: "updated",
+      };
+      const nextMetadata = path.join(schedulesDir, ".staging", "update-rejected", "next.json");
+      const destination = path.join(schedulesDir, "disabled", id);
+      const failingFileSystem = FileSystem.FileSystem.of({
+        ...fileSystem,
+        rename: (from, to) =>
+          from === nextMetadata && to === path.join(destination, "meta.json")
+            ? fileSystem
+                .exists(destination)
+                .pipe(
+                  Effect.flatMap((moved) =>
+                    moved
+                      ? Effect.fail(permissionDenied("rename", from))
+                      : Effect.die("Metadata commit preceded the state move"),
+                  ),
+                )
+            : fileSystem.rename(from, to),
+      });
+      const error = yield* updateDefinition(
+        { ...storage, fileSystem: failingFileSystem },
+        current,
+        updated,
+        "disabled",
+        "rejected",
+      ).pipe(Effect.flip);
+      assert.strictEqual(error.kind, "io");
+      const retained = yield* loadSchedule(storage, id);
+      assert.strictEqual(retained?.view.kind, "ready");
+      if (retained?.view.kind !== "ready") return;
+      assert.deepStrictEqual(retained.view.definition, definition);
+      assert.strictEqual(retained.view.sourceDirectory, path.join(schedulesDir, "enabled", id));
+      assert.isFalse(yield* fileSystem.exists(destination));
+      assert.strictEqual(
+        yield* fileSystem.readFileString(path.join(retained.view.sourceDirectory, "lib/helper.js")),
+        "export const value = 1;",
+      );
+      yield* bootstrap(storage);
+      assert.deepStrictEqual((yield* loadSchedule(storage, id))?.view, retained.view);
+    }).pipe(Effect.provide(platformLayer), Effect.scoped),
+  );
+
+  it.effect("recovers an uncommitted moved directory without overwriting edited source", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-update-recovery-" });
+      const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
+      const storage: Storage = {
+        fileSystem,
+        path,
+        schedulesDir,
+        temporaryId: () => Effect.succeed("unused"),
+      };
+      yield* bootstrap(storage);
+      const id = Schedule.ScheduleId.make("018f47a0-0000-7000-8000-000000000104");
+      const definition: Schedule.ScheduleDefinition = {
+        version: 1,
+        revision: Schedule.ScheduleRevision.make("018f47a0-0000-7000-8000-000000000105"),
+        name: "original",
+        ownerWorkspaceId: workspaceId,
+        createdByChatId: chatId,
+        createdAt: 0,
+        target: { kind: "chat", chatId },
+        trigger: { kind: "once", at: 1_000 },
+      };
+      yield* publishDefinition(
+        storage,
+        id,
+        "disabled",
+        definition,
+        sourceTree({ "prompt.md": "original", "lib/helper.js": "export const value = 1;" }, [
+          "lib",
+        ]),
+        "original",
+      );
+      const transaction = path.join(schedulesDir, ".staging", "update-crashed");
+      const updated: Schedule.ScheduleDefinition = {
+        ...definition,
+        revision: Schedule.ScheduleRevision.make("018f47a0-0000-7000-8000-000000000106"),
+        name: "uncommitted",
+      };
+      yield* fileSystem.makeDirectory(transaction);
+      yield* fileSystem.writeFileString(
+        path.join(transaction, "next.json"),
+        JSON.stringify(updated),
+      );
+      yield* fileSystem.writeFileString(
+        path.join(transaction, "transaction.json"),
+        JSON.stringify({
+          kind: "update",
+          id,
+          state: "disabled",
+          nextState: "enabled",
+          revision: updated.revision,
+        }),
+      );
+      const originalDirectory = path.join(schedulesDir, "disabled", id);
+      const movedDirectory = path.join(schedulesDir, "enabled", id);
+      yield* fileSystem.rename(originalDirectory, movedDirectory);
+      yield* fileSystem.writeFileString(
+        path.join(movedDirectory, "lib/helper.js"),
+        "export const value = 2;",
+      );
+      const restarted = yield* open(schedulesDir);
+      const recovered = yield* restarted.get(caller, id);
+      assert.strictEqual(recovered.kind, "ready");
+      if (recovered.kind !== "ready") return;
+      assert.deepStrictEqual(recovered.definition, definition);
+      assert.strictEqual(recovered.sourceDirectory, originalDirectory);
+      assert.strictEqual(
+        yield* fileSystem.readFileString(path.join(recovered.sourceDirectory, "lib/helper.js")),
+        "export const value = 2;",
+      );
+      assert.isFalse(yield* fileSystem.exists(movedDirectory));
+      assert.isFalse(yield* fileSystem.exists(transaction));
+    }).pipe(Effect.provide(platformLayer), Effect.scoped),
+  );
+
+  it.effect("restores a definition retained by an interrupted pre-upgrade replacement", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-replace-upgrade-" });
+      const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
+      const schedules = yield* open(schedulesDir);
+      const created = yield* schedules.create(caller, {
+        name: "before upgrade",
         enabled: false,
         target: { kind: "current-chat" },
         trigger: { kind: "once", at: 10_000 },
-        prompt: "private original prompt",
+        sourceDirectory: yield* prepareSource({ "prompt.md": "Retained source." }),
       });
-      assert.strictEqual(created.kind, "ready");
-      if (created.kind !== "ready") return;
-      const updated = yield* schedules
-        .replace(caller, created.id, {
-          name: "private replacement",
-          target: { kind: "current-chat" },
-          trigger: { kind: "once", at: 20_000 },
-          prompt: "private replacement prompt",
-        })
-        .pipe(Effect.provide(logs.layer));
-      assert.strictEqual(updated.kind, "ready");
-      if (updated.kind !== "ready") return;
-      assert.notStrictEqual(updated.definition.revision, created.definition.revision);
-      assert.strictEqual(updated.definition.name, "private replacement");
-      assert.deepStrictEqual(yield* schedules.list(caller), [updated]);
+      if (created.kind !== "ready") return yield* Effect.die("Created schedule is invalid");
+      const transaction = path.join(schedulesDir, ".staging", "replace-interrupted");
+      const next = path.join(transaction, "next");
+      yield* fileSystem.makeDirectory(next, { recursive: true });
+      yield* fileSystem.writeFileString(
+        path.join(transaction, "transaction.json"),
+        JSON.stringify({ kind: "replace", id: created.id, state: "disabled" }),
+      );
+      yield* fileSystem.writeFileString(
+        path.join(next, "meta.json"),
+        JSON.stringify({
+          ...created.definition,
+          revision: Schedule.ScheduleRevision.make("018f47a0-0000-7000-8000-000000000107"),
+          name: "uncommitted replacement",
+        }),
+      );
+      yield* fileSystem.writeFileString(path.join(next, "prompt.md"), "Uncommitted source.");
+      yield* fileSystem.rename(created.sourceDirectory, path.join(transaction, "previous"));
+      const restarted = yield* open(schedulesDir);
+      const recovered = yield* restarted.get(caller, created.id);
+      assert.deepStrictEqual(recovered, created);
       assert.strictEqual(
-        yield* fileSystem.readFileString(
-          path.join(schedulesDir, "disabled", created.id, "prompt.md"),
-        ),
-        "private replacement prompt",
+        yield* fileSystem.readFileString(path.join(created.sourceDirectory, "prompt.md")),
+        "Retained source.",
       );
-      if (retainedTransaction === undefined) {
-        return yield* Effect.die("Replacement cleanup was not attempted");
-      }
-      assert.deepStrictEqual(
-        yield* decodeDefinition(
-          yield* fileSystem.readFileString(path.join(retainedTransaction, "previous", "meta.json")),
-        ),
-        created.definition,
-      );
-      assert.isTrue(yield* fileSystem.exists(path.join(retainedTransaction, "transaction.json")));
-      const errors = logs.entries.filter((entry) => entry.level === "Error");
-      assert.strictEqual(errors.length, 1);
-      assert.deepInclude(errors[0]?.annotations, {
-        component: "schedule",
-        operation: "replace",
-        phase: "cleanup",
-        scheduleId: created.id,
-        definitionRevision: updated.definition.revision,
-        category: "io",
-      });
-      assert.notInclude(JSON.stringify(logs.entries), "private");
-      assert.notInclude(JSON.stringify(logs.entries), root);
+      assert.isFalse(yield* fileSystem.exists(transaction));
+      const reopened = yield* open(schedulesDir);
+      assert.deepStrictEqual(yield* reopened.get(caller, created.id), recovered);
     }).pipe(Effect.provide(platformLayer), Effect.scoped),
   );
+
+  it.effect("keeps a committed pre-upgrade replacement after a later pause", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-replace-committed-" });
+      const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
+      const schedules = yield* open(schedulesDir);
+      const created = yield* schedules.create(caller, {
+        name: "committed replacement",
+        enabled: true,
+        target: { kind: "current-chat" },
+        trigger: { kind: "once", at: 10_000 },
+        sourceDirectory: yield* prepareSource({ "prompt.md": "Committed source." }),
+      });
+      if (created.kind !== "ready") return yield* Effect.die("Created schedule is invalid");
+      const transaction = path.join(schedulesDir, ".staging", "replace-committed");
+      const previous = path.join(transaction, "previous");
+      yield* fileSystem.makeDirectory(previous, { recursive: true });
+      yield* fileSystem.writeFileString(
+        path.join(transaction, "transaction.json"),
+        JSON.stringify({ kind: "replace", id: created.id, state: "enabled" }),
+      );
+      yield* fileSystem.writeFileString(
+        path.join(previous, "meta.json"),
+        JSON.stringify({
+          ...created.definition,
+          revision: Schedule.ScheduleRevision.make("018f47a0-0000-7000-8000-000000000108"),
+          name: "old definition",
+        }),
+      );
+      yield* fileSystem.writeFileString(path.join(previous, "prompt.md"), "Old source.");
+      const paused = yield* schedules.update(caller, created.id, { enabled: false });
+      const restarted = yield* open(schedulesDir);
+      const recovered = yield* restarted.get(caller, created.id);
+      assert.deepStrictEqual(recovered, paused);
+      assert.strictEqual(recovered.kind, "ready");
+      if (recovered.kind !== "ready") return yield* Effect.die("Recovered schedule is invalid");
+      assert.strictEqual(recovered.state, "disabled");
+      assert.deepStrictEqual(recovered.definition, created.definition);
+      assert.strictEqual(
+        yield* fileSystem.readFileString(path.join(recovered.sourceDirectory, "prompt.md")),
+        "Committed source.",
+      );
+      assert.isFalse(yield* fileSystem.exists(created.sourceDirectory));
+      assert.isFalse(yield* fileSystem.exists(transaction));
+    }).pipe(Effect.provide(platformLayer), Effect.scoped),
+  );
+
+  it.effect("retains replacement data when its recovery journal is missing or corrupt", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-replace-journal-" });
+      const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
+      yield* open(schedulesDir);
+      const transaction = path.join(schedulesDir, ".staging", "replace-retained");
+      const previous = path.join(transaction, "previous");
+      yield* fileSystem.makeDirectory(previous, { recursive: true });
+      const retained = path.join(previous, "prompt.md");
+      yield* fileSystem.writeFileString(retained, "Only retained source.");
+      const missing = yield* open(schedulesDir).pipe(Effect.flip);
+      assert.strictEqual(missing.kind, "corrupt");
+      assert.strictEqual(yield* fileSystem.readFileString(retained), "Only retained source.");
+      yield* fileSystem.writeFileString(
+        path.join(transaction, "transaction.json"),
+        '{"kind":"replace"}',
+      );
+      const corrupt = yield* open(schedulesDir).pipe(Effect.flip);
+      assert.strictEqual(corrupt.kind, "corrupt");
+      assert.strictEqual(yield* fileSystem.readFileString(retained), "Only retained source.");
+    }).pipe(Effect.provide(platformLayer), Effect.scoped),
+  );
+
   it.effect("keeps the canonical event log during an interrupted append", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
@@ -1210,7 +2022,7 @@ describe("Schedules", () => {
         storage,
         run,
         definition,
-        { script: null, prompt: "append" },
+        sourceTree({ "prompt.md": "append" }),
         "018f47a0-0000-7000-8000-000000000050",
       );
       const original = `${JSON.stringify({ type: "run-started" })}\n`;
@@ -1300,7 +2112,7 @@ describe("Schedules", () => {
           enabled: true,
           target: { kind: "current-chat" },
           trigger: { kind: "once", at: 1_000 },
-          prompt: "complete once",
+          sourceDirectory: yield* prepareSource({ "prompt.md": "complete once" }),
         });
         assert.strictEqual(created.kind, "ready");
         if (created.kind !== "ready") return;
@@ -1375,7 +2187,7 @@ describe("Schedules", () => {
           enabled: true,
           target: { kind: "current-chat" },
           trigger: { kind: "once", at: 1_000 },
-          prompt: "unused",
+          sourceDirectory: yield* prepareSource({ "prompt.md": "unused" }),
         });
         assert.strictEqual(created.kind, "ready");
         if (created.kind !== "ready") return;
@@ -1422,7 +2234,7 @@ describe("Schedules", () => {
         target: { kind: "chat", chatId },
         trigger: { kind: "once", at: 1_000 },
       };
-      const source: Schedule.ScheduleSource = { script: null, prompt: "original" };
+      const source = sourceTree({ "prompt.md": "original" });
       const staging = path.join(schedulesDir, ".staging");
       yield* fileSystem.makeDirectory(outside);
       yield* fileSystem.writeFileString(sentinel, "unchanged");
@@ -1451,22 +2263,22 @@ describe("Schedules", () => {
         revision: Schedule.ScheduleRevision.make("018f47a0-0000-7000-8000-000000000063"),
         name: "replacement",
       };
-      const replacementTransaction = path.join(staging, "replace-preexisting");
-      yield* fileSystem.symlink(outside, replacementTransaction);
-      const replacementError = yield* replaceDefinition(
+      const updateTransaction = path.join(staging, "update-preexisting");
+      yield* fileSystem.symlink(outside, updateTransaction);
+      const updateError = yield* updateDefinition(
         storage,
         current,
         replacement,
-        { script: null, prompt: "replacement" },
+        "disabled",
         "preexisting",
       ).pipe(Effect.flip);
-      assert.strictEqual(replacementError.kind, "corrupt");
+      assert.strictEqual(updateError.kind, "corrupt");
       assert.deepStrictEqual(yield* fileSystem.readDirectory(outside), ["sentinel"]);
       const retained = yield* loadSchedule(storage, id);
       assert.strictEqual(retained?.view.kind, "ready");
       if (retained?.view.kind !== "ready") return;
       assert.strictEqual(retained.view.definition.revision, definition.revision);
-      yield* fileSystem.remove(replacementTransaction);
+      yield* fileSystem.remove(updateTransaction);
 
       yield* fileSystem.remove(staging, { recursive: true });
       yield* fileSystem.symlink(outside, staging);
@@ -1572,7 +2384,7 @@ describe("Schedules", () => {
         firstId,
         "enabled",
         firstDefinition,
-        { script: null, prompt: "first" },
+        sourceTree({ "prompt.md": "first" }),
         "first-definition",
       );
       yield* publishDefinition(
@@ -1580,7 +2392,7 @@ describe("Schedules", () => {
         secondId,
         "enabled",
         secondDefinition,
-        { script: null, prompt: "second" },
+        sourceTree({ "prompt.md": "second" }),
         "second-definition",
       );
       const firstRunId = Schedule.ScheduleRunId.make(`scheduled-1000-${firstDefinition.revision}`);
@@ -1660,7 +2472,7 @@ describe("Schedules", () => {
         firstId,
         "enabled",
         firstDefinition,
-        { script: null, prompt: "first" },
+        sourceTree({ "prompt.md": "first" }),
         "first-missed-definition",
       );
       yield* publishDefinition(
@@ -1668,7 +2480,7 @@ describe("Schedules", () => {
         secondId,
         "enabled",
         secondDefinition,
-        { script: null, prompt: "second" },
+        sourceTree({ "prompt.md": "second" }),
         "second-missed-definition",
       );
       const firstRunId = Schedule.ScheduleRunId.make(`scheduled-1000-${firstDefinition.revision}`);
@@ -1744,7 +2556,7 @@ describe("Schedules", () => {
             enabled: true,
             target: { kind: "current-chat" },
             trigger: { kind: "once", at: 1_000 },
-            prompt: "private prompt",
+            sourceDirectory: yield* prepareSource({ "prompt.md": "private prompt" }),
           });
           assert.strictEqual(created.kind, "ready");
           if (created.kind !== "ready") return;
@@ -1797,7 +2609,7 @@ describe("Schedules", () => {
               enabled: true,
               target: { kind: "current-chat" },
               trigger: { kind: "once", at: 1_000 },
-              prompt: "private prompt",
+              sourceDirectory: yield* prepareSource({ "prompt.md": "private prompt" }),
             });
             assert.strictEqual(created.kind, "ready");
             if (created.kind !== "ready") return;
@@ -1866,7 +2678,7 @@ describe("Schedules", () => {
               enabled: true,
               target: { kind: "current-chat" },
               trigger: { kind: "once", at: 1_000 },
-              prompt: "private cancellation prompt",
+              sourceDirectory: yield* prepareSource({ "prompt.md": "private cancellation prompt" }),
             });
             yield* Deferred.await(started);
             if (mode === "aborted") yield* awaitLog(logs.events, "omp");
@@ -1897,60 +2709,74 @@ describe("Schedules", () => {
     }).pipe(Effect.provide(platformLayer), Effect.scoped),
   );
 
-  it.effect("discards journal-free staging but retains corrupt and unreadable replacements", () =>
-    Effect.gen(function* () {
-      const fileSystem = yield* FileSystem.FileSystem;
-      const path = yield* Path.Path;
-      const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-recovery-journal-" });
-      const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
-      const storage: Storage = {
-        fileSystem,
-        path,
-        schedulesDir,
-        temporaryId: () => Effect.succeed("unused"),
-      };
-      const logs = yield* captureLogs();
-      yield* bootstrap(storage);
-      const abandoned = path.join(schedulesDir, ".staging", "definition-abandoned");
-      yield* fileSystem.makeDirectory(abandoned);
-      yield* bootstrap(storage).pipe(Effect.provide(logs.layer));
-      assert.isFalse(yield* fileSystem.exists(abandoned));
-      assert.deepStrictEqual(
-        logs.entries.filter((entry) => entry.level === "Error"),
-        [],
-      );
+  it.effect(
+    "discards journal-free staging but retains corrupt and unreadable update journals",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "pico-recovery-journal-",
+        });
+        const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
+        const storage: Storage = {
+          fileSystem,
+          path,
+          schedulesDir,
+          temporaryId: () => Effect.succeed("unused"),
+        };
+        const logs = yield* captureLogs();
+        yield* bootstrap(storage);
+        const abandoned = path.join(schedulesDir, ".staging", "update-abandoned");
+        yield* fileSystem.makeDirectory(abandoned);
+        yield* fileSystem.writeFileString(
+          path.join(abandoned, "next.json"),
+          "uncommitted metadata",
+        );
+        yield* bootstrap(storage).pipe(Effect.provide(logs.layer));
+        assert.isFalse(yield* fileSystem.exists(abandoned));
+        assert.deepStrictEqual(
+          logs.entries.filter((entry) => entry.level === "Error"),
+          [],
+        );
 
-      const transaction = path.join(schedulesDir, ".staging", "replace-broken");
-      const previous = path.join(transaction, "previous");
-      const journal = path.join(transaction, "transaction.json");
-      const retained = path.join(previous, "meta.json");
-      yield* fileSystem.makeDirectory(previous, { recursive: true });
-      yield* fileSystem.writeFileString(retained, "retained definition");
-      const absent = yield* bootstrap(storage).pipe(Effect.flip);
-      assert.strictEqual(absent.kind, "corrupt");
-      assert.strictEqual(yield* fileSystem.readFileString(retained), "retained definition");
-      yield* fileSystem.writeFileString(journal, '{"private":"corrupt journal"}');
-      const corrupt = yield* bootstrap(storage).pipe(Effect.flip);
-      assert.strictEqual(corrupt.kind, "corrupt");
-      assert.strictEqual(yield* fileSystem.readFileString(retained), "retained definition");
-      assert.strictEqual(
-        yield* fileSystem.readFileString(journal),
-        '{"private":"corrupt journal"}',
-      );
-      const unreadable = yield* bootstrap({
-        ...storage,
-        fileSystem: FileSystem.FileSystem.of({
-          ...fileSystem,
-          readFileString: (file, encoding) =>
-            file === journal
-              ? Effect.fail(permissionDenied("readFileString", file))
-              : fileSystem.readFileString(file, encoding),
-        }),
-      }).pipe(Effect.flip);
-      assert.strictEqual(unreadable.kind, "io");
-      assert.strictEqual(yield* fileSystem.readFileString(retained), "retained definition");
-      assert.isTrue(yield* fileSystem.exists(journal));
-    }).pipe(Effect.provide(platformLayer), Effect.scoped),
+        const copiedSource = path.join(schedulesDir, ".staging", "definition-abandoned");
+        yield* fileSystem.makeDirectory(path.join(copiedSource, "previous"), { recursive: true });
+        yield* fileSystem.writeFileString(path.join(copiedSource, "prompt.md"), "authored prompt");
+        yield* fileSystem.writeFileString(
+          path.join(copiedSource, "transaction.json"),
+          '{"helper":true}',
+        );
+        yield* bootstrap(storage);
+        assert.isFalse(yield* fileSystem.exists(copiedSource));
+
+        const transaction = path.join(schedulesDir, ".staging", "update-broken");
+        const journal = path.join(transaction, "transaction.json");
+        const retained = path.join(transaction, "next.json");
+        yield* fileSystem.makeDirectory(transaction);
+        yield* fileSystem.writeFileString(retained, "retained definition");
+        yield* fileSystem.writeFileString(journal, '{"private":"corrupt journal"}');
+        const corrupt = yield* bootstrap(storage).pipe(Effect.flip);
+        assert.strictEqual(corrupt.kind, "corrupt");
+        assert.strictEqual(yield* fileSystem.readFileString(retained), "retained definition");
+        assert.strictEqual(
+          yield* fileSystem.readFileString(journal),
+          '{"private":"corrupt journal"}',
+        );
+        const unreadable = yield* bootstrap({
+          ...storage,
+          fileSystem: FileSystem.FileSystem.of({
+            ...fileSystem,
+            readFileString: (file, encoding) =>
+              file === journal
+                ? Effect.fail(permissionDenied("readFileString", file))
+                : fileSystem.readFileString(file, encoding),
+          }),
+        }).pipe(Effect.flip);
+        assert.strictEqual(unreadable.kind, "io");
+        assert.strictEqual(yield* fileSystem.readFileString(retained), "retained definition");
+        assert.isTrue(yield* fileSystem.exists(journal));
+      }).pipe(Effect.provide(platformLayer), Effect.scoped),
   );
   it.effect("warns again only after an invalid definition returns to a valid state", () =>
     Effect.gen(function* () {
@@ -1982,7 +2808,7 @@ describe("Schedules", () => {
             enabled: false,
             target: { kind: "current-chat" },
             trigger: { kind: "once", at: 1_000 },
-            prompt: "private prompt",
+            sourceDirectory: yield* prepareSource({ "prompt.md": "private prompt" }),
           });
           assert.strictEqual(created.kind, "ready");
           if (created.kind !== "ready") return;
@@ -2002,7 +2828,7 @@ describe("Schedules", () => {
           const advanceScan = Effect.gen(function* () {
             yield* TestClock.adjust("30 seconds");
             yield* Queue.take(scans);
-            yield* schedules.setEnabled(caller, created.id, false).pipe(Effect.exit);
+            yield* schedules.update(caller, created.id, { enabled: false }).pipe(Effect.exit);
           });
           yield* advanceScan;
           yield* advanceScan;

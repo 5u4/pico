@@ -46,8 +46,7 @@ const smoke = Effect.fn("AgentRuntime.smoke")(function* () {
     create: () => Effect.die("unexpected schedule create"),
     list: () => Effect.die("unexpected schedule list"),
     get: () => Effect.die("unexpected schedule get"),
-    replace: () => Effect.die("unexpected schedule update"),
-    setEnabled: () => Effect.die("unexpected schedule state change"),
+    update: () => Effect.die("unexpected schedule update"),
     remove: () => Effect.die("unexpected schedule delete"),
     start: () => Effect.die("unexpected scheduler start"),
   });

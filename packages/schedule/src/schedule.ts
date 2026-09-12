@@ -22,15 +22,18 @@ import {
   bootstrap,
   type LoadedSchedule,
   loadSchedule,
+  loadSourceTree,
   moveDefinition,
   publishDefinition,
   publishRun,
   readRunDefinition,
   readRuns,
+  reconcileUpdates,
   removeDefinition,
-  replaceDefinition,
+  type SourceTree,
   type Storage,
   scanSchedules,
+  updateDefinition,
   writeArtifactString,
   writeRun,
 } from "./storage.ts";
@@ -40,14 +43,6 @@ const MISSED_GRACE_MILLIS = 2 * 60 * 60 * 1_000;
 
 const scheduleError = (kind: Schedule.ScheduleError["kind"], message: string) =>
   new Schedule.ScheduleError({ kind, message });
-
-const sourceFromInput = (input: {
-  readonly script?: string | undefined;
-  readonly prompt?: string | undefined;
-}): Schedule.ScheduleSource => ({
-  script: input.script ?? null,
-  prompt: input.prompt ?? null,
-});
 
 const targetFromInput = (
   caller: Schedule.ScheduleCaller,
@@ -89,7 +84,13 @@ const invalidExternalView = (loaded: LoadedSchedule): Schedule.ScheduleView => {
   const error = validateDefinition(loaded.view.definition);
   return error === undefined
     ? loaded.view
-    : { kind: "invalid", id: loaded.view.id, state: loaded.view.state, error };
+    : {
+        kind: "invalid",
+        id: loaded.view.id,
+        state: loaded.view.state,
+        sourceDirectory: loaded.view.sourceDirectory,
+        error,
+      };
 };
 
 const authorize = (
@@ -203,7 +204,7 @@ const capture = Effect.fn("Schedules.capture")(function* (
           id,
           input.enabled ? "enabled" : "disabled",
           definition,
-          sourceFromInput(input),
+          yield* loadSourceTree(storage, input.sourceDirectory),
           yield* transactionId(),
         );
         const loaded = yield* loadSchedule(storage, id);
@@ -217,79 +218,85 @@ const capture = Effect.fn("Schedules.capture")(function* (
   });
 
   const list = Effect.fn("Schedules.list")(function* (caller: Schedule.ScheduleCaller) {
-    const loaded = yield* scanSchedules(storage);
-    return loaded
-      .filter((schedule) => schedule.ownerWorkspaceId === caller.workspaceId)
-      .map(invalidExternalView);
+    return yield* mutation.withPermit(
+      Effect.gen(function* () {
+        const loaded = yield* scanSchedules(storage);
+        return loaded
+          .filter((schedule) => schedule.ownerWorkspaceId === caller.workspaceId)
+          .map(invalidExternalView);
+      }),
+    );
   });
 
   const get = Effect.fn("Schedules.get")(function* (
     caller: Schedule.ScheduleCaller,
     id: Schedule.ScheduleId,
   ) {
-    return invalidExternalView(yield* loadOwned(caller, id));
+    return yield* mutation.withPermit(loadOwned(caller, id).pipe(Effect.map(invalidExternalView)));
   });
 
-  const replace = Effect.fn("Schedules.replace")(function* (
+  const update = Effect.fn("Schedules.update")(function* (
     caller: Schedule.ScheduleCaller,
     id: Schedule.ScheduleId,
-    input: Schedule.ReplaceSchedule,
+    input: Schedule.UpdateSchedule,
   ) {
-    const triggerError = validateTrigger(input.trigger);
-    if (triggerError !== undefined) return yield* scheduleError("invalid", triggerError);
     const updated = yield* mutation.withPermit(
       Effect.gen(function* () {
+        yield* reconcileUpdates(storage);
         const loaded = yield* loadOwned(caller, id);
-        if (loaded.view.kind !== "ready") {
-          return yield* scheduleError("invalid", "Invalid schedules cannot be updated");
+        const metadataChanged =
+          input.name !== undefined ||
+          input.target !== undefined ||
+          input.trigger !== undefined ||
+          input.scriptTimeoutMs !== undefined;
+        if (!metadataChanged) {
+          if (input.enabled === true && invalidExternalView(loaded).kind !== "ready") {
+            return yield* scheduleError("invalid", "Fix invalid schedule files before enabling it");
+          }
+          if (input.enabled !== undefined) {
+            yield* moveDefinition(storage, loaded, input.enabled ? "enabled" : "disabled");
+          }
+        } else {
+          if (loaded.view.kind !== "ready") {
+            return yield* scheduleError("invalid", "Invalid schedules cannot be updated");
+          }
+          const definition: Schedule.ScheduleDefinition = {
+            ...loaded.view.definition,
+            revision: Schedule.ScheduleRevision.make(yield* transactionId()),
+            ...(input.name === undefined ? {} : { name: input.name }),
+            ...(input.target === undefined
+              ? {}
+              : { target: targetFromInput(caller, input.target) }),
+            ...(input.trigger === undefined ? {} : { trigger: input.trigger }),
+            ...(input.scriptTimeoutMs === undefined
+              ? {}
+              : { scriptTimeoutMs: input.scriptTimeoutMs }),
+          };
+          const definitionError = validateDefinition(definition);
+          if (definitionError !== undefined) {
+            return yield* scheduleError("invalid", definitionError);
+          }
+          yield* updateDefinition(
+            storage,
+            loaded,
+            definition,
+            input.enabled === undefined
+              ? loaded.view.state
+              : input.enabled
+                ? "enabled"
+                : "disabled",
+            yield* transactionId(),
+          );
         }
-        const definition: Schedule.ScheduleDefinition = {
-          version: loaded.view.definition.version,
-          revision: Schedule.ScheduleRevision.make(yield* transactionId()),
-          name: input.name,
-          ownerWorkspaceId: loaded.view.definition.ownerWorkspaceId,
-          createdByChatId: loaded.view.definition.createdByChatId,
-          createdAt: loaded.view.definition.createdAt,
-          target: targetFromInput(caller, input.target),
-          trigger: input.trigger,
-          ...(input.scriptTimeoutMs === undefined
-            ? {}
-            : { scriptTimeoutMs: input.scriptTimeoutMs }),
-        };
-        yield* replaceDefinition(
-          storage,
-          loaded,
-          definition,
-          sourceFromInput(input),
-          yield* transactionId(),
-        );
         const refreshed = yield* loadSchedule(storage, id);
         if (refreshed === undefined)
           return yield* scheduleError("io", "Updated schedule is missing");
         return invalidExternalView(refreshed);
       }),
     );
-    if (updated.kind === "ready" && updated.state === "enabled")
+    if (updated.kind === "ready" && updated.state === "enabled") {
       yield* Queue.offer(wake, undefined);
-    return updated;
-  });
-
-  const setEnabled = Effect.fn("Schedules.setEnabled")(function* (
-    caller: Schedule.ScheduleCaller,
-    id: Schedule.ScheduleId,
-    enabled: boolean,
-  ) {
-    const updated = yield* mutation.withPermit(
-      Effect.gen(function* () {
-        const loaded = yield* loadOwned(caller, id);
-        yield* moveDefinition(storage, loaded, enabled ? "enabled" : "disabled");
-        const refreshed = yield* loadSchedule(storage, id);
-        if (refreshed === undefined)
-          return yield* scheduleError("io", "Schedule disappeared while changing state");
-        return invalidExternalView(refreshed);
-      }),
-    );
-    if (enabled) yield* Queue.offer(wake, undefined);
+    }
     return updated;
   });
   const remove = Effect.fn("Schedules.remove")(function* (
@@ -298,6 +305,7 @@ const capture = Effect.fn("Schedules.capture")(function* (
   ) {
     yield* mutation.withPermit(
       Effect.gen(function* () {
+        yield* reconcileUpdates(storage);
         const loaded = yield* loadOwned(caller, id);
         yield* removeDefinition(storage, loaded);
       }),
@@ -308,6 +316,7 @@ const capture = Effect.fn("Schedules.capture")(function* (
     id: Schedule.ScheduleId,
     revision: Schedule.ScheduleRevision,
   ) {
+    yield* reconcileUpdates(storage);
     const loaded = yield* loadSchedule(storage, id);
     if (
       loaded !== undefined &&
@@ -356,7 +365,7 @@ const capture = Effect.fn("Schedules.capture")(function* (
       host: Schedule.ScheduleRunHost,
       run: Schedule.ScheduleRunLifecycle,
       definition: Schedule.ScheduleDefinition,
-      source: Schedule.ScheduleSource,
+      source: SourceTree,
     ) {
       let current = run;
       let failureStage: Extract<Schedule.TerminalOutcome, { readonly kind: "failed" }>["stage"] =
@@ -405,7 +414,7 @@ const capture = Effect.fn("Schedules.capture")(function* (
         failureStage = "protocol";
 
         let decision: Schedule.ScriptDecision;
-        if (source.script === null) {
+        if (!source.files.has("script.js")) {
           decision = { agent: true };
           yield* writeArtifactString(storage, current, "decision.json", JSON.stringify(decision));
         } else {
@@ -448,12 +457,14 @@ const capture = Effect.fn("Schedules.capture")(function* (
           return;
         }
 
+        const promptBytes = source.files.get("prompt.md");
+        const prompt = promptBytes === undefined ? null : new TextDecoder().decode(promptBytes);
         const request =
           decision.content === undefined
-            ? source.prompt
-            : source.prompt === null
+            ? prompt
+            : prompt === null
               ? decision.content
-              : `${decision.content}\n\n${source.prompt}`;
+              : `${decision.content}\n\n${prompt}`;
         if (request === null) {
           yield* fail("protocol", "Script requested an agent run without providing input");
           return;
@@ -634,6 +645,7 @@ const capture = Effect.fn("Schedules.capture")(function* (
 
   const claim = Effect.fn("Schedules.claim")(function* (
     view: Schedule.ReadyScheduleView,
+    tree: SourceTree,
     source: Schedule.ScheduleRunSource,
   ) {
     const id = Schedule.ScheduleRunId.make(
@@ -665,7 +677,7 @@ const capture = Effect.fn("Schedules.capture")(function* (
       claimedAt: yield* Clock.currentTimeMillis,
       state: { kind: "claimed" },
     };
-    yield* publishRun(storage, run, view.definition, view.source, yield* transactionId());
+    yield* publishRun(storage, run, view.definition, tree, yield* transactionId());
     yield* Effect.logInfo("Scheduled run claimed").pipe(
       Effect.annotateLogs({ ...runAnnotations(run), operation: "claim", phase: "claimed" }),
     );
@@ -727,11 +739,16 @@ const capture = Effect.fn("Schedules.capture")(function* (
           const pending: Array<{
             readonly run: Schedule.ScheduleRunLifecycle;
             readonly definition: Schedule.ScheduleDefinition;
-            readonly source: Schedule.ScheduleSource;
+            readonly source: SourceTree;
             readonly missed: boolean;
           }> = [];
           for (const loaded of schedules) {
-            if (loaded.view.kind !== "ready" || loaded.view.state !== "enabled") continue;
+            if (
+              loaded.view.kind !== "ready" ||
+              loaded.view.state !== "enabled" ||
+              loaded.source === null
+            )
+              continue;
             if (validateDefinition(loaded.view.definition) !== undefined) continue;
             const view = loaded.view;
             const existing = yield* readRuns(storage, view.id);
@@ -756,14 +773,14 @@ const capture = Effect.fn("Schedules.capture")(function* (
             }
 
             const run = yield* Effect.uninterruptible(
-              claim(view, { kind: "scheduled", scheduledFor }).pipe(
+              claim(view, loaded.source, { kind: "scheduled", scheduledFor }).pipe(
                 Effect.tap((published) => Effect.sync(() => owned.add(published))),
               ),
             );
             pending.push({
               run,
               definition: view.definition,
-              source: view.source,
+              source: loaded.source,
               missed: now - scheduledFor > MISSED_GRACE_MILLIS,
             });
           }
@@ -870,7 +887,7 @@ const capture = Effect.fn("Schedules.capture")(function* (
   });
 
   return {
-    service: Schedule.Schedules.of({ create, list, get, replace, setEnabled, remove, start }),
+    service: Schedule.Schedules.of({ create, list, get, update, remove, start }),
     initialize,
   };
 });
