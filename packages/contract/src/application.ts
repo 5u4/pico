@@ -3,7 +3,7 @@ import type * as Effect from "effect/Effect";
 import type * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import type { AgentPrompt, AgentTranscript } from "./agent-message.ts";
-import type { ContextUsage, ShakeMode, ShakeResult } from "./agent-runtime.ts";
+import type { ContextUsage, MessageDelivery, ShakeMode, ShakeResult } from "./agent-runtime.ts";
 import type { Chat, ChatId } from "./chat-model.ts";
 import type { ApplicationError, ChatClosed, GitError, WorkspaceBindingInvalid } from "./errors.ts";
 import { AbsolutePath } from "./path.ts";
@@ -100,7 +100,7 @@ export class Application extends Context.Service<
     readonly sendMessage: (
       chatId: ChatId,
       prompt: AgentPrompt,
-    ) => Effect.Effect<void, ApplicationError | ChatClosed>;
+    ) => Effect.Effect<MessageDelivery<ApplicationError>, ApplicationError | ChatClosed>;
 
     readonly abort: (chatId: ChatId) => Effect.Effect<void, ApplicationError>;
 

@@ -5,6 +5,7 @@ import type { ChatId } from "@pico/contract/chat-model";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import { agentError } from "./agent-error.ts";
+import type { OmpPromptSender } from "./omp-prompt-sender.ts";
 
 const TEXT_LIMIT = 500;
 
@@ -27,7 +28,7 @@ interface ExchangeTitleOptions {
   readonly runEffect: typeof Effect.runPromise;
   readonly handleBranchNaming: BranchNamingHandler;
   readonly history: ReadonlyArray<HistoryMessage>;
-  readonly sendPrompt: (prompt: AgentMessage.AgentPrompt) => Promise<void>;
+  readonly sendPrompt: OmpPromptSender;
   readonly generateTitle: (exchange: string, systemPrompt: string) => Promise<string | null>;
   readonly getTitleSource: () => "auto" | "user" | undefined;
   readonly setSessionName: (title: string, source: "auto") => Promise<boolean>;
@@ -36,7 +37,7 @@ interface ExchangeTitleOptions {
 }
 
 export interface ExchangeTitleFlow {
-  readonly sendPrompt: (prompt: AgentMessage.AgentPrompt) => Promise<void>;
+  readonly sendPrompt: OmpPromptSender;
   readonly observe: (event: AgentEvent.AgentEvent) => void;
 }
 
@@ -123,18 +124,26 @@ export const makeExchangeTitleFlow = (options: ExchangeTitleOptions): ExchangeTi
   let candidate: string | undefined;
   let spent = historyIsSpent(options.history);
 
-  const sendPrompt = async (prompt: AgentMessage.AgentPrompt) => {
-    if (spent) {
-      await options.sendPrompt(prompt);
-      return;
-    }
+  const sendPrompt: OmpPromptSender = async (prompt, onStarted) => {
+    if (spent) return options.sendPrompt(prompt, onStarted);
     const claim: PromptClaim = { userText: capText(promptTitleText(prompt)) };
-    claims.push(claim);
-    try {
-      await options.sendPrompt(prompt);
-    } catch (error) {
+    const release = () => {
       const index = claims.indexOf(claim);
       if (index !== -1) claims.splice(index, 1);
+    };
+    claims.push(claim);
+    try {
+      const delivery = await options.sendPrompt(prompt, onStarted);
+      if (delivery.kind !== "started") {
+        release();
+        return delivery;
+      }
+      return {
+        kind: "started",
+        completed: delivery.completed.pipe(Effect.tapCause(() => Effect.sync(release))),
+      };
+    } catch (error) {
+      release();
       throw error;
     }
   };

@@ -1,9 +1,9 @@
 import type { DiscordConfig } from "@pico/config/config";
 import * as AgentMessage from "@pico/contract/agent-message";
-import type { ContextUsage, ShakeResult } from "@pico/contract/agent-runtime";
+import type { ContextUsage, MessageDelivery, ShakeResult } from "@pico/contract/agent-runtime";
 import { Application, type CloseChatResult } from "@pico/contract/application";
 import type * as Chat from "@pico/contract/chat-model";
-import type { WorkspaceBindingInvalid } from "@pico/contract/errors";
+import type { ApplicationError, WorkspaceBindingInvalid } from "@pico/contract/errors";
 import type * as Workspace from "@pico/contract/workspace-model";
 import {
   ButtonStyles,
@@ -21,6 +21,7 @@ import * as Effect from "effect/Effect";
 import * as FiberSet from "effect/FiberSet";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
+import * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import type * as HttpClient from "effect/unstable/http/HttpClient";
@@ -78,6 +79,12 @@ export interface DiscordInputBot<
     interactionCreate?: (interaction: Interaction) => unknown;
   };
   readonly helpers: {
+    readonly addReaction: (channelId: bigint, messageId: bigint, reaction: string) => Promise<void>;
+    readonly deleteOwnReaction: (
+      channelId: bigint,
+      messageId: bigint,
+      reaction: string,
+    ) => Promise<void>;
     readonly getChannel: (channelId: bigint) => Promise<DiscordChannel>;
     readonly sendMessage: (
       channelId: bigint,
@@ -344,6 +351,7 @@ export const install = Effect.fn("DiscordInput.install")(function* <
 ) {
   const application = yield* Application;
   const crypto = yield* Crypto.Crypto;
+  const scope = yield* Scope.Scope;
   const run = yield* FiberSet.makeRuntime();
   const allowedGuildIds = new Set(config.allowedGuildIds);
   const workspaceIds = new Map<bigint, Workspace.WorkspaceId>();
@@ -466,13 +474,13 @@ export const install = Effect.fn("DiscordInput.install")(function* <
     channelId: bigint,
   ) {
     yield* Effect.annotateLogsScoped({ phase: "send-prompt", chatId });
-    yield* application
+    return yield* application
       .sendMessage(chatId, prompt)
       .pipe(
         Effect.catchTag("ChatClosed", () =>
           promiseBoundary("reply-chat-closed", () =>
             bot.helpers.sendMessage(channelId, { content: closedMessage, allowedMentions }),
-          ).pipe(Effect.asVoid),
+          ).pipe(Effect.as(undefined)),
         ),
       );
   });
@@ -524,8 +532,7 @@ export const install = Effect.fn("DiscordInput.install")(function* <
 
     const cachedChatId = chatIds.get(message.channelId);
     if (cachedChatId !== undefined) {
-      yield* sendMessageToChat(cachedChatId, prompt, message.channelId);
-      return;
+      return yield* sendMessageToChat(cachedChatId, prompt, message.channelId);
     }
 
     yield* Effect.annotateLogsScoped({ phase: "resolve-channel" });
@@ -547,8 +554,7 @@ export const install = Effect.fn("DiscordInput.install")(function* <
       workspaceIds.set(channel.parentId, chat.value.workspaceId);
       cacheChat(channel.id, chat.value.id);
       yield* Effect.annotateLogsScoped({ workspaceId: chat.value.workspaceId });
-      yield* sendMessageToChat(chat.value.id, prompt, message.channelId);
-      return;
+      return yield* sendMessageToChat(chat.value.id, prompt, message.channelId);
     }
 
     if (channel.type !== ChannelTypes.GuildText) return;
@@ -580,14 +586,14 @@ export const install = Effect.fn("DiscordInput.install")(function* <
       }),
     );
     yield* Effect.annotateLogsScoped({ phase: "create-chat", threadId: thread.id.toString() });
-    yield* threadLock(thread.id).withPermit(
+    return yield* threadLock(thread.id).withPermit(
       Effect.gen(function* () {
         const chat = yield* application.createChat({
           workspaceId,
           externalId: thread.id.toString(),
         });
         cacheChat(thread.id, chat.id);
-        yield* sendMessageToChat(chat.id, prompt, message.channelId);
+        return yield* sendMessageToChat(chat.id, prompt, message.channelId);
       }),
     );
   });
@@ -602,11 +608,10 @@ export const install = Effect.fn("DiscordInput.install")(function* <
       return;
     }
     if (inputLocks.get(message.channelId)?.knownThread === true || chatIds.has(message.channelId)) {
-      yield* threadLock(message.channelId).withPermit(processMessage(message));
-      return;
+      return yield* threadLock(message.channelId).withPermit(processMessage(message));
     }
     const entry = inputLock(message.channelId);
-    const parentChannel = yield* entry.semaphore.withPermit(
+    const result = yield* entry.semaphore.withPermit(
       Effect.gen(function* () {
         yield* Effect.annotateLogsScoped({ phase: "resolve-channel" });
         const channel = yield* promiseBoundary("resolve-channel", () =>
@@ -614,15 +619,14 @@ export const install = Effect.fn("DiscordInput.install")(function* <
         );
         if (isThread(channel.type)) {
           entry.knownThread = true;
-          yield* processMessage(message, channel);
-          return undefined;
+          const delivery = yield* processMessage(message, channel);
+          return { kind: "thread", delivery } as const;
         }
-        return channel;
+        return { kind: "parent", channel } as const;
       }),
     );
-    if (parentChannel !== undefined) {
-      yield* processMessage(message, parentChannel);
-    }
+    if (result.kind === "thread") return result.delivery;
+    return yield* processMessage(message, result.channel);
   });
 
   type WorkspacePathIssue = Extract<
@@ -1020,7 +1024,32 @@ export const install = Effect.fn("DiscordInput.install")(function* <
   bot.events.messageCreate = (message) => {
     run(
       Effect.scoped(
-        handleMessage(message).pipe(
+        Effect.gen(function* () {
+          const delivery: MessageDelivery<ApplicationError> | undefined =
+            yield* handleMessage(message);
+          if (delivery === undefined || delivery.kind === "handled") return;
+
+          yield* delivery.completed.pipe(
+            Effect.catchCause((cause) => reportFailure("message-request", cause)),
+            Effect.forkIn(scope),
+          );
+          if (delivery.kind !== "steered") return;
+
+          yield* Effect.gen(function* () {
+            yield* promiseBoundary("add-pending-reaction", () =>
+              bot.helpers.addReaction(message.channelId, message.id, "⏳"),
+            ).pipe(Effect.catchCause((cause) => reportFailure("add-pending-reaction", cause)));
+            const outcome = yield* delivery.consumed;
+            yield* promiseBoundary("remove-pending-reaction", () =>
+              bot.helpers.deleteOwnReaction(message.channelId, message.id, "⏳"),
+            ).pipe(Effect.catchCause((cause) => reportFailure("remove-pending-reaction", cause)));
+            if (outcome === "consumed") {
+              yield* promiseBoundary("add-consumed-reaction", () =>
+                bot.helpers.addReaction(message.channelId, message.id, "↩️"),
+              ).pipe(Effect.catchCause((cause) => reportFailure("add-consumed-reaction", cause)));
+            }
+          }).pipe(Effect.forkIn(scope));
+        }).pipe(
           Effect.catchCause((cause) => reportFailure("message-request", cause)),
           Effect.annotateLogs({
             component: "discord",

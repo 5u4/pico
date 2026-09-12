@@ -13,6 +13,7 @@
   },
   "devDependencies": {
     "@effect/platform-bun": "catalog:",
+    "@oh-my-pi/pi-agent-core": "catalog:",
     "@pico/persistence": "workspace:*",
     "@effect/vitest": "catalog:"
   }

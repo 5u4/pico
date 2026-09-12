@@ -2,7 +2,7 @@ import * as BunCrypto from "@effect/platform-bun/BunCrypto";
 import { assert, describe, it } from "@effect/vitest";
 import type { AgentEventEnvelope } from "@pico/contract/agent-event";
 import * as AgentMessage from "@pico/contract/agent-message";
-import type { ContextUsage } from "@pico/contract/agent-runtime";
+import type { ContextUsage, MessageDelivery } from "@pico/contract/agent-runtime";
 import { Application, type BindWorkspace } from "@pico/contract/application";
 import * as Chat from "@pico/contract/chat-model";
 import { ApplicationError, ChatClosed, WorkspaceBindingInvalid } from "@pico/contract/errors";
@@ -40,6 +40,10 @@ const workspaceId = Workspace.WorkspaceId.make("018f47a0-0000-7000-8000-00000000
 const chatId = Chat.ChatId.make("018f47a0-0000-7000-8000-000000000002");
 const failingChatId = Chat.ChatId.make("018f47a0-0000-7000-8000-000000000003");
 const defaultCwd = AbsolutePath.make("/tmp/pico-discord-input");
+const startedDelivery: MessageDelivery<ApplicationError> = {
+  kind: "started",
+  completed: Effect.void,
+};
 const config = {
   token: Redacted.make("test"),
   allowedGuildIds: ["1"],
@@ -136,6 +140,8 @@ describe("Discord input", () => {
           id: 999n,
           events: {},
           helpers: {
+            addReaction: async () => undefined,
+            deleteOwnReaction: async () => undefined,
             getChannel: async () => {
               channelReads += 1;
               return { id: 10n, type: ChannelTypes.GuildText, name: "general" };
@@ -198,6 +204,7 @@ describe("Discord input", () => {
                 20n,
               );
               yield* Deferred.succeed(sent.length === 1 ? firstSent : secondSent, undefined);
+              return startedDelivery;
             }),
           abort: () => Effect.die("unexpected chat abort"),
           contextUsage: () => Effect.die("unexpected context read"),
@@ -269,6 +276,8 @@ describe("Discord input", () => {
           id: 999n,
           events: {},
           helpers: {
+            addReaction: async () => undefined,
+            deleteOwnReaction: async () => undefined,
             getChannel: async () => ({
               id: 10n,
               guildId: 1n,
@@ -312,6 +321,7 @@ describe("Discord input", () => {
             Effect.gen(function* () {
               prompts.push(prompt);
               yield* Deferred.succeed(prompts.length === 1 ? firstSent : secondSent, undefined);
+              return startedDelivery;
             }),
           abort: () => Effect.die("unexpected chat abort"),
           contextUsage: () => Effect.die("unexpected context read"),
@@ -409,6 +419,8 @@ describe("Discord input", () => {
           id: 999n,
           events: {},
           helpers: {
+            addReaction: async () => undefined,
+            deleteOwnReaction: async () => undefined,
             getChannel: async () => {
               throw new Error("cold output must not inspect Discord channels");
             },
@@ -556,6 +568,8 @@ describe("Discord input", () => {
           id: 999n,
           events: {},
           helpers: {
+            addReaction: async () => undefined,
+            deleteOwnReaction: async () => undefined,
             getChannel: async () => ({
               id: 10n,
               guildId: 1n,
@@ -702,6 +716,8 @@ describe("Discord input", () => {
           id: 999n,
           events: {},
           helpers: {
+            addReaction: async () => undefined,
+            deleteOwnReaction: async () => undefined,
             getChannel: async (channelId: bigint) => {
               switch (channelId) {
                 case 10n:
@@ -945,6 +961,8 @@ describe("Discord input", () => {
           id: 999n,
           events: {},
           helpers: {
+            addReaction: async () => undefined,
+            deleteOwnReaction: async () => undefined,
             getChannel: async (channelId: bigint) => {
               if (channelId === 10n) {
                 return { id: channelId, guildId: 1n, type: ChannelTypes.GuildText };
@@ -1122,6 +1140,8 @@ describe("Discord input", () => {
           id: 999n,
           events: {},
           helpers: {
+            addReaction: async () => undefined,
+            deleteOwnReaction: async () => undefined,
             getChannel: async (channelId: bigint) => {
               if (channelId === 10n) {
                 return { id: channelId, guildId: 1n, type: ChannelTypes.GuildText };
@@ -1284,6 +1304,8 @@ describe("Discord input", () => {
           id: 999n,
           events: {},
           helpers: {
+            addReaction: async () => undefined,
+            deleteOwnReaction: async () => undefined,
             getChannel: async () => ({
               id: 20n,
               guildId: 1n,
@@ -1333,7 +1355,7 @@ describe("Discord input", () => {
               }
               order.push(prompt.text);
               yield* Deferred.succeed(prompt.text === "queued" ? queuedSent : laterSent, undefined);
-            }),
+            }).pipe(Effect.as({ kind: "started", completed: Effect.void })),
           abort: () =>
             Effect.gen(function* () {
               order.push("abort");
@@ -1400,6 +1422,8 @@ describe("Discord input", () => {
           id: 999n,
           events: {},
           helpers: {
+            addReaction: async () => undefined,
+            deleteOwnReaction: async () => undefined,
             getChannel: async (channelId: bigint) => {
               if (channelId === 32n) throw { status: 503, body: secret };
               return {
@@ -1540,6 +1564,8 @@ describe("Discord input", () => {
           id: 999n,
           events: {},
           helpers: {
+            addReaction: async () => undefined,
+            deleteOwnReaction: async () => undefined,
             getChannel: async () => {
               if (firstLookup) {
                 firstLookup = false;
@@ -1580,6 +1606,7 @@ describe("Discord input", () => {
               yield* Deferred.succeed(sendStarted, undefined);
               yield* Deferred.await(releaseSend);
               order.push(prompt.text);
+              return startedDelivery;
             }),
           abort: () => Effect.die("unexpected chat abort"),
           contextUsage: () => Effect.die("unexpected context read"),
@@ -1642,6 +1669,8 @@ describe("Discord input", () => {
           id: 999n,
           events: {},
           helpers: {
+            addReaction: async () => undefined,
+            deleteOwnReaction: async () => undefined,
             getChannel: async () => ({
               id: 20n,
               guildId: 1n,
@@ -1678,6 +1707,7 @@ describe("Discord input", () => {
             Effect.gen(function* () {
               order.push("message");
               yield* Deferred.succeed(messageSent, undefined);
+              return startedDelivery;
             }),
           abort: () => Effect.die("unexpected chat abort"),
           contextUsage: () => Effect.die("unexpected context read"),
@@ -1733,6 +1763,8 @@ describe("Discord input", () => {
           id: 999n,
           events: {},
           helpers: {
+            addReaction: async () => undefined,
+            deleteOwnReaction: async () => undefined,
             getChannel: async () => ({
               id: 20n,
               guildId: 1n,
@@ -1769,6 +1801,7 @@ describe("Discord input", () => {
             Effect.gen(function* () {
               order.push("message");
               yield* Deferred.succeed(messageSent, undefined);
+              return startedDelivery;
             }),
           abort: () => Effect.die("unexpected chat abort"),
           contextUsage: () =>
@@ -1847,6 +1880,8 @@ describe("Discord input", () => {
           id: 999n,
           events: {},
           helpers: {
+            addReaction: async () => undefined,
+            deleteOwnReaction: async () => undefined,
             getChannel: async () => ({
               id: 10n,
               guildId: 1n,
@@ -1954,6 +1989,8 @@ describe("Discord input", () => {
           id: 999n,
           events: {},
           helpers: {
+            addReaction: async () => undefined,
+            deleteOwnReaction: async () => undefined,
             getChannel: async () => ({
               id: 10n,
               guildId: 1n,
@@ -1991,6 +2028,7 @@ describe("Discord input", () => {
             Effect.gen(function* () {
               sent.push(prompt);
               yield* Deferred.succeed(messageSent, undefined);
+              return startedDelivery;
             }),
           abort: () => Effect.die("unexpected chat abort"),
           contextUsage: () => Effect.die("unexpected context read"),
@@ -2038,6 +2076,8 @@ describe("Discord input", () => {
           id: 999n,
           events: {},
           helpers: {
+            addReaction: async () => undefined,
+            deleteOwnReaction: async () => undefined,
             getChannel: async () => ({
               id: 10n,
               guildId: 1n,
@@ -2084,6 +2124,7 @@ describe("Discord input", () => {
               }
               completed.push({ id, text: prompt.text });
               yield* Deferred.succeed(id === chatId ? firstSent : secondSent, undefined);
+              return startedDelivery;
             }),
           abort: () => Effect.die("unexpected chat abort"),
           contextUsage: () => Effect.die("unexpected context read"),
@@ -2154,6 +2195,8 @@ describe("Discord input", () => {
             id: 999n,
             events: {},
             helpers: {
+              addReaction: async () => undefined,
+              deleteOwnReaction: async () => undefined,
               getChannel: async (channelId) =>
                 channelId === 10n
                   ? { id: 10n, guildId: 1n, type: ChannelTypes.GuildText, name: "general" }
@@ -2198,6 +2241,7 @@ describe("Discord input", () => {
                   });
                 }
                 yield* Deferred.succeed(followupSent, undefined);
+                return startedDelivery;
               }),
             abort: () => Effect.die("unexpected chat abort"),
             contextUsage: () =>
@@ -2280,6 +2324,8 @@ describe("Discord input", () => {
           id: 999n,
           events: {},
           helpers: {
+            addReaction: async () => undefined,
+            deleteOwnReaction: async () => undefined,
             getChannel: async () => {
               if (failChannelLookup) throw { status: 403, body: '{"code":50013}' };
               return {
@@ -2495,6 +2541,8 @@ describe("Discord input", () => {
           id: 999n,
           events: {},
           helpers: {
+            addReaction: async () => undefined,
+            deleteOwnReaction: async () => undefined,
             getChannel: async () => {
               throw new Error("unexpected channel lookup");
             },
@@ -2617,6 +2665,8 @@ describe("Discord input", () => {
           id: 999n,
           events: {},
           helpers: {
+            addReaction: async () => undefined,
+            deleteOwnReaction: async () => undefined,
             getChannel: async () => ({
               id: 20n,
               guildId: 1n,
@@ -2744,6 +2794,8 @@ describe("Discord input", () => {
           id: 999n,
           events: {},
           helpers: {
+            addReaction: async () => undefined,
+            deleteOwnReaction: async () => undefined,
             getChannel: async () => ({
               id: 20n,
               guildId: 1n,
