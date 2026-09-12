@@ -48,14 +48,37 @@ const makeRepository = Effect.fn("GitWorktreeTest.makeRepository")(function* () 
   const worktreesDir = AbsolutePath.make(path.join(canonicalDirectory, "worktrees"));
 
   yield* fileSystem.makeDirectory(repositoryCwd);
-  yield* git(repositoryCwd, ["init", "--initial-branch=main"]);
+  yield* git(repositoryCwd, ["init", "--initial-branch=main", "--template="]);
   yield* git(repositoryCwd, ["config", "user.email", "pico@example.invalid"]);
   yield* git(repositoryCwd, ["config", "user.name", "pico"]);
+  yield* git(repositoryCwd, ["config", "commit.gpgsign", "false"]);
+  yield* git(repositoryCwd, ["config", "core.hooksPath", "/dev/null"]);
+  yield* git(repositoryCwd, ["config", "protocol.file.allow", "always"]);
+  yield* git(repositoryCwd, ["config", "push.autoSetupRemote", "false"]);
   yield* fileSystem.writeFileString(path.join(repositoryCwd, "README.md"), "pico\n");
   yield* git(repositoryCwd, ["add", "--", "README.md"]);
   yield* git(repositoryCwd, ["commit", "-m", "initial"]);
 
   return { repositoryCwd, worktreesDir };
+});
+
+const makeRemote = Effect.fn("GitWorktreeTest.makeRemote")(function* (
+  repositoryCwd: AbsolutePath,
+  name: string,
+) {
+  const path = yield* Path.Path;
+  const remoteCwd = AbsolutePath.make(path.join(repositoryCwd, "..", `${name}.git`));
+  yield* git(repositoryCwd, ["init", "--bare", "--initial-branch=main", "--template=", remoteCwd]);
+  yield* git(remoteCwd, ["config", "core.hooksPath", "/dev/null"]);
+  yield* git(remoteCwd, [
+    "-c",
+    "protocol.file.allow=always",
+    "fetch",
+    "--no-tags",
+    repositoryCwd,
+    "refs/heads/main:refs/heads/main",
+  ]);
+  return remoteCwd;
 });
 
 const settings = { branch: "main", prefix: "chat/" };
@@ -274,8 +297,9 @@ describe("GitWorktree.renameChatBranch", () => {
     Effect.gen(function* () {
       const path = yield* Path.Path;
       const { repositoryCwd, worktreesDir } = yield* makeRepository();
-      yield* git(repositoryCwd, ["remote", "add", "origin", repositoryCwd]);
-      yield* git(repositoryCwd, ["fetch", "origin", "main"]);
+      const remoteCwd = yield* makeRemote(repositoryCwd, "origin");
+      yield* git(repositoryCwd, ["remote", "add", "origin", remoteCwd]);
+      yield* git(repositoryCwd, ["fetch", "origin", "refs/heads/main:refs/remotes/origin/main"]);
       yield* git(repositoryCwd, ["config", "branch.autoSetupMerge", "true"]);
       const worktree = yield* make(worktreesDir);
       const id = chatId(33);
@@ -288,6 +312,11 @@ describe("GitWorktree.renameChatBranch", () => {
         },
         () => Effect.void,
       );
+      const remoteRefs = yield* git(remoteCwd, ["show-ref"]);
+      assert.strictEqual(
+        (yield* git(cwd, ["for-each-ref", "--format=%(upstream)", `refs/heads/chat/${id}`])).trim(),
+        "",
+      );
 
       assert.deepStrictEqual(
         yield* worktree.renameChatBranch(renameOptions(id, cwd, "remote-base-topic")),
@@ -297,6 +326,7 @@ describe("GitWorktree.renameChatBranch", () => {
         (yield* git(cwd, ["branch", "--show-current"])).trim(),
         renamedBranch(id, "remote-base-topic"),
       );
+      assert.strictEqual(yield* git(remoteCwd, ["show-ref"]), remoteRefs);
     }).pipe(Effect.provide(BunServices.layer)),
   );
 
@@ -331,42 +361,199 @@ describe("GitWorktree.renameChatBranch", () => {
     }).pipe(Effect.provide(BunServices.layer)),
   );
 
-  it.effect("refuses upstream, push, and remote-tracking state", () =>
+  it.effect("renames with a base upstream and configured unpublished push destination", () =>
     Effect.gen(function* () {
       const path = yield* Path.Path;
+      const { repositoryCwd, worktreesDir } = yield* makeRepository();
+      const remoteCwd = yield* makeRemote(repositoryCwd, "origin");
+      yield* git(repositoryCwd, ["remote", "add", "origin", remoteCwd]);
+      yield* git(repositoryCwd, ["fetch", "origin", "refs/heads/main:refs/remotes/origin/main"]);
+      const worktree = yield* make(worktreesDir);
+      const id = chatId(40);
+      const cwd = AbsolutePath.make(path.join(worktreesDir, id));
+      const source = `chat/${id}`;
+      const target = renamedBranch(id, "unpublished-topic");
+      yield* worktree.create(options(id, repositoryCwd), () => Effect.void);
+      yield* git(cwd, ["branch", "--set-upstream-to=origin/main", source]);
+      yield* git(cwd, ["config", `branch.${source}.pushRemote`, "origin"]);
+      yield* git(cwd, ["config", "push.default", "current"]);
+      const remoteRefs = yield* git(remoteCwd, ["show-ref"]);
 
-      for (const [index, state] of [
-        "upstream",
-        "push",
-        "remote-source",
-        "remote-target",
-      ].entries()) {
-        const { repositoryCwd, worktreesDir } = yield* makeRepository();
-        const worktree = yield* make(worktreesDir);
-        const id = chatId(40 + index);
-        const cwd = AbsolutePath.make(path.join(worktreesDir, id));
-        const source = `chat/${id}`;
-        const target = renamedBranch(id, "known-remote-topic");
-        yield* worktree.create(options(id, repositoryCwd), () => Effect.void);
+      assert.deepStrictEqual(
+        yield* worktree.renameChatBranch(renameOptions(id, cwd, "unpublished-topic")),
+        { kind: "renamed" },
+      );
+      assert.strictEqual((yield* git(cwd, ["branch", "--show-current"])).trim(), target);
+      assert.strictEqual(yield* git(remoteCwd, ["show-ref"]), remoteRefs);
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
 
-        if (state === "upstream") {
-          yield* git(cwd, ["branch", "--set-upstream-to=main", source]);
-        } else if (state === "push") {
-          yield* git(repositoryCwd, ["remote", "add", "origin", repositoryCwd]);
-          yield* git(cwd, ["config", `branch.${source}.pushRemote`, "origin"]);
-          yield* git(cwd, ["config", "push.default", "current"]);
-        } else {
-          const remoteBranch = state === "remote-source" ? source : target;
-          yield* git(repositoryCwd, ["update-ref", `refs/remotes/origin/${remoteBranch}`, "HEAD"]);
-        }
+  it.effect("preserves a published source without any cached remote refs", () =>
+    Effect.gen(function* () {
+      const path = yield* Path.Path;
+      const { repositoryCwd, worktreesDir } = yield* makeRepository();
+      const remoteCwd = yield* makeRemote(repositoryCwd, "publisher");
+      yield* git(repositoryCwd, ["remote", "add", "publisher", remoteCwd]);
+      const worktree = yield* make(worktreesDir);
+      const id = chatId(41);
+      const cwd = AbsolutePath.make(path.join(worktreesDir, id));
+      const source = `chat/${id}`;
+      yield* worktree.create(options(id, repositoryCwd), () => Effect.void);
+      yield* git(cwd, ["push", remoteCwd, `HEAD:refs/heads/${source}`]);
+      yield* git(repositoryCwd, ["update-ref", "-d", `refs/remotes/publisher/${source}`]);
+      assert.strictEqual(yield* git(cwd, ["for-each-ref", "refs/remotes/"]), "");
+      const remoteRefs = yield* git(remoteCwd, ["show-ref"]);
 
-        assert.deepStrictEqual(
-          yield* worktree.renameChatBranch(renameOptions(id, cwd, "known-remote-topic")),
-          { kind: "skipped", reason: "remote-state" },
-          state,
-        );
-        assert.strictEqual((yield* git(cwd, ["branch", "--show-current"])).trim(), source);
-      }
+      assert.deepStrictEqual(
+        yield* worktree.renameChatBranch(renameOptions(id, cwd, "published-topic")),
+        { kind: "skipped", reason: "remote-state" },
+      );
+      assert.strictEqual((yield* git(cwd, ["branch", "--show-current"])).trim(), source);
+      assert.strictEqual(yield* git(remoteCwd, ["show-ref"]), remoteRefs);
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
+
+  it.effect("preserves the source when the generated target exists only on the remote", () =>
+    Effect.gen(function* () {
+      const path = yield* Path.Path;
+      const { repositoryCwd, worktreesDir } = yield* makeRepository();
+      const remoteCwd = yield* makeRemote(repositoryCwd, "origin");
+      yield* git(repositoryCwd, ["remote", "add", "origin", remoteCwd]);
+      const worktree = yield* make(worktreesDir);
+      const id = chatId(42);
+      const cwd = AbsolutePath.make(path.join(worktreesDir, id));
+      const source = `chat/${id}`;
+      const target = renamedBranch(id, "published-target");
+      yield* worktree.create(options(id, repositoryCwd), () => Effect.void);
+      yield* git(cwd, ["push", remoteCwd, `HEAD:refs/heads/${target}`]);
+      yield* git(repositoryCwd, ["update-ref", "-d", `refs/remotes/origin/${target}`]);
+      const remoteRefs = yield* git(remoteCwd, ["show-ref"]);
+
+      assert.deepStrictEqual(
+        yield* worktree.renameChatBranch(renameOptions(id, cwd, "published-target")),
+        { kind: "skipped", reason: "remote-state" },
+      );
+      assert.strictEqual((yield* git(cwd, ["branch", "--show-current"])).trim(), source);
+      assert.strictEqual((yield* git(cwd, ["branch", "--list", target])).trim(), "");
+      assert.strictEqual(yield* git(remoteCwd, ["show-ref"]), remoteRefs);
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
+
+  it.effect("ignores stale cached refs and remote refs that only share a name suffix", () =>
+    Effect.gen(function* () {
+      const path = yield* Path.Path;
+      const { repositoryCwd, worktreesDir } = yield* makeRepository();
+      const remoteCwd = yield* makeRemote(repositoryCwd, "origin");
+      yield* git(repositoryCwd, ["remote", "add", "origin", remoteCwd]);
+      const worktree = yield* make(worktreesDir);
+      const id = chatId(43);
+      const cwd = AbsolutePath.make(path.join(worktreesDir, id));
+      const source = `chat/${id}`;
+      const target = renamedBranch(id, "local-topic");
+      yield* worktree.create(options(id, repositoryCwd), () => Effect.void);
+      yield* git(repositoryCwd, ["update-ref", `refs/remotes/origin/${source}`, "HEAD"]);
+      yield* git(repositoryCwd, ["update-ref", `refs/remotes/origin/${target}`, "HEAD"]);
+      yield* git(remoteCwd, ["update-ref", `refs/heads/archive/refs/heads/${source}`, "HEAD"]);
+      yield* git(remoteCwd, ["update-ref", `refs/tags/refs/heads/${target}`, "HEAD"]);
+      const remoteRefs = yield* git(remoteCwd, ["show-ref"]);
+      const cachedRefs = yield* git(repositoryCwd, ["for-each-ref", "refs/remotes/"]);
+
+      assert.deepStrictEqual(
+        yield* worktree.renameChatBranch(renameOptions(id, cwd, "local-topic")),
+        { kind: "renamed" },
+      );
+      assert.strictEqual((yield* git(cwd, ["branch", "--show-current"])).trim(), target);
+      assert.strictEqual(yield* git(remoteCwd, ["show-ref"]), remoteRefs);
+      assert.strictEqual(yield* git(repositoryCwd, ["for-each-ref", "refs/remotes/"]), cachedRefs);
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
+
+  it.effect("checks the fetch endpoint even when the push URL is different", () =>
+    Effect.gen(function* () {
+      const path = yield* Path.Path;
+      const { repositoryCwd, worktreesDir } = yield* makeRepository();
+      const fetchCwd = yield* makeRemote(repositoryCwd, "fetch");
+      const pushCwd = yield* makeRemote(repositoryCwd, "push");
+      yield* git(repositoryCwd, ["remote", "add", "origin", fetchCwd]);
+      yield* git(repositoryCwd, ["remote", "set-url", "--push", "origin", pushCwd]);
+      const worktree = yield* make(worktreesDir);
+      const id = chatId(44);
+      const cwd = AbsolutePath.make(path.join(worktreesDir, id));
+      const source = `chat/${id}`;
+      yield* worktree.create(options(id, repositoryCwd), () => Effect.void);
+      yield* git(cwd, ["push", fetchCwd, `HEAD:refs/heads/${source}`]);
+      yield* git(repositoryCwd, ["update-ref", "-d", `refs/remotes/origin/${source}`]);
+      const fetchRefs = yield* git(fetchCwd, ["show-ref"]);
+      const pushRefs = yield* git(pushCwd, ["show-ref"]);
+
+      assert.deepStrictEqual(
+        yield* worktree.renameChatBranch(renameOptions(id, cwd, "fetch-published-topic")),
+        { kind: "skipped", reason: "remote-state" },
+      );
+      assert.strictEqual((yield* git(cwd, ["branch", "--show-current"])).trim(), source);
+      assert.strictEqual(yield* git(fetchCwd, ["show-ref"]), fetchRefs);
+      assert.strictEqual(yield* git(pushCwd, ["show-ref"]), pushRefs);
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
+
+  it.effect("checks a second push endpoint when fetch and the first push are unpublished", () =>
+    Effect.gen(function* () {
+      const path = yield* Path.Path;
+      const { repositoryCwd, worktreesDir } = yield* makeRepository();
+      const fetchCwd = yield* makeRemote(repositoryCwd, "fetch");
+      const pushCwd = yield* makeRemote(repositoryCwd, "push");
+      const backupCwd = yield* makeRemote(repositoryCwd, "backup");
+      yield* git(repositoryCwd, ["remote", "add", "origin", fetchCwd]);
+      yield* git(repositoryCwd, ["remote", "set-url", "--add", "--push", "origin", pushCwd]);
+      yield* git(repositoryCwd, ["remote", "set-url", "--add", "--push", "origin", backupCwd]);
+      const worktree = yield* make(worktreesDir);
+      const id = chatId(45);
+      const cwd = AbsolutePath.make(path.join(worktreesDir, id));
+      const source = `chat/${id}`;
+      yield* worktree.create(options(id, repositoryCwd), () => Effect.void);
+      yield* git(cwd, ["push", backupCwd, `HEAD:refs/heads/${source}`]);
+      yield* git(repositoryCwd, ["update-ref", "-d", `refs/remotes/origin/${source}`]);
+      assert.strictEqual(yield* git(cwd, ["for-each-ref", "refs/remotes/"]), "");
+      const fetchRefs = yield* git(fetchCwd, ["show-ref"]);
+      const pushRefs = yield* git(pushCwd, ["show-ref"]);
+      const backupRefs = yield* git(backupCwd, ["show-ref"]);
+
+      assert.deepStrictEqual(
+        yield* worktree.renameChatBranch(renameOptions(id, cwd, "backup-published-topic")),
+        { kind: "skipped", reason: "remote-state" },
+      );
+      assert.strictEqual((yield* git(cwd, ["branch", "--show-current"])).trim(), source);
+      assert.strictEqual(yield* git(fetchCwd, ["show-ref"]), fetchRefs);
+      assert.strictEqual(yield* git(pushCwd, ["show-ref"]), pushRefs);
+      assert.strictEqual(yield* git(backupCwd, ["show-ref"]), backupRefs);
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
+
+  it.effect("returns GitError and keeps HEAD when a configured endpoint is inaccessible", () =>
+    Effect.gen(function* () {
+      const path = yield* Path.Path;
+      const { repositoryCwd, worktreesDir } = yield* makeRepository();
+      const remoteCwd = yield* makeRemote(repositoryCwd, "origin");
+      const missingCwd = path.join(repositoryCwd, "..", "missing.git");
+      yield* git(repositoryCwd, ["remote", "add", "origin", remoteCwd]);
+      yield* git(repositoryCwd, ["remote", "add", "unavailable", missingCwd]);
+      const worktree = yield* make(worktreesDir);
+      const id = chatId(46);
+      const cwd = AbsolutePath.make(path.join(worktreesDir, id));
+      const source = `chat/${id}`;
+      yield* worktree.create(options(id, repositoryCwd), () => Effect.void);
+      const head = yield* git(cwd, ["rev-parse", "HEAD"]);
+      const remoteRefs = yield* git(remoteCwd, ["show-ref"]);
+
+      assert.instanceOf(
+        yield* worktree
+          .renameChatBranch(renameOptions(id, cwd, "inaccessible-topic"))
+          .pipe(Effect.flip),
+        GitError,
+      );
+      assert.strictEqual((yield* git(cwd, ["branch", "--show-current"])).trim(), source);
+      assert.strictEqual(yield* git(cwd, ["rev-parse", "HEAD"]), head);
+      assert.strictEqual(yield* git(remoteCwd, ["show-ref"]), remoteRefs);
     }).pipe(Effect.provide(BunServices.layer)),
   );
 
