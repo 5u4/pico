@@ -327,6 +327,12 @@ const recoverReplacement = Effect.fn("Schedules.recoverReplacement")(function* (
     "replacement destination",
   );
   const otherExists = yield* inspectDirectory(storage, other, "replacement destination");
+  if (destinationExists && otherExists) {
+    return yield* new Schedule.ScheduleError({
+      kind: "corrupt",
+      message: "Schedule replacement exists in both enabled and disabled directories",
+    });
+  }
   const previousExists = yield* inspectDirectory(storage, previous, "retained schedule definition");
   if (!destinationExists && !otherExists) {
     if (!previousExists) {
@@ -494,8 +500,10 @@ const inspectSource = Effect.fn("Schedules.inspectSource")(function* (
         asset,
         `Source asset ${relative}`,
       ).pipe(
-        Effect.mapError(() =>
-          invalid(`Cannot read source asset ${relative}; symbolic links are not supported`),
+        Effect.mapError((error) =>
+          error.kind === "corrupt"
+            ? invalid(`Cannot read source asset ${relative}; symbolic links are not supported`)
+            : error,
         ),
       );
       const info = yield* storage.fileSystem
@@ -527,9 +535,11 @@ const inspectSource = Effect.fn("Schedules.inspectSource")(function* (
             .exists(copied)
             .pipe(mapIo(`Failed to inspect source asset destination ${relative}`));
           if (exists) return yield* io(`Source asset destination already exists: ${relative}`);
-          yield* storage.fileSystem
-            .copyFile(asset, copied)
-            .pipe(mapIo(`Failed to copy source asset ${relative}`));
+          yield* storage.fileSystem.copyFile(asset, copied).pipe(
+            mapIo(`Failed to copy source asset ${relative}`),
+            // Interrupting the callback cannot cancel the native copy racing staging cleanup.
+            Effect.uninterruptible,
+          );
           yield* storage.fileSystem
             .chmod(copied, 0o600)
             .pipe(mapIo(`Failed to set source asset permissions ${relative}`));
@@ -863,6 +873,7 @@ export const publishRun = Effect.fn("Schedules.publishRun")(function* (
   definition: Schedule.ScheduleDefinition,
   sourceDirectory: string,
   transactionId: string,
+  onPublished: Effect.Effect<void>,
 ) {
   const value = roots(storage);
   return yield* Effect.acquireUseRelease(
@@ -902,7 +913,11 @@ export const publishRun = Effect.fn("Schedules.publishRun")(function* (
         yield* ensureDirectPath(storage, parent, "run schedule directory");
         yield* storage.fileSystem
           .rename(stage, storage.path.join(parent, run.id))
-          .pipe(mapIo("Failed to publish schedule run claim"));
+          .pipe(
+            mapIo("Failed to publish schedule run claim"),
+            Effect.andThen(onPublished),
+            Effect.uninterruptible,
+          );
         return execution;
       }),
     (stage) =>

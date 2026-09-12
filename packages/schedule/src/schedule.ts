@@ -649,6 +649,7 @@ const capture = Effect.fn("Schedules.capture")(function* (
   const claim = Effect.fn("Schedules.claim")(function* (
     view: Schedule.ReadyScheduleView,
     source: Schedule.ScheduleRunSource,
+    owned: Set<Schedule.ScheduleRunLifecycle>,
   ) {
     const id = Schedule.ScheduleRunId.make(
       `scheduled-${source.scheduledFor}-${view.definition.revision}`,
@@ -685,6 +686,7 @@ const capture = Effect.fn("Schedules.capture")(function* (
       view.definition,
       view.sourceDirectory,
       yield* transactionId(),
+      Effect.sync(() => void owned.add(run)),
     );
     yield* Effect.logInfo("Scheduled run claimed").pipe(
       Effect.annotateLogs({ ...runAnnotations(run), operation: "claim", phase: "claimed" }),
@@ -774,11 +776,8 @@ const capture = Effect.fn("Schedules.capture")(function* (
               if (currentRuns.some((run) => run.source.scheduledFor === scheduledFor)) continue;
             }
 
-            const claimed = yield* Effect.uninterruptible(
-              claim(view, { kind: "scheduled", scheduledFor }).pipe(
-                Effect.tap(({ run }) => Effect.sync(() => owned.add(run))),
-                Effect.result,
-              ),
+            const claimed = yield* claim(view, { kind: "scheduled", scheduledFor }, owned).pipe(
+              Effect.result,
             );
             if (Result.isFailure(claimed)) {
               invalid.add(view.id);

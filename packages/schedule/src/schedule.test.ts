@@ -8,9 +8,11 @@ import * as Chat from "@pico/contract/chat-model";
 import { AbsolutePath } from "@pico/contract/path";
 import * as Schedule from "@pico/contract/schedule";
 import * as Workspace from "@pico/contract/workspace-model";
+import * as Cause from "effect/Cause";
 import * as Crypto from "effect/Crypto";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -886,6 +888,49 @@ describe("Schedules", () => {
     }).pipe(Effect.provide(platformLayer), Effect.scoped),
   );
 
+  it.effect("preserves source resolution io failures while rejecting actual symbolic links", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-source-realpath-" });
+      const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
+      const sourceDirectory = yield* prepareSource({ "prompt.md": "Readable prompt." });
+      const prompt = path.join(sourceDirectory, "prompt.md");
+      let failResolution = true;
+      const failingFileSystem = FileSystem.FileSystem.of({
+        ...fileSystem,
+        realPath: (file) =>
+          failResolution && file === prompt
+            ? Effect.fail(permissionDenied("realPath", file))
+            : fileSystem.realPath(file),
+      });
+      const schedules = yield* open(schedulesDir).pipe(
+        Effect.provideService(FileSystem.FileSystem, failingFileSystem),
+      );
+      const input: Schedule.CreateSchedule = {
+        name: "source resolution",
+        enabled: false,
+        target: { kind: "current-chat" },
+        trigger: { kind: "once", at: 1_000 },
+        sourceDirectory,
+      };
+      const ioFailure = yield* schedules.create(caller, input).pipe(Effect.flip);
+      assert.strictEqual(ioFailure.kind, "io");
+      failResolution = false;
+      const outside = path.join(root, "outside.md");
+      yield* fileSystem.rename(prompt, outside);
+      yield* fileSystem.symlink(outside, prompt);
+      const invalidLink = yield* schedules.create(caller, input).pipe(Effect.flip);
+      assert.strictEqual(invalidLink.kind, "invalid");
+      assert.strictEqual(yield* fileSystem.readFileString(outside), "Readable prompt.");
+      assert.deepStrictEqual(yield* schedules.list(caller), []);
+      assert.deepStrictEqual(
+        yield* fileSystem.readDirectory(path.join(schedulesDir, ".staging")),
+        [],
+      );
+    }).pipe(Effect.provide(platformLayer), Effect.scoped),
+  );
+
   it.effect("isolates unreadable source captures and retries them after repair", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
@@ -1183,6 +1228,7 @@ describe("Schedules", () => {
         definition,
         yield* prepareSource({ "prompt.md": "identity" }),
         "018f47a0-0000-7000-8000-000000000006",
+        Effect.void,
       );
       assert.deepStrictEqual(yield* readRuns(storage), [run]);
 
@@ -1854,6 +1900,7 @@ describe("Schedules", () => {
         created.definition,
         yield* prepareSource({ "prompt.md": "valid", "Meta.json": "{}" }),
         "case-check",
+        Effect.void,
       ).pipe(Effect.flip);
       assert.strictEqual(error.kind, "invalid");
       assert.deepStrictEqual(yield* readRuns(storage), []);
@@ -2779,6 +2826,56 @@ describe("Schedules", () => {
     }).pipe(Effect.provide(platformLayer), Effect.scoped),
   );
 
+  it.effect(
+    "retains the whole legacy replacement transaction when both canonical states exist",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "pico-replace-conflict-",
+        });
+        const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
+        const schedules = yield* open(schedulesDir);
+        const created = yield* schedules.create(caller, {
+          name: "conflicted replacement",
+          enabled: true,
+          target: { kind: "current-chat" },
+          trigger: { kind: "once", at: 10_000 },
+          sourceDirectory: yield* prepareSource({ "prompt.md": "Enabled source." }),
+        });
+        if (created.kind !== "ready") return yield* Effect.die("Created schedule is invalid");
+        const disabled = path.join(schedulesDir, "disabled", created.id);
+        const transaction = path.join(schedulesDir, ".staging", "replace-conflicted");
+        const previous = path.join(transaction, "previous");
+        const next = path.join(transaction, "next");
+        for (const directory of [disabled, previous, next]) {
+          yield* fileSystem.makeDirectory(directory, { recursive: true });
+        }
+        const journal = JSON.stringify({ kind: "replace", id: created.id, state: "enabled" });
+        const retained = {
+          [path.join(created.sourceDirectory, "prompt.md")]: "Enabled source.",
+          [path.join(disabled, "prompt.md")]: "Disabled source.",
+          [path.join(previous, "prompt.md")]: "Only retained source.",
+          [path.join(next, "prompt.md")]: "Uncommitted source.",
+          [path.join(transaction, "transaction.json")]: journal,
+        };
+        for (const [file, content] of Object.entries(retained)) {
+          yield* fileSystem.writeFileString(file, content);
+        }
+        const error = yield* open(schedulesDir).pipe(Effect.flip);
+        assert.strictEqual(error.kind, "corrupt");
+        for (const [file, content] of Object.entries(retained)) {
+          assert.strictEqual(yield* fileSystem.readFileString(file), content);
+        }
+        assert.deepStrictEqual((yield* fileSystem.readDirectory(transaction)).sort(), [
+          "next",
+          "previous",
+          "transaction.json",
+        ]);
+      }).pipe(Effect.provide(platformLayer), Effect.scoped),
+  );
+
   it.effect("retains replacement data when its recovery journal is missing or corrupt", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
@@ -2843,6 +2940,7 @@ describe("Schedules", () => {
         definition,
         yield* prepareSource({ "prompt.md": "append" }),
         "018f47a0-0000-7000-8000-000000000050",
+        Effect.void,
       );
       const original = `${JSON.stringify({ type: "run-started" })}\n`;
       yield* writeArtifactString(storage, run, "omp/events.jsonl", original);
@@ -3126,9 +3224,14 @@ describe("Schedules", () => {
       };
       const runTransaction = path.join(staging, "run-preexisting");
       yield* fileSystem.symlink(outside, runTransaction);
-      const runError = yield* publishRun(storage, run, definition, source, "preexisting").pipe(
-        Effect.flip,
-      );
+      const runError = yield* publishRun(
+        storage,
+        run,
+        definition,
+        source,
+        "preexisting",
+        Effect.void,
+      ).pipe(Effect.flip);
       assert.strictEqual(runError.kind, "corrupt");
       assert.deepStrictEqual(yield* fileSystem.readDirectory(outside), ["sentinel"]);
       assert.isFalse(yield* fileSystem.exists(runDirectory(storage, id, run.id)));
@@ -3154,6 +3257,7 @@ describe("Schedules", () => {
         definition,
         source,
         inputTransactionId,
+        Effect.void,
       ).pipe(Effect.flip);
       assert.strictEqual(inputError.kind, "corrupt");
       assert.deepStrictEqual(yield* fileSystem.readDirectory(outside), ["sentinel"]);
@@ -3163,6 +3267,186 @@ describe("Schedules", () => {
       if (canonical?.view.kind === "ready") {
         assert.strictEqual(canonical.view.definition.revision, definition.revision);
       }
+    }).pipe(Effect.provide(platformLayer), Effect.scoped),
+  );
+
+  for (const phase of ["definition", "run"]) {
+    it.effect(`interrupts ${phase} capture between copies after the active callback settles`, () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "pico-capture-shutdown-",
+        });
+        const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
+        const copyStarted = yield* Deferred.make<{
+          readonly from: string;
+          readonly to: string;
+          readonly resume: (effect: Effect.Effect<void, PlatformError.PlatformError>) => void;
+        }>();
+        const events: Array<string> = [];
+        const copies: Array<string> = [];
+        let capturing = false;
+        const gatedFileSystem = FileSystem.FileSystem.of({
+          ...fileSystem,
+          copyFile: (from, to) =>
+            Effect.suspend(() => {
+              if (!capturing) return fileSystem.copyFile(from, to);
+              copies.push(from);
+              if (copies.length !== 1) return fileSystem.copyFile(from, to);
+              return Effect.callback<void, PlatformError.PlatformError>((resume) => {
+                events.push("copy-started");
+                Deferred.doneUnsafe(copyStarted, Effect.succeed({ from, to, resume }));
+              });
+            }),
+          remove: (file, options) =>
+            Effect.suspend(() => {
+              if (capturing && path.dirname(file) === path.join(schedulesDir, ".staging")) {
+                events.push("staging-removed");
+              }
+              return fileSystem.remove(file, options);
+            }),
+        });
+        const schedules = yield* open(schedulesDir).pipe(
+          Effect.provideService(FileSystem.FileSystem, gatedFileSystem),
+        );
+        const sourceDirectory = yield* prepareSource({
+          "prompt.md": "Do not execute.",
+          "first.bin": new Uint8Array([0, 255, 128]),
+          "last.bin": new Uint8Array([7, 8, 9]),
+        });
+        const input: Schedule.CreateSchedule = {
+          name: "interrupted capture",
+          enabled: true,
+          target: { kind: "current-chat" },
+          trigger: { kind: "once", at: 1_000 },
+          sourceDirectory,
+        };
+        if (phase === "run") yield* schedules.create(caller, input);
+        let prepared = 0;
+        let prompts = 0;
+        const host: Schedule.ScheduleRunHost = {
+          prepare: () =>
+            Effect.sync(() => {
+              prepared++;
+              return { chatId, workspaceId, cwd: AbsolutePath.make(root) };
+            }),
+          deliver: () => Effect.void,
+          publish: () => Effect.void,
+          runPrompt: (_chatId, runId) =>
+            Effect.sync(() => {
+              prompts++;
+              return { runId, outcome: "completed", events: [], finalAssistantText: "unexpected" };
+            }),
+        };
+        yield* TestClock.setTime(1_000);
+        capturing = true;
+        const operation = yield* (
+          phase === "definition"
+            ? schedules.create(caller, input).pipe(Effect.asVoid)
+            : schedules.start(host)
+        ).pipe(Effect.scoped, Effect.forkChild);
+        const active = yield* Deferred.await(copyStarted);
+        const shutdown = yield* Fiber.interrupt(operation).pipe(
+          Effect.forkChild({ startImmediately: true }),
+        );
+        const copied = yield* fileSystem.copyFile(active.from, active.to).pipe(Effect.exit);
+        events.push("copy-settled");
+        active.resume(copied);
+        yield* Fiber.join(shutdown);
+        const stopped = yield* Fiber.await(operation);
+        assert.isTrue(Exit.isFailure(stopped) && Cause.hasInterruptsOnly(stopped.cause));
+        assert.deepStrictEqual(events, ["copy-started", "copy-settled", "staging-removed"]);
+        assert.isTrue(Exit.isSuccess(copied));
+        assert.strictEqual(copies.length, 1);
+        assert.strictEqual(prepared, 0);
+        assert.strictEqual(prompts, 0);
+        assert.deepStrictEqual(
+          yield* fileSystem.readDirectory(path.join(schedulesDir, ".staging")),
+          [],
+        );
+        assert.deepStrictEqual(
+          yield* fileSystem.readDirectory(path.join(schedulesDir, "runs")),
+          [],
+        );
+        if (phase === "definition") {
+          assert.deepStrictEqual(yield* schedules.list(caller), []);
+        }
+        assert.strictEqual(
+          yield* fileSystem.readFileString(path.join(sourceDirectory, "prompt.md")),
+          "Do not execute.",
+        );
+      }).pipe(Effect.provide(platformLayer), Effect.scoped),
+    );
+  }
+
+  it.effect("owns a run published while interruption is pending at the rename callback", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-claim-handoff-" });
+      const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
+      const publishing = yield* Deferred.make<{
+        readonly from: string;
+        readonly to: string;
+        readonly resume: (effect: Effect.Effect<void, PlatformError.PlatformError>) => void;
+      }>();
+      const gatedFileSystem = FileSystem.FileSystem.of({
+        ...fileSystem,
+        rename: (from, to) =>
+          path.dirname(from) === path.join(schedulesDir, ".staging") &&
+          path.basename(from).startsWith("run-")
+            ? Effect.callback<void, PlatformError.PlatformError>((resume) => {
+                Deferred.doneUnsafe(publishing, Effect.succeed({ from, to, resume }));
+              })
+            : fileSystem.rename(from, to),
+      });
+      const schedules = yield* open(schedulesDir).pipe(
+        Effect.provideService(FileSystem.FileSystem, gatedFileSystem),
+      );
+      yield* schedules.create(caller, {
+        name: "publication handoff",
+        enabled: true,
+        target: { kind: "current-chat" },
+        trigger: { kind: "once", at: 1_000 },
+        sourceDirectory: yield* prepareSource({ "prompt.md": "Do not execute." }),
+      });
+      let prompts = 0;
+      yield* TestClock.setTime(1_000);
+      const operation = yield* schedules
+        .start({
+          prepare: () => Effect.succeed({ chatId, workspaceId, cwd: AbsolutePath.make(root) }),
+          deliver: () => Effect.void,
+          publish: () => Effect.void,
+          runPrompt: (_chatId, runId) =>
+            Effect.sync(() => {
+              prompts++;
+              return { runId, outcome: "completed", events: [], finalAssistantText: "unexpected" };
+            }),
+        })
+        .pipe(Effect.scoped, Effect.forkChild);
+      const active = yield* Deferred.await(publishing);
+      const shutdown = yield* Fiber.interrupt(operation).pipe(
+        Effect.forkChild({ startImmediately: true }),
+      );
+      const renamed = yield* fileSystem.rename(active.from, active.to).pipe(Effect.exit);
+      active.resume(renamed);
+      yield* Fiber.join(shutdown);
+      assert.isTrue(Exit.isSuccess(renamed));
+      const stopped = yield* Fiber.await(operation);
+      assert.isTrue(Exit.isFailure(stopped) && Cause.hasInterruptsOnly(stopped.cause));
+      const run = yield* decodeRun(
+        yield* fileSystem.readFileString(path.join(active.to, "run.json")),
+      );
+      assert.deepStrictEqual(run.state.kind === "finished" && run.state.outcome, {
+        kind: "interrupted",
+        phase: "schedule-cycle",
+      });
+      assert.strictEqual(prompts, 0);
+      assert.deepStrictEqual(
+        yield* fileSystem.readDirectory(path.join(schedulesDir, ".staging")),
+        [],
+      );
     }).pipe(Effect.provide(platformLayer), Effect.scoped),
   );
 

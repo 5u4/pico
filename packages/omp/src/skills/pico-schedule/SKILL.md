@@ -29,6 +29,8 @@ Creation copies the complete supported source tree into Pico's managed directory
 
 Creation and run capture copy files sequentially into private staging before publishing the complete snapshot. Helpers and assets do not accumulate in a whole-tree memory buffer. Entrypoints still require memory for text validation, and the agent receives the complete prompt.
 
+Interrupting creation or run capture during copying waits for the active file copy to settle before removing staging. Pico does not start another copy, but one large file can still delay shutdown.
+
 ## Edit or pause a schedule
 
 Read the schedule with `schedule_get`. The result contains the current `sourceDirectory`, not source text. Edit files in that directory with ordinary filesystem tools. Future immutable run snapshots include the edited entrypoints, helpers, assets, and directories. Existing snapshots do not change.
