@@ -56,10 +56,13 @@ const runGitResult = Effect.fn("GitWorktree.runGitResult")(function* (
   repositoryCwd: AbsolutePath,
   action: string,
   args: ReadonlyArray<string>,
+  options?: ChildProcess.CommandOptions,
 ): Effect.fn.Return<GitResult, GitError> {
   return yield* Effect.scoped(
     Effect.gen(function* () {
-      const handle = yield* spawner.spawn(ChildProcess.make("git", args, { cwd: repositoryCwd }));
+      const handle = yield* spawner.spawn(
+        ChildProcess.make("git", args, { ...options, cwd: repositoryCwd }),
+      );
       return yield* Effect.all(
         {
           output: handle.stdout.pipe(
@@ -265,34 +268,72 @@ const localBranchExists = Effect.fn("GitWorktree.localBranchExists")(function* (
   return yield* gitError("inspect local branch");
 });
 
-const hasRemoteState = Effect.fn("GitWorktree.hasRemoteState")(function* (
-  spawner: Spawner,
-  cwd: AbsolutePath,
-  source: string,
-  target: string,
-) {
-  const configured = yield* runGitResult(spawner, cwd, "inspect branch remote configuration", [
-    "for-each-ref",
-    "--format=%(upstream)%00%(push)",
-    `refs/heads/${source}`,
-  ]);
-  if (configured.exitCode !== 0) return yield* gitError("inspect branch remote configuration");
-  if (configured.output.replaceAll("\0", "").trim().length > 0) return true;
+const remoteCommandOptions: ChildProcess.CommandOptions = {
+  env: { GIT_TERMINAL_PROMPT: "0" },
+  extendEnv: true,
+  stdin: "ignore",
+  killSignal: "SIGKILL",
+};
 
-  const remoteRefs = yield* runGitResult(spawner, cwd, "inspect remote-tracking branches", [
-    "for-each-ref",
-    "--format=%(refname)",
-    "refs/remotes",
-  ]);
-  if (remoteRefs.exitCode !== 0) return yield* gitError("inspect remote-tracking branches");
-  return remoteRefs.output
-    .split("\n")
-    .some(
-      (ref) =>
-        ref.startsWith("refs/remotes/") &&
-        (ref.endsWith(`/${source}`) || ref.endsWith(`/${target}`)),
+const hasRemoteState = Effect.fn("GitWorktree.hasRemoteState")(
+  function* (spawner: Spawner, cwd: AbsolutePath, source: string, target: string) {
+    const remotes = yield* runGitResult(
+      spawner,
+      cwd,
+      "inspect remotes",
+      ["remote"],
+      remoteCommandOptions,
     );
-});
+    if (remotes.exitCode !== 0) return yield* gitError("inspect remotes");
+
+    const endpoints = new Set<string>();
+    for (const remote of remotes.output.trim().split("\n")) {
+      if (remote.length === 0) continue;
+      for (const args of [
+        ["remote", "get-url", "--all", "--", remote],
+        ["remote", "get-url", "--push", "--all", "--", remote],
+      ]) {
+        const urls = yield* runGitResult(
+          spawner,
+          cwd,
+          "inspect remote endpoints",
+          args,
+          remoteCommandOptions,
+        );
+        if (urls.exitCode !== 0) return yield* gitError("inspect remote endpoints");
+        for (const url of urls.output.replace(/\n$/, "").split("\n")) {
+          if (url.length === 0) return yield* gitError("inspect remote endpoints");
+          endpoints.add(url);
+        }
+      }
+    }
+
+    const sourceRef = `refs/heads/${source}`;
+    const targetRef = `refs/heads/${target}`;
+    for (const endpoint of endpoints) {
+      const result = yield* runGitResult(
+        spawner,
+        cwd,
+        "inspect remote branches",
+        ["ls-remote", "--quiet", "--refs", "--exit-code", "--", endpoint, sourceRef, targetRef],
+        remoteCommandOptions,
+      );
+      if (result.exitCode === 2) continue;
+      if (result.exitCode !== 0) return yield* gitError("inspect remote branches");
+      for (const line of result.output.split("\n")) {
+        const separator = line.indexOf("\t");
+        if (separator === -1) continue;
+        const ref = line.slice(separator + 1);
+        if (ref === sourceRef || ref === targetRef) return true;
+      }
+    }
+    return false;
+  },
+  Effect.timeoutOrElse({
+    duration: "10 seconds",
+    orElse: () => Effect.fail(gitError("inspect remote branches")),
+  }),
+);
 
 const renameChatBranch = Effect.fn("GitWorktree.renameChatBranch")(function* (
   fileSystem: FileSystem.FileSystem,
@@ -327,7 +368,12 @@ const renameChatBranch = Effect.fn("GitWorktree.renameChatBranch")(function* (
   if (yield* hasRemoteState(spawner, options.cwd, source, target)) {
     return { kind: "skipped", reason: "remote-state" };
   }
-  if (yield* localBranchExists(spawner, options.cwd, target)) {
+  const targetExists = yield* localBranchExists(spawner, options.cwd, target);
+  const currentHead = yield* symbolicHead(spawner, options.cwd);
+  if (currentHead.kind === "detached") return { kind: "skipped", reason: "detached" };
+  if (currentHead.branch === target) return { kind: "already-renamed" };
+  if (currentHead.branch !== source) return { kind: "skipped", reason: "branch-changed" };
+  if (targetExists) {
     return { kind: "skipped", reason: "target-exists" };
   }
 
@@ -344,10 +390,11 @@ const renameChatBranch = Effect.fn("GitWorktree.renameChatBranch")(function* (
   }
 
   const afterFailure = yield* symbolicHead(spawner, options.cwd);
-  if (afterFailure.kind === "branch" && afterFailure.branch === target) {
+  if (afterFailure.kind === "detached") return { kind: "skipped", reason: "detached" };
+  if (afterFailure.branch === target) {
     return { kind: "already-renamed" };
   }
-  if (afterFailure.kind === "branch" && afterFailure.branch !== source) {
+  if (afterFailure.branch !== source) {
     return { kind: "skipped", reason: "branch-changed" };
   }
   return yield* gitError("rename worktree branch");
@@ -410,6 +457,7 @@ const acquire = Effect.fn("GitWorktree.create.acquire")(function* (
   yield* runGit(spawner, worktree.repositoryCwd, "create worktree", [
     "worktree",
     "add",
+    "--no-track",
     "-b",
     worktree.branch,
     "--",
