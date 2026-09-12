@@ -36,6 +36,11 @@ interface PersistedAttachment {
   readonly path: string;
 }
 
+interface OriginalOwnership {
+  pending: number;
+  retained: boolean;
+}
+
 const extensionFor = (mimeType: AgentMessage.AgentImageMimeType) => {
   switch (mimeType) {
     case "image/png":
@@ -143,13 +148,22 @@ const validatePrompt = Schema.decodeUnknownSync(AgentMessage.AgentPrompt, {
 
 const serialize = () => {
   let tail = Promise.resolve();
-  return <A>(operation: () => Promise<A>) => {
-    const result = tail.then(operation);
-    tail = result.then(
-      () => undefined,
-      () => undefined,
-    );
-    return result;
+  return {
+    run: <A>(operation: () => Promise<A>) => {
+      const result = tail.then(operation);
+      tail = result.then(
+        () => undefined,
+        () => undefined,
+      );
+      return result;
+    },
+    settle: async () => {
+      let pending: Promise<void>;
+      do {
+        pending = tail;
+        await pending;
+      } while (pending !== tail);
+    },
   };
 };
 
@@ -159,15 +173,36 @@ export const makeOmpPromptSender = (
   path: Path.Path,
   crypto: Crypto.Crypto,
   diagnostics: PromptDiagnostics,
-): OmpPromptSender => {
-  const runSerialized = serialize();
-  return (input, onStarted) =>
+): OmpPromptSender & { readonly settle: () => Promise<void> } => {
+  const { run: runSerialized, settle } = serialize();
+  const originalOwners = new Map<string, OriginalOwnership>();
+  const sendPrompt: OmpPromptSender = (input, onStarted) =>
     runSerialized(() => {
       const admission = Promise.withResolvers<MessageDelivery>();
       const completion = Deferred.makeUnsafe<void, AgentError>();
       const consumption = Deferred.makeUnsafe<"consumed" | "discarded">();
       let accepted = false;
       let settled = false;
+      let deliveryOutcome: "pending" | "consumed" | "discarded" = "pending";
+      let discardOriginals: (() => Promise<void>) | undefined;
+      let promptOriginals: Map<string, OriginalOwnership> | undefined;
+      const releaseOriginals = (consumed: boolean) => {
+        if (promptOriginals === undefined) return;
+        let removable: string[] | undefined;
+        for (const [file, owner] of promptOriginals) {
+          owner.retained ||= consumed;
+          owner.pending--;
+          if (owner.pending === 0) {
+            originalOwners.delete(file);
+            if (!owner.retained) {
+              removable ??= [];
+              removable.push(file);
+            }
+          }
+        }
+        promptOriginals = undefined;
+        return removable;
+      };
       const deliveryObserver: PromptDeliveryObserver = {
         onAccepted: (kind) => {
           if (accepted || settled) return;
@@ -184,10 +219,22 @@ export const makeOmpPromptSender = (
           );
         },
         onConsumed: () => {
+          if (deliveryOutcome !== "pending") return;
+          deliveryOutcome = "consumed";
+          releaseOriginals(true);
           Deferred.doneUnsafe(consumption, Effect.succeed("consumed"));
         },
         onDiscarded: () => {
-          Deferred.doneUnsafe(consumption, Effect.succeed("discarded"));
+          if (deliveryOutcome !== "pending") return;
+          deliveryOutcome = "discarded";
+          const finish = () => {
+            Deferred.doneUnsafe(consumption, Effect.succeed("discarded"));
+          };
+          if (accepted && discardOriginals) {
+            void runSerialized(discardOriginals).then(finish, finish);
+          } else {
+            finish();
+          }
         },
       };
       const submit = async () => {
@@ -224,8 +271,35 @@ export const makeOmpPromptSender = (
         let createdSessionDirectory = false;
         let createdAttachmentsDirectory = false;
 
-        const written: string[] = [];
         const originals: PersistedAttachment[] = [];
+        discardOriginals = async () => {
+          try {
+            await removeWrittenOriginals(
+              fileSystem,
+              releaseOriginals(false) ?? [],
+              attachmentsDirectory,
+              sessionDirectory,
+              !accepted && createdAttachmentsDirectory,
+              !accepted && createdSessionDirectory,
+            );
+          } catch {
+            try {
+              await diagnostics.runEffect(
+                Effect.logError(
+                  "Failed to remove image originals after prompt rejection",
+                  Cause.fail(new AgentError({ message: "Image rollback failed" })),
+                ).pipe(
+                  Effect.annotateLogs({
+                    component: "omp",
+                    operation: "image-cleanup",
+                    chatId: diagnostics.chatId,
+                    phase: "prompt-rollback",
+                  }),
+                ),
+              );
+            } catch {}
+          }
+        };
         try {
           createdSessionDirectory = !(await Effect.runPromise(fileSystem.exists(sessionDirectory)));
           await Effect.runPromise(
@@ -256,7 +330,16 @@ export const makeOmpPromptSender = (
                 ),
               ),
             );
-            if (created) written.push(file);
+            if (!promptOriginals?.has(file)) {
+              let owner = originalOwners.get(file);
+              if (owner === undefined) {
+                owner = { pending: 0, retained: !created };
+                originalOwners.set(file, owner);
+              }
+              owner.pending++;
+              promptOriginals ??= new Map();
+              promptOriginals.set(file, owner);
+            }
             originals.push({ attachment, path: file });
           }
 
@@ -273,30 +356,8 @@ export const makeOmpPromptSender = (
           if (!accepted) throw new AgentError({ message: "OMP image prompt was not admitted" });
         } catch (error) {
           if (accepted) throw error;
-          try {
-            await removeWrittenOriginals(
-              fileSystem,
-              written,
-              attachmentsDirectory,
-              sessionDirectory,
-              createdAttachmentsDirectory,
-              createdSessionDirectory,
-            );
-          } catch {
-            await diagnostics.runEffect(
-              Effect.logError(
-                "Failed to remove image originals after prompt rejection",
-                Cause.fail(new AgentError({ message: "Image rollback failed" })),
-              ).pipe(
-                Effect.annotateLogs({
-                  component: "omp",
-                  operation: "image-cleanup",
-                  chatId: diagnostics.chatId,
-                  phase: "prompt-rollback",
-                }),
-              ),
-            );
-          }
+          deliveryOutcome = "discarded";
+          await discardOriginals();
           throw error;
         }
       };
@@ -315,6 +376,7 @@ export const makeOmpPromptSender = (
               : Effect.fail(error),
           );
           if (!accepted) {
+            deliveryOutcome = "discarded";
             Deferred.doneUnsafe(consumption, Effect.succeed("discarded"));
             admission.reject(cause);
           }
@@ -322,4 +384,5 @@ export const makeOmpPromptSender = (
       );
       return admission.promise;
     });
+  return Object.assign(sendPrompt, { settle });
 };

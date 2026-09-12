@@ -1,12 +1,23 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, extname, join } from "node:path";
+import * as BunCrypto from "@effect/platform-bun/BunCrypto";
+import * as BunFileSystem from "@effect/platform-bun/BunFileSystem";
+import * as BunPath from "@effect/platform-bun/BunPath";
 import type { StreamFn } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Context, ImageContent } from "@oh-my-pi/pi-ai";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import type { ExtensionFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { PromptDeliveryObserver } from "@oh-my-pi/pi-coding-agent/session/agent-session-types";
+import * as Chat from "@pico/contract/chat-model";
+import { AgentError } from "@pico/contract/errors";
+import * as Crypto from "effect/Crypto";
+import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Layer from "effect/Layer";
+import * as Path from "effect/Path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 const importNative = async () => {
@@ -22,6 +33,7 @@ const importNative = async () => {
     extensions,
     loaders,
     events,
+    sender,
   ] = await Promise.all([
     import("@oh-my-pi/pi-agent-core"),
     import("@oh-my-pi/pi-ai"),
@@ -34,6 +46,7 @@ const importNative = async () => {
     import("@oh-my-pi/pi-coding-agent/extensibility/extensions/runner"),
     import("@oh-my-pi/pi-coding-agent/extensibility/extensions/loader"),
     import("@oh-my-pi/pi-coding-agent/utils/event-bus"),
+    import("./omp-prompt-sender.ts"),
   ]);
   return {
     ...core,
@@ -47,6 +60,7 @@ const importNative = async () => {
     ...extensions,
     ...loaders,
     ...events,
+    ...sender,
   };
 };
 
@@ -240,10 +254,38 @@ const withSession = async (
   }
 };
 
-const png: ImageContent = {
+const png: ImageContent & { readonly mimeType: "image/png" } = {
   type: "image",
   mimeType: "image/png",
   data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+};
+
+const makeSender = (session: AgentSession) =>
+  Effect.runPromise(
+    Effect.gen(function* () {
+      return native.makeOmpPromptSender(
+        session,
+        yield* FileSystem.FileSystem,
+        yield* Path.Path,
+        yield* Crypto.Crypto,
+        {
+          chatId: Chat.ChatId.make("018f47a0-0000-7000-8000-000000000001"),
+          runEffect: Effect.runPromise,
+        },
+      );
+    }).pipe(Effect.provide(Layer.mergeAll(BunCrypto.layer, BunFileSystem.layer, BunPath.layer))),
+  );
+
+const originalFile = (session: AgentSession) => {
+  const sessionFile = session.sessionManager.getSessionFile();
+  if (!sessionFile) throw new Error("Delivery test requires a session file");
+  const digest = createHash("sha256").update(Buffer.from(png.data, "base64")).digest("hex");
+  return join(
+    dirname(sessionFile),
+    basename(sessionFile, extname(sessionFile)),
+    "attachments",
+    `${digest}.png`,
+  );
 };
 
 const imageCount = (context: Context) =>
@@ -625,5 +667,107 @@ describe("native OMP prompt delivery", () => {
         });
       },
     );
+  }, 30_000);
+
+  it("rejects sender admission when an idle native image prompt is discarded before dispatch", async () => {
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    await withSession(
+      [],
+      async (session) => {
+        const send = await makeSender(session);
+        const agentEvents: string[] = [];
+        let started = 0;
+        session.subscribe((event) => {
+          if (event.type === "agent_start" || event.type === "agent_end") {
+            agentEvents.push(event.type);
+          }
+        });
+        const sending = send(
+          { text: "Discard before dispatch", attachments: [{ ...png, name: "idle.png" }] },
+          () => {
+            started++;
+          },
+        ).then(
+          (delivery) => delivery,
+          (error: unknown) => error,
+        );
+        try {
+          await entered.promise;
+          expect(started).toBe(0);
+          expect(await readFile(originalFile(session))).toEqual(Buffer.from(png.data, "base64"));
+          const aborting = session.abort();
+          release.resolve();
+          const [result] = await Promise.all([sending, aborting]);
+          expect(result).toBeInstanceOf(AgentError);
+          expect(started).toBe(0);
+          expect(agentEvents).toEqual([]);
+          expect(session.messages.some((message) => message.role === "user")).toBe(false);
+          expect(await Bun.file(originalFile(session)).exists()).toBe(false);
+        } finally {
+          release.resolve();
+        }
+      },
+      (api) => {
+        api.on("before_agent_start", async () => {
+          entered.resolve();
+          await release.promise;
+        });
+      },
+    );
+  }, 30_000);
+
+  it("removes shared originals after the last native image steer is discarded", async () => {
+    const first = providerTurn();
+    await withSession([first], async (session) => {
+      const running = session.sendUserMessage("Hold the provider open");
+      await first.entered.promise;
+      const send = await makeSender(session);
+      const input = { text: "Queued image", attachments: [{ ...png, name: "queued.png" }] };
+      const creator = await send(input);
+      const duplicate = await send(input);
+      if (creator.kind !== "steered" || duplicate.kind !== "steered") {
+        throw new Error("Both image prompts must join the native queue");
+      }
+      await Effect.runPromise(Effect.all([creator.completed, duplicate.completed]));
+      const file = originalFile(session);
+      session.popLastQueuedMessage();
+      expect(await Effect.runPromise(duplicate.consumed)).toBe("discarded");
+      expect(await readFile(file)).toEqual(Buffer.from(png.data, "base64"));
+      session.clearQueue();
+      expect(await Effect.runPromise(creator.consumed)).toBe("discarded");
+      expect(await Bun.file(file).exists()).toBe(false);
+      first.release.resolve();
+      await running;
+    });
+  }, 30_000);
+
+  it("retains a shared original consumed by a later native message when its creator is discarded", async () => {
+    const first = providerTurn();
+    const second = providerTurn();
+    await withSession([first, second], async (session) => {
+      const running = session.sendUserMessage("Hold the provider open");
+      await first.entered.promise;
+      const send = await makeSender(session);
+      const input = { text: "Shared image", attachments: [{ ...png, name: "shared.png" }] };
+      const creator = await send(input);
+      const duplicate = await send(input);
+      if (creator.kind !== "steered" || duplicate.kind !== "steered") {
+        throw new Error("Both image prompts must join the native queue");
+      }
+      await Effect.runPromise(Effect.all([creator.completed, duplicate.completed]));
+      const [creatorMessage, duplicateMessage] = session.agent.peekSteeringQueue();
+      if (!creatorMessage || !duplicateMessage)
+        throw new Error("Missing native image queue entries");
+      session.agent.replaceQueues([duplicateMessage, creatorMessage], []);
+      first.release.resolve();
+      expect(imageCount(await second.entered.promise)).toBe(1);
+      expect(await Effect.runPromise(duplicate.consumed)).toBe("consumed");
+      session.popLastQueuedMessage();
+      expect(await Effect.runPromise(creator.consumed)).toBe("discarded");
+      expect(await readFile(originalFile(session))).toEqual(Buffer.from(png.data, "base64"));
+      second.release.resolve();
+      await running;
+    });
   }, 30_000);
 });

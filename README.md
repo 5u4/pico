@@ -34,11 +34,11 @@ Run `pico start` directly, not through `bun run`, to avoid duplicate SIGINT deli
 
 Messages sent in an active chat's Discord thread enter OMP as steers without waiting for the
 current run to finish. Each accepted steer gets a ⏳ reaction on its original message. When OMP
-adds that message to its context, pico replaces ⏳ with ✅. Consumption does not mean the task
+adds that message to its context, pico replaces ⏳ with ↩️. Consumption does not mean the task
 has finished.
 
 Each message has its own receipt, including messages with identical text or images. Removing a
-queued steer clears ⏳ without adding ✅. Receipts are in memory and are not replayed after a
+queued steer clears ⏳ without adding ↩️. Receipts are in memory and are not replayed after a
 restart. The bot needs permission to add reactions in the thread.
 
 ## OMP delivery notifications

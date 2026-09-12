@@ -23,7 +23,12 @@ import { normalizeAgentEvent, normalizeTranscript } from "./agent-event.ts";
 import { makeExchangeTitleFlow } from "./exchange-title.ts";
 import { makeOmpPromptSender } from "./omp-prompt-sender.ts";
 import { make as makeScheduleExtension } from "./schedule-extension.ts";
-import { makeSessionPool, type OpenedSession, type SessionFactory } from "./session-pool.ts";
+import {
+  makeSessionPool,
+  type OpenedSession,
+  type SessionFactory,
+  type SessionHandle,
+} from "./session-pool.ts";
 import { prepareSessionSettings } from "./session-settings.ts";
 
 export const make = Effect.fn("AgentRuntime.make")(function* (
@@ -96,6 +101,27 @@ export const make = Effect.fn("AgentRuntime.make")(function* (
 
 export const layer = (sessionsDir: AbsolutePath, schedules: Schedule.Schedules["Service"]) =>
   Layer.effect(AgentRuntime, make(sessionsDir, schedules));
+
+export const makeSessionHandle = (
+  session: SessionHandle,
+  settleSender: () => Promise<void>,
+): SessionHandle => ({
+  get isStreaming() {
+    return session.isStreaming;
+  },
+  waitForIdle: () => session.waitForIdle(),
+  settleInFlightMessagePersistence: () => session.settleInFlightMessagePersistence(),
+  abort: (options) => session.abort(options),
+  beginDispose: () => session.beginDispose(),
+  dispose: async () => {
+    try {
+      session.beginDispose();
+      await settleSender();
+    } finally {
+      await session.dispose();
+    }
+  },
+});
 
 const promiseBoundary = <A>(message: string, evaluate: () => Promise<A>) =>
   Effect.tryPromise({
@@ -233,15 +259,16 @@ const makeFactory = (
       }),
     );
 
+    const sendPrompt = makeOmpPromptSender(created.session, fileSystem, path, crypto, {
+      chatId: chat.id,
+      runEffect,
+    });
     const titleFlow = makeExchangeTitleFlow({
       chatId: chat.id,
       runEffect,
       handleBranchNaming,
       history: created.session.messages,
-      sendPrompt: makeOmpPromptSender(created.session, fileSystem, path, crypto, {
-        chatId: chat.id,
-        runEffect,
-      }),
+      sendPrompt,
       generateTitle: (exchange, systemPrompt) =>
         created.session.generateTitle(exchange, systemPrompt),
       getTitleSource: () => created.session.sessionManager.titleSource,
@@ -284,7 +311,7 @@ const makeFactory = (
     );
 
     const opened: OpenedSession = {
-      session: created.session,
+      session: makeSessionHandle(created.session, sendPrompt.settle),
       sendPrompt: titleFlow.sendPrompt,
       shake: (mode) => created.session.shake(mode).then(normalizeShakeResult),
       contextUsage: () => normalizeContextUsage(created.session.getContextBreakdown()),

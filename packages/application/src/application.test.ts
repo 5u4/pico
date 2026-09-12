@@ -1042,6 +1042,130 @@ describe("Application", () => {
       );
     }).pipe(Effect.provide(platformLayer)),
   );
+  it.live("closes a chat while its scheduled run is waiting for runtime shutdown", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const directory = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "pico-scheduled-close-",
+      });
+      const defaultCwd = AbsolutePath.make(path.join(directory, "workspace"));
+      yield* fileSystem.makeDirectory(defaultCwd);
+      const persistenceLayer = Persistence.layer(
+        AbsolutePath.make(path.join(directory, "store.db")),
+      );
+      const started = yield* Deferred.make<void>();
+      const stopped = yield* Deferred.make<void>();
+      const cleanupStarted = yield* Deferred.make<void>();
+      const releaseCleanup = yield* Deferred.make<void>();
+      const runtimeLayer = Layer.succeed(
+        AgentRuntime,
+        AgentRuntime.of({
+          events: Stream.empty,
+          drain: () => Effect.void,
+          transcript: () => Effect.succeed([]),
+          send: () => Effect.die("unexpected ordinary send"),
+          sendCaptured: (_chatId, runId) =>
+            Deferred.succeed(started, undefined).pipe(
+              Effect.andThen(Deferred.await(stopped)),
+              Effect.as({ runId, outcome: "aborted" as const, events: [], finalAssistantText: "" }),
+              Effect.ensuring(
+                Deferred.succeed(cleanupStarted, undefined).pipe(
+                  Effect.andThen(Deferred.await(releaseCleanup)),
+                  Effect.andThen(
+                    fileSystem
+                      .writeFileString(path.join(defaultCwd, "cleanup.txt"), "complete")
+                      .pipe(Effect.orDie),
+                  ),
+                ),
+              ),
+            ),
+          deliver: () => Effect.die("unexpected delivery"),
+          publish: () => Effect.die("unexpected publication"),
+          close: () => Deferred.succeed(stopped, undefined).pipe(Effect.asVoid),
+          abort: () => Deferred.succeed(stopped, undefined).pipe(Effect.asVoid),
+          contextUsage: () => Effect.die("unexpected context read"),
+          shake: () => Effect.die("unexpected shake"),
+        }),
+      );
+      const sessionsLayer = Layer.succeed(
+        AgentSessionStore,
+        AgentSessionStore.of({ create: () => Effect.void, remove: () => Effect.void }),
+      );
+      const gitWorktree: GitWorktree = {
+        validate: () => Effect.void,
+        create: (_options, use) => use(defaultCwd),
+        inspectChat: () => Effect.succeed({ kind: "managed", state: "dirty" }),
+        renameChatBranch: () => Effect.die("unexpected branch rename"),
+        removeChat: ({ cwd }) =>
+          fileSystem
+            .remove(cwd, { recursive: true })
+            .pipe(Effect.orDie, Effect.as({ kind: "removed" as const })),
+      };
+      yield* Effect.gen(function* () {
+        const application = yield* Application;
+        const host = yield* Schedule.ScheduleRunHostService;
+        const chats = yield* ChatRepository;
+        const workspace = yield* application.createWorkspace({
+          name: "scheduled-close",
+          binding: null,
+          defaultCwd,
+          worktree: { branch: "main", prefix: "chat/" },
+        });
+        const chat = yield* application.createChat({ workspaceId: workspace.id, externalId: null });
+        yield* Effect.gen(function* () {
+          const scheduled = yield* host
+            .runPrompt(
+              chat.id,
+              Schedule.ScheduleRunId.make("scheduled-1000-018f47a0-0000-7000-8000-000000000003"),
+              textPrompt("scheduled"),
+              () => Effect.void,
+            )
+            .pipe(Effect.forkChild);
+          yield* Deferred.await(started);
+          const confirmation = yield* Effect.raceFirst(
+            application.closeChat(chat.id, { allowDirtyWorktree: false }),
+            Effect.sleep("1 second").pipe(Effect.as(null)),
+          );
+          assert.deepStrictEqual(confirmation, { kind: "worktree-confirmation-required" });
+          assert.isFalse(yield* Deferred.isDone(stopped));
+          assert.isNull(Option.getOrThrow(yield* chats.findById(chat.id)).archivedAt);
+          const closing = yield* application
+            .closeChat(chat.id, { allowDirtyWorktree: true })
+            .pipe(Effect.forkChild);
+          const cleaning = yield* Effect.raceFirst(
+            Deferred.await(cleanupStarted).pipe(Effect.as(true)),
+            Effect.sleep("1 second").pipe(Effect.as(false)),
+          );
+          assert.isTrue(cleaning);
+          assert.isTrue(yield* fileSystem.exists(defaultCwd));
+          yield* Deferred.succeed(releaseCleanup, undefined);
+          const result = yield* Effect.raceFirst(
+            Fiber.join(closing),
+            Effect.sleep("1 second").pipe(Effect.as(null)),
+          );
+          assert.deepStrictEqual(result, { kind: "closed" });
+          assert.strictEqual((yield* Fiber.join(scheduled)).outcome, "aborted");
+          assert.isNotNull(Option.getOrThrow(yield* chats.findById(chat.id)).archivedAt);
+          assert.isFalse(yield* fileSystem.exists(defaultCwd));
+        }).pipe(
+          Effect.ensuring(
+            Deferred.succeed(stopped, undefined).pipe(
+              Effect.andThen(Deferred.succeed(releaseCleanup, undefined)),
+            ),
+          ),
+        );
+      }).pipe(
+        Effect.provide(ApplicationLayer.layer(gitWorktree)),
+        Effect.provide(persistenceLayer),
+        Effect.provide(runtimeLayer),
+        Effect.provide(sessionsLayer),
+        Effect.provide(BunCrypto.layer),
+        Effect.scoped,
+      );
+    }).pipe(Effect.provide(platformLayer)),
+  );
+
   it.effect("confirms destructive cleanup and never removes before runtime disposal", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;

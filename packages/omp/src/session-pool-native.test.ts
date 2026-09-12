@@ -12,8 +12,10 @@ import type * as AgentEvent from "@pico/contract/agent-event";
 import * as AgentMessage from "@pico/contract/agent-message";
 import * as Chat from "@pico/contract/chat-model";
 import * as Schedule from "@pico/contract/schedule";
+import * as Cause from "effect/Cause";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -37,6 +39,7 @@ const importNative = async () => {
     import("./omp-prompt-sender.ts"),
     import("./session-pool.ts"),
     import("./agent-event.ts"),
+    import("./layer.ts"),
   ]);
   const [
     core,
@@ -53,6 +56,7 @@ const importNative = async () => {
     sender,
     pool,
     normalized,
+    adapter,
   ] = modules;
   return {
     ...core,
@@ -69,6 +73,7 @@ const importNative = async () => {
     ...sender,
     ...pool,
     ...normalized,
+    makeSessionHandle: adapter.makeSessionHandle,
   };
 };
 
@@ -106,7 +111,7 @@ const providerTurn = (text: string) => ({
 
 const withSession = async (
   turns: ReturnType<typeof providerTurn>[],
-  run: (session: AgentSession) => Promise<void>,
+  run: (session: AgentSession, reopen: () => Promise<AgentSession>) => Promise<void>,
   extensionFactory?: ExtensionFactory,
 ) => {
   const directory = await mkdtemp(join(root, "session-"));
@@ -173,57 +178,72 @@ const withSession = async (
     });
     return stream;
   };
-  const agent = new native.Agent({
-    initialState: {
-      model,
-      systemPrompt: ["Use the local pool ownership test provider."],
-      tools: [],
-    },
-    steeringMode: "one-at-a-time",
-    followUpMode: "one-at-a-time",
-    convertToLlm: native.convertToLlm,
-    streamFn,
-    getApiKey: () => "local-provider-only",
-  });
-  const sessionManager = native.SessionManager.create(directory, join(directory, "sessions"));
-  const runtime = new native.ExtensionRuntime();
-  const extensionRunner = extensionFactory
-    ? new native.ExtensionRunner(
-        [
-          await native.loadExtensionFromFactory(
-            extensionFactory,
-            directory,
-            new native.EventBus(),
-            runtime,
-          ),
-        ],
-        runtime,
-        directory,
-        sessionManager,
-        registry,
-        undefined,
-        settings,
-      )
-    : undefined;
-  const session = new native.AgentSession({
-    agent,
-    settings,
-    modelRegistry: registry,
-    sessionManager,
-    ...(extensionRunner === undefined ? {} : { extensionRunner }),
-    skills: [],
-    skillsSettings: { enableSkillCommands: true },
-    memoryAgentDir: join(directory, "agent"),
-    disableExtensionDiscovery: true,
-  });
+  const sessions: AgentSession[] = [];
+  const openSession = async (sessionFile?: string) => {
+    const agent = new native.Agent({
+      initialState: {
+        model,
+        systemPrompt: ["Use the local pool ownership test provider."],
+        tools: [],
+      },
+      steeringMode: "one-at-a-time",
+      followUpMode: "one-at-a-time",
+      convertToLlm: native.convertToLlm,
+      streamFn,
+      getApiKey: () => "local-provider-only",
+    });
+    const sessionManager =
+      sessionFile === undefined
+        ? native.SessionManager.create(directory, join(directory, "sessions"))
+        : await native.SessionManager.open(sessionFile, join(directory, "sessions"));
+    const runtime = new native.ExtensionRuntime();
+    const extensionRunner = extensionFactory
+      ? new native.ExtensionRunner(
+          [
+            await native.loadExtensionFromFactory(
+              extensionFactory,
+              directory,
+              new native.EventBus(),
+              runtime,
+            ),
+          ],
+          runtime,
+          directory,
+          sessionManager,
+          registry,
+          undefined,
+          settings,
+        )
+      : undefined;
+    const session = new native.AgentSession({
+      agent,
+      settings,
+      modelRegistry: registry,
+      sessionManager,
+      ...(extensionRunner === undefined ? {} : { extensionRunner }),
+      skills: [],
+      skillsSettings: { enableSkillCommands: true },
+      memoryAgentDir: join(directory, "agent"),
+      disableExtensionDiscovery: true,
+    });
+    sessions.push(session);
+    return session;
+  };
   try {
-    await run(session);
+    const session = await openSession();
+    await run(session, () => {
+      const sessionFile = session.sessionManager.getSessionFile();
+      if (sessionFile === undefined) throw new Error("Expected native session journal");
+      return openSession(sessionFile);
+    });
   } finally {
-    session.beginDispose();
-    agent.abort("Pool ownership test cleanup");
+    for (const session of sessions) {
+      session.beginDispose();
+      session.agent.abort("Pool ownership test cleanup");
+    }
     for (const turn of turns) turn.release.resolve();
     try {
-      await session.dispose();
+      await Promise.all(sessions.map((session) => session.dispose()));
     } finally {
       auth.close();
     }
@@ -235,40 +255,51 @@ const makePool = Effect.fn("NativePoolTest.make")(function* (
   options: {
     readonly fileSystem?: FileSystem.FileSystem;
     readonly settlePersistence?: () => Promise<void>;
+    readonly reopen?: () => Promise<AgentSession>;
   } = {},
 ) {
   const fileSystem = options.fileSystem ?? (yield* FileSystem.FileSystem);
   const path = yield* Path.Path;
   const crypto = yield* Crypto.Crypto;
-  const sendPrompt = native.makeOmpPromptSender(session, fileSystem, path, crypto, {
-    chatId,
-    runEffect: Effect.runPromise,
-  });
+  let opened = false;
   return yield* native.makeSessionPool({
     factory: {
       open: (_id, emit) =>
-        Effect.sync(() => ({
-          session: {
-            get isStreaming() {
-              return session.isStreaming;
-            },
-            waitForIdle: () => session.waitForIdle(),
-            settleInFlightMessagePersistence:
-              options.settlePersistence ?? (() => session.settleInFlightMessagePersistence()),
-            abort: (options) => session.abort(options),
-            beginDispose: () => session.beginDispose(),
-            dispose: () => session.dispose(),
-          },
-          sendPrompt,
-          shake: () => Promise.reject(new Error("Shake is not part of ownership tests")),
-          contextUsage: () => ({ kind: "unavailable" }),
-          appendAssistantMessage: () =>
-            Promise.reject(new Error("Publication is not part of ownership tests")),
-          unsubscribe: session.subscribe((event) => {
-            const normalized = native.normalizeAgentEvent(event);
-            if (normalized !== undefined) emit(normalized);
-          }),
-        })),
+        Effect.promise(async () => {
+          if (opened && options.reopen) session = await options.reopen();
+          opened = true;
+          const currentSession = session;
+          const sendPrompt = native.makeOmpPromptSender(currentSession, fileSystem, path, crypto, {
+            chatId,
+            runEffect: Effect.runPromise,
+          });
+          return {
+            session: native.makeSessionHandle(
+              {
+                get isStreaming() {
+                  return currentSession.isStreaming;
+                },
+                waitForIdle: () => currentSession.waitForIdle(),
+                settleInFlightMessagePersistence:
+                  options.settlePersistence ??
+                  (() => currentSession.settleInFlightMessagePersistence()),
+                abort: (options) => currentSession.abort(options),
+                beginDispose: () => currentSession.beginDispose(),
+                dispose: () => currentSession.dispose(),
+              },
+              sendPrompt.settle,
+            ),
+            sendPrompt,
+            shake: () => Promise.reject(new Error("Shake is not part of ownership tests")),
+            contextUsage: () => ({ kind: "unavailable" }),
+            appendAssistantMessage: () =>
+              Promise.reject(new Error("Publication is not part of ownership tests")),
+            unsubscribe: currentSession.subscribe((event) => {
+              const normalized = native.normalizeAgentEvent(event);
+              if (normalized !== undefined) emit(normalized);
+            }),
+          };
+        }),
     },
     loadTranscript: () => Effect.succeed(native.normalizeTranscript(session.messages)),
   });
@@ -282,6 +313,176 @@ const assistantTexts = (events: ReadonlyArray<AgentEvent.AgentEvent>) =>
   );
 
 describe("native SessionPool ownership", () => {
+  it("drains discarded image cleanup before closing and reopening the same journal", async () => {
+    const initial = providerTurn("Interrupted ordinary answer");
+    const reused = providerTurn("Reopened image answer");
+    const removing = Promise.withResolvers<string>();
+    const releaseRemove = Promise.withResolvers<void>();
+    const removed = Promise.withResolvers<void>();
+    const image = AgentMessage.AgentPrompt.make({
+      text: "Keep this image",
+      attachments: [
+        {
+          type: "image",
+          name: "pixel.png",
+          mimeType: "image/png",
+          data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+        },
+      ],
+    });
+    await withSession([initial, reused], (session, reopen) =>
+      session.runModeExitTeardown(() =>
+        Effect.runPromise(
+          Effect.scoped(
+            Effect.gen(function* () {
+              const fileSystem = yield* FileSystem.FileSystem;
+              const pool = yield* makePool(session, {
+                reopen,
+                fileSystem: {
+                  ...fileSystem,
+                  remove: (file, options) =>
+                    Effect.promise(async () => {
+                      removing.resolve(file);
+                      await releaseRemove.promise;
+                    }).pipe(
+                      Effect.andThen(fileSystem.remove(file, options)),
+                      Effect.tap(() => Effect.sync(() => removed.resolve())),
+                    ),
+                },
+              });
+              yield* Effect.gen(function* () {
+                const first = yield* pool.send(chatId, prompt("Ordinary request"));
+                expect(first.kind).toBe("started");
+                yield* Effect.promise(() => initial.entered.promise);
+                const queued = yield* pool.send(chatId, image);
+                if (queued.kind !== "steered") throw new Error("Expected queued image admission");
+                yield* queued.completed;
+                yield* pool.abort(chatId);
+                if (first.kind !== "handled") yield* first.completed;
+                const closing = yield* pool.close(chatId).pipe(Effect.forkChild);
+                const reopening = yield* Fiber.join(closing).pipe(
+                  Effect.andThen(pool.send(chatId, image)),
+                  Effect.forkChild,
+                );
+                const original = yield* Effect.promise(() => removing.promise);
+                const closedBeforeCleanup = yield* Effect.raceFirst(
+                  Fiber.join(closing).pipe(Effect.as(true)),
+                  Effect.sleep("100 millis").pipe(Effect.as(false)),
+                );
+                expect.soft(closedBeforeCleanup).toBe(false);
+                if (closedBeforeCleanup) yield* Effect.promise(() => reused.entered.promise);
+                releaseRemove.resolve();
+                yield* Effect.promise(() => removed.promise);
+                const delivery = yield* Fiber.join(reopening);
+                expect(delivery.kind).toBe("started");
+                const context = yield* Effect.promise(() => reused.entered.promise);
+                expect(
+                  context.messages.some(
+                    (message) =>
+                      message.role === "user" &&
+                      typeof message.content !== "string" &&
+                      message.content.some((part) => part.type === "image"),
+                  ),
+                ).toBe(true);
+                expect(yield* fileSystem.exists(original)).toBe(true);
+                expect(yield* queued.consumed).toBe("discarded");
+                reused.release.resolve();
+                if (delivery.kind !== "handled") yield* delivery.completed;
+                yield* pool.close(chatId);
+              }).pipe(
+                Effect.ensuring(
+                  Effect.sync(() => {
+                    releaseRemove.resolve();
+                    reused.release.resolve();
+                  }),
+                ),
+              );
+            }).pipe(Effect.provide(platform)),
+          ),
+        ),
+      ),
+    );
+  }, 30_000);
+
+  it("closes a live captured run before its provider finishes", async () => {
+    const scheduled = providerTurn("Must be aborted by close");
+    await withSession([scheduled], (session) =>
+      Effect.runPromise(
+        Effect.scoped(
+          Effect.gen(function* () {
+            const pool = yield* makePool(session);
+            const events: AgentEvent.AgentEvent[] = [];
+            yield* Effect.gen(function* () {
+              const capture = yield* pool
+                .sendCaptured(chatId, runId, prompt("Scheduled request"), (event) =>
+                  Effect.sync(() => {
+                    events.push(event);
+                  }),
+                )
+                .pipe(Effect.forkChild);
+              yield* Effect.promise(() => scheduled.entered.promise);
+              const closing = yield* pool.close(chatId).pipe(Effect.forkChild);
+              const settled = yield* Effect.raceFirst(
+                Effect.all([Fiber.join(closing), Fiber.await(capture)]).pipe(Effect.as(true)),
+                Effect.sleep("1 second").pipe(Effect.as(false)),
+              );
+              expect(settled).toBe(true);
+              const interrupted = yield* Fiber.await(capture);
+              expect(
+                Exit.isFailure(interrupted) && Cause.hasInterruptsOnly(interrupted.cause),
+              ).toBe(true);
+              expect(events).toContainEqual({ type: "run-finished", outcome: "aborted" });
+              expect(session.isStreaming).toBe(false);
+            }).pipe(
+              Effect.ensuring(
+                Effect.promise(async () => {
+                  scheduled.release.resolve();
+                  await session.abort({ reason: "Release close regression after assertion" });
+                }),
+              ),
+            );
+          }).pipe(Effect.provide(platform)),
+        ),
+      ),
+    );
+  }, 30_000);
+
+  it("closes a capture waiting for admission persistence without starting a provider", async () => {
+    const persisting = Promise.withResolvers<void>();
+    const releasePersistence = Promise.withResolvers<void>();
+    await withSession([], (session) =>
+      Effect.runPromise(
+        Effect.scoped(
+          Effect.gen(function* () {
+            const pool = yield* makePool(session, {
+              settlePersistence: async () => {
+                persisting.resolve();
+                await releasePersistence.promise;
+                await session.settleInFlightMessagePersistence();
+              },
+            });
+            yield* Effect.gen(function* () {
+              const capture = yield* pool
+                .sendCaptured(chatId, runId, prompt("Waiting for persistence"), () => Effect.void)
+                .pipe(Effect.forkChild);
+              yield* Effect.promise(() => persisting.promise);
+              const closing = yield* pool.close(chatId).pipe(Effect.forkChild);
+              const settled = yield* Effect.raceFirst(
+                Effect.all([Fiber.join(closing), Fiber.await(capture)]).pipe(Effect.as(true)),
+                Effect.sleep("1 second").pipe(Effect.as(false)),
+              );
+              expect(settled).toBe(true);
+              const interrupted = yield* Fiber.await(capture);
+              expect(
+                Exit.isFailure(interrupted) && Cause.hasInterruptsOnly(interrupted.cause),
+              ).toBe(true);
+            }).pipe(Effect.ensuring(Effect.sync(() => releasePersistence.resolve())));
+          }).pipe(Effect.provide(platform)),
+        ),
+      ),
+    );
+  }, 30_000);
+
   it("admits a capture after an aborted ordinary run resumes its queued steer", async () => {
     const initial = providerTurn("Interrupted ordinary answer");
     const resumed = providerTurn("Resumed ordinary answer");

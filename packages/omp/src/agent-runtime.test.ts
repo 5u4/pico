@@ -267,6 +267,81 @@ describe("AgentRuntime", () => {
         }),
       ),
   );
+  it.live("releases a scheduled waiter after a new admission overtakes a queued terminal", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const followingFinished = yield* Deferred.make<void>();
+        const pool = yield* makeSessionPool({
+          factory: {
+            open: (_id, emit) =>
+              Effect.succeed({
+                session: {
+                  isStreaming: false,
+                  waitForIdle: async () => {},
+                  settleInFlightMessagePersistence: async () => {},
+                  abort: async () => {},
+                  beginDispose: () => {},
+                  dispose: async () => {},
+                },
+                sendPrompt: async (value, onStarted): Promise<MessageDelivery> => {
+                  if (value.text === "following") {
+                    emit({ type: "run-finished", outcome: "completed" });
+                  }
+                  onStarted?.();
+                  emit({ type: "run-started" });
+                  if (value.text === "ordinary") {
+                    return { kind: "started", completed: Effect.void };
+                  }
+                  return {
+                    kind: "started",
+                    completed: (value.text === "following"
+                      ? Deferred.await(followingFinished)
+                      : Effect.void
+                    ).pipe(
+                      Effect.tap(() =>
+                        Effect.sync(() => emit({ type: "run-finished", outcome: "completed" })),
+                      ),
+                    ),
+                  };
+                },
+                shake: async (mode) => shakeResult(mode),
+                contextUsage: () => ({ kind: "unavailable" }),
+                appendAssistantMessage: async () => {},
+                unsubscribe: () => {},
+              }),
+          },
+          loadTranscript: () => Effect.succeed([]),
+        });
+        yield* Effect.gen(function* () {
+          const first = yield* pool.send(chatId, prompt("ordinary"));
+          if (first.kind !== "started") return yield* Effect.die("Expected ordinary admission");
+          yield* first.completed;
+          const captured = yield* pool
+            .sendCaptured(
+              chatId,
+              Schedule.ScheduleRunId.make("scheduled-1000-018f47a0-0000-7000-8000-000000000003"),
+              prompt("scheduled"),
+              () => Effect.void,
+            )
+            .pipe(Effect.forkChild);
+          yield* Effect.yieldNow;
+          const next = yield* pool.send(chatId, prompt("following"));
+          if (next.kind !== "started") return yield* Effect.die("Expected following admission");
+          yield* Deferred.succeed(followingFinished, undefined);
+          yield* next.completed;
+          const result = yield* Effect.raceFirst(
+            Fiber.join(captured),
+            Effect.sleep("1 second").pipe(Effect.as(null)),
+          );
+          assert.strictEqual(result?.outcome, "completed");
+          assert.deepStrictEqual(
+            result?.events.map((event) => event.type),
+            ["run-started", "run-finished"],
+          );
+        }).pipe(Effect.ensuring(Deferred.succeed(followingFinished, undefined)));
+      }),
+    ),
+  );
 
   it("hides ignored OMP events", () => {
     assert.isUndefined(normalizeAgentEvent({ type: "config_warnings_changed" }));

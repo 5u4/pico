@@ -218,7 +218,7 @@ describe("Discord message delivery", () => {
             "add:10:101:⏳",
             "add:20:102:⏳",
             "remove:20:102:⏳",
-            "add:20:102:✅",
+            "add:20:102:↩️",
           ]);
           assert.isFalse(yield* Deferred.isDone(firstConsumed));
           yield* Deferred.succeed(firstConsumed, "discarded");
@@ -228,7 +228,7 @@ describe("Discord message delivery", () => {
             "add:10:101:⏳",
             "add:20:102:⏳",
             "remove:20:102:⏳",
-            "add:20:102:✅",
+            "add:20:102:↩️",
             "remove:10:101:⏳",
           ]);
         }),
@@ -355,7 +355,7 @@ describe("Discord message delivery", () => {
           assert.deepStrictEqual(actions, ["add:⏳"]);
           yield* Deferred.succeed(consumed, "consumed");
           yield* Effect.promise(() => finalReported.promise);
-          assert.deepStrictEqual(actions, ["add:⏳", "remove:⏳", "add:✅"]);
+          assert.deepStrictEqual(actions, ["add:⏳", "remove:⏳", "add:↩️"]);
           assert.deepStrictEqual(
             logs.map(({ annotations }) => ({
               operation: annotations.operation,

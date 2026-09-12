@@ -1045,7 +1045,7 @@ export const install = Effect.fn("DiscordInput.install")(function* <
             ).pipe(Effect.catchCause((cause) => reportFailure("remove-pending-reaction", cause)));
             if (outcome === "consumed") {
               yield* promiseBoundary("add-consumed-reaction", () =>
-                bot.helpers.addReaction(message.channelId, message.id, "✅"),
+                bot.helpers.addReaction(message.channelId, message.id, "↩️"),
               ).pipe(Effect.catchCause((cause) => reportFailure("add-consumed-reaction", cause)));
             }
           }).pipe(Effect.forkIn(scope));

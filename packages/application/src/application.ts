@@ -225,16 +225,25 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const scope = yield* Effect.scope;
-  const activeOperations = new Map<Chat.ChatId, Set<Deferred.Deferred<void>>>();
-  const trackOperation = <A, E, R>(chatId: Chat.ChatId, effect: Effect.Effect<A, E, R>) => {
+  interface ActiveOperation {
+    readonly kind: "ordinary" | "captured";
+    readonly finished: Deferred.Deferred<void>;
+  }
+  const activeOperations = new Map<Chat.ChatId, Set<ActiveOperation>>();
+  const trackOperation = <A, E, R>(
+    chatId: Chat.ChatId,
+    kind: ActiveOperation["kind"],
+    effect: Effect.Effect<A, E, R>,
+  ) => {
     const finished = Deferred.makeUnsafe<void>();
-    const operations = activeOperations.get(chatId) ?? new Set<Deferred.Deferred<void>>();
-    operations.add(finished);
+    const operation: ActiveOperation = { kind, finished };
+    const operations = activeOperations.get(chatId) ?? new Set<ActiveOperation>();
+    operations.add(operation);
     activeOperations.set(chatId, operations);
     return effect.pipe(
       Effect.ensuring(
         Effect.sync(() => {
-          operations.delete(finished);
+          operations.delete(operation);
           if (operations.size === 0) activeOperations.delete(chatId);
           Deferred.doneUnsafe(finished, Effect.void);
         }),
@@ -602,9 +611,12 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
     return yield* serialized(
       chatId,
       Effect.gen(function* () {
-        yield* Effect.forEach(activeOperations.get(chatId) ?? [], Deferred.await, {
-          discard: true,
-        });
+        yield* Effect.forEach(
+          activeOperations.get(chatId) ?? [],
+          (operation) =>
+            operation.kind === "ordinary" ? Deferred.await(operation.finished) : Effect.void,
+          { discard: true },
+        );
         const chat = yield* findChat(chatId);
         const inspection = yield* gitWorktree
           .inspectChat({ chatId, cwd: chat.cwd })
@@ -636,6 +648,11 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
         yield* runtime
           .close(chatId)
           .pipe(Effect.mapError(failure("Chat archived, but runtime close failed")));
+        yield* Effect.forEach(
+          activeOperations.get(chatId) ?? [],
+          (operation) => Deferred.await(operation.finished),
+          { discard: true },
+        );
         yield* Effect.logDebug("Chat runtime closed").pipe(
           Effect.annotateLogs({
             component: "application",
@@ -700,7 +717,7 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
           Effect.mapError(failure("Failed to send message")),
         );
         yield* Effect.uninterruptible(
-          trackOperation(chatId, completed).pipe(Effect.exit, Effect.forkIn(scope)),
+          trackOperation(chatId, "ordinary", completed).pipe(Effect.exit, Effect.forkIn(scope)),
         );
         return delivery.kind === "started"
           ? ({ kind: "started", completed } satisfies MessageDelivery<ApplicationError>)
@@ -728,6 +745,7 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
             return yield* Effect.uninterruptible(
               trackOperation(
                 chatId,
+                "captured",
                 runtime
                   .sendCaptured(chatId, runId, prompt, onEvent)
                   .pipe(Effect.mapError(failure("Failed to run scheduled prompt"))),

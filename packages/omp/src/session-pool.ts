@@ -226,23 +226,14 @@ const drainSessionEvents = Effect.fn("SessionPool.drainSessionEvents")(function*
 });
 
 const closeEntry = Effect.fn("SessionPool.closeEntry")(function* (entry: LiveEntry) {
-  const lifecycle = yield* entry.admission.withPermit(
-    Effect.sync(() => {
-      const current = MutableRef.get(entry.lifecycle);
-      if (current.type === "open") {
-        MutableRef.set(entry.lifecycle, {
-          type: "closing",
-          completed: Deferred.makeUnsafe<void, AgentError>(),
-        });
-      }
-      return current;
-    }),
-  );
+  const lifecycle = MutableRef.get(entry.lifecycle);
   if (lifecycle.type === "closed") return;
   if (lifecycle.type === "closing") return yield* Deferred.await(lifecycle.completed);
-  const closing = MutableRef.get(entry.lifecycle);
-  if (closing.type !== "closing") return;
-  yield* Effect.forEach(entry.operations, Deferred.await, { discard: true });
+  const closing: ClosingLifecycle = {
+    type: "closing",
+    completed: Deferred.makeUnsafe<void, AgentError>(),
+  };
+  MutableRef.set(entry.lifecycle, closing);
 
   let firstFailure: AgentError | undefined;
   const capture = (phase: string, effect: Effect.Effect<void, AgentError>) =>
@@ -257,7 +248,6 @@ const closeEntry = Effect.fn("SessionPool.closeEntry")(function* (entry: LiveEnt
     );
 
   if (lifecycle.type === "open") {
-    yield* Deferred.succeed(entry.closed, undefined);
     yield* capture(
       "begin-dispose",
       Effect.try({
@@ -265,6 +255,8 @@ const closeEntry = Effect.fn("SessionPool.closeEntry")(function* (entry: LiveEnt
         catch: (cause) => agentError("Failed to begin OMP session disposal", cause),
       }).pipe(Effect.asVoid),
     );
+    yield* Deferred.succeed(entry.closed, undefined);
+    yield* Effect.forEach(entry.operations, Deferred.await, { discard: true });
     yield* capture(
       "unsubscribe",
       Effect.try({
@@ -701,7 +693,11 @@ export const makeSessionPool = Effect.fn("SessionPool.make")(function* (
                   entry.session.settleInFlightMessagePersistence(),
                 );
                 return captured;
-              }),
+              }).pipe(
+                Effect.raceFirst(
+                  Deferred.await(entry.closed).pipe(Effect.andThen(Effect.interrupt)),
+                ),
+              ),
             ).pipe(Effect.exit);
             if (MutableRef.get(entry.capture) === capture) {
               if (Exit.isFailure(result)) {

@@ -601,4 +601,172 @@ describe("makeOmpPromptSender", () => {
       ),
     );
   });
+
+  it.effect("retains an original when its creator is discarded during another admission", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const crypto = yield* Crypto.Crypto;
+      const root = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "pico-omp-shared-admission-",
+      });
+      const secondWriteEntered = Promise.withResolvers<void>();
+      const releaseSecondWrite = Promise.withResolvers<void>();
+      const releaseRemoval = Promise.withResolvers<void>();
+      let writes = 0;
+      const gatedFiles = FileSystem.FileSystem.of({
+        ...fileSystem,
+        writeFile: (file, bytes, options) => {
+          const writing = fileSystem.writeFile(file, bytes, options);
+          if (++writes !== 2) return writing;
+          return writing.pipe(
+            Effect.ensuring(
+              Effect.promise(async () => {
+                secondWriteEntered.resolve();
+                await releaseSecondWrite.promise;
+              }),
+            ),
+          );
+        },
+        remove: (file, options) =>
+          Effect.promise(() => releaseRemoval.promise).pipe(
+            Effect.andThen(fileSystem.remove(file, options)),
+          ),
+      });
+      const fake = makeFakeSession(
+        {
+          name: "unused",
+          description: "unused",
+          filePath: path.join(root, "SKILL.md"),
+          baseDir: root,
+          source: "test",
+        },
+        false,
+        path.join(root, "chat.jsonl"),
+      );
+      const observers: PromptDeliveryObserver[] = [];
+      fake.session.prompt = async (_text, options) => {
+        const observer = options?.deliveryObserver;
+        if (!observer) throw new Error("Missing prompt delivery observer");
+        observers.push(observer);
+        observer.onAccepted("steer");
+        return true;
+      };
+      const send = makeOmpPromptSender(fake.session, gatedFiles, path, crypto, diagnostics);
+      const input = AgentMessage.AgentPrompt.make({
+        text: "Shared image",
+        attachments: [
+          { type: "image", name: "shared.png", data: pngBase64, mimeType: "image/png" },
+        ],
+      });
+      try {
+        const creator = yield* Effect.promise(() => send(input));
+        if (creator.kind !== "steered") return yield* Effect.die("Creator must queue");
+        yield* creator.completed;
+        const admitting = send(input);
+        yield* Effect.promise(() => secondWriteEntered.promise);
+        const creatorObserver = observers[0];
+        if (!creatorObserver) return yield* Effect.die("Missing creator observer");
+        creatorObserver.onDiscarded();
+        releaseSecondWrite.resolve();
+        const duplicate = yield* Effect.promise(() => admitting);
+        if (duplicate.kind !== "steered") return yield* Effect.die("Duplicate must queue");
+        const duplicateObserver = observers[1];
+        if (!duplicateObserver) return yield* Effect.die("Missing duplicate observer");
+        duplicateObserver.onConsumed();
+        releaseRemoval.resolve();
+        assert.strictEqual(yield* creator.consumed, "discarded");
+        assert.strictEqual(yield* duplicate.consumed, "consumed");
+        const image = new Uint8Array(Buffer.from(pngBase64, "base64"));
+        const digest = hex(yield* crypto.digest("SHA-256", image));
+        assert.deepStrictEqual(
+          yield* fileSystem.readFile(path.join(root, "chat", "attachments", `${digest}.png`)),
+          image,
+        );
+      } finally {
+        releaseSecondWrite.resolve();
+        releaseRemoval.resolve();
+      }
+    }).pipe(Effect.provide(platformLayer)),
+  );
+
+  it.effect("reports one late image cleanup failure without rejecting discarded delivery", () => {
+    const records: Array<ReturnType<typeof Logger.formatStructured.log>> = [];
+    return Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const crypto = yield* Crypto.Crypto;
+      const runEffect = Effect.runPromiseWith(yield* Effect.context<never>());
+      const root = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "pico-omp-late-rollback-failure-",
+      });
+      const fake = makeFakeSession(
+        {
+          name: "unused",
+          description: "unused",
+          filePath: path.join(root, "SKILL.md"),
+          baseDir: root,
+          source: "test",
+        },
+        false,
+        path.join(root, "chat.jsonl"),
+      );
+      const queued = Promise.withResolvers<PromptDeliveryObserver>();
+      fake.session.prompt = async (_text, options) => {
+        const observer = options?.deliveryObserver;
+        if (!observer) throw new Error("Missing prompt delivery observer");
+        queued.resolve(observer);
+        observer.onAccepted("steer");
+        return true;
+      };
+      const failingCleanup = FileSystem.FileSystem.of({
+        ...fileSystem,
+        remove: () =>
+          Effect.fail(
+            PlatformError.systemError({
+              _tag: "PermissionDenied",
+              module: "FileSystem",
+              method: "remove",
+              description: "private filesystem details",
+            }),
+          ),
+      });
+      const send = makeOmpPromptSender(fake.session, failingCleanup, path, crypto, {
+        ...diagnostics,
+        runEffect,
+      });
+      const delivery = yield* Effect.promise(() =>
+        send({
+          text: "private queued prompt",
+          attachments: [
+            {
+              type: "image",
+              name: "private filename.png",
+              data: pngBase64,
+              mimeType: "image/png",
+            },
+          ],
+        }),
+      );
+      if (delivery.kind !== "steered") return yield* Effect.die("Image prompt must queue");
+      yield* delivery.completed;
+      const observer = yield* Effect.promise(() => queued.promise);
+      observer.onDiscarded();
+      observer.onDiscarded();
+      assert.strictEqual(yield* delivery.consumed, "discarded");
+      const errors = records.filter((record) => record.level === "ERROR");
+      assert.strictEqual(errors.length, 1);
+      assert.strictEqual(errors[0]?.annotations.chatId, diagnostics.chatId);
+      assert.strictEqual(errors[0]?.annotations.phase, "prompt-rollback");
+      assert.notInclude(JSON.stringify(records), "private");
+      assert.isTrue(yield* fileSystem.exists(path.join(root, "chat", "attachments")));
+    }).pipe(
+      Effect.provide(platformLayer),
+      Effect.provide(
+        Logger.layer([
+          Logger.make((options) => records.push(Logger.formatStructured.log(options))),
+        ]),
+      ),
+    );
+  });
 });
