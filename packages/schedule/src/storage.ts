@@ -496,7 +496,11 @@ const inspectSourceTree = Effect.fn("Schedules.inspectSourceTree")(function* (
             .readFile(asset)
             .pipe(mapIo(`Failed to read source asset ${relative}`));
           if (entrypoint) {
-            if (new TextDecoder().decode(content).trim() === "") {
+            const text = yield* Effect.try({
+              try: () => new TextDecoder("utf-8", { fatal: true }).decode(content),
+              catch: () => invalid(`${relative} must contain valid UTF-8 text`),
+            });
+            if (text.trim() === "") {
               return yield* invalid(`${relative} must be a nonblank regular file`);
             }
             hasEntrypoint = true;

@@ -584,13 +584,20 @@ describe("Schedules", () => {
       }
       unreadableHelper = path.join(blocked.sourceDirectory, "lib/helper.js");
       const published: Array<string> = [];
+      const publishedEvents = yield* Queue.unbounded<void>();
       yield* TestClock.setTime(1_000);
       yield* schedules.start({
         prepare: () => Effect.succeed({ chatId, workspaceId, cwd: AbsolutePath.make(root) }),
         deliver: () => Effect.die("Script must publish without OMP"),
-        publish: (_chatId, content) => Effect.sync(() => void published.push(content)),
+        publish: (_chatId, content) =>
+          Effect.sync(() => void published.push(content)).pipe(
+            Effect.andThen(Queue.offer(publishedEvents, undefined)),
+            Effect.asVoid,
+          ),
         runPrompt: () => Effect.die("Script must not invoke OMP"),
       });
+      yield* Queue.take(publishedEvents);
+      yield* Queue.take(publishedEvents);
       for (const view of [first, last]) {
         const runId = `scheduled-1000-${view.definition.revision}`;
         const run = yield* awaitFinished(
@@ -606,6 +613,7 @@ describe("Schedules", () => {
       assert.isFalse(yield* fileSystem.exists(path.join(schedulesDir, "runs", blocked.id)));
       unreadableHelper = undefined;
       yield* TestClock.adjust("30 seconds");
+      yield* Queue.take(publishedEvents);
       const recoveredId = `scheduled-1000-${blocked.definition.revision}`;
       const recovered = yield* awaitFinished(
         fileSystem,
@@ -1348,6 +1356,73 @@ describe("Schedules", () => {
           "helper.js",
           "prompt.md",
         ]);
+      }).pipe(Effect.provide(platformLayer), Effect.scoped),
+  );
+
+  it.effect.each(["script.js", "prompt.md"])(
+    "rejects malformed UTF-8 in authored %s",
+    (entrypoint) =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-source-utf8-" });
+        const schedules = yield* open(AbsolutePath.make(path.join(root, "schedules")));
+        const error = yield* schedules
+          .create(caller, {
+            name: "malformed entrypoint",
+            enabled: false,
+            target: { kind: "current-chat" },
+            trigger: { kind: "once", at: 1_000 },
+            sourceDirectory: yield* prepareSource({
+              "script.js": "process.stdout.write(JSON.stringify({agent:false}));",
+              "prompt.md": "Check the workspace.",
+              [entrypoint]: new Uint8Array([0xc3, 0x28]),
+            }),
+          })
+          .pipe(Effect.flip);
+        assert.instanceOf(error, Schedule.ScheduleError);
+        assert.strictEqual(error.kind, "invalid");
+        assert.deepStrictEqual(yield* schedules.list(caller), []);
+      }).pipe(Effect.provide(platformLayer), Effect.scoped),
+  );
+
+  it.effect.each(["script.js", "prompt.md"])(
+    "lists managed %s with malformed UTF-8 as invalid until repaired",
+    (entrypoint) =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-owned-utf8-" });
+        const schedules = yield* open(AbsolutePath.make(path.join(root, "schedules")));
+        const created = yield* schedules.create(caller, {
+          name: "repairable entrypoint",
+          enabled: false,
+          target: { kind: "current-chat" },
+          trigger: { kind: "once", at: 1_000 },
+          sourceDirectory: yield* prepareSource({
+            "script.js": "process.stdout.write(JSON.stringify({agent:false}));",
+            "prompt.md": "Check the workspace.",
+          }),
+        });
+        if (created.kind !== "ready") return yield* Effect.die("Created schedule is invalid");
+        const entrypointPath = path.join(created.sourceDirectory, entrypoint);
+        yield* fileSystem.writeFile(entrypointPath, new Uint8Array([0xc3, 0x28]));
+        const invalid = yield* schedules.get(caller, created.id);
+        assert.strictEqual(invalid.kind, "invalid");
+        assert.strictEqual(invalid.sourceDirectory, created.sourceDirectory);
+        assert.deepStrictEqual(
+          (yield* schedules.list(caller)).map((view) => view.kind),
+          ["invalid"],
+        );
+        const error = yield* schedules
+          .update(caller, created.id, { enabled: true })
+          .pipe(Effect.flip);
+        assert.strictEqual(error.kind, "invalid");
+        yield* fileSystem.writeFileString(entrypointPath, "/* Repaired café. */");
+        const repaired = yield* schedules.update(caller, created.id, { enabled: true });
+        assert.strictEqual(repaired.kind, "ready");
+        assert.strictEqual(repaired.state, "enabled");
+        assert.deepStrictEqual(yield* schedules.list(caller), [repaired]);
       }).pipe(Effect.provide(platformLayer), Effect.scoped),
   );
 
