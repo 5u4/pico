@@ -48,6 +48,7 @@ export const prepareSessionOptions = Effect.fn("OmpSession.prepareOptions")(func
         ...settings.get("skills.customDirectories"),
         bundledSkillsDirectory,
       ]);
+      settings.override("secrets.enabled", true);
       if (policy.mermaid === "disabled") {
         settings.override("tui.renderMermaid", false);
       }

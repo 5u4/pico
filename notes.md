@@ -5,6 +5,8 @@
 - reference omp cli if unsure
 - omp session jsonl file is the source of truth
 - set omp session async:false; this is because currently cannot support multiple omp sdk agents run async
+- pico forces OMP `secrets.enabled` for outbound conversation text, even when project settings disable it. OMP owns detection and reversible placeholders.
+- secret detection is format- and configuration-based, not a guarantee for arbitrary passwords, encoded values, or images. Local tool details, journals, and logs may retain plaintext.
 - share omp auth/model registry
 - append pico identity and platform context through the omp sdk; do not replace its system prompt, so omp's coding instructions remain intact
 - register bundled `pico-schedule` through per-session OMP `skills.customDirectories`; append after configured directories without copying into user settings
