@@ -107,13 +107,19 @@ const smoke = Effect.fn("AgentRuntime.smoke")(function* () {
 
     const [, terminal] = yield* Effect.all(
       [
-        runtime.send(
-          chatId,
-          AgentMessage.AgentPrompt.make({
-            text: `Do not use tools. Reply with exactly ${marker}.`,
-            attachments: [],
-          }),
-        ),
+        runtime
+          .send(
+            chatId,
+            AgentMessage.AgentPrompt.make({
+              text: `Do not use tools. Reply with exactly ${marker}.`,
+              attachments: [],
+            }),
+          )
+          .pipe(
+            Effect.flatMap((delivery) =>
+              delivery.kind === "handled" ? Effect.void : delivery.completed,
+            ),
+          ),
         Deferred.await(finished).pipe(Effect.timeout("1 minute")),
       ],
       { concurrency: "unbounded" },

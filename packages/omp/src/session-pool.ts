@@ -4,6 +4,7 @@ import type * as AgentMessage from "@pico/contract/agent-message";
 import type {
   CapturedAgentRun,
   ContextUsage,
+  MessageDelivery,
   ShakeMode,
   ShakeResult,
 } from "@pico/contract/agent-runtime";
@@ -22,8 +23,10 @@ import * as Queue from "effect/Queue";
 import * as RcMap from "effect/RcMap";
 import * as Result from "effect/Result";
 import type * as Scope from "effect/Scope";
+import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import { agentError } from "./agent-error.ts";
+import type { OmpPromptSender } from "./omp-prompt-sender.ts";
 
 type OmpAssistantMessage = Extract<
   Extract<AgentSessionEvent, { readonly type: "message_end" }>["message"],
@@ -31,6 +34,8 @@ type OmpAssistantMessage = Extract<
 >;
 
 export interface SessionHandle {
+  readonly isStreaming: boolean;
+  readonly waitForIdle: () => Promise<void>;
   readonly settleInFlightMessagePersistence: () => Promise<void>;
   readonly abort: (options?: {
     readonly goalReason?: "interrupted" | "internal";
@@ -42,7 +47,7 @@ export interface SessionHandle {
 
 export interface OpenedSession {
   readonly session: SessionHandle;
-  readonly sendPrompt: (prompt: AgentMessage.AgentPrompt) => Promise<void>;
+  readonly sendPrompt: OmpPromptSender;
   readonly shake: (mode: ShakeMode) => Promise<ShakeResult>;
   readonly contextUsage: () => ContextUsage;
   readonly appendAssistantMessage: (message: OmpAssistantMessage) => Promise<void>;
@@ -65,7 +70,7 @@ export interface SessionPool {
   readonly send: (
     chatId: Chat.ChatId,
     prompt: AgentMessage.AgentPrompt,
-  ) => Effect.Effect<void, AgentError>;
+  ) => Effect.Effect<MessageDelivery, AgentError>;
   readonly close: (chatId: Chat.ChatId) => Effect.Effect<void, AgentError>;
   readonly abort: (chatId: Chat.ChatId) => Effect.Effect<void, AgentError>;
   readonly contextUsage: (chatId: Chat.ChatId) => Effect.Effect<ContextUsage, AgentError>;
@@ -87,6 +92,7 @@ interface OpenLifecycle {
 
 interface ClosingLifecycle {
   readonly type: "closing";
+  readonly completed: Deferred.Deferred<void, AgentError>;
 }
 
 interface ClosedLifecycle {
@@ -96,27 +102,34 @@ interface ClosedLifecycle {
 type LiveLifecycle = OpenLifecycle | ClosingLifecycle | ClosedLifecycle;
 type CaptureHandler = (event: AgentEvent.AgentEvent) => Effect.Effect<void>;
 interface ActiveCapture {
+  readonly kind: "captured";
   readonly runId: ScheduleRunId;
   readonly onEvent: CaptureHandler;
+  readonly released: Deferred.Deferred<void>;
 }
-type RunOutcome = Extract<AgentEvent.AgentEvent, { readonly type: "run-finished" }>["outcome"];
+type RunFinished = Extract<AgentEvent.AgentEvent, { readonly type: "run-finished" }>;
+type RunOutcome = RunFinished["outcome"];
 interface OrdinaryRun {
-  phase:
-    | { readonly type: "sending"; outcome: RunOutcome | undefined }
-    | { readonly type: "accepted" | "rejected" | "finished" };
+  readonly kind: "ordinary";
+  readonly finished: Deferred.Deferred<void>;
+  state:
+    | { readonly kind: "submitting"; readonly terminal: RunFinished | null }
+    | { readonly kind: "streaming" }
+    | { readonly kind: "settled"; readonly terminal: RunFinished };
 }
+type ActiveRun = OrdinaryRun | ActiveCapture;
 type SessionItem =
   | {
       readonly kind: "event";
       readonly event: AgentEvent.AgentEvent;
-      readonly ordinaryRun: OrdinaryRun | null;
+      readonly owner: ActiveRun | null;
     }
   | { readonly kind: "barrier"; readonly completed: Deferred.Deferred<void> };
 
 interface LiveEntry {
   readonly chatId: Chat.ChatId;
   readonly session: SessionHandle;
-  readonly sendPrompt: (prompt: AgentMessage.AgentPrompt) => Promise<void>;
+  readonly sendPrompt: OmpPromptSender;
   readonly shake: (mode: ShakeMode) => Promise<ShakeResult>;
   readonly contextUsage: () => ContextUsage;
   readonly appendAssistantMessage: (message: OmpAssistantMessage) => Promise<void>;
@@ -124,7 +137,10 @@ interface LiveEntry {
   readonly forwarder: Fiber.Fiber<void>;
   readonly lifecycle: MutableRef.MutableRef<LiveLifecycle>;
   readonly capture: MutableRef.MutableRef<ActiveCapture | null>;
-  readonly ordinaryRun: MutableRef.MutableRef<OrdinaryRun | null>;
+  readonly run: MutableRef.MutableRef<ActiveRun | null>;
+  readonly admission: Semaphore.Semaphore;
+  readonly operations: Set<Deferred.Deferred<void>>;
+  readonly closed: Deferred.Deferred<void>;
 }
 
 interface MakeOptions {
@@ -180,18 +196,53 @@ const finishOrdinaryRun = (chatId: Chat.ChatId, outcome: RunOutcome) =>
     Effect.annotateLogs({ component: "omp", operation: "run", chatId, outcome, mode: "ordinary" }),
   );
 
+const settleOrdinaryRun = Effect.fn("SessionPool.settleOrdinaryRun")(function* (
+  chatId: Chat.ChatId,
+  active: MutableRef.MutableRef<ActiveRun | null>,
+  run: OrdinaryRun,
+) {
+  const state = run.state;
+  if (state.kind !== "settled") return;
+  if (MutableRef.get(active) === run) MutableRef.set(active, null);
+  if (yield* Deferred.succeed(run.finished, undefined)) {
+    yield* finishOrdinaryRun(chatId, state.terminal.outcome);
+  }
+});
+
 const drainSessionEvents = Effect.fn("SessionPool.drainSessionEvents")(function* (
   entry: LiveEntry,
 ) {
   const completed = yield* Deferred.make<void>();
   const accepted = yield* Queue.offer(entry.events, { kind: "barrier", completed });
   if (!accepted) return yield* new AgentError({ message: "OMP session event queue is closed" });
-  yield* Deferred.await(completed);
+  yield* Effect.raceFirst(
+    Deferred.await(completed),
+    Fiber.await(entry.forwarder).pipe(
+      Effect.flatMap(() =>
+        Effect.fail(new AgentError({ message: "OMP session event forwarder is closed" })),
+      ),
+    ),
+  );
 });
 
 const closeEntry = Effect.fn("SessionPool.closeEntry")(function* (entry: LiveEntry) {
-  const lifecycle = MutableRef.get(entry.lifecycle);
+  const lifecycle = yield* entry.admission.withPermit(
+    Effect.sync(() => {
+      const current = MutableRef.get(entry.lifecycle);
+      if (current.type === "open") {
+        MutableRef.set(entry.lifecycle, {
+          type: "closing",
+          completed: Deferred.makeUnsafe<void, AgentError>(),
+        });
+      }
+      return current;
+    }),
+  );
   if (lifecycle.type === "closed") return;
+  if (lifecycle.type === "closing") return yield* Deferred.await(lifecycle.completed);
+  const closing = MutableRef.get(entry.lifecycle);
+  if (closing.type !== "closing") return;
+  yield* Effect.forEach(entry.operations, Deferred.await, { discard: true });
 
   let firstFailure: AgentError | undefined;
   const capture = (phase: string, effect: Effect.Effect<void, AgentError>) =>
@@ -206,7 +257,7 @@ const closeEntry = Effect.fn("SessionPool.closeEntry")(function* (entry: LiveEnt
     );
 
   if (lifecycle.type === "open") {
-    MutableRef.set(entry.lifecycle, { type: "closing" });
+    yield* Deferred.succeed(entry.closed, undefined);
     yield* capture(
       "begin-dispose",
       Effect.try({
@@ -236,6 +287,10 @@ const closeEntry = Effect.fn("SessionPool.closeEntry")(function* (entry: LiveEnt
     boundary("Failed to dispose OMP session", () => entry.session.dispose()),
   );
   MutableRef.set(entry.lifecycle, { type: "closed" });
+  yield* Deferred.done(
+    closing.completed,
+    firstFailure === undefined ? Exit.succeed(undefined) : Exit.fail(firstFailure),
+  );
   yield* Effect.logDebug("OMP session closed").pipe(
     Effect.annotateLogs({
       component: "omp",
@@ -256,28 +311,48 @@ const acquireEntry = Effect.fn("SessionPool.acquireEntry")(function* (
   chatId: Chat.ChatId,
 ) {
   const capture = MutableRef.make<ActiveCapture | null>(null);
-  const ordinaryRun = MutableRef.make<OrdinaryRun | null>(null);
+  const run = MutableRef.make<ActiveRun | null>(null);
   const events = yield* Queue.unbounded<SessionItem, Cause.Done>();
   const opened = yield* factory.open(chatId, (event) => {
-    Queue.offerUnsafe(events, { kind: "event", event, ordinaryRun: MutableRef.get(ordinaryRun) });
+    let owner = MutableRef.get(run);
+    if (event.type === "run-started") {
+      if (owner === null) {
+        owner = {
+          kind: "ordinary",
+          finished: Deferred.makeUnsafe<void>(),
+          state: { kind: "streaming" },
+        };
+        MutableRef.set(run, owner);
+      } else if (owner.kind === "ordinary") {
+        owner.state =
+          owner.state.kind === "submitting"
+            ? { kind: "submitting", terminal: null }
+            : { kind: "streaming" };
+      }
+    }
+    if (event.type === "run-finished" && owner !== null) {
+      if (owner.kind === "captured") {
+        MutableRef.set(run, null);
+      } else {
+        owner.state =
+          owner.state.kind === "submitting"
+            ? { kind: "submitting", terminal: event }
+            : { kind: "settled", terminal: event };
+      }
+    }
+    Queue.offerUnsafe(events, { kind: "event", event, owner });
   });
   const forwarder = yield* Stream.fromQueue(events).pipe(
     Stream.runForEach((item) =>
       Effect.gen(function* () {
         if (item.kind === "barrier") return yield* Deferred.succeed(item.completed, undefined);
-        const handler = MutableRef.get(capture);
-        if (handler !== null && item.event.type !== "title-changed") {
-          yield* handler.onEvent(item.event);
+        const owner = item.owner;
+        if (owner?.kind === "captured" && item.event.type !== "title-changed") {
+          yield* owner.onEvent(item.event);
           return;
         }
-        if (handler === null && item.event.type === "run-finished") {
-          const run = item.ordinaryRun;
-          if (run?.phase.type === "sending") run.phase.outcome = item.event.outcome;
-          else if (run?.phase.type === "accepted") {
-            run.phase = { type: "finished" };
-            if (MutableRef.get(ordinaryRun) === run) MutableRef.set(ordinaryRun, null);
-            yield* finishOrdinaryRun(chatId, item.event.outcome);
-          }
+        if (owner?.kind === "ordinary" && item.event.type === "run-finished") {
+          yield* settleOrdinaryRun(chatId, run, owner);
         }
         yield* Queue.offer(output, { kind: "event", envelope: { chatId, event: item.event } });
       }),
@@ -296,6 +371,7 @@ const acquireEntry = Effect.fn("SessionPool.acquireEntry")(function* (
             }),
           ),
     ),
+    Effect.ensuring(Queue.end(events)),
     Effect.forkDetach,
   );
 
@@ -316,7 +392,10 @@ const acquireEntry = Effect.fn("SessionPool.acquireEntry")(function* (
       unsubscribe: opened.unsubscribe,
     }),
     capture,
-    ordinaryRun,
+    run,
+    admission: Semaphore.makeUnsafe(1),
+    operations: new Set(),
+    closed: Deferred.makeUnsafe<void>(),
   } satisfies LiveEntry;
 }, Effect.uninterruptible);
 
@@ -340,6 +419,7 @@ const retainOption = (
 export const makeSessionPool = Effect.fn("SessionPool.make")(function* (
   options: MakeOptions,
 ): Effect.fn.Return<SessionPool, never, Scope.Scope> {
+  const scope = yield* Effect.scope;
   const output = yield* Effect.acquireRelease(Queue.unbounded<OutputItem, Cause.Done>(), (queue) =>
     Queue.end(queue).pipe(Effect.asVoid),
   );
@@ -374,53 +454,142 @@ export const makeSessionPool = Effect.fn("SessionPool.make")(function* (
     chatId: Chat.ChatId,
     prompt: AgentMessage.AgentPrompt,
   ) {
+    const admitted = yield* Deferred.make<MessageDelivery, AgentError>();
+    const completed = yield* Deferred.make<void, AgentError>();
+    const consumed = yield* Deferred.make<"consumed" | "discarded">();
     yield* Effect.scoped(
       Effect.gen(function* () {
         const entry = yield* retain(sessions, chatId);
-        const run: OrdinaryRun = { phase: { type: "sending", outcome: undefined } };
-        MutableRef.set(entry.ordinaryRun, run);
-        yield* Effect.logDebug("OMP run started").pipe(
-          Effect.annotateLogs({
-            component: "omp",
-            operation: "run",
-            chatId,
-            mode: "ordinary",
-            attachmentCount: prompt.attachments.length,
-          }),
-        );
+        const operation = yield* Deferred.make<void>();
+        let consumption: Fiber.Fiber<void> | undefined;
+        let delivery: MessageDelivery | undefined;
+        let ordinary: OrdinaryRun | null = null;
         yield* Effect.gen(function* () {
-          yield* boundary("Failed to send OMP prompt", () => entry.sendPrompt(prompt));
-          yield* drainSessionEvents(entry);
-          if (run.phase.type !== "sending") return;
-          const outcome = run.phase.outcome;
-          if (outcome === undefined) {
-            run.phase = { type: "accepted" };
-          } else {
-            run.phase = { type: "finished" };
-            if (MutableRef.get(entry.ordinaryRun) === run) MutableRef.set(entry.ordinaryRun, null);
-            yield* finishOrdinaryRun(chatId, outcome);
+          while (delivery === undefined) {
+            const next = yield* entry.admission.withPermit(
+              Effect.gen(function* () {
+                if (MutableRef.get(entry.lifecycle).type !== "open") {
+                  return yield* new AgentError({ message: "OMP session is closing" });
+                }
+                const capture = MutableRef.get(entry.capture);
+                if (capture !== null && MutableRef.get(entry.run) !== capture) {
+                  return { kind: "waiting", released: capture.released } as const;
+                }
+                entry.operations.add(operation);
+                const value = yield* boundary("Failed to send OMP prompt", () =>
+                  entry.sendPrompt(prompt, () => {
+                    const active = MutableRef.get(entry.run);
+                    const state: OrdinaryRun["state"] = { kind: "submitting", terminal: null };
+                    ordinary =
+                      active?.kind === "ordinary"
+                        ? active
+                        : {
+                            kind: "ordinary",
+                            finished: Deferred.makeUnsafe<void>(),
+                            state,
+                          };
+                    ordinary.state = state;
+                    MutableRef.set(entry.run, ordinary);
+                  }),
+                );
+                return { kind: "admitted", delivery: value } as const;
+              }),
+            );
+            if (next.kind === "waiting") yield* Deferred.await(next.released);
+            else delivery = next.delivery;
           }
-        }).pipe(
-          Effect.onExit((exit) => {
-            if (Exit.isFailure(exit)) {
-              run.phase = { type: "rejected" };
-              if (MutableRef.get(entry.ordinaryRun) === run)
-                MutableRef.set(entry.ordinaryRun, null);
-              return Effect.logDebug("OMP prompt ended before accepting a run").pipe(
-                Effect.annotateLogs({
-                  component: "omp",
-                  operation: "run",
-                  chatId,
-                  mode: "ordinary",
-                  outcome: Cause.hasInterruptsOnly(exit.cause) ? "interrupted" : "rejected",
-                }),
-              );
+          if (delivery.kind === "steered") {
+            consumption = yield* Effect.raceFirst(
+              delivery.consumed,
+              Deferred.await(entry.closed).pipe(Effect.as("discarded" as const)),
+            ).pipe(
+              Effect.flatMap((outcome) => Deferred.succeed(consumed, outcome)),
+              Effect.asVoid,
+              Effect.forkChild,
+            );
+          }
+          if (delivery.kind === "started") {
+            yield* Effect.logDebug("OMP run started").pipe(
+              Effect.annotateLogs({
+                component: "omp",
+                operation: "run",
+                chatId,
+                mode: "ordinary",
+                attachmentCount: prompt.attachments.length,
+              }),
+            );
+          }
+          const receipt: MessageDelivery =
+            delivery.kind === "handled"
+              ? delivery
+              : delivery.kind === "started"
+                ? { kind: "started", completed: Deferred.await(completed) }
+                : {
+                    kind: "steered",
+                    consumed: Deferred.await(consumed),
+                    completed: Deferred.await(completed),
+                  };
+          yield* Deferred.succeed(admitted, receipt);
+          if (delivery.kind !== "handled") yield* delivery.completed;
+          if (ordinary !== null) {
+            const state = ordinary.state;
+            if (state.kind === "submitting") {
+              ordinary.state =
+                state.terminal === null
+                  ? { kind: "streaming" }
+                  : { kind: "settled", terminal: state.terminal };
             }
-            return Effect.void;
-          }),
+            yield* settleOrdinaryRun(chatId, entry.run, ordinary);
+          }
+          yield* drainSessionEvents(entry);
+        }).pipe(
+          Effect.onExit((exit) =>
+            Effect.gen(function* () {
+              yield* Deferred.done(completed, exit);
+              if (Exit.isFailure(exit)) {
+                yield* Deferred.failCause(admitted, exit.cause);
+                if (ordinary?.state.kind === "submitting") {
+                  if (ordinary.state.terminal === null) {
+                    ordinary.state = { kind: "streaming" };
+                  } else {
+                    if (MutableRef.get(entry.run) === ordinary) MutableRef.set(entry.run, null);
+                    yield* Deferred.succeed(ordinary.finished, undefined);
+                  }
+                }
+              }
+              entry.operations.delete(operation);
+              yield* Deferred.succeed(operation, undefined);
+            }),
+          ),
+          Effect.exit,
         );
+        if (consumption !== undefined) yield* Fiber.join(consumption);
       }),
+    ).pipe(
+      Effect.onExit((exit) =>
+        Effect.gen(function* () {
+          if (Exit.isFailure(exit)) {
+            yield* Deferred.failCause(admitted, exit.cause);
+            yield* Deferred.done(completed, exit);
+          }
+          yield* Deferred.succeed(consumed, "discarded");
+        }),
+      ),
+      Effect.catchCause((cause) =>
+        Cause.hasDies(cause)
+          ? Effect.logError("OMP submission observer failed").pipe(
+              Effect.annotateLogs({
+                component: "omp",
+                operation: "send",
+                chatId,
+                failureKind: "defect",
+              }),
+            )
+          : Effect.void,
+      ),
+      Effect.forkIn(scope),
     );
+    return yield* Deferred.await(admitted);
   });
   const sendCaptured = Effect.fn("AgentRuntime.sendCaptured")(function* (
     chatId: Chat.ChatId,
@@ -431,108 +600,166 @@ export const makeSessionPool = Effect.fn("SessionPool.make")(function* (
     return yield* Effect.scoped(
       Effect.gen(function* () {
         const entry = yield* retain(sessions, chatId);
-        if (MutableRef.get(entry.capture) !== null) {
-          return yield* new AgentError({ message: "A captured OMP run is already active" });
-        }
-        yield* drainSessionEvents(entry);
         const terminal = yield* Deferred.make<CapturedAgentRun, AgentError>();
+        const released = yield* Deferred.make<void>();
         const capturedEvents: Array<AgentEvent.AgentEvent> = [];
         let assistantText = "";
-        const handler: CaptureHandler = (event) =>
-          Effect.gen(function* () {
-            capturedEvents.push(event);
-            if (event.type === "message-settled" && event.message.role === "assistant") {
-              assistantText = event.message.content
-                .filter((block) => block.type === "text")
-                .map((block) => block.text)
-                .join("");
-            }
-            const sink = yield* onEvent(event).pipe(Effect.result);
-            if (Result.isFailure(sink)) {
-              yield* Deferred.fail(terminal, sink.failure);
-              return;
-            }
-            if (event.type === "run-finished") {
-              yield* Deferred.succeed(terminal, {
-                runId,
-                outcome: event.outcome,
-                events: [...capturedEvents],
-                finalAssistantText: assistantText,
-              });
-            }
-          });
-        MutableRef.set(entry.capture, { runId, onEvent: handler });
-        yield* Effect.logDebug("Captured OMP run started").pipe(
-          Effect.annotateLogs({
-            component: "omp",
-            operation: "run",
-            chatId,
-            runId,
-            mode: "captured",
-          }),
-        );
+        let submission: Promise<MessageDelivery> | undefined;
+        const capture: ActiveCapture = {
+          kind: "captured",
+          runId,
+          released,
+          onEvent: (event) =>
+            Effect.gen(function* () {
+              capturedEvents.push(event);
+              if (event.type === "message-settled" && event.message.role === "assistant") {
+                assistantText = event.message.content
+                  .filter((block) => block.type === "text")
+                  .map((block) => block.text)
+                  .join("");
+              }
+              const sink = yield* onEvent(event).pipe(
+                Effect.tapCause((cause) => Deferred.failCause(terminal, cause)),
+                Effect.result,
+              );
+              if (Result.isFailure(sink)) return yield* Deferred.fail(terminal, sink.failure);
+              if (event.type === "run-finished") {
+                yield* Deferred.succeed(terminal, {
+                  runId,
+                  outcome: event.outcome,
+                  events: [...capturedEvents],
+                  finalAssistantText: assistantText,
+                });
+              }
+            }).pipe(Effect.asVoid),
+        };
         return yield* Effect.uninterruptibleMask((restore) =>
           Effect.gen(function* () {
-            const terminalFailure = Deferred.await(terminal).pipe(
-              Effect.flatMap(() => Effect.never),
-            );
-            const completed = yield* restore(
+            const result = yield* restore(
               Effect.gen(function* () {
-                yield* Effect.raceFirst(
-                  boundary("Failed to send captured OMP prompt", () => entry.sendPrompt(prompt)),
-                  terminalFailure,
+                let delivery: MessageDelivery | undefined;
+                while (delivery === undefined) {
+                  const active = MutableRef.get(entry.capture) ?? MutableRef.get(entry.run);
+                  if (active !== null) {
+                    yield* Deferred.await(
+                      active.kind === "captured" ? active.released : active.finished,
+                    );
+                    continue;
+                  }
+                  yield* boundary("Failed to wait for OMP session idle", () =>
+                    entry.session.waitForIdle(),
+                  );
+                  yield* boundary("Failed to settle OMP capture admission persistence", () =>
+                    entry.session.settleInFlightMessagePersistence(),
+                  );
+                  yield* drainSessionEvents(entry);
+                  const next = yield* entry.admission.withPermit(
+                    Effect.gen(function* () {
+                      if (MutableRef.get(entry.lifecycle).type !== "open") {
+                        return yield* new AgentError({ message: "OMP session is closing" });
+                      }
+                      const activeCapture = MutableRef.get(entry.capture);
+                      const ordinary = MutableRef.get(entry.run);
+                      if (activeCapture !== null)
+                        return { kind: "waiting", released: activeCapture.released } as const;
+                      if (ordinary?.kind === "ordinary")
+                        return { kind: "waiting", released: ordinary.finished } as const;
+                      if (entry.session.isStreaming) return { kind: "busy" } as const;
+                      MutableRef.set(entry.capture, capture);
+                      MutableRef.set(entry.run, capture);
+                      entry.operations.add(released);
+                      const value = yield* boundary("Failed to send captured OMP prompt", () => {
+                        submission = entry.sendPrompt(prompt);
+                        return submission;
+                      });
+                      return { kind: "admitted", delivery: value } as const;
+                    }),
+                  );
+                  if (next.kind === "waiting") yield* Deferred.await(next.released);
+                  else if (next.kind === "admitted") delivery = next.delivery;
+                }
+                if (delivery.kind !== "started") {
+                  return yield* new AgentError({
+                    message: "Scheduled prompt did not start a captured run",
+                  });
+                }
+                yield* Effect.logDebug("Captured OMP run started").pipe(
+                  Effect.annotateLogs({
+                    component: "omp",
+                    operation: "run",
+                    chatId,
+                    runId,
+                    mode: "captured",
+                  }),
                 );
-                const result = yield* Deferred.await(terminal);
+                yield* Effect.raceFirst(
+                  delivery.completed,
+                  Deferred.await(terminal).pipe(Effect.flatMap(() => Effect.never)),
+                );
+                const captured = yield* Deferred.await(terminal);
                 yield* boundary("Failed to settle captured OMP persistence", () =>
                   entry.session.settleInFlightMessagePersistence(),
                 );
-                return result;
+                return captured;
               }),
             ).pipe(Effect.exit);
-            if (Exit.isFailure(completed)) {
-              yield* attemptCleanup(
-                chatId,
-                "capture-abort",
-                boundary("Failed to abort captured OMP run", () =>
-                  entry.session.abort({
-                    goalReason: Cause.hasInterruptsOnly(completed.cause)
-                      ? "interrupted"
-                      : "internal",
-                    reason: Cause.hasInterruptsOnly(completed.cause)
-                      ? "Scheduled run interrupted"
-                      : "Scheduled run capture failed",
-                  }),
-                ),
-              ).pipe(Effect.annotateLogs({ runId }), Effect.exit);
-              yield* attemptCleanup(chatId, "capture-drain", drainSessionEvents(entry)).pipe(
-                Effect.annotateLogs({ runId }),
-                Effect.exit,
-              );
+            if (MutableRef.get(entry.capture) === capture) {
+              if (Exit.isFailure(result)) {
+                if (MutableRef.get(entry.run) === capture) {
+                  yield* attemptCleanup(
+                    chatId,
+                    "capture-abort",
+                    boundary("Failed to abort captured OMP run", () =>
+                      entry.session.abort({
+                        goalReason: Cause.hasInterruptsOnly(result.cause)
+                          ? "interrupted"
+                          : "internal",
+                        reason: Cause.hasInterruptsOnly(result.cause)
+                          ? "Scheduled run interrupted"
+                          : "Scheduled run capture failed",
+                      }),
+                    ),
+                  ).pipe(Effect.annotateLogs({ runId }), Effect.exit);
+                }
+                const inFlight = submission;
+                if (inFlight !== undefined) {
+                  yield* attemptCleanup(
+                    chatId,
+                    "capture-completion",
+                    boundary("Failed to settle captured OMP submission", () => inFlight).pipe(
+                      Effect.flatMap((delivery) =>
+                        delivery.kind === "handled" ? Effect.void : delivery.completed,
+                      ),
+                    ),
+                  ).pipe(Effect.annotateLogs({ runId }), Effect.exit);
+                }
+                yield* attemptCleanup(chatId, "capture-drain", drainSessionEvents(entry)).pipe(
+                  Effect.annotateLogs({ runId }),
+                  Effect.exit,
+                );
+              }
+              if (MutableRef.get(entry.run) === capture) MutableRef.set(entry.run, null);
               MutableRef.set(entry.capture, null);
-              yield* Effect.logDebug("Captured OMP run stopped").pipe(
+              entry.operations.delete(released);
+              yield* Deferred.succeed(released, undefined);
+              yield* Effect.logDebug(
+                Exit.isFailure(result) ? "Captured OMP run stopped" : "Captured OMP run finished",
+              ).pipe(
                 Effect.annotateLogs({
                   component: "omp",
                   operation: "run",
                   chatId,
                   runId,
                   mode: "captured",
-                  outcome: Cause.hasInterruptsOnly(completed.cause) ? "interrupted" : "rejected",
+                  outcome: Exit.isFailure(result)
+                    ? Cause.hasInterruptsOnly(result.cause)
+                      ? "interrupted"
+                      : "rejected"
+                    : result.value.outcome,
                 }),
               );
-              return yield* completed;
             }
-            MutableRef.set(entry.capture, null);
-            yield* Effect.logDebug("Captured OMP run finished").pipe(
-              Effect.annotateLogs({
-                component: "omp",
-                operation: "run",
-                chatId,
-                runId,
-                mode: "captured",
-                outcome: completed.value.outcome,
-              }),
-            );
-            return yield* completed;
+            return yield* result;
           }),
         );
       }),

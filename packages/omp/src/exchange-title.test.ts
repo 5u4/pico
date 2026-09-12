@@ -1,6 +1,7 @@
 import { assert, describe, it } from "@effect/vitest";
 import type * as AgentEvent from "@pico/contract/agent-event";
 import * as AgentMessage from "@pico/contract/agent-message";
+import type { MessageDelivery } from "@pico/contract/agent-runtime";
 import * as Chat from "@pico/contract/chat-model";
 import * as Effect from "effect/Effect";
 import * as Logger from "effect/Logger";
@@ -13,6 +14,7 @@ import {
 
 const prompt = (text: string) => AgentMessage.AgentPrompt.make({ text, attachments: [] });
 const chatId = Chat.ChatId.make("018f47a0-0000-7000-8000-000000000001");
+const admitted: MessageDelivery = { kind: "started", completed: Effect.void };
 const ignoreBranchNaming = () => {};
 const flush = async () => {
   await Promise.resolve();
@@ -82,6 +84,7 @@ describe("exchange titles", () => {
       history: [],
       sendPrompt: async () => {
         calls.push("send");
+        return admitted;
       },
       generateTitle: async (exchange, systemPrompt) => {
         calls.push("generate");
@@ -181,7 +184,7 @@ describe("exchange titles", () => {
       chatId,
       handleBranchNaming: ignoreBranchNaming,
       history: [],
-      sendPrompt: async () => {},
+      sendPrompt: async () => admitted,
       generateTitle: async (exchange) => {
         generated.push(exchange);
         return "Image request";
@@ -212,8 +215,8 @@ describe("exchange titles", () => {
 
   it("correlates concurrent sends by claim identity and spends once", async () => {
     const generated: string[] = [];
-    const firstSend = Promise.withResolvers<void>();
-    const secondSend = Promise.withResolvers<void>();
+    const firstSend = Promise.withResolvers<MessageDelivery>();
+    const secondSend = Promise.withResolvers<MessageDelivery>();
     let sends = 0;
     const flow = makeExchangeTitleFlow({
       chatId,
@@ -223,7 +226,7 @@ describe("exchange titles", () => {
         sends += 1;
         if (sends === 1) return firstSend.promise;
         if (sends === 2) return secondSend.promise;
-        return Promise.resolve();
+        return Promise.resolve(admitted);
       },
       generateTitle: async (exchange) => {
         generated.push(exchange);
@@ -242,7 +245,7 @@ describe("exchange titles", () => {
       () => "rejected",
     );
     const accepted = flow.sendPrompt(prompt("accepted second"));
-    secondSend.resolve();
+    secondSend.resolve(admitted);
     await accepted;
     firstSend.reject(new Error("rejected"));
     assert.strictEqual(await rejectedResult, "rejected");
@@ -264,7 +267,7 @@ describe("exchange titles", () => {
       chatId,
       handleBranchNaming: ignoreBranchNaming,
       history: [],
-      sendPrompt: async () => {},
+      sendPrompt: async () => admitted,
       generateTitle: async (exchange) => {
         generated.push(exchange);
         return "Recovered title";
@@ -304,7 +307,7 @@ describe("exchange titles", () => {
         branchRequests += 1;
       },
       history: [{ role: "assistant", stopReason: "stop" }],
-      sendPrompt: async () => {},
+      sendPrompt: async () => admitted,
       generateTitle: async () => {
         generated += 1;
         return "Late title";
@@ -334,7 +337,7 @@ describe("exchange titles", () => {
         generators.push(request.generateTopic);
       },
       history: [],
-      sendPrompt: async () => {},
+      sendPrompt: async () => admitted,
       generateTitle: async (exchange, systemPrompt) => {
         generatedInputs.push({ exchange, prompt: systemPrompt });
         return "fix-widget-flow";
@@ -374,7 +377,7 @@ describe("exchange titles", () => {
         });
       },
       history: [],
-      sendPrompt: async () => {},
+      sendPrompt: async () => admitted,
       generateTitle: async (_exchange, systemPrompt) => {
         if (systemPrompt === EXCHANGE_TITLE_SYSTEM_PROMPT) throw new Error("display failed");
         return "fix-widget-flow";
@@ -401,7 +404,7 @@ describe("exchange titles", () => {
       chatId,
       handleBranchNaming: ignoreBranchNaming,
       history: [],
-      sendPrompt: async () => {},
+      sendPrompt: async () => admitted,
       generateTitle: async () => {
         generated += 1;
         return "Replacement";
@@ -427,7 +430,7 @@ describe("exchange titles", () => {
       chatId,
       handleBranchNaming: ignoreBranchNaming,
       history: [],
-      sendPrompt: async () => {},
+      sendPrompt: async () => admitted,
       generateTitle: () => {
         generated += 1;
         return generation.promise;
@@ -470,7 +473,7 @@ describe("exchange titles", () => {
         chatId,
         handleBranchNaming: ignoreBranchNaming,
         history: [],
-        sendPrompt: async () => {},
+        sendPrompt: async () => admitted,
         generateTitle: async () => {
           if (outcome === "aborted") throw new DOMException("cancelled", "AbortError");
           if (outcome === "null") return null;

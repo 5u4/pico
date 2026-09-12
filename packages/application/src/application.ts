@@ -1,6 +1,6 @@
 import type * as AgentEvent from "@pico/contract/agent-event";
 import type * as AgentMessage from "@pico/contract/agent-message";
-import { AgentRuntime, type ShakeMode } from "@pico/contract/agent-runtime";
+import { AgentRuntime, type MessageDelivery, type ShakeMode } from "@pico/contract/agent-runtime";
 import { AgentSessionStore } from "@pico/contract/agent-session-store";
 import {
   Application,
@@ -35,8 +35,10 @@ import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import * as FiberSet from "effect/FiberSet";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -222,6 +224,23 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
   const crypto = yield* Crypto.Crypto;
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
+  const scope = yield* Effect.scope;
+  const activeOperations = new Map<Chat.ChatId, Set<Deferred.Deferred<void>>>();
+  const trackOperation = <A, E, R>(chatId: Chat.ChatId, effect: Effect.Effect<A, E, R>) => {
+    const finished = Deferred.makeUnsafe<void>();
+    const operations = activeOperations.get(chatId) ?? new Set<Deferred.Deferred<void>>();
+    operations.add(finished);
+    activeOperations.set(chatId, operations);
+    return effect.pipe(
+      Effect.ensuring(
+        Effect.sync(() => {
+          operations.delete(finished);
+          if (operations.size === 0) activeOperations.delete(chatId);
+          Deferred.doneUnsafe(finished, Effect.void);
+        }),
+      ),
+    );
+  };
 
   interface ChatLock {
     readonly semaphore: Semaphore.Semaphore;
@@ -583,6 +602,9 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
     return yield* serialized(
       chatId,
       Effect.gen(function* () {
+        yield* Effect.forEach(activeOperations.get(chatId) ?? [], Deferred.await, {
+          discard: true,
+        });
         const chat = yield* findChat(chatId);
         const inspection = yield* gitWorktree
           .inspectChat({ chatId, cwd: chat.cwd })
@@ -665,14 +687,28 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
   const sendMessage = Effect.fn("Application.sendMessage")(function* (
     chatId: Chat.ChatId,
     prompt: AgentMessage.AgentPrompt,
-  ) {
-    yield* serialized(
+  ): Effect.fn.Return<MessageDelivery<ApplicationError>, ApplicationError | ChatClosed> {
+    return yield* serialized(
       chatId,
       Effect.gen(function* () {
         yield* ensureChatOpen(chatId, "Failed to send message");
-        yield* runtime
+        const delivery = yield* runtime
           .send(chatId, prompt)
           .pipe(Effect.mapError(failure("Failed to send message")));
+        if (delivery.kind === "handled") return delivery;
+        const completed = delivery.completed.pipe(
+          Effect.mapError(failure("Failed to send message")),
+        );
+        yield* Effect.uninterruptible(
+          trackOperation(chatId, completed).pipe(Effect.exit, Effect.forkIn(scope)),
+        );
+        return delivery.kind === "started"
+          ? ({ kind: "started", completed } satisfies MessageDelivery<ApplicationError>)
+          : ({
+              kind: "steered",
+              consumed: delivery.consumed,
+              completed,
+            } satisfies MessageDelivery<ApplicationError>);
       }),
     );
   });
@@ -682,13 +718,24 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
     prompt: AgentMessage.AgentPrompt,
     onEvent: (event: AgentEvent.AgentEvent) => Effect.Effect<void, AgentError>,
   ) {
-    return yield* serialized(
-      chatId,
+    return yield* Effect.scoped(
       Effect.gen(function* () {
-        yield* ensureChatOpen(chatId, "Failed to run scheduled prompt");
-        return yield* runtime
-          .sendCaptured(chatId, runId, prompt, onEvent)
-          .pipe(Effect.mapError(failure("Failed to run scheduled prompt")));
+        const operationScope = yield* Effect.scope;
+        const operation = yield* serialized(
+          chatId,
+          Effect.gen(function* () {
+            yield* ensureChatOpen(chatId, "Failed to run scheduled prompt");
+            return yield* Effect.uninterruptible(
+              trackOperation(
+                chatId,
+                runtime
+                  .sendCaptured(chatId, runId, prompt, onEvent)
+                  .pipe(Effect.mapError(failure("Failed to run scheduled prompt"))),
+              ).pipe(Effect.forkIn(operationScope)),
+            );
+          }),
+        );
+        return yield* Fiber.join(operation);
       }),
     );
   });

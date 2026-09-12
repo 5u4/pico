@@ -4,10 +4,14 @@ import * as BunPath from "@effect/platform-bun/BunPath";
 import { assert, describe, it } from "@effect/vitest";
 import type { tryRunRpcSkillCommand } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
 import type * as OmpAgentSession from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import type { PromptDeliveryObserver } from "@oh-my-pi/pi-coding-agent/session/agent-session-types";
 import * as AgentMessage from "@pico/contract/agent-message";
 import * as Chat from "@pico/contract/chat-model";
+import { AgentError } from "@pico/contract/errors";
 import * as Crypto from "effect/Crypto";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Logger from "effect/Logger";
@@ -21,7 +25,7 @@ type CustomMessage = Parameters<HelperSession["promptCustomMessage"]>[0];
 type CustomMessageOptions = Parameters<HelperSession["promptCustomMessage"]>[1];
 type LiteralPrompt = Parameters<OmpAgentSession.AgentSession["sendUserMessage"]>[0];
 type ImagePromptOptions = Parameters<OmpAgentSession.AgentSession["prompt"]>[1];
-type PromptDropped = Parameters<OmpAgentSession.AgentSession["setPromptDropped"]>[0];
+type LiteralPromptOptions = Parameters<OmpAgentSession.AgentSession["sendUserMessage"]>[1];
 
 const platformLayer = Layer.mergeAll(BunCrypto.layer, BunFileSystem.layer, BunPath.layer);
 const textPrompt = (text: string) => AgentMessage.AgentPrompt.make({ text, attachments: [] });
@@ -48,27 +52,30 @@ const makeFakeSession = (
   }> = [];
   const literalPrompts: Array<LiteralPrompt> = [];
   const imagePrompts: Array<{ readonly text: string; readonly options: ImagePromptOptions }> = [];
-  let promptDropped: PromptDropped;
   const session = {
     skillsSettings: { enableSkillCommands },
     skills: [skill],
     sessionManager: { getSessionFile: () => sessionFile },
     promptCustomMessage: (message: CustomMessage, options?: CustomMessageOptions) => {
       customMessages.push({ message, options });
+      options?.deliveryObserver?.onAccepted("prompt");
+      options?.deliveryObserver?.onConsumed();
       return Promise.resolve(true);
     },
-    sendUserMessage: (prompt: LiteralPrompt) => {
+    sendUserMessage: (prompt: LiteralPrompt, options?: LiteralPromptOptions) => {
       literalPrompts.push(prompt);
+      options?.deliveryObserver?.onAccepted("prompt");
+      options?.deliveryObserver?.onConsumed();
       return Promise.resolve();
-    },
-    setPromptDropped: (handler: PromptDropped) => {
-      promptDropped = handler;
     },
     prompt: async (text: string, options?: ImagePromptOptions) => {
       imagePrompts.push({ text, options });
       await promptGate?.(imagePrompts.length);
       if (!accepted) {
-        promptDropped?.({ text, ...(options?.images ? { images: options.images } : {}) });
+        options?.deliveryObserver?.onDiscarded();
+      } else {
+        options?.deliveryObserver?.onAccepted("prompt");
+        options?.deliveryObserver?.onConsumed();
       }
       return true;
     },
@@ -77,6 +84,72 @@ const makeFakeSession = (
 };
 
 describe("makeOmpPromptSender", () => {
+  it.effect(
+    "admits duplicate images before completion and retains accepted originals after failure",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const crypto = yield* Crypto.Crypto;
+        const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-image-admission-" });
+        const fake = makeFakeSession(
+          {
+            name: "unused",
+            description: "unused",
+            filePath: path.join(root, "SKILL.md"),
+            baseDir: root,
+            source: "test",
+          },
+          false,
+          path.join(root, "chat.jsonl"),
+        );
+        const firstOperation = Promise.withResolvers<void>();
+        const observers: PromptDeliveryObserver[] = [];
+        fake.session.prompt = async (_text, options) => {
+          const observer = options?.deliveryObserver;
+          if (observer === undefined) throw new Error("Missing prompt delivery observer");
+          observers.push(observer);
+          observer.onAccepted(observers.length === 1 ? "prompt" : "steer");
+          if (observers.length === 1) {
+            observer.onConsumed();
+            await firstOperation.promise;
+          }
+          return true;
+        };
+        const send = makeOmpPromptSender(fake.session, fileSystem, path, crypto, diagnostics);
+        const input = AgentMessage.AgentPrompt.make({
+          text: "same",
+          attachments: [
+            { type: "image", name: "same.png", data: pngBase64, mimeType: "image/png" },
+          ],
+        });
+        const first = yield* Effect.promise(() => send(input));
+        const second = yield* Effect.promise(() => send(input));
+        const third = yield* Effect.promise(() => send(input));
+        if (first.kind !== "started" || second.kind !== "steered" || third.kind !== "steered") {
+          return yield* Effect.die("Unexpected delivery kinds");
+        }
+        const thirdConsumed = yield* Deferred.make<void>();
+        const thirdResult = yield* third.consumed.pipe(
+          Effect.tap(() => Deferred.succeed(thirdConsumed, undefined)),
+          Effect.forkChild,
+        );
+        observers[1]?.onConsumed();
+        assert.strictEqual(yield* second.consumed, "consumed");
+        assert.isFalse(yield* Deferred.isDone(thirdConsumed));
+        observers[2]?.onDiscarded();
+        assert.strictEqual(yield* Fiber.join(thirdResult), "discarded");
+        firstOperation.reject(new Error("provider failed after admission"));
+        assert.instanceOf(yield* first.completed.pipe(Effect.flip), AgentError);
+        const image = new Uint8Array(Buffer.from(pngBase64, "base64"));
+        const digest = hex(yield* crypto.digest("SHA-256", image));
+        assert.deepStrictEqual(
+          yield* fileSystem.readFile(path.join(root, "chat", "attachments", `${digest}.png`)),
+          image,
+        );
+      }).pipe(Effect.provide(platformLayer)),
+  );
+
   it.effect("preserves text and skill prompt behavior", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
@@ -117,7 +190,7 @@ describe("makeOmpPromptSender", () => {
           display: message.display,
           details: message.details,
           attribution: message.attribution,
-          options,
+          options: { streamingBehavior: options?.streamingBehavior },
         })),
         [
           {
@@ -237,15 +310,22 @@ describe("makeOmpPromptSender", () => {
       assert.strictEqual(fake.imagePrompts.length, 1);
       const call = fake.imagePrompts[0];
       if (call === undefined) return yield* Effect.die("missing image prompt call");
-      assert.deepStrictEqual(call.options, {
-        images: prompt.attachments.map(({ data, mimeType }) => ({
-          type: "image",
-          data,
-          mimeType,
-        })),
-        expandPromptTemplates: false,
-        streamingBehavior: "steer",
-      } satisfies NonNullable<ImagePromptOptions>);
+      assert.deepStrictEqual(
+        {
+          images: call.options?.images,
+          expandPromptTemplates: call.options?.expandPromptTemplates,
+          streamingBehavior: call.options?.streamingBehavior,
+        },
+        {
+          images: prompt.attachments.map(({ data, mimeType }) => ({
+            type: "image",
+            data,
+            mimeType,
+          })),
+          expandPromptTemplates: false,
+          streamingBehavior: "steer",
+        } satisfies NonNullable<ImagePromptOptions>,
+      );
 
       const attachmentsDirectory = path.join(root, "chat", "attachments");
       const pngFile = path.join(
@@ -327,7 +407,7 @@ describe("makeOmpPromptSender", () => {
           ),
         catch: (error) => error,
       }).pipe(Effect.flip);
-      assert.isTrue(failure instanceof DOMException && failure.name === "AbortError");
+      assert.instanceOf(failure, AgentError);
       assert.isFalse(yield* fileSystem.exists(path.join(root, "chat")));
     }).pipe(Effect.provide(platformLayer)),
   );

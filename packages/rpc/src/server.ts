@@ -28,6 +28,9 @@ const handlers = PicoRpcs.toLayer(
         ),
       SendMessage: ({ chatId, prompt }, { requestId }) =>
         application.sendMessage(chatId, prompt).pipe(
+          Effect.flatMap((delivery) =>
+            delivery.kind === "handled" ? Effect.void : delivery.completed,
+          ),
           Effect.tapCause(reportFailure),
           Effect.annotateLogs({
             component: "rpc",

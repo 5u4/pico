@@ -29,3 +29,24 @@ copying it. Source changes take effect on the next start. If you move the reposi
 `bun link --cwd packages/cli` again from its new location.
 
 Run `pico start` directly, not through `bun run`, to avoid duplicate SIGINT delivery.
+
+## Discord steering
+
+Messages sent in an active chat's Discord thread enter OMP as steers without waiting for the
+current run to finish. Each accepted steer gets a ⏳ reaction on its original message. When OMP
+adds that message to its context, pico replaces ⏳ with ✅. Consumption does not mean the task
+has finished.
+
+Each message has its own receipt, including messages with identical text or images. Removing a
+queued steer clears ⏳ without adding ✅. Receipts are in memory and are not replayed after a
+restart. The bot needs permission to add reactions in the thread.
+
+## OMP delivery notifications
+
+The pinned OMP dependency has a Bun patch because its SDK does not expose per-message admission
+and consumption notifications. The patch attaches observers to native messages and uses OMP's
+context-insertion callbacks. Pico does not match message text or maintain another execution queue.
+
+`bun install` applies the patch. When upgrading OMP, rebase or remove the patch and run
+`bun --bun x vitest run packages/omp/src/omp-delivery.test.ts packages/omp/src/session-pool-native.test.ts`
+to check delivery timing, queue removal, and continuation ownership against the new SDK.

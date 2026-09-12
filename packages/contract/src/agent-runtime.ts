@@ -46,6 +46,15 @@ export interface CapturedAgentRun {
   readonly finalAssistantText: string;
 }
 
+export type MessageDelivery<E = AgentError> =
+  | { readonly kind: "started"; readonly completed: Effect.Effect<void, E> }
+  | {
+      readonly kind: "steered";
+      readonly consumed: Effect.Effect<"consumed" | "discarded">;
+      readonly completed: Effect.Effect<void, E>;
+    }
+  | { readonly kind: "handled" };
+
 export class AgentRuntime extends Context.Service<
   AgentRuntime,
   {
@@ -54,7 +63,10 @@ export class AgentRuntime extends Context.Service<
 
     readonly transcript: (chatId: ChatId) => Effect.Effect<AgentTranscript, AgentError>;
 
-    readonly send: (chatId: ChatId, prompt: AgentPrompt) => Effect.Effect<void, AgentError>;
+    readonly send: (
+      chatId: ChatId,
+      prompt: AgentPrompt,
+    ) => Effect.Effect<MessageDelivery, AgentError>;
     readonly sendCaptured: (
       chatId: ChatId,
       runId: ScheduleRunId,

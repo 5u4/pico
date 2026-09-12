@@ -1,0 +1,615 @@
+diff --git a/dist/types/modes/rpc/rpc-mode.d.ts b/dist/types/modes/rpc/rpc-mode.d.ts
+index d2c6e672d3c088aa917c8c0f8deb6fc38c5f8792..70f7b393faa2f3d5faa642f5b48a2678ed031db6 100644
+--- a/dist/types/modes/rpc/rpc-mode.d.ts
++++ b/dist/types/modes/rpc/rpc-mode.d.ts
+@@ -1,6 +1,7 @@
+ import { type ExtensionUIContext, type ExtensionUIDialogOptions, type ExtensionUISelectItem } from "../../extensibility/extensions/index.js";
+ import { type BuiltSkillPromptMessage, type Skill } from "../../extensibility/skills.js";
+ import type { AgentSession } from "../../session/agent-session.js";
++import type { PromptDeliveryObserver } from "../../session/agent-session-types.js";
+ import type { EventBus } from "../../utils/event-bus.js";
+ import { RpcSubagentRegistry } from "./rpc-subagents.js";
+ import type { RpcCommand, RpcExtensionUIRequest, RpcExtensionUIResponse, RpcHostToolCallRequest, RpcHostToolCancelRequest, RpcHostToolResult, RpcHostToolUpdate, RpcHostUriCancelRequest, RpcHostUriRequest, RpcHostUriResult, RpcResponse } from "./rpc-types.js";
+@@ -63,7 +64,7 @@ export declare function resolveRpcSkillInvocation(session: RpcSkillCommandSessio
+  * Must not run on the RPC serial queue's response path — register it with
+  * watchAndReportLocalOnlyPromptResult and answer the command first.
+  */
+-export declare function runRpcSkillCommand(session: RpcSkillCommandSession, invocation: RpcSkillInvocation, streamingBehavior?: "steer" | "followUp", prebuilt?: BuiltSkillPromptMessage): Promise<boolean>;
++export declare function runRpcSkillCommand(session: RpcSkillCommandSession, invocation: RpcSkillInvocation, streamingBehavior?: "steer" | "followUp", prebuilt?: BuiltSkillPromptMessage, deliveryObserver?: PromptDeliveryObserver): Promise<boolean>;
+ /**
+  * Skill branch of the `prompt` command: resolves the invocation cheaply, then
+  * registers the slow dispatch with watchAndReportLocalOnlyPromptResult and
+@@ -81,7 +82,7 @@ export declare function dispatchRpcSkillPrompt(input: {
+     onError: (error: Error) => void;
+     extensionUserMessageTracker: RpcExtensionUserMessageTracker;
+ }): Promise<RpcSkillCommandResult | null>;
+-export declare function tryRunRpcSkillCommand(session: RpcSkillCommandSession, text: string, streamingBehavior?: "steer" | "followUp"): Promise<RpcSkillCommandResult | false>;
++export declare function tryRunRpcSkillCommand(session: RpcSkillCommandSession, text: string, streamingBehavior?: "steer" | "followUp", deliveryObserver?: PromptDeliveryObserver): Promise<RpcSkillCommandResult | false>;
+ export declare function reportLocalOnlyPromptResult(input: {
+     id: string | undefined;
+     prompt: Promise<boolean>;
+diff --git a/dist/types/session/agent-session-types.d.ts b/dist/types/session/agent-session-types.d.ts
+index abf74e5efad48f840d09492eb6a453a0f10eb656..18e1f0a262d090909f3abfebe706bafbc818d530 100644
+--- a/dist/types/session/agent-session-types.d.ts
++++ b/dist/types/session/agent-session-types.d.ts
+@@ -308,8 +308,15 @@ export interface AgentSessionConfig {
+     /** System prompt used by automatic session-title generation. */
+     titleSystemPrompt?: string;
+ }
++/** SDK hosts observe admission and final delivery of one submitted message. */
++export interface PromptDeliveryObserver {
++    onAccepted(delivery: "prompt" | "steer" | "followUp" | "aside"): void;
++    onConsumed(): void;
++    onDiscarded(): void;
++}
+ /** Options for AgentSession.prompt(). */
+ export interface PromptOptions {
++    deliveryObserver?: PromptDeliveryObserver;
+     /** Whether to expand file-based prompt templates (default: true). */
+     expandPromptTemplates?: boolean;
+     /** Image attachments. */
+diff --git a/dist/types/session/agent-session.d.ts b/dist/types/session/agent-session.d.ts
+index e9c8ade46a1ad9521d3ad3bf47ca82315212c54c..339b548b54c20b3afc8588765271359e360e4cba 100644
+--- a/dist/types/session/agent-session.d.ts
++++ b/dist/types/session/agent-session.d.ts
+@@ -53,7 +53,7 @@ import type { TodoPhase } from "../tools/todo.js";
+ import type { WorkPoolYieldItem } from "../task/workpool-yield.js";
+ import type { VibeModeState } from "../vibe/state.js";
+ import type { AgentSessionEvent, AgentSessionEventListener } from "./agent-session-events.js";
+-import type { AgentSessionConfig, AgentSessionDisposeOptions, AsyncJobSnapshot, CommandMetadataChangedListener, ContextUsageBreakdown, DroppedPrompt, FollowUpOptions, FreshSessionResult, HandoffResult, ModelCycleResult, Prewalk, PromptOptions, ResetSessionContextResult, ResolvedRoleModel, RestoredQueuedMessage, RoleModelCycle, RoleModelCycleResult, SessionHandoffOptions, SessionOAuthAccountList, SessionStats, UsageFallbackConfirmer } from "./agent-session-types.js";
++import type { AgentSessionConfig, AgentSessionDisposeOptions, AsyncJobSnapshot, CommandMetadataChangedListener, ContextUsageBreakdown, DroppedPrompt, FollowUpOptions, FreshSessionResult, HandoffResult, ModelCycleResult, Prewalk, PromptDeliveryObserver, PromptOptions, ResetSessionContextResult, ResolvedRoleModel, RestoredQueuedMessage, RoleModelCycle, RoleModelCycleResult, SessionHandoffOptions, SessionOAuthAccountList, SessionStats, UsageFallbackConfirmer } from "./agent-session-types.js";
+ import type { ClientBridge } from "./client-bridge.js";
+ import { type CustomMessage, type CustomMessagePayload } from "./messages.js";
+ import type { ServingModel } from "./retry-fallback-chains.js";
+@@ -235,7 +235,7 @@ export declare class AgentSession {
+     markMovedFromEmptySessionFile(sessionFile: string): void;
+     /**
+      * Synchronously mark the session as disposing so new work is rejected
+-     * immediately: eval starts throw, queued asides are dropped, and the
++     * immediately: eval starts throw, queued asides are flushed, and the
+      * aside provider is detached. Idempotent; `dispose()` runs it first.
+      *
+      * Wrappers that await other teardown before delegating to `dispose()` MUST
+@@ -554,7 +554,7 @@ export declare class AgentSession {
+      * won the generation race), so hosts waiting on a terminal `agent_end` can
+      * stop instead of hanging.
+      */
+-    promptCustomMessage<T = unknown>(message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">, options?: Pick<PromptOptions, "streamingBehavior" | "toolChoice"> & {
++    promptCustomMessage<T = unknown>(message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">, options?: Pick<PromptOptions, "streamingBehavior" | "toolChoice" | "deliveryObserver"> & {
+         queueChipText?: string;
+         queueOnly?: boolean;
+     }): Promise<boolean>;
+@@ -616,6 +616,7 @@ export declare class AgentSession {
+      */
+     sendUserMessage(content: string | (TextContent | ImageContent)[], options?: {
+         deliverAs?: "steer" | "followUp" | "aside";
++        deliveryObserver?: PromptDeliveryObserver;
+     }): Promise<void>;
+     /** Clear queued messages and return the user-restorable ones (text plus any attached images).
+      *  Only user-authored messages (plain user turns, `attribution:"user"` custom like `/skill`) are
+diff --git a/src/modes/rpc/rpc-mode.ts b/src/modes/rpc/rpc-mode.ts
+index 45d59e034199245a591df37abe13eef9e43804f3..507eab85c7f691da0c961c4d2b7531085a881c77 100644
+--- a/src/modes/rpc/rpc-mode.ts
++++ b/src/modes/rpc/rpc-mode.ts
+@@ -32,6 +32,7 @@ import {
+ import { loadSlashCommands } from "../../extensibility/slash-commands";
+ import { type Theme, theme } from "../../modes/theme/theme";
+ import type { AgentSession } from "../../session/agent-session";
++import type { PromptDeliveryObserver } from "../../session/agent-session-types";
+ import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../session/messages";
+ import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins";
+ import { buildAvailableSlashCommands } from "../../slash-commands/available-commands";
+@@ -151,6 +152,7 @@ export async function runRpcSkillCommand(
+ 	invocation: RpcSkillInvocation,
+ 	streamingBehavior: "steer" | "followUp" = "steer",
+ 	prebuilt?: BuiltSkillPromptMessage,
++	deliveryObserver?: PromptDeliveryObserver,
+ ): Promise<boolean> {
+ 	const built = prebuilt ?? (await buildSkillPromptMessage(invocation.skill, invocation.args, "user"));
+ 	return session.promptCustomMessage(
+@@ -161,7 +163,7 @@ export async function runRpcSkillCommand(
+ 			details: built.details,
+ 			attribution: "user",
+ 		},
+-		{ streamingBehavior },
++		deliveryObserver ? { streamingBehavior, deliveryObserver } : { streamingBehavior },
+ 	);
+ }
+ 
+@@ -204,10 +206,11 @@ export async function tryRunRpcSkillCommand(
+ 	session: RpcSkillCommandSession,
+ 	text: string,
+ 	streamingBehavior: "steer" | "followUp" = "steer",
++	deliveryObserver?: PromptDeliveryObserver,
+ ): Promise<RpcSkillCommandResult | false> {
+ 	const invocation = resolveRpcSkillInvocation(session, text);
+ 	if (!invocation) return false;
+-	await runRpcSkillCommand(session, invocation, streamingBehavior);
++	await runRpcSkillCommand(session, invocation, streamingBehavior, undefined, deliveryObserver);
+ 	return { agentInvoked: true };
+ }
+ 
+diff --git a/src/session/agent-session-types.ts b/src/session/agent-session-types.ts
+index dc7f27445225bb9ecc263cd7310ef384f84c0049..4481a4ed7a316820a1fd54655de3a5048bd71f1d 100644
+--- a/src/session/agent-session-types.ts
++++ b/src/session/agent-session-types.ts
+@@ -327,8 +327,16 @@ export interface AgentSessionConfig {
+ 	titleSystemPrompt?: string;
+ }
+ 
++/** SDK hosts observe admission and final delivery of one submitted message. */
++export interface PromptDeliveryObserver {
++	onAccepted(delivery: "prompt" | "steer" | "followUp" | "aside"): void;
++	onConsumed(): void;
++	onDiscarded(): void;
++}
++
+ /** Options for AgentSession.prompt(). */
+ export interface PromptOptions {
++	deliveryObserver?: PromptDeliveryObserver;
+ 	/** Whether to expand file-based prompt templates (default: true). */
+ 	expandPromptTemplates?: boolean;
+ 	/** Image attachments. */
+diff --git a/src/session/agent-session.ts b/src/session/agent-session.ts
+index e8d114fd9f65a64e64f9642f44b9abd85db87798..c57fdf9dbc428e7ec341fa819404ddc302684172 100644
+--- a/src/session/agent-session.ts
++++ b/src/session/agent-session.ts
+@@ -33,9 +33,12 @@ import {
+ 	type AgentToolResult,
+ 	type AgentTurnEndContext,
+ 	AppendOnlyContextManager,
++	ASIDE_MESSAGE_COMMIT,
++	ASIDE_MESSAGE_DISCARD,
+ 	type AsideMessage,
+ 	type BeforeToolCallContext,
+ 	type BeforeToolCallResult,
++	type CommittableAsideMessage,
+ 	EventLoopKeepalive,
+ 	resolveTelemetry,
+ 	type StreamFn,
+@@ -247,6 +250,7 @@ import type {
+ 	HandoffResult,
+ 	ModelCycleResult,
+ 	Prewalk,
++	PromptDeliveryObserver,
+ 	PromptOptions,
+ 	ResetSessionContextResult,
+ 	ResolvedRoleModel,
+@@ -656,6 +660,7 @@ export class AgentSession {
+ 	/** Host hook invoked when a typed user prompt is dropped before dispatch;
+ 	 *  see {@link setPromptDropped}. */
+ 	#promptDropped: ((prompt: DroppedPrompt) => void) | undefined;
++	#promptDeliveries: Map<CommittableAsideMessage, PromptDeliveryObserver> | undefined;
+ 	#titleGenerationAbortController = new AbortController();
+ 	#toolChoiceQueue = new ToolChoiceQueue();
+ 
+@@ -979,6 +984,8 @@ export class AgentSession {
+ 		for (const record of records) {
+ 			this.agent.emitExternalEvent({ type: "message_start", message: record });
+ 			this.agent.emitExternalEvent({ type: "message_end", message: record });
++			const committable: CommittableAsideMessage = record;
++			committable[ASIDE_MESSAGE_COMMIT]?.();
+ 		}
+ 	}
+ 
+@@ -4497,7 +4504,7 @@ export class AgentSession {
+ 
+ 	/**
+ 	 * Synchronously mark the session as disposing so new work is rejected
+-	 * immediately: eval starts throw, queued asides are dropped, and the
++	 * immediately: eval starts throw, queued asides are flushed, and the
+ 	 * aside provider is detached. Idempotent; `dispose()` runs it first.
+ 	 *
+ 	 * Wrappers that await other teardown before delegating to `dispose()` MUST
+@@ -4505,6 +4512,7 @@ export class AgentSession {
+ 	 * gap slips past the disposal guards.
+ 	 */
+ 	beginDispose(): void {
++		if (this.#isDisposed) return;
+ 		this.#isDisposed = true;
+ 		this.#modelDiscoveryAbortController.abort();
+ 		this.#queuedMessageDrainBlocked = false;
+@@ -4517,6 +4525,7 @@ export class AgentSession {
+ 		this.#titleGenerationAbortController.abort();
+ 		this.#abortAutolearnCapture();
+ 		this.#irc.flushPending();
++		this.#discardPromptDeliveries();
+ 		this.yieldQueue.clear();
+ 		this.agent.setAsideMessageProvider(undefined);
+ 		this.agent.hasIrcInterrupts = undefined;
+@@ -4536,7 +4545,11 @@ export class AgentSession {
+ 	 */
+ 	#disposeCall?: Promise<void>;
+ 	dispose(options: AgentSessionDisposeOptions = {}): Promise<void> {
+-		if (!this.#disposeCall) this.#disposeCall = this.#doDispose(options);
++		if (!this.#disposeCall) {
++			const { promise, resolve, reject } = Promise.withResolvers<void>();
++			this.#disposeCall = promise;
++			void this.#doDispose(options).then(resolve, reject);
++		}
+ 		return this.#disposeCall;
+ 	}
+ 
+@@ -4911,6 +4924,8 @@ export class AgentSession {
+ 
+ 		// Drop the conversation: messages, queued steers/follow-ups, pending tool
+ 		// calls, and error state. agent.reset() keeps the model and system prompt.
++		this.#discardPromptDeliveries(this.agent.peekSteeringQueue());
++		this.#discardPromptDeliveries(this.agent.peekFollowUpQueue());
+ 		this.agent.reset();
+ 		this.#pendingNextTurnMessages = [];
+ 		this.#experimentalContextNotesReminder = undefined;
+@@ -5631,6 +5646,10 @@ export class AgentSession {
+ 		const filteredFollowUp = followUp.filter(message => !isVibeContext(message));
+ 		if (filteredSteering.length !== steering.length || filteredFollowUp.length !== followUp.length) {
+ 			this.agent.replaceQueues(filteredSteering, filteredFollowUp);
++			if (this.#promptDeliveries) {
++				this.#discardPromptDeliveries(steering.filter(isVibeContext));
++				this.#discardPromptDeliveries(followUp.filter(isVibeContext));
++			}
+ 			this.#reconcileQueuedMessageDrain();
+ 		}
+ 		this.#pendingNextTurnMessages = this.#pendingNextTurnMessages.filter(message => !isVibeContext(message));
+@@ -6176,7 +6195,9 @@ export class AgentSession {
+ 			for (const notice of keywordNotices) {
+ 				await this.#queueCustomMessage(notice, streamingBehavior);
+ 			}
+-			await this.#queueUserMessage(expandedText, options?.images, streamingBehavior, submittedAt);
++			await this.#queueUserMessage(
++				expandedText, options?.images, streamingBehavior, submittedAt, undefined, options?.deliveryObserver,
++			);
+ 			return true;
+ 		}
+ 
+@@ -6222,10 +6243,11 @@ export class AgentSession {
+ 			for (const notice of keywordNotices) {
+ 				await this.#queueCustomMessage(notice, streamingBehavior);
+ 			}
+-			await this.#queueUserMessage(expandedText, options?.images, streamingBehavior, submittedAt, {
+-				images: normalizedImages,
+-				descriptionNotice: imageDescriptionNotice,
+-			});
++			await this.#queueUserMessage(
++				expandedText, options?.images, streamingBehavior, submittedAt,
++				{ images: normalizedImages, descriptionNotice: imageDescriptionNotice },
++				options?.deliveryObserver,
++			);
+ 			return true;
+ 		}
+ 
+@@ -6303,7 +6325,7 @@ export class AgentSession {
+ 	 */
+ 	async promptCustomMessage<T = unknown>(
+ 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">,
+-		options?: Pick<PromptOptions, "streamingBehavior" | "toolChoice"> & {
++		options?: Pick<PromptOptions, "streamingBehavior" | "toolChoice" | "deliveryObserver"> & {
+ 			queueChipText?: string;
+ 			queueOnly?: boolean;
+ 		},
+@@ -6342,7 +6364,7 @@ export class AgentSession {
+ 			for (const notice of keywordNotices) {
+ 				await this.#queueCustomMessage(notice, streamingBehavior);
+ 			}
+-			await this.#queueCustomMessage(message, streamingBehavior, options.queueChipText);
++			await this.#queueCustomMessage(message, streamingBehavior, options.queueChipText, options.deliveryObserver);
+ 			return true;
+ 		}
+ 		if (this.isStreaming) {
+@@ -6352,7 +6374,7 @@ export class AgentSession {
+ 			for (const notice of keywordNotices) {
+ 				await this.#queueCustomMessage(notice, streamingBehavior);
+ 			}
+-			await this.#queueCustomMessage(message, streamingBehavior, options?.queueChipText);
++			await this.#queueCustomMessage(message, streamingBehavior, options?.queueChipText, options?.deliveryObserver);
+ 			return true;
+ 		}
+ 
+@@ -6375,7 +6397,7 @@ export class AgentSession {
+ 	async #promptWithMessage(
+ 		message: AgentMessage,
+ 		expandedText: string,
+-		options?: Pick<PromptOptions, "toolChoice" | "images" | "skipCompactionCheck"> & {
++		options?: Pick<PromptOptions, "toolChoice" | "images" | "skipCompactionCheck" | "deliveryObserver"> & {
+ 			prependMessages?: AgentMessage[];
+ 			skipPostPromptRecoveryWait?: boolean;
+ 			acceptTerminalEmptyStop?: boolean;
+@@ -6385,6 +6407,13 @@ export class AgentSession {
+ 		// every pre-dispatch bail (generation bump from abort, disposal, usage
+ 		// preflight denial) exits silently, and prompt() uses the outcome to hand
+ 		// the typed text back to the host instead of losing it.
++		if (options?.deliveryObserver) {
++			if (this.#isDisposed) {
++				this.#notifyPromptDelivery(options.deliveryObserver, "discarded");
++				return false;
++			}
++			this.#observePromptDelivery(message, options.deliveryObserver, "prompt");
++		}
+ 		this.#beginInFlight();
+ 		const generation = this.#promptGeneration;
+ 		this.#promptSequence++;
+@@ -6614,6 +6643,9 @@ export class AgentSession {
+ 			}
+ 			return true;
+ 		} finally {
++			if (options?.deliveryObserver && this.#promptDeliveries?.has(message)) {
++				this.#discardPromptDeliveries([message]);
++			}
+ 			// The per-turn before_agent_start override lives only for this turn.
+ 			this.#tools.clearTurnSystemPromptOverride();
+ 			this.#usagePreflightReadyForNextModelCall = false;
+@@ -6866,12 +6898,68 @@ export class AgentSession {
+ 		}
+ 	}
+ 
++	#notifyPromptDelivery(
++		observer: PromptDeliveryObserver,
++		delivery: "prompt" | "steer" | "followUp" | "aside" | "consumed" | "discarded",
++	): void {
++		try {
++			if (delivery === "consumed") observer.onConsumed();
++			else if (delivery === "discarded") observer.onDiscarded();
++			else observer.onAccepted(delivery);
++		} catch {
++			logger.warn("Prompt delivery observer failed", { delivery });
++		}
++	}
++
++	#observePromptDelivery(
++		message: CommittableAsideMessage,
++		observer: PromptDeliveryObserver,
++		delivery: "prompt" | "steer" | "followUp" | "aside",
++	): void {
++		this.#promptDeliveries ??= new Map();
++		this.#promptDeliveries.set(message, observer);
++		const commit = message[ASIDE_MESSAGE_COMMIT];
++		const discard = message[ASIDE_MESSAGE_DISCARD];
++		const finish = (consumed: boolean, error?: Error): void => {
++			const pending = this.#promptDeliveries?.get(message);
++			if (!pending) return;
++			this.#promptDeliveries?.delete(message);
++			if (this.#promptDeliveries?.size === 0) this.#promptDeliveries = undefined;
++			if (commit) message[ASIDE_MESSAGE_COMMIT] = commit;
++			else delete message[ASIDE_MESSAGE_COMMIT];
++			if (discard) message[ASIDE_MESSAGE_DISCARD] = discard;
++			else delete message[ASIDE_MESSAGE_DISCARD];
++			try {
++				if (consumed) commit?.();
++				else if (error) discard?.(error);
++			} finally {
++				if (consumed && delivery === "prompt") this.#notifyPromptDelivery(pending, "prompt");
++				this.#notifyPromptDelivery(pending, consumed ? "consumed" : "discarded");
++			}
++		};
++		message[ASIDE_MESSAGE_COMMIT] = () => finish(true);
++		message[ASIDE_MESSAGE_DISCARD] = error => finish(false, error);
++	}
++
++	#discardPromptDeliveries(messages?: Iterable<AgentMessage>): void {
++		const pending = this.#promptDeliveries;
++		if (!pending) return;
++		let error: Error | undefined;
++		for (const message of messages ?? pending.keys()) {
++			if (!pending.has(message)) continue;
++			error ??= new Error("Prompt removed before context insertion");
++			const committable: CommittableAsideMessage = message;
++			committable[ASIDE_MESSAGE_DISCARD]?.(error);
++		}
++	}
++
+ 	async #queueUserMessage(
+ 		text: string,
+ 		images: ImageContent[] | undefined,
+ 		mode: "steer" | "followUp" | "aside",
+ 		timestamp?: number,
+ 		preprocessed?: { images: ImageContent[] | undefined; descriptionNotice: CustomMessage | undefined },
++		deliveryObserver?: PromptDeliveryObserver,
+ 	): Promise<void> {
+ 		// Captured before any await below so the aside branch can detect a
+ 		// newSession()/switchSession() that completed while normalization/vision
+@@ -6902,12 +6990,25 @@ export class AgentSession {
+ 			: normalizedImages?.length
+ 				? await this.#buildImageDescriptionNotice(normalizedImages)
+ 				: undefined;
++		if ((mode === "aside" || deliveryObserver) && await this.#sessionGenerationChanged(sessionGeneration)) {
++			if (deliveryObserver) this.#notifyPromptDelivery(deliveryObserver, "discarded");
++			return;
++		}
++		if (deliveryObserver && this.#isDisposed) {
++			this.#notifyPromptDelivery(deliveryObserver, "discarded");
++			return;
++		}
++		const message: CommittableAsideMessage = {
++			role: "user", content, attribution: "user", timestamp: timestamp ?? Date.now(),
++		};
++		if (mode === "steer") message.steering = true;
++		if (deliveryObserver) this.#observePromptDelivery(message, deliveryObserver, mode);
+ 		if (mode === "aside") {
+-			if (await this.#sessionGenerationChanged(sessionGeneration)) return;
+ 			const records: AgentMessage[] = [];
+ 			if (imageDescriptionNotice) records.push(imageDescriptionNotice);
+-			records.push({ role: "user", content, attribution: "user", timestamp: timestamp ?? Date.now() });
++			records.push(message);
+ 			this.#irc.queueAside(records);
++			if (deliveryObserver) this.#notifyPromptDelivery(deliveryObserver, "aside");
+ 			// The awaits above (image normalization / vision description) can span the run's
+ 			// settle, so the run may already be idle by the time the record lands in the aside
+ 			// queue with no loop left to drain it. Resuming here is a no-op while streaming and
+@@ -6919,23 +7020,13 @@ export class AgentSession {
+ 		if (mode === "followUp") {
+ 			for (const notice of videoAttachmentNotices) this.agent.followUp(notice);
+ 			if (imageDescriptionNotice) this.agent.followUp(imageDescriptionNotice);
+-			this.agent.followUp({
+-				role: "user",
+-				content,
+-				attribution: "user",
+-				timestamp: timestamp ?? Date.now(),
+-			});
++			this.agent.followUp(message);
+ 		} else {
+ 			for (const notice of videoAttachmentNotices) this.agent.steer(notice);
+ 			if (imageDescriptionNotice) this.agent.steer(imageDescriptionNotice);
+-			this.agent.steer({
+-				role: "user",
+-				content,
+-				steering: true,
+-				attribution: "user",
+-				timestamp: timestamp ?? Date.now(),
+-			});
++			this.agent.steer(message);
+ 		}
++		if (deliveryObserver) this.#notifyPromptDelivery(deliveryObserver, mode);
+ 		this.#scheduleIdleQueueDrain();
+ 	}
+ 
+@@ -7131,6 +7222,7 @@ export class AgentSession {
+ 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">,
+ 		deliverAs: "steer" | "followUp" | "aside",
+ 		queueChipText?: string,
++		deliveryObserver?: PromptDeliveryObserver,
+ 	): Promise<void> {
+ 		// Captured before the normalization await below — see #sessionGeneration's doc comment.
+ 		const sessionGeneration = this.#sessionGeneration;
+@@ -7154,12 +7246,21 @@ export class AgentSession {
+ 			timestamp: Date.now(),
+ 		};
+ 		const normalizedAppMessage = await this.#normalizeAgentMessageImages(appMessage);
++		if ((deliverAs === "aside" || deliveryObserver) && await this.#sessionGenerationChanged(sessionGeneration)) {
++			if (deliveryObserver) this.#notifyPromptDelivery(deliveryObserver, "discarded");
++			return;
++		}
++		if (deliveryObserver && this.#isDisposed) {
++			this.#notifyPromptDelivery(deliveryObserver, "discarded");
++			return;
++		}
++		if (deliveryObserver) this.#observePromptDelivery(normalizedAppMessage, deliveryObserver, deliverAs);
+ 		if (deliverAs === "aside") {
+-			if (await this.#sessionGenerationChanged(sessionGeneration)) return;
+ 			// Non-interrupting: rides the same step-boundary aside poll as
+ 			// sendCustomMessage's streaming aside branch — not an agent-core queue
+ 			// entry, so no drain-retry latch and no idle-queue drain scheduling.
+ 			this.#irc.queueAside([normalizedAppMessage]);
++			if (deliveryObserver) this.#notifyPromptDelivery(deliveryObserver, "aside");
+ 			// The image-normalization await above can span the run's settle, so the run may
+ 			// already be idle by the time the record lands in the aside queue with no loop
+ 			// left to drain it. Resuming here is a no-op while streaming and wakes/folds
+@@ -7173,6 +7274,7 @@ export class AgentSession {
+ 		} else {
+ 			this.agent.steer(normalizedAppMessage);
+ 		}
++		if (deliveryObserver) this.#notifyPromptDelivery(deliveryObserver, deliverAs);
+ 		this.#scheduleIdleQueueDrain();
+ 	}
+ 
+@@ -7325,7 +7427,7 @@ export class AgentSession {
+ 	 */
+ 	async sendUserMessage(
+ 		content: string | (TextContent | ImageContent)[],
+-		options?: { deliverAs?: "steer" | "followUp" | "aside" },
++		options?: { deliverAs?: "steer" | "followUp" | "aside"; deliveryObserver?: PromptDeliveryObserver },
+ 	): Promise<void> {
+ 		// Normalize content to text string + optional images
+ 		let text: string;
+@@ -7350,17 +7452,17 @@ export class AgentSession {
+ 		let deliveredAsAside = false;
+ 		if (options?.deliverAs === "aside") {
+ 			if (this.isStreaming) {
+-				await this.#queueUserMessage(text, images, "aside");
++				await this.#queueUserMessage(text, images, "aside", undefined, undefined, options.deliveryObserver);
+ 				return;
+ 			}
+ 			// Idle: fall through to the prompt flow below (starts a turn, like an omitted
+ 			// deliverAs) — there is no live run to inject an aside into.
+ 			deliveredAsAside = true;
+ 		} else if (options?.deliverAs === "followUp") {
+-			await this.#queueUserMessage(text, images, "followUp");
++			await this.#queueUserMessage(text, images, "followUp", undefined, undefined, options.deliveryObserver);
+ 			return;
+ 		} else if (options?.deliverAs === "steer") {
+-			await this.#queueUserMessage(text, images, "steer");
++			await this.#queueUserMessage(text, images, "steer", undefined, undefined, options.deliveryObserver);
+ 			return;
+ 		}
+ 
+@@ -7375,6 +7477,7 @@ export class AgentSession {
+ 			expandPromptTemplates: false,
+ 			images,
+ 			streamingBehavior: deliveredAsAside ? "aside" : "steer",
++			deliveryObserver: options?.deliveryObserver,
+ 		});
+ 	}
+ 
+@@ -7398,6 +7501,10 @@ export class AgentSession {
+ 			? isAdvisorCard
+ 			: m => !isUserQueuedMessage(m) && !isHiddenUserCompanion(m);
+ 		this.agent.replaceQueues(steeringAll.filter(keep), followUpAll.filter(keep));
++		if (this.#promptDeliveries) {
++			this.#discardPromptDeliveries(steeringAll.filter(message => !keep(message)));
++			this.#discardPromptDeliveries(followUpAll.filter(message => !keep(message)));
++		}
+ 		this.#reconcileQueuedMessageDrain();
+ 		return { steering, followUp };
+ 	}
+@@ -7448,6 +7555,7 @@ export class AgentSession {
+ 		if (fromSteer >= 0) {
+ 			const removed = steering[fromSteer];
+ 			this.agent.replaceQueues(removeWithCompanions(steering, fromSteer), followUp.slice());
++			if (this.#promptDeliveries) this.#discardPromptDeliveries([removed]);
+ 			this.#reconcileQueuedMessageDrain();
+ 			return toRestoredQueuedMessage(removed);
+ 		}
+@@ -7455,6 +7563,7 @@ export class AgentSession {
+ 		if (fromFollowUp >= 0) {
+ 			const removed = followUp[fromFollowUp];
+ 			this.agent.replaceQueues(steering.slice(), removeWithCompanions(followUp, fromFollowUp));
++			if (this.#promptDeliveries) this.#discardPromptDeliveries([removed]);
+ 			this.#reconcileQueuedMessageDrain();
+ 			return toRestoredQueuedMessage(removed);
+ 		}
+@@ -7866,6 +7975,7 @@ export class AgentSession {
+ 			advisorRecordersDetached = true;
+ 			await this.#advisors.drainAndDetachRecorders();
+ 			try {
++				this.#discardPromptDeliveries();
+ 				this.agent.reset();
+ 				if (options?.drop && previousSessionFile) {
+ 					try {
+@@ -9249,6 +9359,11 @@ export class AgentSession {
+ 			}
+ 			transitionSettled.resolve();
+ 			this.#sessionTransitionSettled = previousSessionTransitionSettled;
++			this.#discardPromptDeliveries(previousSteeringMessages);
++			this.#discardPromptDeliveries(previousFollowUpMessages);
++			this.#discardPromptDeliveries(previousIrcPending.interrupts);
++			this.#discardPromptDeliveries(previousIrcPending.asides);
++			this.#discardPromptDeliveries(previousIrcPending.deferredWakes);
+ 			return true;
+ 		} catch (error) {
+ 			this.sessionManager.restoreState(previousSessionState);
+@@ -9505,6 +9620,8 @@ export class AgentSession {
+ 
+ 		this.#pendingNextTurnMessages = [];
+ 		this.#scheduledHiddenNextTurnGeneration = undefined;
++		this.#discardPromptDeliveries(this.agent.peekSteeringQueue());
++		this.#discardPromptDeliveries(this.agent.peekFollowUpQueue());
+ 		this.agent.replaceQueues([], []);
+ 		this.#queuedMessageDrainBlocked = false;
+ 		this.#usagePreflightReadyForNextModelCall = false;
+diff --git a/src/session/irc-bridge.ts b/src/session/irc-bridge.ts
+index 35c0a35b1d19ec438d8cea17c9f957caa13efbb2..462fc3a06c4b8ca7d9d6d78fd7929629e9abb6bb 100644
+--- a/src/session/irc-bridge.ts
++++ b/src/session/irc-bridge.ts
+@@ -1,4 +1,4 @@
+-import type { Agent, AgentMessage } from "@oh-my-pi/pi-agent-core";
++import { type Agent, type AgentMessage, ASIDE_MESSAGE_COMMIT, type CommittableAsideMessage } from "@oh-my-pi/pi-agent-core";
+ import { logger, prompt } from "@oh-my-pi/pi-utils";
+ import type { Settings } from "../config/settings";
+ import { IrcBus, type IrcMessage } from "../irc/bus";
+@@ -256,6 +256,8 @@ export class IrcBridge {
+ 		for (const record of this.drainPending()) {
+ 			this.#host.agent.emitExternalEvent({ type: "message_start", message: record });
+ 			this.#host.agent.emitExternalEvent({ type: "message_end", message: record });
++			const committable: CommittableAsideMessage = record;
++			committable[ASIDE_MESSAGE_COMMIT]?.();
+ 		}
+ 	}
+ 

@@ -5,7 +5,12 @@ import * as OmpSessionLoader from "@oh-my-pi/pi-coding-agent/session/session-loa
 import * as OmpSessionManager from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type * as AgentEvent from "@pico/contract/agent-event";
 import * as Agent from "@pico/contract/agent-message";
-import type { ContextUsage, ShakeMode, ShakeResult } from "@pico/contract/agent-runtime";
+import type {
+  ContextUsage,
+  MessageDelivery,
+  ShakeMode,
+  ShakeResult,
+} from "@pico/contract/agent-runtime";
 import * as Chat from "@pico/contract/chat-model";
 import { AgentError } from "@pico/contract/errors";
 import * as Schedule from "@pico/contract/schedule";
@@ -26,6 +31,7 @@ import { makeSessionPool, type OpenedSession, type SessionFactory } from "./sess
 const platformLayer = Layer.merge(BunFileSystem.layer, BunPath.layer);
 const chatId = Chat.ChatId.make("018f47a0-0000-7000-8000-000000000001");
 const prompt = (text: string) => Agent.AgentPrompt.make({ text, attachments: [] });
+const admitted: MessageDelivery = { kind: "started", completed: Effect.void };
 
 const shakeResult = (mode: ShakeMode): ShakeResult => {
   switch (mode) {
@@ -43,6 +49,225 @@ const shakeResult = (mode: ShakeMode): ShakeResult => {
 };
 
 describe("AgentRuntime", () => {
+  it.effect("settles admitted receipts when the owning scope closes", () =>
+    Effect.gen(function* () {
+      const owner = yield* Scope.make();
+      const nativeConsumption = yield* Deferred.make<"consumed" | "discarded">();
+      const pool = yield* makeSessionPool({
+        factory: {
+          open: () =>
+            Effect.succeed({
+              session: {
+                isStreaming: false,
+                waitForIdle: async () => {},
+                settleInFlightMessagePersistence: async () => {},
+                abort: async () => {},
+                beginDispose: () => {},
+                dispose: async () => {},
+              },
+              sendPrompt: async (): Promise<MessageDelivery> => ({
+                kind: "steered",
+                consumed: Deferred.await(nativeConsumption),
+                completed: Effect.never,
+              }),
+              shake: async (mode) => shakeResult(mode),
+              contextUsage: () => ({ kind: "unavailable" }),
+              appendAssistantMessage: async () => {},
+              unsubscribe: () => {},
+            }),
+        },
+        loadTranscript: () => Effect.succeed([]),
+      }).pipe(Scope.provide(owner));
+      const delivery = yield* pool.send(chatId, prompt("queued"));
+      if (delivery.kind !== "steered") return yield* Effect.die("Expected steering admission");
+      yield* Scope.close(owner, Exit.void);
+      assert.strictEqual(yield* delivery.consumed, "discarded");
+      const completed = yield* delivery.completed.pipe(Effect.exit);
+      assert.isTrue(Exit.isFailure(completed) && Cause.hasInterruptsOnly(completed.cause));
+      yield* Deferred.succeed(nativeConsumption, "consumed");
+      assert.strictEqual(yield* delivery.consumed, "discarded");
+    }),
+  );
+
+  it.effect(
+    "keeps admission and exact consumption independent of operation completion and close",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const releaseRun = yield* Deferred.make<void>();
+          const releaseSteer = yield* Deferred.make<void>();
+          const consumeFirst = yield* Deferred.make<"consumed" | "discarded">();
+          const consumeSecond = yield* Deferred.make<"consumed" | "discarded">();
+          const disposed = yield* Deferred.make<void>();
+          const submitted: string[] = [];
+          const pool = yield* makeSessionPool({
+            factory: {
+              open: (_id, emit) =>
+                Effect.succeed({
+                  session: {
+                    isStreaming: false,
+                    waitForIdle: async () => {},
+                    settleInFlightMessagePersistence: async () => {},
+                    abort: async () => {},
+                    beginDispose: () => {},
+                    dispose: async () => {
+                      Deferred.doneUnsafe(disposed, Effect.void);
+                    },
+                  },
+                  sendPrompt: async (value, onStarted): Promise<MessageDelivery> => {
+                    submitted.push(value.text);
+                    if (submitted.length === 1) {
+                      onStarted?.();
+                      emit({ type: "run-started" });
+                      return {
+                        kind: "started",
+                        completed: Deferred.await(releaseRun).pipe(
+                          Effect.tap(() =>
+                            Effect.sync(() => emit({ type: "run-finished", outcome: "completed" })),
+                          ),
+                        ),
+                      };
+                    }
+                    return {
+                      kind: "steered",
+                      consumed: Deferred.await(
+                        submitted.length === 2 ? consumeFirst : consumeSecond,
+                      ),
+                      completed: Deferred.await(releaseSteer),
+                    };
+                  },
+                  shake: async (mode) => shakeResult(mode),
+                  contextUsage: () => ({ kind: "unavailable" }),
+                  appendAssistantMessage: async () => {},
+                  unsubscribe: () => {},
+                }),
+            },
+            loadTranscript: () => Effect.succeed([]),
+          });
+          const first = yield* pool.send(chatId, prompt("same"));
+          const second = yield* pool.send(chatId, prompt("same"));
+          const third = yield* pool.send(chatId, prompt("same"));
+          if (first.kind !== "started" || second.kind !== "steered" || third.kind !== "steered") {
+            return yield* Effect.die("Unexpected delivery kinds");
+          }
+          assert.deepStrictEqual(submitted, ["same", "same", "same"]);
+          yield* Deferred.succeed(consumeFirst, "consumed");
+          assert.strictEqual(yield* second.consumed, "consumed");
+          assert.isFalse(yield* Deferred.isDone(releaseRun));
+          assert.isFalse(yield* Deferred.isDone(releaseSteer));
+          const closing = yield* pool.close(chatId).pipe(Effect.forkChild);
+          yield* Effect.yieldNow;
+          assert.isFalse(yield* Deferred.isDone(disposed));
+          yield* Deferred.succeed(releaseRun, undefined);
+          yield* Deferred.succeed(releaseSteer, undefined);
+          yield* Fiber.join(closing);
+          assert.strictEqual(yield* third.consumed, "discarded");
+          yield* Deferred.succeed(consumeSecond, "consumed");
+          assert.strictEqual(yield* third.consumed, "discarded");
+          assert.isTrue(yield* Deferred.isDone(disposed));
+        }),
+      ),
+  );
+
+  it.effect(
+    "waits for capture ownership outside admission and permits steers during a captured run",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const ordinaryFinished = yield* Deferred.make<void>();
+          const captureStarted = yield* Deferred.make<void>();
+          const captureFinished = yield* Deferred.make<void>();
+          const persistenceStarted = yield* Deferred.make<void>();
+          const persistenceFinished = yield* Deferred.make<void>();
+          const submitted: string[] = [];
+          const captured: string[] = [];
+          const pool = yield* makeSessionPool({
+            factory: {
+              open: (_id, emit) =>
+                Effect.succeed({
+                  session: {
+                    isStreaming: false,
+                    waitForIdle: async () => {},
+                    settleInFlightMessagePersistence: () =>
+                      captured.includes("run-finished")
+                        ? Effect.runPromise(
+                            Deferred.succeed(persistenceStarted, undefined).pipe(
+                              Effect.andThen(Deferred.await(persistenceFinished)),
+                            ),
+                          )
+                        : Promise.resolve(),
+                    abort: async () => {},
+                    beginDispose: () => {},
+                    dispose: async () => {},
+                  },
+                  sendPrompt: async (value, onStarted): Promise<MessageDelivery> => {
+                    if (value.text === "reject")
+                      throw new AgentError({ message: "Rejected before admission" });
+                    submitted.push(value.text);
+                    if (value.text === "steer") {
+                      return {
+                        kind: "steered",
+                        consumed: Effect.succeed("consumed"),
+                        completed: Effect.void,
+                      };
+                    }
+                    onStarted?.();
+                    emit({ type: "run-started" });
+                    if (value.text === "scheduled")
+                      Deferred.doneUnsafe(captureStarted, Effect.void);
+                    return {
+                      kind: "started",
+                      completed: Deferred.await(
+                        value.text === "scheduled" ? captureFinished : ordinaryFinished,
+                      ).pipe(
+                        Effect.tap(() =>
+                          Effect.sync(() => emit({ type: "run-finished", outcome: "completed" })),
+                        ),
+                      ),
+                    };
+                  },
+                  shake: async (mode) => shakeResult(mode),
+                  contextUsage: () => ({ kind: "unavailable" }),
+                  appendAssistantMessage: async () => {},
+                  unsubscribe: () => {},
+                }),
+            },
+            loadTranscript: () => Effect.succeed([]),
+          });
+          yield* pool.send(chatId, prompt("ordinary"));
+          assert.instanceOf(
+            yield* pool.send(chatId, prompt("reject")).pipe(Effect.flip),
+            AgentError,
+          );
+          const scheduled = yield* pool
+            .sendCaptured(
+              chatId,
+              Schedule.ScheduleRunId.make("scheduled-1000-018f47a0-0000-7000-8000-000000000003"),
+              prompt("scheduled"),
+              (event) =>
+                Effect.sync(() => {
+                  captured.push(event.type);
+                }),
+            )
+            .pipe(Effect.forkChild);
+          assert.strictEqual((yield* pool.send(chatId, prompt("steer"))).kind, "steered");
+          assert.isFalse(yield* Deferred.isDone(captureStarted));
+          yield* Deferred.succeed(ordinaryFinished, undefined);
+          yield* Deferred.await(captureStarted);
+          assert.strictEqual((yield* pool.send(chatId, prompt("steer"))).kind, "steered");
+          yield* Deferred.succeed(captureFinished, undefined);
+          yield* Deferred.await(persistenceStarted);
+          const following = yield* pool.send(chatId, prompt("following")).pipe(Effect.forkChild);
+          yield* Effect.yieldNow;
+          assert.deepStrictEqual(submitted, ["ordinary", "steer", "scheduled", "steer"]);
+          yield* Deferred.succeed(persistenceFinished, undefined);
+          assert.strictEqual((yield* Fiber.join(scheduled)).outcome, "completed");
+          assert.strictEqual((yield* Fiber.join(following)).kind, "started");
+          assert.deepStrictEqual(captured, ["run-started", "run-finished"]);
+        }),
+      ),
+  );
+
   it("hides ignored OMP events", () => {
     assert.isUndefined(normalizeAgentEvent({ type: "config_warnings_changed" }));
     assert.isUndefined(normalizeAgentEvent({ type: "advisor_yielded" }));
@@ -86,6 +311,8 @@ describe("AgentRuntime", () => {
             yield* Deferred.await(allowOpen);
             return {
               session: {
+                isStreaming: false,
+                waitForIdle: async () => {},
                 settleInFlightMessagePersistence: () => Promise.resolve(),
                 abort: () => Promise.resolve(),
                 beginDispose: () => {
@@ -100,7 +327,7 @@ describe("AgentRuntime", () => {
                 if (value.text !== "acquire") {
                   emit({ type: "notice", level: "info", message: value.text });
                 }
-                return Promise.resolve();
+                return Promise.resolve(admitted);
               },
               shake: async (mode) => shakeResult(mode),
               appendAssistantMessage: () => Promise.resolve(),
@@ -202,6 +429,8 @@ describe("AgentRuntime", () => {
               );
               return {
                 session: {
+                  isStreaming: false,
+                  waitForIdle: async () => {},
                   settleInFlightMessagePersistence: () => Promise.resolve(),
                   abort: () => Promise.resolve(),
                   beginDispose: () => manager.seal(),
@@ -210,7 +439,7 @@ describe("AgentRuntime", () => {
                     manager.releaseRetainedEntries();
                   },
                 },
-                sendPrompt: () => Promise.resolve(),
+                sendPrompt: () => Promise.resolve(admitted),
                 shake: async (mode) => shakeResult(mode),
                 appendAssistantMessage: async (message) => {
                   manager.appendMessage(message);
@@ -319,6 +548,8 @@ describe("AgentRuntime", () => {
                 };
                 return {
                   session: {
+                    isStreaming: false,
+                    waitForIdle: async () => {},
                     settleInFlightMessagePersistence: async () => {
                       await manager.ensureOnDisk();
                       await manager.flush();
@@ -330,7 +561,8 @@ describe("AgentRuntime", () => {
                       manager.releaseRetainedEntries();
                     },
                   },
-                  sendPrompt: () => {
+                  sendPrompt: (_value, onStarted) => {
+                    onStarted?.();
                     manager.appendMessage(assistantMessage);
                     emit({ type: "run-started" });
                     emit({
@@ -345,7 +577,7 @@ describe("AgentRuntime", () => {
                       },
                     });
                     emit({ type: "run-finished", outcome: "completed" });
-                    return Promise.resolve();
+                    return Promise.resolve(admitted);
                   },
                   shake: async (mode) => shakeResult(mode),
                   appendAssistantMessage: () => Promise.resolve(),
@@ -418,6 +650,8 @@ describe("AgentRuntime", () => {
             acquisitions += 1;
             return Effect.succeed({
               session: {
+                isStreaming: false,
+                waitForIdle: async () => {},
                 settleInFlightMessagePersistence: () => Promise.resolve(),
                 abort: () => Promise.resolve(),
                 beginDispose: () => {},
@@ -509,6 +743,8 @@ describe("AgentRuntime", () => {
             acquisitions += 1;
             return Effect.succeed({
               session: {
+                isStreaming: false,
+                waitForIdle: async () => {},
                 settleInFlightMessagePersistence: () => Promise.resolve(),
                 abort: () => Promise.resolve(),
                 beginDispose: () => {
@@ -519,7 +755,7 @@ describe("AgentRuntime", () => {
                   return Promise.resolve();
                 },
               },
-              sendPrompt: () => Promise.resolve(),
+              sendPrompt: () => Promise.resolve(admitted),
               shake: async (mode) => shakeResult(mode),
               appendAssistantMessage: () => Promise.resolve(),
               contextUsage: () => ({ kind: "unavailable" }),
@@ -566,6 +802,8 @@ describe("AgentRuntime", () => {
                 open: () =>
                   Effect.succeed({
                     session: {
+                      isStreaming: false,
+                      waitForIdle: async () => {},
                       settleInFlightMessagePersistence: () => Promise.resolve(),
                       abort: () => Promise.resolve(),
                       beginDispose: () => {
@@ -578,7 +816,7 @@ describe("AgentRuntime", () => {
                         return disposal;
                       },
                     },
-                    sendPrompt: () => Promise.resolve(),
+                    sendPrompt: () => Promise.resolve(admitted),
                     shake: async (mode) => shakeResult(mode),
                     appendAssistantMessage: () => Promise.resolve(),
                     contextUsage: () => ({ kind: "unavailable" }),
@@ -641,6 +879,8 @@ describe("AgentRuntime", () => {
             open: (_id, emit) =>
               Effect.succeed({
                 session: {
+                  isStreaming: false,
+                  waitForIdle: async () => {},
                   settleInFlightMessagePersistence: () => Promise.resolve(),
                   abort: () => Promise.resolve(),
                   beginDispose: () => {},
@@ -648,7 +888,7 @@ describe("AgentRuntime", () => {
                 },
                 sendPrompt: () => {
                   emit({ type: "notice", level: "info", message: "last" });
-                  return Promise.resolve();
+                  return Promise.resolve(admitted);
                 },
                 shake: async (mode) => shakeResult(mode),
                 appendAssistantMessage: () => Promise.resolve(),
@@ -681,21 +921,20 @@ describe("AgentRuntime", () => {
   it.effect("captures one scheduled run without forwarding its events", () =>
     Effect.scoped(
       Effect.gen(function* () {
-        let settled = 0;
         const pool = yield* makeSessionPool({
           factory: {
             open: (_id, emit) =>
               Effect.succeed({
                 session: {
-                  settleInFlightMessagePersistence: () => {
-                    settled += 1;
-                    return Promise.resolve();
-                  },
+                  isStreaming: false,
+                  waitForIdle: async () => {},
+                  settleInFlightMessagePersistence: () => Promise.resolve(),
                   abort: () => Promise.resolve(),
                   beginDispose: () => {},
                   dispose: () => Promise.resolve(),
                 },
-                sendPrompt: () => {
+                sendPrompt: (_value, onStarted) => {
+                  onStarted?.();
                   emit({ type: "run-started" });
                   emit({
                     type: "message-settled",
@@ -709,7 +948,7 @@ describe("AgentRuntime", () => {
                     },
                   });
                   emit({ type: "run-finished", outcome: "completed" });
-                  return Promise.resolve();
+                  return Promise.resolve(admitted);
                 },
                 shake: async (mode) => shakeResult(mode),
                 appendAssistantMessage: () => Promise.resolve(),
@@ -747,7 +986,6 @@ describe("AgentRuntime", () => {
           finalAssistantText: "scheduled answer",
         });
         assert.deepStrictEqual(observed, ["run-started", "message-settled", "run-finished"]);
-        assert.strictEqual(settled, 1);
       }),
     ),
   );
@@ -763,12 +1001,15 @@ describe("AgentRuntime", () => {
               emitEvent = emit;
               return Effect.succeed({
                 session: {
+                  isStreaming: false,
+                  waitForIdle: async () => {},
                   settleInFlightMessagePersistence: () => Promise.resolve(),
                   abort: () => Promise.resolve(),
                   beginDispose: () => {},
                   dispose: () => Promise.resolve(),
                 },
-                sendPrompt: () => {
+                sendPrompt: (_value, onStarted) => {
+                  onStarted?.();
                   emit({ type: "run-started" });
                   const pending = new Promise<void>((resolve) => {
                     completeCapture = () => {
@@ -777,7 +1018,10 @@ describe("AgentRuntime", () => {
                     };
                   });
                   Effect.runSync(Deferred.succeed(captureStarted, undefined));
-                  return pending;
+                  return Promise.resolve({
+                    kind: "started" as const,
+                    completed: Effect.promise(() => pending),
+                  });
                 },
                 shake: async (mode) => shakeResult(mode),
                 appendAssistantMessage: () => Promise.resolve(),
@@ -838,6 +1082,8 @@ describe("AgentRuntime", () => {
             open: (_id, emit) =>
               Effect.succeed({
                 session: {
+                  isStreaming: false,
+                  waitForIdle: async () => {},
                   settleInFlightMessagePersistence: () => Promise.resolve(),
                   abort: () => {
                     resolvePendingPrompt?.();
@@ -848,21 +1094,27 @@ describe("AgentRuntime", () => {
                   beginDispose: () => {},
                   dispose: () => Promise.resolve(),
                 },
-                sendPrompt: () => {
+                sendPrompt: (_value, onStarted) => {
                   sends += 1;
                   if (sends === 1) {
+                    onStarted?.();
                     emit({ type: "run-started" });
-                    return new Promise<void>((resolve) => {
+                    const pending = new Promise<void>((resolve) => {
                       resolvePendingPrompt = resolve;
+                    });
+                    return Promise.resolve({
+                      kind: "started" as const,
+                      completed: Effect.promise(() => pending),
                     });
                   }
                   if (sends === 2) {
+                    onStarted?.();
                     emit({ type: "run-started" });
                     emit({ type: "run-finished", outcome: "completed" });
                   } else {
                     emit({ type: "title-changed", title: "ordinary" });
                   }
-                  return Promise.resolve();
+                  return Promise.resolve(admitted);
                 },
                 shake: async (mode) => shakeResult(mode),
                 appendAssistantMessage: () => Promise.resolve(),
@@ -939,6 +1191,8 @@ describe("AgentRuntime", () => {
             open: (_id, emit) =>
               Effect.succeed({
                 session: {
+                  isStreaming: false,
+                  waitForIdle: async () => {},
                   settleInFlightMessagePersistence: () => Promise.resolve(),
                   abort: (options) => {
                     abortGoalReason = options?.goalReason;
@@ -949,15 +1203,16 @@ describe("AgentRuntime", () => {
                   beginDispose: () => {},
                   dispose: () => Promise.resolve(),
                 },
-                sendPrompt: () => {
+                sendPrompt: (_value, onStarted) => {
                   sends += 1;
                   if (sends === 1) {
+                    onStarted?.();
                     emit({ type: "run-started" });
                     Effect.runSync(Deferred.succeed(runStarted, undefined));
                   } else {
                     emit({ type: "title-changed", title: "ordinary" });
                   }
-                  return Promise.resolve();
+                  return Promise.resolve(admitted);
                 },
                 shake: async (mode) => shakeResult(mode),
                 appendAssistantMessage: () => Promise.resolve(),
@@ -1018,12 +1273,18 @@ describe("AgentRuntime", () => {
               open: (_id, emit) =>
                 Effect.succeed({
                   session: {
+                    isStreaming: false,
+                    waitForIdle: async () => {},
                     settleInFlightMessagePersistence: () => Promise.resolve(),
                     abort: () => Promise.resolve(),
                     beginDispose: () => {},
                     dispose: () => Promise.resolve(),
                   },
-                  sendPrompt: (value) => {
+                  sendPrompt: (value, onStarted) => {
+                    if (value.text === "reject") return Promise.reject(rejected);
+                    if (value.text === "abort-reject")
+                      return Promise.reject(new DOMException("private abort", "AbortError"));
+                    onStarted?.();
                     emit({ type: "run-started" });
                     emit({
                       type: "message-settled",
@@ -1038,25 +1299,22 @@ describe("AgentRuntime", () => {
                       },
                     });
                     if (value.text === "queued-terminal") {
-                      return new Promise<void>((resolve) => {
+                      return new Promise<MessageDelivery>((resolve) => {
                         queueMicrotask(() => {
-                          resolve();
+                          resolve(admitted);
                           queueMicrotask(() => emit({ type: "run-finished", outcome: "failed" }));
                         });
                       });
                     }
                     if (value.text === "late") {
                       emitLater = emit;
-                      return Promise.resolve();
+                      return Promise.resolve(admitted);
                     }
                     emit({
                       type: "run-finished",
                       outcome: value.text === "abort" ? "aborted" : "failed",
                     });
-                    if (value.text === "reject") return Promise.reject(rejected);
-                    if (value.text === "abort-reject")
-                      return Promise.reject(new DOMException("private abort", "AbortError"));
-                    return Promise.resolve();
+                    return Promise.resolve(admitted);
                   },
                   shake: async (mode) => shakeResult(mode),
                   appendAssistantMessage: () => Promise.resolve(),
@@ -1066,7 +1324,8 @@ describe("AgentRuntime", () => {
             },
             loadTranscript: () => Effect.succeed([]),
           });
-          yield* pool.send(chatId, prompt("resolved"));
+          const resolved = yield* pool.send(chatId, prompt("resolved"));
+          if (resolved.kind !== "handled") yield* resolved.completed;
           assert.strictEqual(records.filter((record) => record.level === "ERROR").length, 1);
           assert.strictEqual(
             yield* pool.send(chatId, prompt("reject")).pipe(Effect.flip),
@@ -1083,7 +1342,8 @@ describe("AgentRuntime", () => {
           );
           assert.strictEqual(captured.outcome, "failed");
           assert.strictEqual(records.filter((record) => record.level === "ERROR").length, 1);
-          yield* pool.send(chatId, prompt("queued-terminal"));
+          const queued = yield* pool.send(chatId, prompt("queued-terminal"));
+          if (queued.kind !== "handled") yield* queued.completed;
           yield* pool.send(chatId, prompt("late"));
           emitLater?.({ type: "run-finished", outcome: "failed" });
           yield* pool.close(chatId);
@@ -1106,55 +1366,6 @@ describe("AgentRuntime", () => {
       );
     },
   );
-  it.effect("preserves capture failure when cleanup finds a closed event queue", () => {
-    const records: Array<ReturnType<typeof Logger.formatStructured.log>> = [];
-    return Effect.scoped(
-      Effect.gen(function* () {
-        const runEffect = Effect.runPromiseWith(yield* Effect.context<never>());
-        let closeSession: () => Promise<void> = () => Promise.resolve();
-        const primary = new AgentError({ message: "Capture persistence failed" });
-        const pool = yield* makeSessionPool({
-          factory: {
-            open: (_id, emit) =>
-              Effect.succeed({
-                session: {
-                  settleInFlightMessagePersistence: () => Promise.resolve(),
-                  abort: () => closeSession(),
-                  beginDispose: () => {},
-                  dispose: () => Promise.resolve(),
-                },
-                sendPrompt: async () => {
-                  emit({ type: "run-started" });
-                },
-                shake: async (mode) => shakeResult(mode),
-                appendAssistantMessage: () => Promise.resolve(),
-                contextUsage: () => ({ kind: "unavailable" }),
-                unsubscribe: () => {},
-              }),
-          },
-          loadTranscript: () => Effect.succeed([]),
-        });
-        closeSession = () => runEffect(pool.close(chatId));
-        const runId = Schedule.ScheduleRunId.make(
-          "scheduled-1000-018f47a0-0000-7000-8000-000000000003",
-        );
-        const failure = yield* pool
-          .sendCaptured(chatId, runId, prompt("private capture"), () => Effect.fail(primary))
-          .pipe(Effect.flip);
-        assert.strictEqual(failure, primary);
-        const errors = records.filter((record) => record.level === "ERROR");
-        assert.strictEqual(errors.length, 1);
-        assert.strictEqual(errors[0]?.annotations.phase, "capture-drain");
-        assert.strictEqual(errors[0]?.annotations.runId, runId);
-      }),
-    ).pipe(
-      Effect.provide(
-        Logger.layer([
-          Logger.make((options) => records.push(Logger.formatStructured.log(options))),
-        ]),
-      ),
-    );
-  });
 
   it.effect("reports a dead session forwarder once without replaying it during release", () => {
     const records: Array<ReturnType<typeof Logger.formatStructured.log>> = [];
@@ -1166,13 +1377,17 @@ describe("AgentRuntime", () => {
             open: (_id, emit) =>
               Effect.succeed({
                 session: {
+                  isStreaming: false,
+                  waitForIdle: async () => {},
                   settleInFlightMessagePersistence: () => Promise.resolve(),
                   abort: () => Promise.resolve(),
                   beginDispose: () => {},
                   dispose: () => Promise.resolve(),
                 },
-                sendPrompt: async () => {
+                sendPrompt: async (_value, onStarted) => {
+                  onStarted?.();
                   emit({ type: "run-started" });
+                  return admitted;
                 },
                 shake: async (mode) => shakeResult(mode),
                 appendAssistantMessage: () => Promise.resolve(),
@@ -1191,10 +1406,9 @@ describe("AgentRuntime", () => {
           )
           .pipe(Effect.forkChild);
         yield* Effect.promise(() => reported.promise);
+        const failed = yield* Fiber.await(capture);
+        assert.isTrue(Exit.isFailure(failed) && Cause.hasDies(failed.cause));
         yield* pool.close(chatId);
-        yield* Fiber.interrupt(capture);
-        const interrupted = yield* Fiber.await(capture);
-        assert.isTrue(Exit.isFailure(interrupted) && Cause.hasInterruptsOnly(interrupted.cause));
         const forwarderErrors = records.filter(
           (record) => record.annotations.operation === "event-forwarder",
         );

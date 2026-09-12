@@ -133,6 +133,7 @@ describe("Application", () => {
                   sendFailure === null ? Effect.void : Effect.fail(sendFailure),
                 ),
               ),
+              Effect.as({ kind: "started", completed: Effect.void } as const),
             ),
           sendCaptured: (capturedChatId, runId, _prompt, onEvent) =>
             onEvent({ type: "run-started" }).pipe(
@@ -890,12 +891,18 @@ describe("Application", () => {
             events: Stream.empty,
             drain: () => Effect.void,
             transcript: () => Effect.succeed(runtimeTranscript),
-            send: () =>
+            send: (_chatId, value) =>
               Effect.gen(function* () {
+                if (value.text === "steer") {
+                  return {
+                    kind: "steered",
+                    consumed: Effect.succeed("consumed" as const),
+                    completed: Effect.void,
+                  } as const;
+                }
                 order.push("send-start");
                 yield* Deferred.succeed(sendStarted, undefined);
-                yield* Deferred.await(releaseSend);
-                order.push("send-end");
+                return { kind: "started", completed: Deferred.await(releaseSend) } as const;
               }),
             sendCaptured: (_chatId, runId) =>
               Deferred.succeed(scheduledStarted, undefined).pipe(
@@ -968,6 +975,8 @@ describe("Application", () => {
           )
           .pipe(Effect.forkChild);
         yield* Deferred.await(scheduledStarted);
+        const steering = yield* application.sendMessage(chat.id, textPrompt("steer"));
+        assert.strictEqual(steering.kind, "steered");
         yield* application.abort(chat.id);
         assert.strictEqual(aborts, 1);
         assert.strictEqual((yield* Fiber.join(scheduled)).outcome, "aborted");
@@ -985,7 +994,7 @@ describe("Application", () => {
         yield* Deferred.succeed(releaseSend, undefined);
         yield* Fiber.join(send);
         assert.deepStrictEqual(yield* Fiber.join(closing), { kind: "closed" });
-        assert.deepStrictEqual(order, ["send-start", "send-end", "inspect", "runtime-close"]);
+        assert.deepStrictEqual(order, ["send-start", "inspect", "runtime-close"]);
 
         const chats = yield* ChatRepository;
         assert.strictEqual(Option.getOrThrow(yield* chats.findById(chat.id)).archivedAt, 3_000);

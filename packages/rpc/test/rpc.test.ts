@@ -11,6 +11,7 @@ import * as RpcServer from "@pico/rpc/server";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Logger from "effect/Logger";
 import * as Queue from "effect/Queue";
@@ -66,6 +67,8 @@ describe("RPC", () => {
       ]);
       const failures = () => logs.filter((entry) => entry.level === "ERROR");
       const sent = yield* Deferred.make<void>();
+      const releaseSend = yield* Deferred.make<void>();
+      const sendReturned = yield* Deferred.make<void>();
       const aborted = yield* Deferred.make<void>();
       const routeOpened = yield* Deferred.make<void>();
       const eventsDelivered = yield* Deferred.make<void>();
@@ -99,6 +102,7 @@ describe("RPC", () => {
             : Effect.gen(function* () {
                 sendInputs.push({ chatId, prompt });
                 yield* Deferred.succeed(sent, undefined);
+                return { kind: "started", completed: Deferred.await(releaseSend) } as const;
               }),
         abort: (chatId) =>
           chatId === firstChatId
@@ -184,8 +188,15 @@ describe("RPC", () => {
             },
           ],
         });
-        yield* client.SendMessage({ chatId: firstChatId, prompt });
+        const sending = yield* client.SendMessage({ chatId: firstChatId, prompt }).pipe(
+          Effect.tap(() => Deferred.succeed(sendReturned, undefined)),
+          Effect.forkChild,
+        );
         yield* Deferred.await(sent);
+        yield* Effect.yieldNow;
+        assert.isFalse(yield* Deferred.isDone(sendReturned));
+        yield* Deferred.succeed(releaseSend, undefined);
+        assert.isUndefined(yield* Fiber.join(sending));
         assert.deepStrictEqual(sendInputs, [{ chatId: firstChatId, prompt }]);
         assert.instanceOf(
           yield* client
