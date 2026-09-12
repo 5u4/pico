@@ -4,7 +4,8 @@
   "type": "module",
   "exports": {
     "./root": "./src/root.ts",
-    "./config": "./src/config.ts"
+    "./config": "./src/config.ts",
+    "./identity": "./src/identity.ts"
   },
   "dependencies": {
     "@pico/contract": "workspace:*",

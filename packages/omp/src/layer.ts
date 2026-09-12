@@ -8,7 +8,7 @@ import type * as OmpShake from "@oh-my-pi/pi-coding-agent/session/shake-types";
 import { AgentRuntime, type ContextUsage, type ShakeResult } from "@pico/contract/agent-runtime";
 import { BranchNaming, type BranchNamingHandler } from "@pico/contract/branch-naming";
 import type * as Chat from "@pico/contract/chat-model";
-import { ChatPlatformResolver } from "@pico/contract/chat-platform-resolver";
+import { ChatSessionContext } from "@pico/contract/chat-session-context";
 import { AgentError } from "@pico/contract/errors";
 import type { AbsolutePath } from "@pico/contract/path";
 import type * as Schedule from "@pico/contract/schedule";
@@ -23,7 +23,7 @@ import { makeExchangeTitleFlow } from "./exchange-title.ts";
 import { makeOmpPromptSender } from "./omp-prompt-sender.ts";
 import { make as makeScheduleExtension } from "./schedule-extension.ts";
 import { makeSessionPool, type OpenedSession, type SessionFactory } from "./session-pool.ts";
-import { prepareSessionOptions } from "./session-settings.ts";
+import { prepareSessionSettings } from "./session-settings.ts";
 
 export const make = Effect.fn("AgentRuntime.make")(function* (
   sessionsDir: AbsolutePath,
@@ -32,7 +32,7 @@ export const make = Effect.fn("AgentRuntime.make")(function* (
   const fileSystem = yield* FileSystem.FileSystem;
   const crypto = yield* Crypto.Crypto;
   const path = yield* Path.Path;
-  const chatPlatforms = yield* ChatPlatformResolver;
+  const chatSessionContext = yield* ChatSessionContext;
   const branchNaming = yield* BranchNaming;
 
   yield* fileSystem
@@ -69,7 +69,7 @@ export const make = Effect.fn("AgentRuntime.make")(function* (
       path,
       fileSystem,
       crypto,
-      chatPlatforms,
+      chatSessionContext,
       authStorage,
       modelRegistry,
       schedules,
@@ -182,16 +182,16 @@ const makeFactory = (
   path: Path.Path,
   fileSystem: FileSystem.FileSystem,
   crypto: Crypto.Crypto,
-  chatPlatforms: ChatPlatformResolver["Service"],
+  chatSessionContext: ChatSessionContext["Service"],
   authStorage: Awaited<ReturnType<typeof OmpSdk.discoverAuthStorage>>,
   modelRegistry: OmpModelRegistry.ModelRegistry,
   schedules: Schedule.Schedules["Service"],
   handleBranchNaming: BranchNamingHandler,
 ): SessionFactory => ({
   open: Effect.fn("OmpSession.open")(function* (chatId, emit) {
-    const { chat, platform } = yield* chatPlatforms.resolve(chatId);
+    const { chat, platform, appendSystemPrompt } = yield* chatSessionContext.resolve(chatId);
     const sessionFile = path.join(sessionsDir, `${chat.id}.jsonl`);
-    const { settings, appendSystemPrompt } = yield* prepareSessionOptions(chat.cwd, platform);
+    const settings = yield* prepareSessionSettings(chat.cwd, platform);
 
     const manager = yield* promiseBoundary("Failed to open OMP session journal", () =>
       OmpSessionManager.SessionManager.open(sessionFile, sessionsDir, undefined, {

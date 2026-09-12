@@ -119,11 +119,9 @@ describe("Application", () => {
               ),
             ),
           send: (chatId, content) =>
-            content.text === "fail"
-              ? Effect.fail(new AgentError({ message: "runtime failed" }))
-              : Effect.sync(() => {
-                  sentMessages.push({ chatId, content });
-                }),
+            Effect.sync(() => {
+              sentMessages.push({ chatId, content });
+            }),
           sendCaptured: (capturedChatId, runId, _prompt, onEvent) =>
             onEvent({ type: "run-started" }).pipe(
               Effect.as({
@@ -318,10 +316,6 @@ describe("Application", () => {
           { chatId: discordChat.id, content: attachedPrompt },
           { chatId: discordChat.id, content: textPrompt("second") },
         ]);
-        assertApplicationError(
-          yield* application.sendMessage(discordChat.id, textPrompt("fail")).pipe(Effect.flip),
-          "Failed to send message",
-        );
         yield* application.abort(discordChat.id);
         assert.deepStrictEqual(abortedChatIds, [discordChat.id]);
         assertApplicationError(

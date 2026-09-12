@@ -6,36 +6,15 @@ import * as Effect from "effect/Effect";
 
 const bundledSkillsDirectory = Bun.fileURLToPath(new URL("./skills", import.meta.url));
 
-type SessionPlatform = WorkspacePlatform | "web";
-
-interface PlatformSessionPolicy {
-  readonly appendSystemPrompt: string;
-  readonly mermaid: "disabled" | "inherit";
-}
-
-const platformSessionPolicies = {
-  discord: {
-    appendSystemPrompt:
-      "You are pico, a personal agent assistant. You are chatting with the user through Discord.",
-    mermaid: "disabled",
-  },
-  web: {
-    appendSystemPrompt:
-      "You are pico, a personal agent assistant. You are chatting with the user through Pico Web.",
-    mermaid: "inherit",
-  },
-} satisfies Record<SessionPlatform, PlatformSessionPolicy>;
-
 const agentError = (message: string, cause: unknown) =>
   new AgentError({
     message: cause instanceof Error ? `${message}: ${cause.message}` : message,
   });
 
-export const prepareSessionOptions = Effect.fn("OmpSession.prepareOptions")(function* (
+export const prepareSessionSettings = Effect.fn("OmpSession.prepareSettings")(function* (
   cwd: AbsolutePath,
   platform: WorkspacePlatform | null,
 ) {
-  const policy = platformSessionPolicies[platform ?? "web"];
   const settings = yield* Effect.tryPromise({
     try: () => OmpSettings.Settings.loadIsolated({ cwd }),
     catch: (cause) => agentError("Failed to load OMP settings", cause),
@@ -49,10 +28,10 @@ export const prepareSessionOptions = Effect.fn("OmpSession.prepareOptions")(func
         bundledSkillsDirectory,
       ]);
       settings.override("secrets.enabled", true);
-      if (policy.mermaid === "disabled") {
+      if (platform === "discord") {
         settings.override("tui.renderMermaid", false);
       }
-      return { settings, appendSystemPrompt: policy.appendSystemPrompt };
+      return settings;
     },
     catch: (cause) => agentError("Failed to isolate OMP session settings", cause),
   });
