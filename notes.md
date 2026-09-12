@@ -5,6 +5,13 @@
 - reference omp cli if unsure
 - omp session jsonl file is the source of truth
 - set omp session async:false; this is because currently cannot support multiple omp sdk agents run async
+- pico patches OMP 18.1.17's JS worker to retain pending bridge replies until cell completion. Missing async managers must produce errors, not permanently pending handles.
+  - Incident: a Discord chat kept typing for hours after `comments = agent(...)` returned from one eval cell and a later cell executed `await comments` with `timeout: 0`. The worker deleted the originating run before its bridge reply arrived. Both successful and failed replies could be lost.
+  - `bun run test` checks the installed, patched dependency. `bun run check:omp-eval` installs the catalog version without patches in a temporary directory and runs the same ten scenarios. Pass an exact candidate version as `bun run check:omp-eval <version>` before upgrading.
+  - The pristine check exits 0 only when every scenario passes, 1 for scenario failures, and 2 for setup or argument errors. API incompatibilities and installation failures do not prove the original bug still exists. Inspect the diagnostics before deciding whether to retain or adapt the patch.
+  - The regression includes the real IPC worker because direct WorkerCore calls do not reproduce Bun's IPC rejection timing. It also checks late success and failure, handled rejection, chained calls, exported tool results, cancellation, and preservation of another worker's state. No model credentials or live pico root are used.
+  - When an unpatched candidate passes, update the OMP versions together and remove only the eval hunks from the dependency patch. The same patch also carries prompt-delivery changes; retain those until separately verified upstream. Remove the `patchedDependencies` entry and patch file only when no fixes remain. Regenerate `bun.lock` and run `bun run test`. Keep the regression after removing the eval fix. The checker never updates dependencies or removes patch hunks automatically.
+  - The patch does not enable async or change chat isolation. After deploying it, reinstall dependencies and restart the daemon to replace loaded workers.
 - pico forces OMP `secrets.enabled` for outbound conversation text, even when project settings disable it. OMP owns detection and reversible placeholders.
 - secret detection is format- and configuration-based, not a guarantee for arbitrary passwords, encoded values, or images. Local tool details, journals, and logs may retain plaintext.
 - share omp auth/model registry

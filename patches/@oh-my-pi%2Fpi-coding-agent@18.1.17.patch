@@ -613,3 +613,271 @@ index 35c0a35b1d19ec438d8cea17c9f957caa13efbb2..462fc3a06c4b8ca7d9d6d78fd7929629
  		}
  	}
  
+diff --git a/src/eval/js/context-manager.ts b/src/eval/js/context-manager.ts
+index 233b6c514af8be2f5399d04a829be8894eff66d6..c4d99347ca76f77099bc34e51b5a06fb735af0b5 100644
+--- a/src/eval/js/context-manager.ts
++++ b/src/eval/js/context-manager.ts
+@@ -70,13 +70,6 @@ interface PendingRun {
+ 	deferDrained?: PromiseWithResolvers<void>;
+ 	/** Set once the turn was cancelled; blocks new bridge calls during the drain. */
+ 	aborted: boolean;
+-	/**
+-	 * A worker `result` withheld because the cell still has bridge calls in
+-	 * flight. `#runOne` reports a finished run without awaiting its pending
+-	 * tools, so a floated or caught `agent()` would otherwise settle the run —
+-	 * tearing down the abort listener — while the subagent kept going with
+-	 * nothing left able to cancel it. Delivered once the last call drains.
+-	 */
+ 	heldResult?: Extract<WorkerOutbound, { type: "result" }>;
+ 	settled: boolean;
+ }
+@@ -683,11 +676,6 @@ function settlePending(session: JsSession, msg: Extract<WorkerOutbound, { type:
+ 	// Once the turn is cancelled the scheduled kill is the sole settler, so a
+ 	// late worker result can't cut the abort drain short.
+ 	if (pending.aborted) return;
+-	// A cell owns every bridge call it starts. The worker finishes a run without
+-	// awaiting its outstanding tool calls, so `agent(...)` that is floated or
+-	// caught would settle the run here — `runOnce` then drops the abort listener
+-	// and the pending entry, leaving the subagent running with nothing able to
+-	// cancel it. Hold the result until the last call drains.
+ 	if (pending.toolCalls.size > 0) {
+ 		pending.heldResult = msg;
+ 		return;
+diff --git a/src/eval/js/worker-core.ts b/src/eval/js/worker-core.ts
+index 30528423386976590fdf3bf7c3115fbabf0ce4f9..a3022fe6ad8cc40bb1e27570d2eb16404119b06c 100644
+--- a/src/eval/js/worker-core.ts
++++ b/src/eval/js/worker-core.ts
+@@ -19,6 +19,7 @@ interface ActiveRun {
+ 	runId: string;
+ 	filename: string;
+ 	pendingTools: Map<string, PendingTool>;
++	pendingToolsDrained: PromiseWithResolvers<void> | undefined;
+ 	/** Rejections floated by this run's cell code, captured before its result was sent. */
+ 	floatingRejections: unknown[];
+ }
+@@ -120,6 +121,7 @@ export class WorkerCore {
+ 	#unsubscribe: () => void;
+ 	#uninstallRejectionGuard: () => void;
+ 	#options: WorkerCoreOptions;
++	#closedError: ToolError | undefined;
+ 
+ 	constructor(transport: Transport, options: WorkerCoreOptions) {
+ 		this.#transport = transport;
+@@ -163,6 +165,7 @@ export class WorkerCore {
+ 	 * cell activity and must keep the default fatal path.
+ 	 */
+ 	#consumeRejection(reason: unknown): boolean {
++		if (this.#closedError !== undefined && reason === this.#closedError) return true;
+ 		const stack = reason instanceof Error && typeof reason.stack === "string" ? reason.stack : undefined;
+ 		if (stack) {
+ 			// The stack can name several cells (helper defined by an earlier cell,
+@@ -221,6 +224,7 @@ export class WorkerCore {
+ 	}
+ 
+ 	#handle(msg: WorkerInbound): void {
++		if (this.#closedError) return;
+ 		switch (msg.type) {
+ 			case "init":
+ 				try {
+@@ -298,7 +302,13 @@ export class WorkerCore {
+ 	}
+ 
+ 	async #runOne(runId: string, code: string, filename: string, snapshot: SessionSnapshot): Promise<void> {
+-		const active: ActiveRun = { runId, filename, pendingTools: new Map(), floatingRejections: [] };
++		const active: ActiveRun = {
++			runId,
++			filename,
++			pendingTools: new Map(),
++			pendingToolsDrained: undefined,
++			floatingRejections: [],
++		};
+ 		this.#runs.set(runId, active);
+ 		const hooks: RuntimeHooks = {
+ 			onText: chunk => this.#transport.send({ type: "text", runId, chunk }),
+@@ -316,17 +326,7 @@ export class WorkerCore {
+ 		} catch (error) {
+ 			result = { type: "result", runId, ok: false, error: errorPayload(error) };
+ 		}
+-		try {
+-			// One event-loop turn so rejections the cell already floated surface
+-			// while this run can still own them (rejection callbacks run before
+-			// timers fire).
+-			await Bun.sleep(0);
+-			result = foldFloatingRejections(active, result, hooks);
+-		} finally {
+-			this.#runs.delete(runId);
+-			this.#rememberCellFile(filename);
+-			this.#transport.send(result);
+-		}
++		await this.#finishRun(active, result, hooks);
+ 	}
+ 
+ 	async #invokeTool(msg: Extract<WorkerInbound, { type: "tool" }>): Promise<void> {
+@@ -334,6 +334,7 @@ export class WorkerCore {
+ 			runId: msg.runId,
+ 			filename: `tool-${msg.runId}`,
+ 			pendingTools: new Map(),
++			pendingToolsDrained: undefined,
+ 			floatingRejections: [],
+ 		};
+ 		this.#runs.set(msg.runId, active);
+@@ -343,6 +344,8 @@ export class WorkerCore {
+ 			callTool: (name, args) => this.#callTool(active, name, args),
+ 		};
+ 
++		let result: RunResult;
++		let envelope: Record<string, unknown> | undefined;
+ 		try {
+ 			const runtime = this.#runtime;
+ 			if (!runtime) throw new ToolError("JavaScript kernel is not running");
+@@ -354,7 +357,6 @@ export class WorkerCore {
+ 				}
+ 			}
+ 
+-			let envelope: Record<string, unknown>;
+ 			if (msg.op === "describe") {
+ 				const names = msg.names.length > 0 ? msg.names : [...tools.keys()];
+ 				envelope = {
+@@ -377,13 +379,42 @@ export class WorkerCore {
+ 				}
+ 				envelope = { ok: true, value: cloneable };
+ 			}
+-			this.#transport.send({ type: "display", runId: msg.runId, output: { type: "json", data: envelope } });
+-			this.#transport.send({ type: "result", runId: msg.runId, ok: true });
++			result = { type: "result", runId: msg.runId, ok: true };
+ 		} catch (error) {
+-			this.#transport.send({ type: "result", runId: msg.runId, ok: false, error: errorPayload(error) });
++			result = { type: "result", runId: msg.runId, ok: false, error: errorPayload(error) };
++		}
++		await this.#finishRun(active, result, hooks, envelope);
++	}
++
++	async #finishRun(
++		active: ActiveRun,
++		result: RunResult,
++		hooks: RuntimeHooks,
++		envelope?: Record<string, unknown>,
++	): Promise<void> {
++		while (true) {
++			if (this.#closedError || this.#runs.get(active.runId) !== active) return;
++			if (active.pendingTools.size > 0) {
++				active.pendingToolsDrained ??= Promise.withResolvers<void>();
++				await active.pendingToolsDrained.promise;
++			}
++			await new Promise<void>(resolve => setTimeout(resolve, 0));
++			if (this.#closedError || this.#runs.get(active.runId) !== active) return;
++			if (active.pendingTools.size === 0) break;
++		}
++		try {
++			result = foldFloatingRejections(active, result, hooks);
+ 		} finally {
+-			this.#runs.delete(msg.runId);
++			this.#runs.delete(active.runId);
+ 			this.#rememberCellFile(active.filename);
++			if (result.ok && envelope) {
++				this.#transport.send({
++					type: "display",
++					runId: active.runId,
++					output: { type: "json", data: envelope },
++				});
++			}
++			this.#transport.send(result);
+ 		}
+ 	}
+ 
+@@ -397,6 +428,8 @@ export class WorkerCore {
+ 	}
+ 
+ 	async #callTool(active: ActiveRun, name: string, args: unknown): Promise<unknown> {
++		if (this.#closedError) throw this.#closedError;
++		if (this.#runs.get(active.runId) !== active) throw new ToolError("JS run no longer active");
+ 		const id = `tc-${active.runId}-${crypto.randomUUID()}`;
+ 		const { promise, resolve, reject } = Promise.withResolvers<unknown>();
+ 		active.pendingTools.set(id, { runId: active.runId, resolve, reject });
+@@ -406,55 +439,60 @@ export class WorkerCore {
+ 			// Non-serializable args (DataCloneError from postMessage / IPC send).
+ 			// No reply will ever arrive; fail this call instead of stranding a
+ 			// pending entry until close.
+-			active.pendingTools.delete(id);
+ 			reject(error);
+ 		}
+-		return await promise;
++		try {
++			return await promise;
++		} finally {
++			active.pendingTools.delete(id);
++			if (active.pendingTools.size === 0) {
++				active.pendingToolsDrained?.resolve();
++				active.pendingToolsDrained = undefined;
++			}
++		}
+ 	}
+ 
+ 	#deliverToolReply(id: string, reply: ToolReply): void {
+ 		for (const active of this.#runs.values()) {
+ 			const pending = active.pendingTools.get(id);
+ 			if (!pending) continue;
+-			active.pendingTools.delete(id);
+ 			if (reply.ok) pending.resolve(reply.value);
+ 			else pending.reject(errorFromPayload(reply.error));
+ 			return;
+ 		}
+ 	}
+ 
+-	#close(): void {
++	#close(notify = true): void {
++		if (this.#closedError) return;
++		const error = new ToolError("JS worker closed");
++		this.#closedError = error;
++		this.#unsubscribe();
+ 		for (const active of this.#runs.values()) {
+ 			for (const pending of active.pendingTools.values()) {
+-				pending.reject(new ToolError("JS worker closed"));
++				pending.reject(error);
+ 			}
+ 			active.pendingTools.clear();
++			active.pendingToolsDrained?.resolve();
++			active.pendingToolsDrained = undefined;
+ 		}
+-		this.#runs.clear();
+ 		this.#runtime?.dispose?.();
+ 		this.#runtime = null;
+-		this.#transport.send({ type: "closed" });
+-		this.#uninstallRejectionGuard();
+-		this.#unsubscribe();
+-		this.#transport.close();
++		// Keep rejection ownership until floated bridge shutdown errors surface.
++		setTimeout(() => {
++			this.#runs.clear();
++			this.#uninstallRejectionGuard();
++			try {
++				if (notify) this.#transport.send({ type: "closed" });
++			} finally {
++				try {
++					this.#transport.close();
++				} catch {
++				}
++			}
++		}, 0);
+ 	}
+ 
+ 	dispose(): void {
+-		for (const active of this.#runs.values()) {
+-			for (const pending of active.pendingTools.values()) {
+-				pending.reject(new ToolError("JS worker closed"));
+-			}
+-			active.pendingTools.clear();
+-		}
+-		this.#runs.clear();
+-		this.#runtime?.dispose?.();
+-		this.#runtime = null;
+-		this.#uninstallRejectionGuard();
+-		this.#unsubscribe();
+-		try {
+-			this.#transport.close();
+-		} catch {
+-			// Ignore
+-		}
++		this.#close(false);
+ 	}
+ }
