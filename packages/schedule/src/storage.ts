@@ -25,7 +25,6 @@ export interface LoadedSchedule {
   readonly view: Schedule.ScheduleView;
   readonly ownerWorkspaceId: string | null;
   readonly directory: string | null;
-  readonly source: SourceTree | null;
 }
 
 const ownerSchema = Schema.fromJsonString(
@@ -435,18 +434,19 @@ export const ensureRunAsset = Effect.fn("Schedules.ensureRunAsset")(function* (
   yield* ensureDirectPath(storage, candidate, `run asset ${relative}`);
 });
 
-export const loadSourceTree = Effect.fn("Schedules.loadSourceTree")(function* (
+const inspectSourceTree = Effect.fn("Schedules.inspectSourceTree")(function* (
   storage: Storage,
   directory: string,
-  owned = false,
-): Effect.fn.Return<SourceTree, Schedule.ScheduleError> {
+  owned: boolean,
+  files?: Map<string, Uint8Array>,
+): Effect.fn.Return<ReadonlyArray<string>, Schedule.ScheduleError> {
   if (!storage.path.isAbsolute(directory)) {
     return yield* invalid("sourceDirectory must be an absolute path");
   }
   if (!(yield* inspectDirectory(storage, directory, "schedule source directory"))) {
     return yield* invalid("sourceDirectory must name an existing directory");
   }
-  const files = new Map<string, Uint8Array>();
+  let hasEntrypoint = false;
   const directories: Array<string> = [];
   const pending = [""];
   for (const relativeDirectory of pending) {
@@ -480,14 +480,26 @@ export const loadSourceTree = Effect.fn("Schedules.loadSourceTree")(function* (
       const info = yield* storage.fileSystem
         .stat(asset)
         .pipe(mapIo(`Failed to inspect source asset ${relative}`));
+      const entrypoint = relative === "script.js" || relative === "prompt.md";
+      if (entrypoint && info.type !== "File") {
+        return yield* invalid(`${relative} must be a nonblank regular file`);
+      }
       if (info.type === "Directory") {
         directories.push(relative);
         pending.push(relative);
       } else if (info.type === "File") {
-        const content = yield* storage.fileSystem
-          .readFile(asset)
-          .pipe(mapIo(`Failed to read source asset ${relative}`));
-        files.set(relative, content);
+        if (entrypoint || files !== undefined) {
+          const content = yield* storage.fileSystem
+            .readFile(asset)
+            .pipe(mapIo(`Failed to read source asset ${relative}`));
+          if (entrypoint) {
+            if (new TextDecoder().decode(content).trim() === "") {
+              return yield* invalid(`${relative} must be a nonblank regular file`);
+            }
+            hasEntrypoint = true;
+          }
+          files?.set(relative, content);
+        }
       } else {
         return yield* invalid(
           `Source asset ${relative} must be a regular file or directory; links and special files are not supported`,
@@ -495,18 +507,19 @@ export const loadSourceTree = Effect.fn("Schedules.loadSourceTree")(function* (
       }
     }
   }
-  if (!files.has("script.js") && !files.has("prompt.md")) {
+  if (!hasEntrypoint) {
     return yield* invalid("sourceDirectory requires script.js and/or prompt.md at its root");
   }
-  for (const name of ["script.js", "prompt.md"]) {
-    const content = files.get(name);
-    if (
-      directories.includes(name) ||
-      (content !== undefined && new TextDecoder().decode(content).trim() === "")
-    ) {
-      return yield* invalid(`${name} must be a nonblank regular file`);
-    }
-  }
+  return directories;
+});
+
+export const loadSourceTree = Effect.fn("Schedules.loadSourceTree")(function* (
+  storage: Storage,
+  directory: string,
+  owned = false,
+): Effect.fn.Return<SourceTree, Schedule.ScheduleError> {
+  const files = new Map<string, Uint8Array>();
+  const directories = yield* inspectSourceTree(storage, directory, owned, files);
   return { files, directories };
 });
 
@@ -552,7 +565,6 @@ const invalidLoaded = (
   },
   ownerWorkspaceId,
   directory,
-  source: null,
 });
 
 export const loadSchedule = Effect.fn("Schedules.loadSchedule")(function* (
@@ -613,7 +625,7 @@ export const loadSchedule = Effect.fn("Schedules.loadSchedule")(function* (
     const definition = yield* decodeDefinition(metaSource).pipe(
       Effect.mapError(() => invalid("Invalid schedule metadata")),
     );
-    const source = yield* loadSourceTree(storage, directory, true);
+    yield* inspectSourceTree(storage, directory, true);
     return {
       view: {
         kind: "ready",
@@ -624,7 +636,6 @@ export const loadSchedule = Effect.fn("Schedules.loadSchedule")(function* (
       },
       ownerWorkspaceId: definition.ownerWorkspaceId,
       directory,
-      source,
     } satisfies LoadedSchedule;
   }).pipe(Effect.result);
 

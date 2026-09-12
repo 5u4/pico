@@ -403,6 +403,208 @@ describe("Schedules", () => {
       }).pipe(Effect.provide(platformLayer), Effect.scoped),
   );
 
+  it.effect("clears a timeout override and runs with the default after a partial update", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-timeout-reset-" });
+      const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
+      const schedules = yield* open(schedulesDir);
+      const created = yield* schedules.create(caller, {
+        name: "custom timeout",
+        enabled: false,
+        target: { kind: "current-chat" },
+        trigger: { kind: "once", at: 1_000 },
+        sourceDirectory: yield* prepareSource({
+          "script.js": 'process.stdout.write(JSON.stringify({agent:false,content:"default"}));',
+        }),
+        scriptTimeoutMs: 5_000,
+      });
+      if (created.kind !== "ready") return yield* Effect.die("Created schedule is invalid");
+      const input = yield* Schema.decodeUnknownEffect(Schedule.UpdateSchedule)({
+        scriptTimeoutMs: null,
+      });
+      const reset = yield* schedules.update(caller, created.id, input);
+      if (reset.kind !== "ready") return yield* Effect.die("Reset schedule is invalid");
+      assert.isFalse(Object.hasOwn(reset.definition, "scriptTimeoutMs"));
+      assert.notStrictEqual(reset.definition.revision, created.definition.revision);
+      const persisted = yield* decodeDefinition(
+        yield* fileSystem.readFileString(path.join(reset.sourceDirectory, "meta.json")),
+      );
+      assert.isFalse(Object.hasOwn(persisted, "scriptTimeoutMs"));
+      const renamed = yield* schedules.update(caller, created.id, { name: "default timeout" });
+      if (renamed.kind !== "ready") return yield* Effect.die("Renamed schedule is invalid");
+      assert.isFalse(Object.hasOwn(renamed.definition, "scriptTimeoutMs"));
+      assert.deepStrictEqual(renamed.definition.trigger, created.definition.trigger);
+      assert.deepStrictEqual(renamed.definition.target, created.definition.target);
+      yield* schedules.update(caller, created.id, { enabled: true });
+      yield* TestClock.setTime(1_000);
+      const published = yield* Queue.unbounded<string>();
+      yield* schedules.start({
+        prepare: () => Effect.succeed({ chatId, workspaceId, cwd: AbsolutePath.make(root) }),
+        deliver: () => Effect.die("Script must publish without OMP"),
+        publish: (_chatId, content) => Queue.offer(published, content).pipe(Effect.asVoid),
+        runPrompt: () => Effect.die("Script must not invoke OMP"),
+      });
+      assert.strictEqual(yield* Queue.take(published), "default");
+      const runId = `scheduled-1000-${renamed.definition.revision}`;
+      const directory = path.join(schedulesDir, "runs", created.id, runId);
+      yield* awaitFinished(fileSystem, path.join(directory, "run.json"));
+      const result = yield* decodeScriptResult(
+        yield* fileSystem.readFileString(path.join(directory, "script", "result.json")),
+      );
+      assert.strictEqual(result.timeoutMillis, Schedule.DEFAULT_SCRIPT_TIMEOUT_MS);
+    }).pipe(Effect.provide(platformLayer), Effect.scoped),
+  );
+
+  it.effect("checks source structure without reading helpers during get, list, or idle scans", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-source-inspection-" });
+      const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
+      const assetReads: Array<string> = [];
+      let observeReads = false;
+      const observedFileSystem = FileSystem.FileSystem.of({
+        ...fileSystem,
+        readFile: (file) => {
+          if (observeReads && (file.endsWith("helper.js") || file.endsWith("data.bin"))) {
+            assetReads.push(file);
+          }
+          return fileSystem.readFile(file);
+        },
+      });
+      const schedules = yield* open(schedulesDir).pipe(
+        Effect.provideService(FileSystem.FileSystem, observedFileSystem),
+      );
+      const sourceDirectory = yield* prepareSource({
+        "prompt.md": "Run when due.",
+        "lib/helper.js": "export const value = 1;",
+        "assets/data.bin": new Uint8Array([0, 255, 128]),
+      });
+      const created: Array<Schedule.ReadyScheduleView> = [];
+      for (const enabled of [false, true]) {
+        const view = yield* schedules.create(caller, {
+          name: enabled ? "not due" : "disabled",
+          enabled,
+          target: { kind: "current-chat" },
+          trigger: { kind: "once", at: enabled ? 1_000_000 : 0 },
+          sourceDirectory,
+        });
+        if (view.kind !== "ready") return yield* Effect.die("Created schedule is invalid");
+        created.push(view);
+      }
+      observeReads = true;
+      for (const view of created) {
+        assert.deepStrictEqual(yield* schedules.get(caller, view.id), view);
+      }
+      assert.sameDeepMembers([...(yield* schedules.list(caller))], created);
+      yield* TestClock.setTime(1_000);
+      yield* schedules.start({
+        prepare: () => Effect.die("Disabled and non-due schedules must not execute"),
+        deliver: () => Effect.die("Unexpected delivery"),
+        publish: () => Effect.die("Unexpected publication"),
+        runPrompt: () => Effect.die("Unexpected prompt"),
+      });
+      assert.deepStrictEqual(assetReads, []);
+      assert.deepStrictEqual(yield* fileSystem.readDirectory(path.join(schedulesDir, "runs")), []);
+
+      for (const view of created) {
+        const prompt = path.join(view.sourceDirectory, "prompt.md");
+        yield* fileSystem.writeFileString(prompt, " \n\t");
+        assert.strictEqual((yield* schedules.get(caller, view.id)).kind, "invalid");
+        yield* fileSystem.writeFileString(prompt, "Repaired entrypoint.");
+        const helper = path.join(view.sourceDirectory, "lib/helper.js");
+        yield* fileSystem.remove(helper);
+        yield* fileSystem.symlink(path.join(sourceDirectory, "lib/helper.js"), helper);
+        assert.strictEqual((yield* schedules.get(caller, view.id)).kind, "invalid");
+        yield* fileSystem.remove(helper);
+        yield* fileSystem.writeFileString(helper, "export const value = 2;");
+        const fifo = path.join(view.sourceDirectory, "assets/pipe");
+        const made = Bun.spawnSync(["mkfifo", fifo]);
+        assert.strictEqual(made.exitCode, 0);
+        assert.strictEqual((yield* schedules.get(caller, view.id)).kind, "invalid");
+        yield* fileSystem.remove(fifo);
+        assert.deepStrictEqual(yield* schedules.get(caller, view.id), view);
+      }
+      assert.deepStrictEqual(assetReads, []);
+    }).pipe(Effect.provide(platformLayer), Effect.scoped),
+  );
+
+  it.effect("isolates unreadable source captures and retries them after repair", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-capture-isolation-" });
+      const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
+      let unreadableHelper: string | undefined;
+      const failingFileSystem = FileSystem.FileSystem.of({
+        ...fileSystem,
+        readFile: (file) =>
+          file === unreadableHelper
+            ? Effect.fail(permissionDenied("readFile", file))
+            : fileSystem.readFile(file),
+      });
+      const schedules = yield* open(schedulesDir).pipe(
+        Effect.provideService(FileSystem.FileSystem, failingFileSystem),
+      );
+      const created: Array<Schedule.ReadyScheduleView> = [];
+      for (const name of ["one", "two", "three"]) {
+        const view = yield* schedules.create(caller, {
+          name,
+          enabled: true,
+          target: { kind: "current-chat" },
+          trigger: { kind: "once", at: 1_000 },
+          sourceDirectory: yield* prepareSource({
+            "script.js":
+              'import { content } from "./lib/helper.js";process.stdout.write(JSON.stringify({agent:false,content}));',
+            "lib/helper.js": `export const content = ${JSON.stringify(name)};`,
+          }),
+        });
+        if (view.kind !== "ready") return yield* Effect.die("Created schedule is invalid");
+        created.push(view);
+      }
+      const [first, blocked, last] = created.sort((a, b) => a.id.localeCompare(b.id));
+      if (first === undefined || blocked === undefined || last === undefined) {
+        return yield* Effect.die("Expected three schedules");
+      }
+      unreadableHelper = path.join(blocked.sourceDirectory, "lib/helper.js");
+      const published: Array<string> = [];
+      yield* TestClock.setTime(1_000);
+      yield* schedules.start({
+        prepare: () => Effect.succeed({ chatId, workspaceId, cwd: AbsolutePath.make(root) }),
+        deliver: () => Effect.die("Script must publish without OMP"),
+        publish: (_chatId, content) => Effect.sync(() => void published.push(content)),
+        runPrompt: () => Effect.die("Script must not invoke OMP"),
+      });
+      for (const view of [first, last]) {
+        const runId = `scheduled-1000-${view.definition.revision}`;
+        const run = yield* awaitFinished(
+          fileSystem,
+          path.join(schedulesDir, "runs", view.id, runId, "run.json"),
+        );
+        assert.deepStrictEqual(run.state.kind === "finished" && run.state.outcome, {
+          kind: "published",
+          content: view.definition.name,
+        });
+      }
+      assert.sameMembers(published, [first.definition.name, last.definition.name]);
+      assert.isFalse(yield* fileSystem.exists(path.join(schedulesDir, "runs", blocked.id)));
+      unreadableHelper = undefined;
+      yield* TestClock.adjust("30 seconds");
+      const recoveredId = `scheduled-1000-${blocked.definition.revision}`;
+      const recovered = yield* awaitFinished(
+        fileSystem,
+        path.join(schedulesDir, "runs", blocked.id, recoveredId, "run.json"),
+      );
+      assert.deepStrictEqual(recovered.state.kind === "finished" && recovered.state.outcome, {
+        kind: "published",
+        content: blocked.definition.name,
+      });
+      assert.sameMembers(published, ["one", "two", "three"]);
+    }).pipe(Effect.provide(platformLayer), Effect.scoped),
+  );
+
   it.effect("returns repair paths for invalid metadata and entrypoints across state changes", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
@@ -1706,6 +1908,93 @@ describe("Schedules", () => {
       assert.strictEqual(paused.state, "disabled");
       const restarted = yield* open(schedulesDir);
       assert.deepStrictEqual(yield* restarted.get(caller, created.id), paused);
+    }).pipe(Effect.provide(platformLayer), Effect.scoped),
+  );
+
+  it.effect("gates reads and running cycles on retained enable rollback recovery", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-enable-recovery-" });
+      const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
+      const enabled = path.join(schedulesDir, "enabled");
+      const disabled = path.join(schedulesDir, "disabled");
+      let rejectCommitAndRollback = true;
+      const failingFileSystem = FileSystem.FileSystem.of({
+        ...fileSystem,
+        rename: (from, to) =>
+          rejectCommitAndRollback &&
+          (path.basename(from) === "next.json" ||
+            (path.dirname(from) === enabled && path.dirname(to) === disabled))
+            ? Effect.fail(permissionDenied("rename", from))
+            : fileSystem.rename(from, to),
+      });
+      const logs = yield* captureLogs();
+      yield* Effect.gen(function* () {
+        const schedules = yield* open(schedulesDir).pipe(
+          Effect.provideService(FileSystem.FileSystem, failingFileSystem),
+        );
+        const published = yield* Queue.unbounded<string>();
+        yield* TestClock.setTime(1_000);
+        yield* schedules.start({
+          prepare: () => Effect.succeed({ chatId, workspaceId, cwd: AbsolutePath.make(root) }),
+          deliver: () => Effect.die("Script must publish without OMP"),
+          publish: (_chatId, content) => Queue.offer(published, content).pipe(Effect.asVoid),
+          runPrompt: () => Effect.die("Script must not invoke OMP"),
+        });
+        const created = yield* schedules.create(caller, {
+          name: "original",
+          enabled: false,
+          target: { kind: "current-chat" },
+          trigger: { kind: "once", at: 1_000 },
+          sourceDirectory: yield* prepareSource({
+            "script.js":
+              'process.stdout.write(JSON.stringify({agent:false,content:"original script executed"}));',
+          }),
+        });
+        if (created.kind !== "ready") return yield* Effect.die("Created schedule is invalid");
+        const error = yield* schedules
+          .update(caller, created.id, { enabled: true, name: "uncommitted" })
+          .pipe(Effect.flip);
+        assert.strictEqual(error.kind, "io");
+        assert.isTrue(yield* fileSystem.exists(path.join(enabled, created.id)));
+        const getResult = yield* schedules.get(caller, created.id).pipe(Effect.exit);
+        const listResult = yield* schedules.list(caller).pipe(Effect.exit);
+        yield* TestClock.adjust("30 seconds");
+        const cycleResult = yield* Effect.race(
+          awaitLog(logs.events, "cycle").pipe(Effect.as("blocked")),
+          Queue.take(published),
+        );
+        assert.deepStrictEqual(
+          { get: getResult._tag, list: listResult._tag, cycle: cycleResult },
+          { get: "Failure", list: "Failure", cycle: "blocked" },
+        );
+        assert.deepStrictEqual(
+          yield* fileSystem.readDirectory(path.join(schedulesDir, "runs")),
+          [],
+        );
+        rejectCommitAndRollback = false;
+        yield* TestClock.adjust("30 seconds");
+        yield* awaitLog(logs.events, "update-recovery");
+        assert.deepStrictEqual(yield* schedules.get(caller, created.id), created);
+        assert.deepStrictEqual(yield* schedules.list(caller), [created]);
+        assert.deepStrictEqual(
+          yield* fileSystem.readDirectory(path.join(schedulesDir, "runs")),
+          [],
+        );
+        yield* schedules.update(caller, created.id, { enabled: true });
+        yield* TestClock.adjust("30 seconds");
+        assert.strictEqual(yield* Queue.take(published), "original script executed");
+        const runId = `scheduled-1000-${created.definition.revision}`;
+        const run = yield* awaitFinished(
+          fileSystem,
+          path.join(schedulesDir, "runs", created.id, runId, "run.json"),
+        );
+        assert.deepStrictEqual(run.state.kind === "finished" && run.state.outcome, {
+          kind: "published",
+          content: "original script executed",
+        });
+      }).pipe(Effect.provide(logs.layer));
     }).pipe(Effect.provide(platformLayer), Effect.scoped),
   );
 

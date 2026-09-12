@@ -202,7 +202,7 @@ export const UpdateSchedule = Schema.Struct({
   enabled: Schema.optional(Schema.Boolean),
   target: Schema.optional(ScheduleTargetInput),
   trigger: Schema.optional(ScheduleTrigger),
-  scriptTimeoutMs: Schema.optional(ScriptTimeoutMs),
+  scriptTimeoutMs: Schema.optional(Schema.NullOr(ScriptTimeoutMs)),
 });
 export type UpdateSchedule = typeof UpdateSchedule.Type;
 

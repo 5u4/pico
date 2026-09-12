@@ -220,6 +220,7 @@ const capture = Effect.fn("Schedules.capture")(function* (
   const list = Effect.fn("Schedules.list")(function* (caller: Schedule.ScheduleCaller) {
     return yield* mutation.withPermit(
       Effect.gen(function* () {
+        yield* reconcileUpdates(storage);
         const loaded = yield* scanSchedules(storage);
         return loaded
           .filter((schedule) => schedule.ownerWorkspaceId === caller.workspaceId)
@@ -232,7 +233,12 @@ const capture = Effect.fn("Schedules.capture")(function* (
     caller: Schedule.ScheduleCaller,
     id: Schedule.ScheduleId,
   ) {
-    return yield* mutation.withPermit(loadOwned(caller, id).pipe(Effect.map(invalidExternalView)));
+    return yield* mutation.withPermit(
+      Effect.gen(function* () {
+        yield* reconcileUpdates(storage);
+        return invalidExternalView(yield* loadOwned(caller, id));
+      }),
+    );
   });
 
   const update = Effect.fn("Schedules.update")(function* (
@@ -260,7 +266,7 @@ const capture = Effect.fn("Schedules.capture")(function* (
           if (loaded.view.kind !== "ready") {
             return yield* scheduleError("invalid", "Invalid schedules cannot be updated");
           }
-          const definition: Schedule.ScheduleDefinition = {
+          const definition = {
             ...loaded.view.definition,
             revision: Schedule.ScheduleRevision.make(yield* transactionId()),
             ...(input.name === undefined ? {} : { name: input.name }),
@@ -268,10 +274,9 @@ const capture = Effect.fn("Schedules.capture")(function* (
               ? {}
               : { target: targetFromInput(caller, input.target) }),
             ...(input.trigger === undefined ? {} : { trigger: input.trigger }),
-            ...(input.scriptTimeoutMs === undefined
-              ? {}
-              : { scriptTimeoutMs: input.scriptTimeoutMs }),
-          };
+            ...(input.scriptTimeoutMs == null ? {} : { scriptTimeoutMs: input.scriptTimeoutMs }),
+          } satisfies Schedule.ScheduleDefinition;
+          if (input.scriptTimeoutMs === null) delete definition.scriptTimeoutMs;
           const definitionError = validateDefinition(definition);
           if (definitionError !== undefined) {
             return yield* scheduleError("invalid", definitionError);
@@ -714,6 +719,7 @@ const capture = Effect.fn("Schedules.capture")(function* (
     return yield* Effect.gen(function* () {
       const claimed = yield* mutation.withPermit(
         Effect.gen(function* () {
+          yield* reconcileUpdates(storage);
           const now = yield* Clock.currentTimeMillis;
           const schedules = yield* scanSchedules(storage);
           const invalid = new Set<Schedule.ScheduleId>();
@@ -734,8 +740,6 @@ const capture = Effect.fn("Schedules.capture")(function* (
               );
             }
           }
-          invalidDefinitions.clear();
-          for (const id of invalid) invalidDefinitions.add(id);
           const pending: Array<{
             readonly run: Schedule.ScheduleRunLifecycle;
             readonly definition: Schedule.ScheduleDefinition;
@@ -743,12 +747,7 @@ const capture = Effect.fn("Schedules.capture")(function* (
             readonly missed: boolean;
           }> = [];
           for (const loaded of schedules) {
-            if (
-              loaded.view.kind !== "ready" ||
-              loaded.view.state !== "enabled" ||
-              loaded.source === null
-            )
-              continue;
+            if (loaded.view.kind !== "ready" || loaded.view.state !== "enabled") continue;
             if (validateDefinition(loaded.view.definition) !== undefined) continue;
             const view = loaded.view;
             const existing = yield* readRuns(storage, view.id);
@@ -772,18 +771,39 @@ const capture = Effect.fn("Schedules.capture")(function* (
               if (currentRuns.some((run) => run.source.scheduledFor === scheduledFor)) continue;
             }
 
+            const source = yield* loadSourceTree(storage, view.sourceDirectory, true).pipe(
+              Effect.result,
+            );
+            if (Result.isFailure(source)) {
+              invalid.add(view.id);
+              if (!invalidDefinitions.has(view.id)) {
+                yield* Effect.logWarning("Schedule source capture failed").pipe(
+                  Effect.annotateLogs({
+                    component: "schedule",
+                    operation: "scan",
+                    phase: "source",
+                    scheduleId: view.id,
+                    state: view.state,
+                    category: source.failure.kind,
+                  }),
+                );
+              }
+              continue;
+            }
             const run = yield* Effect.uninterruptible(
-              claim(view, loaded.source, { kind: "scheduled", scheduledFor }).pipe(
+              claim(view, source.success, { kind: "scheduled", scheduledFor }).pipe(
                 Effect.tap((published) => Effect.sync(() => owned.add(published))),
               ),
             );
             pending.push({
               run,
               definition: view.definition,
-              source: loaded.source,
+              source: source.success,
               missed: now - scheduledFor > MISSED_GRACE_MILLIS,
             });
           }
+          invalidDefinitions.clear();
+          for (const id of invalid) invalidDefinitions.add(id);
           return pending;
         }),
       );

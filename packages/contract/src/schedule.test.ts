@@ -85,6 +85,21 @@ describe("schedule contract", () => {
     assert.throws(() => decodeUpdate({ enabled: null }));
   });
 
+  it("clears timeout overrides only through updates", () => {
+    assert.deepStrictEqual(decodeUpdate({ scriptTimeoutMs: null }), { scriptTimeoutMs: null });
+    assert.throws(() => decodeDefinition({ ...definition, scriptTimeoutMs: null }));
+    assert.throws(() =>
+      decodeCreate({
+        name: "default timeout",
+        enabled: false,
+        target: { kind: "current-chat" },
+        trigger: { kind: "once", at: 1 },
+        sourceDirectory,
+        scriptTimeoutMs: null,
+      }),
+    );
+  });
+
   it("returns the managed source directory instead of source text", () => {
     const decodeView = Schema.decodeUnknownSync(Schedule.ReadyScheduleView, {
       onExcessProperty: "error",

@@ -33,7 +33,7 @@ Read the schedule with `schedule_get`. The result contains the current `sourceDi
 
 Invalid schedules also report `sourceDirectory` when their directory is known, so you can repair missing entrypoints, blank prompts, or unsupported files in place. A conflicted schedule has `sourceDirectory: null` because it exists in both state directories.
 
-Use `schedule_update` for metadata. Supply only the fields you want to change: `name`, `enabled`, `target`, `trigger`, or `scriptTimeoutMs`. Omitted fields keep their values, including a custom timeout. Metadata updates preserve all source bytes.
+Use `schedule_update` for metadata. Supply only the fields you want to change: `name`, `enabled`, `target`, `trigger`, or `scriptTimeoutMs`. Omitted fields keep their values, including a custom timeout. Set `scriptTimeoutMs` to `null` to remove the override and use the default timeout. Metadata updates preserve all source bytes.
 
 You can repair an invalid cron expression and resume in one update by supplying both `trigger` and `enabled: true`. Pico validates the resulting metadata and still rejects enabling a schedule with invalid source files.
 

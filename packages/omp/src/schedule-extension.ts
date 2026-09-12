@@ -114,9 +114,7 @@ export const make =
         { additionalProperties: false },
       ),
     ]);
-    const scriptTimeoutMs = Type.Optional(
-      Type.Integer({ minimum: 1, maximum: Schedule.MAX_SCRIPT_TIMEOUT_MS }),
-    );
+    const scriptTimeoutMs = Type.Integer({ minimum: 1, maximum: Schedule.MAX_SCRIPT_TIMEOUT_MS });
     api.registerTool({
       name: scheduleToolNames.create,
       label: "Create schedule",
@@ -133,7 +131,7 @@ export const make =
             minLength: 1,
             description: "Absolute path to the prepared source directory to copy.",
           }),
-          scriptTimeoutMs,
+          scriptTimeoutMs: Type.Optional(scriptTimeoutMs),
         },
         { additionalProperties: false },
       ),
@@ -176,7 +174,7 @@ export const make =
       name: scheduleToolNames.update,
       label: "Update schedule",
       description:
-        "Update only supplied metadata fields, including enabled to pause or resume. Source files and omitted fields stay unchanged. Enable/disable moves sourceDirectory; use the returned current path for subsequent file edits.",
+        "Update only supplied metadata fields, including enabled to pause or resume. Source files and omitted fields stay unchanged. Set scriptTimeoutMs to null to restore the default timeout. Enable/disable moves sourceDirectory; use the returned current path for subsequent file edits.",
       approval: "write",
       parameters: Type.Object(
         {
@@ -185,7 +183,7 @@ export const make =
           enabled: Type.Optional(Type.Boolean()),
           target: Type.Optional(target),
           trigger: Type.Optional(trigger),
-          scriptTimeoutMs,
+          scriptTimeoutMs: Type.Optional(Type.Union([scriptTimeoutMs, Type.Null()])),
         },
         { additionalProperties: false },
       ),
