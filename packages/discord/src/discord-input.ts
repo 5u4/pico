@@ -354,6 +354,7 @@ export const install = Effect.fn("DiscordInput.install")(function* <
     bigint,
     { readonly semaphore: Semaphore.Semaphore; knownThread: boolean }
   >();
+  const bindLocks = new Map<bigint, Semaphore.Semaphore>();
   const closeConfirmations = new Map<string, CloseConfirmation>();
   const allowedMentions = { parse: [], repliedUser: false } satisfies {
     parse: [];
@@ -1004,8 +1005,17 @@ export const install = Effect.fn("DiscordInput.install")(function* <
                   : { kind: "context" };
           return handleInteraction(interaction, command);
         })();
-        if (channelId === undefined || (closeNonce === undefined && name === "bind")) {
+        if (channelId === undefined) {
           run(effect);
+          return;
+        }
+        if (closeNonce === undefined && name === "bind") {
+          let semaphore = bindLocks.get(channelId);
+          if (semaphore === undefined) {
+            semaphore = Semaphore.makeUnsafe(1);
+            bindLocks.set(channelId, semaphore);
+          }
+          run(semaphore.withPermit(effect));
           return;
         }
         run(inputLock(channelId).semaphore.withPermit(effect));

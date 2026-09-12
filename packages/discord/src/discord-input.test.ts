@@ -1543,6 +1543,113 @@ describe("Discord input", () => {
     ),
   );
 
+  it.effect("serializes same-channel binds through the awaited response", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const firstEditStarted = yield* Deferred.make<void>();
+        const releaseFirstEdit = Promise.withResolvers<void>();
+        const secondDeferred = yield* Deferred.make<void>();
+        const secondEdited = yield* Deferred.make<void>();
+        const order: string[] = [];
+        let workspace: Workspace.Workspace = {
+          id: workspaceId,
+          name: "general",
+          binding: { platform: "discord", externalId: "10" },
+          defaultCwd,
+          worktree: null,
+          createdAt: 0,
+        };
+        const bot = {
+          id: 999n,
+          events: {},
+          helpers: {
+            getChannel: async () => ({
+              id: 10n,
+              guildId: 1n,
+              type: ChannelTypes.GuildText,
+              name: "general",
+            }),
+            sendMessage: async () => undefined,
+            editChannel: async () => undefined,
+            startThreadWithMessage: async () => {
+              throw new Error("unexpected thread creation");
+            },
+          },
+        } satisfies DiscordInputBot;
+        const application = Application.of({
+          createWorkspace: () => Effect.die("unexpected explicit workspace creation"),
+          getOrCreateWorkspaceByBinding: () => Effect.die("unexpected workspace creation"),
+          bindWorkspace: ({ configuration }) =>
+            Effect.sync(() => {
+              if (configuration.kind !== "direct") {
+                throw new Error("unexpected worktree binding");
+              }
+              workspace = { ...workspace, defaultCwd: AbsolutePath.make(configuration.cwd) };
+              order.push(`bind:${workspace.defaultCwd}`);
+              return workspace;
+            }),
+          createChat: () => Effect.die("unexpected chat creation"),
+          findWorkspaceByPlatformId: () => Effect.die("unexpected workspace lookup"),
+          findChatByPlatformId: () => Effect.die("unexpected chat lookup"),
+          findChatPlatformBinding: () => Effect.die("unexpected chat binding lookup"),
+          transcript: () => Effect.die("unexpected transcript read"),
+          sendMessage: () => Effect.die("unexpected message send"),
+          abort: () => Effect.die("unexpected chat abort"),
+          contextUsage: () => Effect.die("unexpected context read"),
+          shake: () => Effect.die("unexpected chat shake"),
+          closeChat: () => Effect.die("unexpected chat close"),
+        });
+
+        yield* install(bot, config).pipe(
+          Effect.provideService(Application, application),
+          Effect.provide(BunCrypto.layer),
+        );
+        const handleInteraction = interactionHandlerFor(bot);
+        handleInteraction(
+          interaction({
+            data: { name: "bind", options: bindOptions("/first") },
+            edit: async (response) => {
+              assert.include(response.content, "/first");
+              Effect.runSync(Deferred.succeed(firstEditStarted, undefined));
+              await releaseFirstEdit.promise;
+              order.push("reply:/first");
+            },
+          }),
+        );
+        yield* Deferred.await(firstEditStarted);
+
+        handleInteraction(
+          interaction({
+            data: { name: "bind", options: bindOptions("/second") },
+            defer: async () => {
+              Effect.runSync(Deferred.succeed(secondDeferred, undefined));
+            },
+            edit: async (response) => {
+              assert.include(response.content, "/second");
+              order.push("reply:/second");
+              Effect.runSync(Deferred.succeed(secondEdited, undefined));
+            },
+          }),
+        );
+        yield* Deferred.await(secondDeferred);
+        yield* TestClock.adjust("1 millis");
+        assert.strictEqual(workspace.defaultCwd, "/first");
+        assert.deepStrictEqual(order, ["bind:/first"]);
+        assert.isFalse(yield* Deferred.isDone(secondEdited));
+
+        releaseFirstEdit.resolve();
+        yield* Deferred.await(secondEdited);
+        assert.strictEqual(workspace.defaultCwd, "/second");
+        assert.deepStrictEqual(order, [
+          "bind:/first",
+          "reply:/first",
+          "bind:/second",
+          "reply:/second",
+        ]);
+      }),
+    ),
+  );
+
   it.effect("accepts parent messages while bind is pending", () =>
     Effect.scoped(
       Effect.gen(function* () {

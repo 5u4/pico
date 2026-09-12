@@ -61,6 +61,7 @@
   - parent-channel messages do not wait for pending bind validation or another thread's first send
   - concurrent messages and bind share one workspace identity; messages never replace existing configuration
   - a successful bind applies its requested configuration, including when a message created the workspace first
+  - binds in the same channel serialize validation, configuration updates, and awaited replies
   - thread input and commands remain serialized; chat publication and the opening prompt hold that same thread lock
 - a workspace can be a regular workspace (worktree_* = null) or a worktree workspace (worktree_* != null)
   - regular workspace new chats with workspace.default_cwd
