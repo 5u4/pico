@@ -229,8 +229,7 @@ merely restates the service contract.
 
 - Never open one unless the developer explicitly asks.
 - Use conventional commit titles in plain language: `fix(web): new chats no longer spike CPU`.
-- State the problem in a sentence or two, then how it was fixed. End with the model and harness that
-  did the work.
+- State the problem in a sentence or two, then how it was fixed.
 - Rebase onto the latest main before opening.
 - Merge pull requests with squash merge, then delete the source branch.
 - UI changes need before/after images; motion or timing needs a short video.
