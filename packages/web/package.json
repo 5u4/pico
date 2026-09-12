@@ -3,9 +3,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "tsc --project tsconfig.json && vite build",
-    "preview": "vite preview"
+    "dev": "bun --bun run vite",
+    "build": "bun --bun run tsc --project tsconfig.json && bun --bun run vite build",
+    "preview": "bun --bun run vite preview"
   },
   "dependencies": {
     "@phosphor-icons/react": "catalog:",
