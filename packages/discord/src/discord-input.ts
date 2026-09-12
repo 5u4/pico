@@ -800,6 +800,18 @@ export const install = Effect.fn("DiscordInput.install")(function* <
     return formatContextUsage(yield* application.contextUsage(chatId.value));
   });
 
+  const abortResponse = Effect.fnUntraced(function* (interaction: Interaction) {
+    const policyCopy = "This command can only be used in a pico-owned Discord thread.";
+    const thread = yield* resolveCommandThread(interaction);
+    if (Option.isNone(thread)) return policyCopy;
+
+    const chatId = yield* resolveCommandChatId(thread.value);
+    if (Option.isNone(chatId)) return policyCopy;
+    yield* Effect.annotateLogsScoped({ phase: "abort-chat" });
+    yield* application.abort(chatId.value);
+    return "Stop request processed. Any queued messages may still run.";
+  });
+
   const archiveThread = Effect.fnUntraced(function* (threadId: bigint) {
     yield* Effect.annotateLogsScoped({ phase: "drain-output" });
     yield* drainOutput();
@@ -968,6 +980,14 @@ export const install = Effect.fn("DiscordInput.install")(function* <
               ),
             ),
           );
+        case "abort":
+          return abortResponse(interaction).pipe(
+            Effect.catchCause((cause) =>
+              reportFailure("abort-chat", cause).pipe(
+                Effect.as("pico could not stop this chat's current run."),
+              ),
+            ),
+          );
         case "close":
           return closeResponse(interaction).pipe(
             Effect.catchCause((cause) =>
@@ -1024,7 +1044,7 @@ export const install = Effect.fn("DiscordInput.install")(function* <
     const name = interaction.data?.name;
     const isCommand =
       interaction.type === InteractionTypes.ApplicationCommand &&
-      (name === "bind" || name === "shake" || name === "context" || name === "close");
+      DiscordCommand.applicationCommands.some((command) => command.name === name);
     if (closeNonce === undefined && !isCommand) return;
 
     run(
@@ -1035,32 +1055,29 @@ export const install = Effect.fn("DiscordInput.install")(function* <
             closeNonce === undefined ? interaction.defer(true) : interaction.deferEdit(),
           );
           yield* Effect.annotateLogsScoped({ phase: "request" });
-          const effect = Effect.suspend(() => {
-            if (closeNonce !== undefined) {
-              return closeConfirmationResponse(interaction, closeNonce).pipe(
-                Effect.catchCause((cause) =>
-                  reportFailure("close-confirmation", cause).pipe(
-                    Effect.as({
-                      content: "pico could not close this chat.",
-                      components: [],
-                    } satisfies ComponentResponse),
+          const command =
+            closeNonce === undefined
+              ? DiscordCommand.parse(name, interaction.data?.options)
+              : undefined;
+          const effect =
+            closeNonce !== undefined
+              ? closeConfirmationResponse(interaction, closeNonce).pipe(
+                  Effect.catchCause((cause) =>
+                    reportFailure("close-confirmation", cause).pipe(
+                      Effect.as({
+                        content: "pico could not close this chat.",
+                        components: [],
+                      } satisfies ComponentResponse),
+                    ),
                   ),
-                ),
-                Effect.flatMap((response) => editInteraction(interaction, response)),
-              );
-            }
-            const command: DiscordCommand.Command =
-              name === "bind"
-                ? DiscordCommand.parseBind(interaction.data?.options)
-                : name === "shake"
-                  ? DiscordCommand.parseShake(interaction.data?.options)
-                  : name === "close"
-                    ? { kind: "close" }
-                    : { kind: "context" };
-            return handleInteraction(interaction, command);
-          });
+                  Effect.flatMap((response) => editInteraction(interaction, response)),
+                )
+              : command === undefined
+                ? undefined
+                : handleInteraction(interaction, command);
+          if (effect === undefined) return;
           const channelId = interaction.channelId;
-          if (channelId === undefined) {
+          if (channelId === undefined || command?.kind === "abort") {
             yield* effect;
             return;
           }

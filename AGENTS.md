@@ -211,6 +211,7 @@ merely restates the service contract.
 - Users notice a dropped frame, a lying spinner, and a stale label. Nothing repaints continuously;
   that pegs the GPU on high-refresh displays.
 - Change behavior and change the docs in the same commit.
+- Never modify `README.md` without the developer's explicit permission, including for behavior changes or documentation cleanup.
 - Docs carry only what the environment cannot answer: conventions, reasons, and gotchas. Delete
   prose that merely restates a manifest, config file, or directory listing.
 

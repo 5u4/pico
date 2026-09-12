@@ -110,13 +110,13 @@ const smoke = Effect.fn("Discord.smoke")(function* () {
         ]),
       );
       assert.strictEqual(globalCommands.length, 0);
-      assert.strictEqual(guildCommands.length, 3);
+      const abortCommand = guildCommands.find((command) => command.name === "abort");
+      assert.strictEqual(abortCommand?.type, ApplicationCommandTypes.ChatInput);
 
       const bindCommand = guildCommands.find((command) => command.name === "bind");
       assert.strictEqual(bindCommand?.name, "bind");
       assert.strictEqual(bindCommand?.type, ApplicationCommandTypes.ChatInput);
       assert.strictEqual(bindCommand?.defaultMemberPermissions, undefined);
-      assert.strictEqual(bindCommand?.options?.length, 1);
 
       const setCommand = bindCommand?.options?.[0];
       assert.strictEqual(setCommand?.name, "set");

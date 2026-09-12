@@ -1268,6 +1268,252 @@ describe("Discord input", () => {
     ),
   );
 
+  it.effect("aborts an active send before its lock releases and preserves queued input", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const sendStarted = yield* Deferred.make<void>();
+        const stopRequested = yield* Deferred.make<void>();
+        const releaseSend = yield* Deferred.make<void>();
+        const sendFinished = yield* Deferred.make<void>();
+        const abortStarted = yield* Deferred.make<void>();
+        const interactionEdited = yield* Deferred.make<void>();
+        const queuedSent = yield* Deferred.make<void>();
+        const laterSent = yield* Deferred.make<void>();
+        const order: string[] = [];
+        const bot = {
+          id: 999n,
+          events: {},
+          helpers: {
+            getChannel: async () => ({
+              id: 20n,
+              guildId: 1n,
+              type: ChannelTypes.PublicThread,
+              parentId: 10n,
+            }),
+            sendMessage: async () => {
+              throw new Error("abort must not send a public reply");
+            },
+            editChannel: async () => {
+              throw new Error("abort must not archive the thread");
+            },
+            startThreadWithMessage: async () => {
+              throw new Error("abort must not create a thread");
+            },
+          },
+        } satisfies DiscordInputBot;
+        const application = Application.of({
+          createWorkspace: () => Effect.die("unexpected workspace creation"),
+          getOrCreateWorkspaceByBinding: () => Effect.die("unexpected workspace creation"),
+          bindWorkspace: () => Effect.die("unexpected workspace binding"),
+          createChat: () => Effect.die("unexpected chat creation"),
+          findWorkspaceByPlatformId: () => Effect.die("unexpected workspace lookup"),
+          findChatByPlatformId: () =>
+            Effect.succeed(
+              Option.some({
+                id: chatId,
+                workspaceId,
+                cwd: defaultCwd,
+                externalId: "20",
+                createdAt: 0,
+                archivedAt: null,
+              }),
+            ),
+          findChatPlatformBinding: () => Effect.die("unexpected binding lookup"),
+          transcript: () => Effect.die("unexpected transcript read"),
+          sendMessage: (_id, prompt) =>
+            Effect.gen(function* () {
+              if (prompt.text === "active") {
+                order.push("active-start");
+                yield* Deferred.succeed(sendStarted, undefined);
+                yield* Deferred.await(stopRequested);
+                yield* Deferred.await(releaseSend);
+                order.push("active-end");
+                yield* Deferred.succeed(sendFinished, undefined);
+                return;
+              }
+              order.push(prompt.text);
+              yield* Deferred.succeed(prompt.text === "queued" ? queuedSent : laterSent, undefined);
+            }),
+          abort: () =>
+            Effect.gen(function* () {
+              order.push("abort");
+              yield* Deferred.succeed(abortStarted, undefined);
+              yield* Deferred.succeed(stopRequested, undefined);
+              yield* Deferred.await(sendFinished);
+            }),
+          contextUsage: () => Effect.die("unexpected context read"),
+          shake: () => Effect.die("unexpected chat shake"),
+          closeChat: () => Effect.die("unexpected chat close"),
+        });
+        yield* install(bot, config).pipe(
+          Effect.provideService(Application, application),
+          Effect.provide(BunCrypto.layer),
+        );
+
+        const handleMessage = handlerFor(bot);
+        handleMessage(message({ channelId: 20n, content: "active" }));
+        yield* Deferred.await(sendStarted);
+        handleMessage(message({ channelId: 20n, content: "queued" }));
+        interactionHandlerFor(bot)(
+          interaction({
+            channelId: 20n,
+            data: { name: "abort" },
+            defer: async (isPrivate) => {
+              assert.isTrue(isPrivate);
+              order.push("private-defer");
+            },
+            edit: async () => {
+              Effect.runSync(Deferred.succeed(interactionEdited, undefined));
+            },
+          }),
+        );
+        yield* Deferred.await(abortStarted);
+        assert.deepStrictEqual(order, ["active-start", "private-defer", "abort"]);
+
+        yield* Deferred.succeed(releaseSend, undefined);
+        yield* Deferred.await(interactionEdited);
+        yield* Deferred.await(queuedSent);
+        handleMessage(message({ channelId: 20n, content: "later" }));
+        yield* Deferred.await(laterSent);
+        assert.deepStrictEqual(order, [
+          "active-start",
+          "private-defer",
+          "abort",
+          "active-end",
+          "queued",
+          "later",
+        ]);
+      }),
+    ),
+  );
+
+  it.effect("rejects unbound aborts and replies privately without exposing failures", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const secret = "private-abort-error";
+        const logs: Array<ReturnType<typeof Logger.formatStructured.log>> = [];
+        const logger = Logger.make((options) => {
+          logs.push(Logger.formatStructured.log(options));
+        });
+        let aborts = 0;
+        const bot = {
+          id: 999n,
+          events: {},
+          helpers: {
+            getChannel: async (channelId: bigint) => {
+              if (channelId === 32n) throw { status: 503, body: secret };
+              return {
+                id: channelId,
+                guildId: channelId === 30n ? 2n : 1n,
+                type: channelId === 10n ? ChannelTypes.GuildText : ChannelTypes.PublicThread,
+                ...(channelId === 31n ? {} : { parentId: 10n }),
+              };
+            },
+            sendMessage: async () => {
+              throw new Error("abort must not send a public reply");
+            },
+            editChannel: async () => {
+              throw new Error("abort must not archive the thread");
+            },
+            startThreadWithMessage: async () => {
+              throw new Error("abort must not create a thread");
+            },
+          },
+        } satisfies DiscordInputBot;
+        const application = Application.of({
+          createWorkspace: () => Effect.die("unexpected workspace creation"),
+          getOrCreateWorkspaceByBinding: () => Effect.die("unexpected workspace creation"),
+          bindWorkspace: () => Effect.die("unexpected workspace binding"),
+          createChat: () => Effect.die("unexpected chat creation"),
+          findWorkspaceByPlatformId: () => Effect.die("unexpected workspace lookup"),
+          findChatByPlatformId: (_platform, _parentId, threadId) =>
+            Effect.succeed(
+              threadId === "21"
+                ? Option.none()
+                : Option.some({
+                    id: threadId === "22" ? failingChatId : chatId,
+                    workspaceId,
+                    cwd: defaultCwd,
+                    externalId: threadId,
+                    createdAt: 0,
+                    archivedAt: null,
+                  }),
+            ),
+          findChatPlatformBinding: () => Effect.die("unexpected binding lookup"),
+          transcript: () => Effect.die("unexpected transcript read"),
+          sendMessage: () => Effect.die("unexpected message send"),
+          abort: (id) =>
+            id === failingChatId
+              ? Effect.fail(
+                  new ApplicationError({ reason: "operation", message: "Failed to abort chat" }),
+                )
+              : Effect.sync(() => {
+                  aborts += 1;
+                }),
+          contextUsage: () => Effect.die("unexpected context read"),
+          shake: () => Effect.die("unexpected chat shake"),
+          closeChat: () => Effect.die("unexpected chat close"),
+        });
+        yield* install(bot, config).pipe(
+          Effect.provideService(Application, application),
+          Effect.provide(BunCrypto.layer),
+          Effect.provide(Logger.layer([logger])),
+        );
+        const handleInteraction = interactionHandlerFor(bot);
+        const invoke = (channelId: bigint, guildId = 1n) =>
+          new Promise<string>((resolve) => {
+            handleInteraction(
+              interaction({
+                channelId,
+                guildId,
+                data: { name: "abort" },
+                defer: async (isPrivate) => {
+                  assert.isTrue(isPrivate);
+                },
+                edit: async (response) => {
+                  assert.deepStrictEqual(response.allowedMentions, {
+                    parse: [],
+                    repliedUser: false,
+                  });
+                  resolve(response.content ?? "");
+                },
+              }),
+            );
+          });
+
+        const unboundReply = yield* Effect.promise(() => invoke(21n));
+        for (const [channelId, guildId] of [
+          [20n, 2n],
+          [30n, 1n],
+          [10n, 1n],
+          [31n, 1n],
+        ] as const) {
+          assert.strictEqual(yield* Effect.promise(() => invoke(channelId, guildId)), unboundReply);
+        }
+        assert.strictEqual(aborts, 0);
+        assert.deepStrictEqual(logs, []);
+
+        const applicationFailure = yield* Effect.promise(() => invoke(22n));
+        const discordFailure = yield* Effect.promise(() => invoke(32n));
+        assert.strictEqual(applicationFailure, discordFailure);
+        assert.notStrictEqual(applicationFailure, unboundReply);
+        assert.notInclude(applicationFailure, secret);
+        assert.notInclude(applicationFailure, "Failed to abort chat");
+        assert.notInclude(JSON.stringify(logs), secret);
+        assert.deepStrictEqual(
+          logs.map((entry) => entry.annotations.phase),
+          ["abort-chat", "resolve-interaction-channel"],
+        );
+        assert.strictEqual(aborts, 0);
+
+        const successReply = yield* Effect.promise(() => invoke(20n));
+        assert.notStrictEqual(successReply, unboundReply);
+        assert.notStrictEqual(successReply, applicationFailure);
+        assert.strictEqual(aborts, 1);
+      }),
+    ),
+  );
+
   it.effect("keeps a cold-thread message ahead of close during channel classification", () =>
     Effect.scoped(
       Effect.gen(function* () {
