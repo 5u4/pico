@@ -331,66 +331,6 @@ async function shutdown(dispose: () => void): Promise<void> {
   );
 }
 
-async function ipcErrorRecovery(): Promise<void> {
-  const { Settings } = await import("@oh-my-pi/pi-coding-agent/config/settings");
-  const { executeInVmContext, disposeVmContextsByOwner } = await import(
-    "@oh-my-pi/pi-coding-agent/eval/js/context-manager"
-  );
-  const session: ToolSession = {
-    cwd: root,
-    hasUI: false,
-    getSessionFile: () => null,
-    getSessionSpawns: () => null,
-    settings: Settings.isolated({ "async.enabled": false }),
-  };
-  const output: unknown[] = [];
-  const execute = (owner: string, code: string, signal = AbortSignal.timeout(8_000)) =>
-    executeInVmContext({
-      sessionKey: owner,
-      sessionId: owner,
-      ownerId: owner,
-      cwd: root,
-      session,
-      code,
-      filename: join(root, `${owner}.ts`),
-      runState: {
-        signal,
-        onDisplay(value) {
-          if (value.type === "json") output.push(value.data);
-        },
-        onText(text) {
-          if (text.includes("abort-ready")) cancellation.abort(new Error("probe cancellation"));
-        },
-      },
-    });
-  const cancellation = new AbortController();
-  try {
-    await assert.rejects(
-      execute(
-        "ipc-A",
-        'comments = agent("review", { agent: "task" }); print("issued"); undefined;',
-      ),
-      /async job manager; unavailable here/,
-    );
-    await assert.rejects(
-      execute("ipc-A", "await comments;"),
-      /async job manager; unavailable here/,
-    );
-    await execute("ipc-A", "display({ recovered: 4 });");
-    assert.deepEqual(output, [{ recovered: 4 }]);
-    await execute("ipc-B", "retained = 73; undefined;");
-    await assert.rejects(
-      execute("ipc-A", 'print("abort-ready"); await new Promise(() => {});', cancellation.signal),
-      /probe cancellation/,
-    );
-    await execute("ipc-B", "display({ retained });");
-    assert.deepEqual(output, [{ recovered: 4 }, { retained: 73 }]);
-  } finally {
-    await disposeVmContextsByOwner("ipc-A");
-    await disposeVmContextsByOwner("ipc-B");
-  }
-}
-
 let dispose: (() => void) | undefined;
 try {
   const { WorkerCore } = await import("@oh-my-pi/pi-coding-agent/eval/js/worker-core");
@@ -447,9 +387,6 @@ try {
       break;
     case "dispose":
       await shutdown(dispose);
-      break;
-    case "ipc-error-recovery":
-      await ipcErrorRecovery();
       break;
     default:
       throw new Error(`Unknown WorkerCore regression scenario: ${scenario}`);

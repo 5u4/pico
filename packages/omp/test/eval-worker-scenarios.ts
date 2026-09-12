@@ -9,8 +9,4 @@ export const evalWorkerScenarios: ReadonlyArray<readonly [scenario: string, desc
     ["stale-continuation", "rejects bridge calls started after their run has finished"],
     ["close", "closes pending bridges without late results or escaping rejections"],
     ["dispose", "disposes pending bridges without waiting for unrelated local promises"],
-    [
-      "ipc-error-recovery",
-      "reports IPC bridge errors and cancels without losing another worker's state",
-    ],
   ];

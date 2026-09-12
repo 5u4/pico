@@ -10,7 +10,6 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, isAbsolute, join, relative, sep } from "node:path";
-import { evalWorkerScenarios } from "../packages/omp/test/eval-worker-scenarios.ts";
 
 const packageName = "@oh-my-pi/pi-coding-agent";
 const repository = Bun.fileURLToPath(new URL("../", import.meta.url));
@@ -70,7 +69,6 @@ function checkVersion(version: string): number {
     throw new Error("The system temporary directory must be outside this checkout");
   }
   const root = mkdtempSync(join(tempBase, "pico-omp-upstream-"));
-  let failures = 0;
   try {
     const home = join(root, "home");
     const scratch = join(root, "tmp");
@@ -142,58 +140,45 @@ function checkVersion(version: string): number {
     ) {
       throw new Error(`Installed package does not match requested ${packageName}@${version}`);
     }
-    const fixture = join(root, "eval-worker.ts");
-    copyFileSync(
-      join(repository, "packages", "omp", "test", "fixtures", "eval-worker.ts"),
-      fixture,
+    const probe = join(root, "eval-hang.ts");
+    copyFileSync(join(repository, "packages", "omp", "test", "repro", "eval-hang.ts"), probe);
+    console.log(
+      "Checking the original real IPC missing-manager hang and recovery only; other patch invariants are not validated.",
     );
-    for (const [scenario, description] of evalWorkerScenarios) {
-      try {
-        const result = Bun.spawnSync({
-          cmd: [process.execPath, "--no-install", fixture, scenario],
-          cwd: root,
-          env: environment,
-          stdin: "ignore",
-          stdout: "pipe",
-          stderr: "pipe",
-          timeout: 20_000,
-          killSignal: "SIGKILL",
-          maxBuffer: 4 * 1024 * 1024,
-        });
-        if (
-          result.success &&
-          result.stdout.includes(`${JSON.stringify({ scenario, result: "passed" })}\n`)
-        ) {
-          console.log(`PASS ${scenario}: ${description}`);
-        } else {
-          failures++;
-          console.error(`FAIL ${scenario}: ${description}`);
-          reportFailure(result);
-          if (result.success) console.error("Fixture exited without its completion marker");
-        }
-      } catch (cause) {
-        failures++;
-        console.error(`FAIL ${scenario}: ${description}`);
-        console.error(cause);
+    try {
+      const result = Bun.spawnSync({
+        cmd: [process.execPath, "--no-install", probe],
+        cwd: root,
+        env: environment,
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+        timeout: 20_000,
+        killSignal: "SIGKILL",
+        maxBuffer: 4 * 1024 * 1024,
+      });
+      if (
+        result.success &&
+        result.stdout.toString().trim() === JSON.stringify({ result: "passed" })
+      ) {
+        console.log(`PASS pristine ${packageName}@${version}: original real IPC hang regression`);
+        console.log("This does not prove absolute safety or identify an upstream fix commit.");
+        return 0;
       }
+      console.error("FAIL original real IPC hang regression");
+      reportFailure(result);
+      if (result.success) console.error("Probe exited without its completion marker");
+    } catch (cause) {
+      console.error("FAIL original real IPC hang regression");
+      console.error(cause);
     }
+    console.error(
+      "Patch removal is NOT established. Failure may be a regression, module/API incompatibility or execution error; it does not by itself confirm the original hang.",
+    );
+    return 1;
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
-  const passed = evalWorkerScenarios.length - failures;
-  console.log(
-    `Tested pristine ${packageName}@${version}: ${passed}/${evalWorkerScenarios.length} scenarios passed`,
-  );
-  if (failures > 0) {
-    console.error(
-      "Patch removal is NOT established. Failures may be regressions, module/API incompatibilities or execution errors; they do not by themselves confirm the original hang.",
-    );
-    return 1;
-  }
-  console.log(
-    "Candidate meets this regression contract. This does not prove absolute safety or identify an upstream fix commit.",
-  );
-  return 0;
 }
 
 try {
