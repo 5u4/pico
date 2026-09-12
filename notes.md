@@ -5,6 +5,9 @@
 - reference omp cli if unsure
 - omp session jsonl file is the source of truth
 - set omp session async:false; this is because currently cannot support multiple omp sdk agents run async
+- pico patches OMP 18.1.17's JS worker because a cell could discard pending bridge replies, leaving a later `await` stuck indefinitely. The patch retains replies through cell completion and Bun's rejection delivery turn; async remains disabled.
+  - `packages/omp/test/repro/eval-hang.ts` reproduces the missing-manager failure through real IPC, awaits the saved handle in another cell, and checks that the worker remains usable. `bun run test` runs it without model credentials or a live pico root.
+  - Retire the eval hunks only after the unpatched SDK passes this regression. The dependency patch also contains prompt-delivery fixes; do not delete those with the eval fix. Reinstall dependencies and restart the daemon to load a changed patch.
 - pico forces OMP `secrets.enabled` for outbound conversation text, even when project settings disable it. OMP owns detection and reversible placeholders.
 - secret detection is format- and configuration-based, not a guarantee for arbitrary passwords, encoded values, or images. Local tool details, journals, and logs may retain plaintext.
 - share omp auth/model registry
