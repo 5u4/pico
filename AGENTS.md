@@ -34,6 +34,18 @@ These words mean one thing each in prompts, docs, type names, and table names.
 Tests and scripts use a temporary pico root. `~/.pico` belongs to the developer and is never a test
 fixture.
 
+## Run the local CLI
+
+From the checkout root, run `bun install`, then `bun link --cwd packages/cli`. Start the daemon
+with `pico start` or `pico start /absolute/root`. Bun must be on `PATH`, and its global bin directory
+from `bun pm bin -g` must precede `/usr/bin`, which also contains a `pico` text editor on macOS.
+Check `command -v pico` after linking.
+
+The command links to this checkout and uses its installed dependencies. Source changes take effect
+on the next start. Relink from another checkout before deleting the linked worktree.
+Run `pico` directly, not through a package script: `bun run` can forward a terminal SIGINT that
+the child already received, turning one Ctrl-C into a forced exit.
+
 ## Where code lives
 
 - `packages/contract` — cross-package schemas, branded values, errors, interfaces, and service tags;

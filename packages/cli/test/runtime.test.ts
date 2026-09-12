@@ -1,11 +1,11 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { clearTimeout, setTimeout } from "node:timers";
 import { assert, describe, it } from "@effect/vitest";
 
 const fixturePath = Bun.fileURLToPath(new URL("./runtime.fixture.ts", import.meta.url));
-const mainPath = Bun.fileURLToPath(new URL("../src/main.ts", import.meta.url));
+const cliDirectory = Bun.fileURLToPath(new URL("../", import.meta.url));
 
 const pump = async (
   stream: ReadableStream<Uint8Array>,
@@ -193,23 +193,89 @@ describe("CLI foreground shutdown", () => {
     }
   });
 
-  it("removes the actual CLI lock when SIGINT immediately follows readiness", async () => {
-    const temporaryDirectory = await mkdtemp(join(tmpdir(), "pico-cli-shutdown-"));
-    const root = join(temporaryDirectory, "root");
-    const lockFile = join(root, ".pico.lock");
-    const spawned = spawnChild(mainPath, ["start", root]);
+  it.skipIf(process.platform !== "darwin" && process.platform !== "linux")(
+    "releases the root lock when the linked pico receives terminal Ctrl-C",
+    async () => {
+      const temporaryDirectory = await mkdtemp(join(tmpdir(), "pico-cli-shutdown-"));
+      try {
+        const bin = join(temporaryDirectory, "bun", "bin");
+        const root = join(temporaryDirectory, "root");
+        const lockFile = join(root, ".pico.lock");
+        const env = {
+          HOME: join(temporaryDirectory, "home"),
+          BUN_INSTALL: join(temporaryDirectory, "bun"),
+          BUN_INSTALL_GLOBAL_DIR: join(temporaryDirectory, "bun", "install", "global"),
+          BUN_INSTALL_BIN: bin,
+          BUN_INSTALL_CACHE_DIR: join(temporaryDirectory, "bun", "install", "cache"),
+          BUN_RUNTIME_TRANSPILER_CACHE_PATH: join(temporaryDirectory, "bun", "transpiler-cache"),
+          BUN_OPTIONS: "--no-env-file",
+          TMPDIR: join(temporaryDirectory, "tmp"),
+          PATH: `${bin}:/usr/bin:/bin`,
+          TERM: "xterm-256color",
+        };
+        await Promise.all(
+          [
+            env.HOME,
+            env.BUN_INSTALL_GLOBAL_DIR,
+            bin,
+            env.BUN_INSTALL_CACHE_DIR,
+            env.BUN_RUNTIME_TRANSPILER_CACHE_PATH,
+            env.TMPDIR,
+          ].map((directory) => mkdir(directory, { recursive: true })),
+        );
+        await symlink(process.execPath, join(bin, "bun"));
+        const linked = Bun.spawnSync({
+          cmd: [process.execPath, "link"],
+          cwd: cliDirectory,
+          env,
+          stdin: "ignore",
+          stdout: "pipe",
+          stderr: "pipe",
+          timeout: 10_000,
+          killSignal: "SIGKILL",
+        });
+        assert.isTrue(linked.success, `bun link failed\n${linked.stderr.toString()}`);
 
-    try {
-      await waitForMarker(spawned, "pico.daemon.ready", 15_000);
-      spawned.child.kill("SIGINT");
-      const result = await finish(spawned, 10_000);
+        let transcript = "";
+        const decoder = new TextDecoder();
+        const child = Bun.spawn({
+          cmd: [join(bin, "pico"), "start", root],
+          cwd: temporaryDirectory,
+          env,
+          // Bun 1.3.14 assigns the controlling PTY only for inline terminal options.
+          terminal: {
+            data(_terminal, data) {
+              transcript += decoder.decode(data, { stream: true });
+            },
+          },
+        });
+        await using terminal = child.terminal;
+        try {
+          if (!terminal) throw new Error("Linked pico has no terminal");
+          const deadline = performance.now() + 15_000;
+          while (!transcript.includes("pico.daemon.ready")) {
+            if (child.exitCode !== null) {
+              throw new Error(`Linked pico exited before readiness\n${transcript}`);
+            }
+            if (performance.now() >= deadline) {
+              throw new Error(`Timed out waiting for linked pico readiness\n${transcript}`);
+            }
+            await Bun.sleep(10);
+          }
 
-      assert.strictEqual(result.exitCode, 130, result.stderr);
-      assert.include(result.stderr, "pico: stopping on SIGINT");
-      assert.isFalse(await Bun.file(lockFile).exists());
-    } finally {
-      await terminate(spawned);
-      await rm(temporaryDirectory, { recursive: true, force: true });
-    }
-  });
+          assert.isTrue(await Bun.file(lockFile).exists(), transcript);
+          terminal.write("\x03");
+          const exitCode = await withTimeout(child.exited, 10_000, "linked pico exit");
+          assert.strictEqual(exitCode, 130, transcript);
+          assert.isFalse(await Bun.file(lockFile).exists(), transcript);
+        } finally {
+          if (child.exitCode === null) child.kill("SIGKILL");
+          await withTimeout(child.exited, 2_000, "linked pico cleanup");
+        }
+      } finally {
+        await rm(temporaryDirectory, { recursive: true, force: true });
+      }
+    },
+    45_000,
+  );
 });

@@ -2,6 +2,9 @@
   "name": "@pico/cli",
   "private": true,
   "type": "module",
+  "bin": {
+    "pico": "./src/main.ts"
+  },
   "dependencies": {
     "@effect/platform-bun": "catalog:",
     "@oh-my-pi/pi-utils": "catalog:",

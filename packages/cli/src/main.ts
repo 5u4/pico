@@ -1,3 +1,4 @@
+#!/usr/bin/env bun
 import * as BunServices from "@effect/platform-bun/BunServices";
 import { PicoRoot } from "@pico/contract/config";
 import * as Daemon from "@pico/daemon";
