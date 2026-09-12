@@ -1,6 +1,8 @@
 - use effect v4 as much as possible
 - use effect vitest
 - we should use omp sdk; no ui mode
+- initialize omp extensions after subscribing to session events and before exposing the session; SDK construction alone leaves runtime actions unbound and does not emit session_start
+- keep extension UI headless; runtime initialization does not add TUI rendering, slash-command dispatch, or extension-requested host shutdown
 - omp sdk function provides the chat driving functionality; pico should use those instead of self inventing
 - reference omp cli if unsure
 - omp session jsonl file is the source of truth
