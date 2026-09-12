@@ -92,7 +92,7 @@ export const run = Effect.fn("Daemon.run")(
         }
         return Exit.asVoidAll([exit, loggerExit]);
       }),
-    ).pipe(Effect.annotateLogs({ root }));
+    );
   },
   Effect.annotateLogs({ component: "daemon", operation: "run" }),
 );
@@ -105,7 +105,6 @@ const openComponents = Effect.fn("Daemon.openComponents")(function* (
   yield* Effect.logInfo("pico.daemon.ready").pipe(
     Effect.annotateLogs({
       phase: "ready",
-      root: paths.root,
       discord: Option.isSome(config.discord) ? "enabled" : "disabled",
       rpc: "disabled",
     }),

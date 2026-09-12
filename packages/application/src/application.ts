@@ -131,7 +131,10 @@ const runBranchNaming = Effect.fn("Application.runBranchNaming")(function* (
     phase = "generation";
     const generated = yield* Effect.tryPromise({
       try: request.generateTopic,
-      catch: () => new AgentError({ message: "Branch topic generation failed" }),
+      catch: (cause) =>
+        cause instanceof AgentError
+          ? cause
+          : new AgentError({ message: "Branch topic generation failed" }),
     });
     if (generated === null) return;
     const topic = parseBranchTopic(generated);
@@ -159,20 +162,39 @@ const runBranchNaming = Effect.fn("Application.runBranchNaming")(function* (
       }),
     );
   }).pipe(
-    Effect.catchCause((cause) =>
-      Cause.hasInterruptsOnly(cause)
-        ? Effect.interrupt
-        : Effect.logError("Background branch naming failed").pipe(
-            Effect.annotateLogs({
-              component: "application",
-              operation: "branch-naming",
-              chatId: request.chatId,
-              ...(workspaceId === undefined ? {} : { workspaceId }),
-              phase,
-              reason: Cause.hasDies(cause) ? "defect" : "operation",
-            }),
-          ),
-    ),
+    Effect.catchCause((cause) => {
+      if (Cause.hasInterruptsOnly(cause)) return Effect.interrupt;
+      const safeCause = Cause.fromReasons(
+        cause.reasons.map((reason) => {
+          if (reason._tag === "Interrupt") return reason;
+          const error = reason._tag === "Fail" ? reason.error : reason.defect;
+          if (
+            error instanceof GitError ||
+            error instanceof PersistenceError ||
+            error instanceof AgentError
+          )
+            return reason;
+          const safeError = new Error(
+            reason._tag === "Fail"
+              ? "Branch naming operation failed"
+              : "Unexpected branch naming defect",
+          );
+          return reason._tag === "Fail"
+            ? Cause.makeFailReason(safeError)
+            : Cause.makeDieReason(safeError);
+        }),
+      );
+      return Effect.logError("Background branch naming failed", safeCause).pipe(
+        Effect.annotateLogs({
+          component: "application",
+          operation: "branch-naming",
+          chatId: request.chatId,
+          ...(workspaceId === undefined ? {} : { workspaceId }),
+          phase,
+          reason: Cause.hasDies(cause) ? "defect" : "operation",
+        }),
+      );
+    }),
   );
 });
 

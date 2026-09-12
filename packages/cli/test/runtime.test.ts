@@ -296,10 +296,19 @@ describe("CLI foreground shutdown", () => {
           assert.include(transcript, "pico: stopping on SIGINT");
           assert.notInclude(transcript, "forcing exit");
           assert.strictEqual(consoleErrors({ stdout: transcript, stderr: "" }), 0);
+          const logs = await readLogs(root);
           assert.deepStrictEqual(
-            (await readLogs(root)).filter((entry) => entry.level === "ERROR"),
+            logs.filter((entry) => entry.level === "ERROR"),
             [],
           );
+          assert.strictEqual(
+            logs.find((entry) => entry.annotations.phase === "ready")?.annotations.operation,
+            "run",
+          );
+          for (const entry of logs) {
+            assert.notProperty(entry.annotations, "root");
+            assert.notInclude(JSON.stringify(entry.annotations), root);
+          }
         } finally {
           if (child.exitCode === null) child.kill("SIGKILL");
           await withTimeout(child.exited, 2_000, "linked pico cleanup");
@@ -355,12 +364,18 @@ describe("CLI foreground shutdown", () => {
     const spawned = spawnChild(mainPath, ["start", root]);
     try {
       const result = await finish(spawned, 15_000);
-      const failures = (await readLogs(root)).filter((entry) => entry.level === "ERROR");
+      const logs = await readLogs(root);
+      const failures = logs.filter((entry) => entry.level === "ERROR");
       assert.notStrictEqual(result.exitCode, 0);
       assert.strictEqual(consoleErrors(result), 1);
       assert.strictEqual(failures.length, 1);
+      assert.strictEqual(failures[0]?.annotations.operation, "run");
       assert.strictEqual(failures[0]?.annotations.phase, "startup");
       assert.include(failures[0]?.cause ?? "", "PersistenceError");
+      for (const entry of logs) {
+        assert.notProperty(entry.annotations, "root");
+        assert.notInclude(JSON.stringify(entry.annotations), root);
+      }
       assert.isFalse(await Bun.file(join(root, ".pico.lock")).exists());
     } finally {
       await terminate(spawned);

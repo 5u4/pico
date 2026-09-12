@@ -1099,6 +1099,80 @@ describe("Schedules", () => {
       assert.strictEqual(loaded.view.definition.name, "replacement");
     }).pipe(Effect.provide(platformLayer), Effect.scoped),
   );
+  it.effect("keeps a committed replacement successful when staging cleanup fails", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-replace-cleanup-" });
+      const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
+      const staging = path.join(schedulesDir, ".staging");
+      const logs = yield* captureLogs();
+      let retainedTransaction: string | undefined;
+      const failingFileSystem = FileSystem.FileSystem.of({
+        ...fileSystem,
+        remove: (file, options) => {
+          if (path.dirname(file) !== staging || !path.basename(file).startsWith("replace-")) {
+            return fileSystem.remove(file, options);
+          }
+          retainedTransaction = file;
+          return Effect.fail(permissionDenied("remove", "private cleanup cause"));
+        },
+      });
+      const schedules = yield* open(schedulesDir).pipe(
+        Effect.provideService(FileSystem.FileSystem, failingFileSystem),
+      );
+      const created = yield* schedules.create(caller, {
+        name: "private original",
+        enabled: false,
+        target: { kind: "current-chat" },
+        trigger: { kind: "once", at: 10_000 },
+        prompt: "private original prompt",
+      });
+      assert.strictEqual(created.kind, "ready");
+      if (created.kind !== "ready") return;
+      const updated = yield* schedules
+        .replace(caller, created.id, {
+          name: "private replacement",
+          target: { kind: "current-chat" },
+          trigger: { kind: "once", at: 20_000 },
+          prompt: "private replacement prompt",
+        })
+        .pipe(Effect.provide(logs.layer));
+      assert.strictEqual(updated.kind, "ready");
+      if (updated.kind !== "ready") return;
+      assert.notStrictEqual(updated.definition.revision, created.definition.revision);
+      assert.strictEqual(updated.definition.name, "private replacement");
+      assert.deepStrictEqual(yield* schedules.list(caller), [updated]);
+      assert.strictEqual(
+        yield* fileSystem.readFileString(
+          path.join(schedulesDir, "disabled", created.id, "prompt.md"),
+        ),
+        "private replacement prompt",
+      );
+      if (retainedTransaction === undefined) {
+        return yield* Effect.die("Replacement cleanup was not attempted");
+      }
+      assert.deepStrictEqual(
+        yield* decodeDefinition(
+          yield* fileSystem.readFileString(path.join(retainedTransaction, "previous", "meta.json")),
+        ),
+        created.definition,
+      );
+      assert.isTrue(yield* fileSystem.exists(path.join(retainedTransaction, "transaction.json")));
+      const errors = logs.entries.filter((entry) => entry.level === "Error");
+      assert.strictEqual(errors.length, 1);
+      assert.deepInclude(errors[0]?.annotations, {
+        component: "schedule",
+        operation: "replace",
+        phase: "cleanup",
+        scheduleId: created.id,
+        definitionRevision: updated.definition.revision,
+        category: "io",
+      });
+      assert.notInclude(JSON.stringify(logs.entries), "private");
+      assert.notInclude(JSON.stringify(logs.entries), root);
+    }).pipe(Effect.provide(platformLayer), Effect.scoped),
+  );
   it.effect("keeps the canonical event log during an interrupted append", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;

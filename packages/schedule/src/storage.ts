@@ -547,9 +547,16 @@ export const replaceDefinition = Effect.fn("Schedules.replaceDefinition")(functi
       );
     }),
   );
-  yield* storage.fileSystem
-    .remove(transaction, { recursive: true, force: true })
-    .pipe(mapIo("Schedule replaced, but staging cleanup failed"));
+  yield* ignoreCleanupFailure(
+    "Failed to remove schedule replacement staging",
+    storage.fileSystem.remove(transaction, { recursive: true, force: true }),
+    {
+      operation: "replace",
+      phase: "cleanup",
+      scheduleId: current.view.id,
+      definitionRevision: definition.revision,
+    },
+  );
 });
 
 export const moveDefinition = Effect.fn("Schedules.moveDefinition")(function* (

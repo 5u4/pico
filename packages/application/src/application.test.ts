@@ -31,6 +31,7 @@ import type {
   RenameChatBranchResult,
 } from "@pico/contract/worktree";
 import * as Persistence from "@pico/persistence/layer";
+import * as Cause from "effect/Cause";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -1682,7 +1683,7 @@ describe("Application", () => {
       const logger = Logger.make((options) => {
         if (options.logLevel !== "Error") return;
         logs.push(Logger.formatStructured.log(options));
-        if (logs.length === 3) failuresLogged.resolve();
+        if (logs.length === 4) failuresLogged.resolve();
       });
       let repositoryFails = true;
       const repositories = Layer.merge(
@@ -1695,7 +1696,11 @@ describe("Application", () => {
               repositoryFails
                 ? Effect.sync(() => repositoryFailureObserved.resolve()).pipe(
                     Effect.andThen(
-                      Effect.fail(new PersistenceError({ message: "repository failed" })),
+                      Effect.fail(
+                        new PersistenceError({
+                          message: "chat.findById: ConnectionError, SQLite code 14",
+                        }),
+                      ),
                     ),
                   )
                 : Effect.succeed(Option.some(chat)),
@@ -1726,7 +1731,19 @@ describe("Application", () => {
             renameAttempts += 1;
             if (gitFails) {
               yield* Deferred.succeed(gitFailureObserved, undefined);
-              return yield* new GitError({ message: "rename failed" });
+              return yield* Effect.failCause(
+                Cause.combine(
+                  Cause.fail(
+                    new GitError({
+                      message: "Failed to rename chat branch: Git exited with code 128",
+                    }),
+                  ),
+                  Cause.combine(
+                    Cause.die(new Error("private defect token=secret")),
+                    Cause.interrupt(),
+                  ),
+                ),
+              );
             }
             yield* Deferred.succeed(renamed, undefined);
             return { kind: "renamed" } satisfies RenameChatBranchResult;
@@ -1745,10 +1762,17 @@ describe("Application", () => {
           chatId: namingChatId,
           generateTopic: () => {
             modelFailureObserved.resolve();
-            return Promise.reject(new Error("model failed"));
+            return Promise.reject(new Error("private model token=secret"));
           },
         });
         yield* Effect.promise(() => modelFailureObserved.promise);
+
+        handler({
+          chatId: namingChatId,
+          generateTopic: async () => {
+            throw new AgentError({ message: "Generate branch topic: HTTP 429" });
+          },
+        });
 
         handler({ chatId: namingChatId, generateTopic: async () => "git-failure" });
         yield* Deferred.await(gitFailureObserved);
@@ -1771,9 +1795,10 @@ describe("Application", () => {
         yield* Effect.promise(() => generationStarted.promise);
       }).pipe(Effect.provide(repositories), Effect.scoped, Effect.provide(Logger.layer([logger])));
       assert.strictEqual(renameAttempts, 2);
-      assert.strictEqual(logs.length, 3);
+      assert.strictEqual(logs.length, 4);
       assert.deepStrictEqual(logs.map((entry) => entry.annotations.phase).sort(), [
         "eligibility",
+        "generation",
         "generation",
         "rename",
       ]);
@@ -1787,8 +1812,17 @@ describe("Application", () => {
           assert.strictEqual(entry.annotations.workspaceId, workspaceId);
         }
       }
-      assert.notInclude(JSON.stringify(logs), "model failed");
-      assert.notInclude(JSON.stringify(logs), "git-failure");
+      const output = JSON.stringify(logs);
+      assert.include(output, "chat.findById: ConnectionError, SQLite code 14");
+      assert.include(output, "Failed to rename chat branch: Git exited with code 128");
+      assert.include(output, "Generate branch topic: HTTP 429");
+      assert.notInclude(output, "private model token=secret");
+      assert.notInclude(output, "private defect token=secret");
+      assert.strictEqual(
+        logs.find((entry) => entry.annotations.phase === "rename")?.annotations.reason,
+        "defect",
+      );
+      assert.notInclude(output, "git-failure");
     }),
   );
 });
