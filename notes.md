@@ -61,7 +61,10 @@
 - a workspace can be a regular workspace (worktree_* = null) or a worktree workspace (worktree_* != null)
   - regular workspace new chats with workspace.default_cwd
   - worktree workspace new chats with new worktree from worktree_branch, creating `{worktree_prefix}/{chat.id}` to `{picoHome}/worktrees/{chat.id}`
-  - new worktree branches do not inherit upstream tracking. This keeps remote bases such as `origin/main` from blocking first-exchange naming. Explicit upstream configuration or published branch state still prevents automatic renaming.
+  - new worktree branches do not inherit upstream tracking; the source branch is a starting point, not the chat branch's synchronization target.
+  - automatic branch naming waits for the first completed exchange and uses its user prompt and terminal assistant reply. It only renames the generated local placeholder; user-chosen names and remote branches remain untouched.
+  - before renaming, pico checks the exact source and target branch names on every configured fetch and push endpoint. Upstream configuration and cached remote refs do not establish publication. A remote match, query failure, or 10-second lookup timeout preserves the original name.
+  - this check covers currently advertised names on configured endpoints, not arbitrary aliases or historical pushes. It cannot prevent a separate process from publishing between the check and the local rename. Naming remains a one-shot attempt, with no automatic retry or old-branch migration.
 - MVP make happy path work; errors no need to be so specific
   - I mean we can define very generic boundary errors that contains just a `message: string` which can be used for the errors; until we need to pattern match and handle some specific errors, we split it out from the generic error
 - errors should be grouped by boundary and mostly defined in contract unless the error would not go out the boundary
