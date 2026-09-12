@@ -5,11 +5,6 @@
 ## Install
 
 Install [Git](https://git-scm.com/downloads) and [Bun](https://bun.sh/docs/installation) 1.3.14 or newer.
-Node.js is not required to install or start pico. Repository scripts and Git hooks run with Bun.
-
-Agent tools can require the toolchain of the workspace they operate on.
-OMP's TypeScript workspace diagnostics currently invoke `npx tsc --noEmit`, which still needs
-Node.js and npm.
 
 In a macOS or Linux terminal:
 
