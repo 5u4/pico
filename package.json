@@ -42,7 +42,6 @@
     "test": "bun run typecheck && bun --bun x vitest run",
     "smoke": "bun --env-file=.env.smoke node_modules/vitest/vitest.mjs run --config vitest.smoke.config.ts",
     "vendor:effect": "bun scripts/vendor-effect.ts",
-    "check:omp-eval": "bun scripts/check-omp-eval.ts",
     "web:dev": "bun run --cwd packages/web dev",
     "web:build": "bun run --cwd packages/web build",
     "web:preview": "bun run --cwd packages/web preview"

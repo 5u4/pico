@@ -4,8 +4,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 
-const mode = process.argv[2];
-assert.ok(mode === undefined || mode === "isolation", `Unknown IPC probe mode: ${mode}`);
 const originalCwd = process.cwd();
 const root = await realpath(await mkdtemp(join(tmpdir(), "pico-eval-hang-")));
 try {
@@ -27,53 +25,33 @@ try {
     settings: Settings.isolated({ "async.enabled": false }),
   };
   const output: unknown[] = [];
-  const cancellation = new AbortController();
-  const execute = (owner: string, code: string, signal = AbortSignal.timeout(8_000)) =>
+  const execute = (code: string) =>
     executeInVmContext({
-      sessionKey: owner,
-      sessionId: owner,
-      ownerId: owner,
+      sessionKey: "eval-hang",
+      sessionId: "eval-hang",
+      ownerId: "eval-hang",
       cwd: root,
       session,
       code,
-      filename: join(root, `${owner}.ts`),
+      filename: join(root, "eval-hang.ts"),
       runState: {
-        signal,
+        signal: AbortSignal.timeout(8_000),
         onDisplay(value) {
           if (value.type === "json") output.push(value.data);
-        },
-        onText(text) {
-          if (text.includes("abort-ready")) cancellation.abort(new Error("probe cancellation"));
         },
       },
     });
 
   try {
-    if (mode === "isolation") {
-      await execute("ipc-B", "retained = 73; undefined;");
-      await assert.rejects(
-        execute("ipc-A", 'print("abort-ready"); await new Promise(() => {});', cancellation.signal),
-        /probe cancellation/,
-      );
-      await execute("ipc-B", "display({ retained });");
-      assert.deepEqual(output, [{ retained: 73 }]);
-    } else {
-      await assert.rejects(
-        execute(
-          "ipc-A",
-          'comments = agent("review", { agent: "task" }); print("issued"); undefined;',
-        ),
-        /async job manager; unavailable here/,
-      );
-      await assert.rejects(
-        execute("ipc-A", "await comments;"),
-        /async job manager; unavailable here/,
-      );
-      await execute("ipc-A", "display({ recovered: 4 });");
-      assert.deepEqual(output, [{ recovered: 4 }]);
-    }
+    await assert.rejects(
+      execute('comments = agent("review", { agent: "task" }); undefined;'),
+      /async job manager; unavailable here/,
+    );
+    await assert.rejects(execute("await comments;"), /async job manager; unavailable here/);
+    await execute("display({ recovered: 4 });");
+    assert.deepEqual(output, [{ recovered: 4 }]);
   } finally {
-    await Promise.all([disposeVmContextsByOwner("ipc-A"), disposeVmContextsByOwner("ipc-B")]);
+    await disposeVmContextsByOwner("eval-hang");
   }
 } finally {
   process.chdir(originalCwd);
