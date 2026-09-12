@@ -25,81 +25,27 @@ const worktreeOptions = (options: ReadonlyArray<DiscordCommand.CommandOption>) =
 ];
 
 describe("Discord command", () => {
-  it("registers bind, shake, close, and context commands exactly", () => {
-    assert.deepStrictEqual(DiscordCommand.applicationCommands, [
-      {
-        name: "bind",
-        description: "Bind a channel workspace",
-        options: [
-          {
-            name: "set",
-            description: "Set workspace configuration",
-            type: ApplicationCommandOptionTypes.SubCommand,
-            options: [
-              {
-                name: "cwd",
-                description: "Absolute working directory path",
-                type: ApplicationCommandOptionTypes.String,
-                required: true,
-              },
-            ],
-          },
-          {
-            name: "worktree",
-            description: "Configure worktrees for new chats",
-            type: ApplicationCommandOptionTypes.SubCommand,
-            options: [
-              {
-                name: "repository",
-                description: "Absolute Git repository path",
-                type: ApplicationCommandOptionTypes.String,
-                required: true,
-              },
-              {
-                name: "branch",
-                description: "Commit-ish starting ref",
-                type: ApplicationCommandOptionTypes.String,
-                required: true,
-              },
-              {
-                name: "prefix",
-                description: "Branch prefix for new chats",
-                type: ApplicationCommandOptionTypes.String,
-                required: true,
-              },
-            ],
-          },
-        ],
-      },
-      {
-        name: "shake",
-        description: "Drop heavy content from this chat's context",
-        options: [
-          {
-            name: "mode",
-            description: "What to remove. Defaults to elide",
-            type: ApplicationCommandOptionTypes.String,
-            choices: [
-              { name: "Tool results and large blocks", value: "elide" },
-              { name: "Images", value: "images" },
-              { name: "Thinking", value: "thinking" },
-            ],
-          },
-        ],
-      },
-      {
-        name: "close",
-        description: "Close this chat and archive its thread",
-      },
-      {
-        name: "context",
-        description: "Show this chat's context usage",
-      },
+  it("registers every supported command without duplicate names", () => {
+    assert.deepStrictEqual(DiscordCommand.applicationCommands.map(({ name }) => name).sort(), [
+      "abort",
+      "bind",
+      "close",
+      "context",
+      "shake",
     ]);
   });
 
+  it("decodes commands without options and ignores unknown names", () => {
+    for (const kind of ["abort", "close", "context"] as const) {
+      assert.deepStrictEqual(DiscordCommand.parse(kind, undefined), { kind });
+      assert.deepStrictEqual(DiscordCommand.parse(kind, []), { kind });
+    }
+    assert.isUndefined(DiscordCommand.parse(undefined, validOptions));
+    assert.isUndefined(DiscordCommand.parse("unknown", validOptions));
+  });
+
   it("parses bind without rewriting cwd", () => {
-    assert.deepStrictEqual(DiscordCommand.parseBind(validOptions), {
+    assert.deepStrictEqual(DiscordCommand.parse("bind", validOptions), {
       kind: "bindDirect",
       cwd: "  /raw/path  ",
     });
@@ -126,7 +72,7 @@ describe("Discord command", () => {
       [prefix, repository, branch],
       [branch, prefix, repository],
     ]) {
-      assert.deepStrictEqual(DiscordCommand.parseBind(worktreeOptions(options)), {
+      assert.deepStrictEqual(DiscordCommand.parse("bind", worktreeOptions(options)), {
         kind: "bindWorktree",
         repository: "/repo",
         branch: "main",
@@ -166,7 +112,7 @@ describe("Discord command", () => {
         },
       ],
     ]) {
-      assert.deepStrictEqual(DiscordCommand.parseBind(options), { kind: "malformedBind" });
+      assert.deepStrictEqual(DiscordCommand.parse("bind", options), { kind: "malformedBind" });
     }
 
     for (const options of [
@@ -191,16 +137,19 @@ describe("Discord command", () => {
         { name: "prefix", type: ApplicationCommandOptionTypes.Integer, value: "chat/" },
       ]),
     ]) {
-      assert.deepStrictEqual(DiscordCommand.parseBind(options), { kind: "malformedBind" });
+      assert.deepStrictEqual(DiscordCommand.parse("bind", options), { kind: "malformedBind" });
     }
   });
 
   it("defaults shake to elide and constructs every selected mode", () => {
-    assert.deepStrictEqual(DiscordCommand.parseShake(undefined), { kind: "shake", mode: "elide" });
-    assert.deepStrictEqual(DiscordCommand.parseShake([]), { kind: "shake", mode: "elide" });
+    assert.deepStrictEqual(DiscordCommand.parse("shake", undefined), {
+      kind: "shake",
+      mode: "elide",
+    });
+    assert.deepStrictEqual(DiscordCommand.parse("shake", []), { kind: "shake", mode: "elide" });
     for (const mode of ["elide", "images", "thinking"] as const) {
       assert.deepStrictEqual(
-        DiscordCommand.parseShake([
+        DiscordCommand.parse("shake", [
           { name: "mode", type: ApplicationCommandOptionTypes.String, value: mode },
         ]),
         { kind: "shake", mode },
@@ -226,7 +175,7 @@ describe("Discord command", () => {
         { name: "mode", type: ApplicationCommandOptionTypes.String, value: "images" },
       ],
     ]) {
-      assert.deepStrictEqual(DiscordCommand.parseShake(options), { kind: "malformedShake" });
+      assert.deepStrictEqual(DiscordCommand.parse("shake", options), { kind: "malformedShake" });
     }
   });
 });

@@ -63,6 +63,10 @@ export const applicationCommands = [
     ],
   },
   {
+    name: "abort",
+    description: "Stop this chat's current run",
+  },
+  {
     name: "close",
     description: "Close this chat and archive its thread",
   },
@@ -99,10 +103,31 @@ export type ShakeCommand =
 export type Command =
   | BindCommand
   | ShakeCommand
+  | { readonly kind: "abort" }
   | { readonly kind: "context" }
   | { readonly kind: "close" };
 
-export const parseBind = (options: ReadonlyArray<CommandOption> | undefined): BindCommand => {
+export const parse = (
+  name: string | undefined,
+  options: ReadonlyArray<CommandOption> | undefined,
+): Command | undefined => {
+  switch (name) {
+    case "bind":
+      return parseBind(options);
+    case "shake":
+      return parseShake(options);
+    case "abort":
+      return { kind: "abort" };
+    case "context":
+      return { kind: "context" };
+    case "close":
+      return { kind: "close" };
+    default:
+      return undefined;
+  }
+};
+
+const parseBind = (options: ReadonlyArray<CommandOption> | undefined): BindCommand => {
   if (options?.length !== 1) return { kind: "malformedBind" };
   const subcommand = options[0];
   if (subcommand?.type !== ApplicationCommandOptionTypes.SubCommand) {
@@ -150,7 +175,7 @@ export const parseBind = (options: ReadonlyArray<CommandOption> | undefined): Bi
   };
 };
 
-export const parseShake = (options: ReadonlyArray<CommandOption> | undefined): ShakeCommand => {
+const parseShake = (options: ReadonlyArray<CommandOption> | undefined): ShakeCommand => {
   if (options === undefined || options.length === 0) {
     return { kind: "shake", mode: "elide" };
   }
