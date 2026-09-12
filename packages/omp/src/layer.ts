@@ -1,4 +1,5 @@
 import * as OmpModelRegistry from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import * as OmpRuntimeInit from "@oh-my-pi/pi-coding-agent/modes/runtime-init";
 import * as OmpAgentRegistry from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import * as OmpSdk from "@oh-my-pi/pi-coding-agent/sdk";
 import type * as OmpAgentSession from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -159,7 +160,7 @@ const closeManagerAfterFailure = (manager: OmpSessionManager.SessionManager, err
 
 const disposeSessionAfterFailure = (session: OmpAgentSession.AgentSession, error: AgentError) =>
   ignoreCleanupFailure(
-    "Failed to dispose OMP session after subscription failure",
+    "Failed to dispose OMP session after startup failure",
     promiseBoundary("Failed to dispose OMP session", () => session.dispose()),
   ).pipe(Effect.andThen(Effect.fail(error)));
 
@@ -308,6 +309,48 @@ const makeFactory = (
         workspaceId: chat.workspaceId,
         phase: "subscription-rollback",
       }),
+    );
+
+    const runLog = Effect.runSyncWith(yield* Effect.context());
+    yield* promiseBoundary("Failed to initialize OMP extensions", () =>
+      OmpRuntimeInit.initializeExtensions(created.session, {
+        mode: "print",
+        reportSendError: (action, error) => {
+          runLog(
+            Effect.logError("OMP extension send failed").pipe(
+              Effect.annotateLogs({
+                component: "omp",
+                operation: "extension-send",
+                chatId: chat.id,
+                workspaceId: chat.workspaceId,
+                action,
+                error: error.message,
+                stack: error.stack,
+              }),
+            ),
+          );
+        },
+        reportRuntimeError: (error) => {
+          runLog(
+            Effect.logError("OMP extension runtime failed").pipe(
+              Effect.annotateLogs({
+                component: "omp",
+                operation: "extension-runtime",
+                chatId: chat.id,
+                workspaceId: chat.workspaceId,
+                ...error,
+              }),
+            ),
+          );
+        },
+      }),
+    ).pipe(
+      Effect.catch((error) =>
+        ignoreCleanupFailure(
+          "Failed to unsubscribe after OMP startup failure",
+          syncBoundary("Failed to unsubscribe from OMP session events", unsubscribe),
+        ).pipe(Effect.andThen(disposeSessionAfterFailure(created.session, error))),
+      ),
     );
 
     const opened: OpenedSession = {
