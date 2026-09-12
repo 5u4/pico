@@ -86,6 +86,7 @@ describe("Application", () => {
       const abortedChatIds: Array<Chat.ChatId> = [];
       const shakeInputs: Array<{ readonly chatId: Chat.ChatId; readonly mode: ShakeMode }> = [];
       const contextChatIds: Array<Chat.ChatId> = [];
+      let sendFailure: AgentError | null = null;
       const persistenceLayer = Persistence.layer(storeFile);
       const sessionsLayer = Layer.effect(
         AgentSessionStore,
@@ -119,11 +120,15 @@ describe("Application", () => {
               ),
             ),
           send: (chatId, content) =>
-            content.text === "fail"
-              ? Effect.fail(new AgentError({ message: "runtime failed" }))
-              : Effect.sync(() => {
-                  sentMessages.push({ chatId, content });
-                }),
+            Effect.sync(() => {
+              sentMessages.push({ chatId, content });
+            }).pipe(
+              Effect.andThen(
+                Effect.suspend(() =>
+                  sendFailure === null ? Effect.void : Effect.fail(sendFailure),
+                ),
+              ),
+            ),
           sendCaptured: (capturedChatId, runId, _prompt, onEvent) =>
             onEvent({ type: "run-started" }).pipe(
               Effect.as({
@@ -318,10 +323,13 @@ describe("Application", () => {
           { chatId: discordChat.id, content: attachedPrompt },
           { chatId: discordChat.id, content: textPrompt("second") },
         ]);
-        assertApplicationError(
-          yield* application.sendMessage(discordChat.id, textPrompt("fail")).pipe(Effect.flip),
-          "Failed to send message",
-        );
+        sendFailure = new AgentError({ message: "Discord identity is not ready" });
+        const sendError = yield* application
+          .sendMessage(discordChat.id, textPrompt("retry"))
+          .pipe(Effect.flip);
+        assert.instanceOf(sendError, ApplicationError);
+        assert.include(sendError.message, sendFailure.message);
+        sendFailure = null;
         yield* application.abort(discordChat.id);
         assert.deepStrictEqual(abortedChatIds, [discordChat.id]);
         assertApplicationError(

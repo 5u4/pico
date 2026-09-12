@@ -8,8 +8,16 @@
 - pico forces OMP `secrets.enabled` for outbound conversation text, even when project settings disable it. OMP owns detection and reversible placeholders.
 - secret detection is format- and configuration-based, not a guarantee for arbitrary passwords, encoded values, or images. Local tool details, journals, and logs may retain plaintext.
 - share omp auth/model registry
-- append pico identity and platform context through the omp sdk; do not replace its system prompt, so omp's coding instructions remain intact
-- register bundled `pico-schedule` through per-session OMP `skills.customDirectories`; append after configured directories without copying into user settings
+- append pico instructions and platform context through the omp sdk; do not replace its system prompt, so omp's coding instructions remain intact
+  - instructions files load in order: `<picoRoot>/agents/instructions.md`, `agents/discord/bots/{botId}/instructions.md`, then `agents/discord/channels/{channelId}/instructions.md`
+  - `channelId` is the owning workspace's parent Discord channel, never the chat's thread ID; scheduled chats and native clients use that same ownership
+  - native workspaces load only the global file; channel instructions are shared across bots
+  - the single configured bot's identity comes from authenticated Discord READY; configured but not ready fails session opening, while disabled Discord skips only the bot file
+  - missing and blank instructions files are ignored; other read failures include the path and cause
+  - all layers append; empty files do not clear inherited content; more-specific instructions take precedence as model guidance, not authorization
+  - files are read when a live OMP session opens, not on every message; edits affect the next opening after close, idle eviction, or daemon restart
+  - config owns instructions file paths and reads; application session context owns scope selection and prompt composition; OMP receives the completed text
+- register bundled `pico-schedule` and `pico-instructions` through per-session OMP `skills.customDirectories`; append after configured directories without copying into user settings
   - keep native skill filters and opt-outs; user custom directories win name collisions, but OMP custom-directory skills override ordinary project/provider skills
   - resolve bundled skill files relative to the package, not the chat cwd; deployments must retain these disk-backed resources
 - workspace is like folder

@@ -1,7 +1,10 @@
 import * as ApplicationLayer from "@pico/application/layer";
+import * as SessionContext from "@pico/application/session-context";
 import * as Config from "@pico/config/config";
+import * as Instructions from "@pico/config/instructions";
 import * as ConfigRoot from "@pico/config/root";
 import type { PicoPaths, PicoRoot } from "@pico/contract/config";
+import { AgentError } from "@pico/contract/errors";
 import { EventRouter } from "@pico/contract/event-router";
 import { ScheduleRunHostService } from "@pico/contract/schedule";
 import * as DiscordLayer from "@pico/discord/layer";
@@ -12,6 +15,7 @@ import * as AgentSessionStoreLayer from "@pico/omp/agent-session-store";
 import * as AgentRuntimeLayer from "@pico/omp/layer";
 import * as PersistenceLayer from "@pico/persistence/layer";
 import * as ScheduleLayer from "@pico/schedule/layer";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -32,26 +36,46 @@ const daemonLayer = (paths: PicoPaths, config: Config.PicoConfig) =>
     Effect.gen(function* () {
       const gitWorktree = yield* GitWorktree.make(paths.worktreesDir);
       const schedules = yield* ScheduleLayer.open(paths.schedulesDir);
+      const instructions = yield* Instructions.make(paths.root);
+      const discord = Option.isSome(config.discord)
+        ? { config: config.discord.value, authenticated: yield* Deferred.make<string>() }
+        : null;
+      const discordBotId =
+        discord === null
+          ? null
+          : Effect.gen(function* () {
+              const authenticated = yield* Deferred.poll(discord.authenticated);
+              if (Option.isNone(authenticated)) {
+                return yield* new AgentError({
+                  message:
+                    "Discord identity is not ready. The configured bot has not authenticated.",
+                });
+              }
+              return yield* authenticated.value;
+            });
       const persistence = PersistenceLayer.layer(paths.storeFile);
       const branchNaming = ApplicationLayer.branchNamingLayer(gitWorktree).pipe(
         Layer.provide(persistence),
       );
-      const chatPlatformResolver = ApplicationLayer.chatPlatformResolverLayer.pipe(
-        Layer.provide(persistence),
-      );
+      const chatSessionContext = SessionContext.layer({
+        instructions,
+        discordBotId,
+      }).pipe(Layer.provide(persistence));
       const application = ApplicationLayer.layer(gitWorktree).pipe(
         Layer.provide(Layer.merge(persistence, AgentSessionStoreLayer.layer(paths.sessionsDir))),
       );
       const agentRuntime = AgentRuntimeLayer.layer(paths.sessionsDir, schedules).pipe(
-        Layer.provide(Layer.merge(chatPlatformResolver, branchNaming)),
+        Layer.provide(Layer.merge(chatSessionContext, branchNaming)),
       );
       const core = Layer.merge(application, EventRouterLayer.layer).pipe(
         Layer.provide(agentRuntime),
       );
-      const surfaces = Option.match(config.discord, {
-        onNone: () => core,
-        onSome: (discord) => DiscordLayer.layer(discord).pipe(Layer.provideMerge(core)),
-      });
+      const surfaces =
+        discord === null
+          ? core
+          : DiscordLayer.layer(discord.config, (id) => {
+              Deferred.doneUnsafe(discord.authenticated, Effect.succeed(id));
+            }).pipe(Layer.provideMerge(core));
       const scheduler = Layer.effectDiscard(
         Effect.gen(function* () {
           const host = yield* ScheduleRunHostService;

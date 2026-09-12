@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { loadSkills } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { AbsolutePath } from "@pico/contract/path";
 import * as Effect from "effect/Effect";
-import { prepareSessionOptions } from "../src/session-settings.ts";
+import { prepareSessionSettings } from "../src/session-settings.ts";
 
 const root = process.cwd();
 assert.equal(homedir(), join(root, "home"));
@@ -18,8 +18,11 @@ await writeFile(globalConfigPath, globalConfig);
 const bundledSchedulePath = Bun.fileURLToPath(
   new URL("../src/skills/pico-schedule/SKILL.md", import.meta.url),
 );
+const bundledInstructionsPath = Bun.fileURLToPath(
+  new URL("../src/skills/pico-instructions/SKILL.md", import.meta.url),
+);
 
-for (const customNames of [["user-skill"], ["user-skill", "pico-schedule"]]) {
+for (const customNames of [["user-skill"], ["user-skill", "pico-schedule", "pico-instructions"]]) {
   const cwd = AbsolutePath.make(join(root, `project-${customNames.length}`));
   const customDir = join(cwd, "custom-skills");
   await mkdir(join(cwd, ".omp"), { recursive: true });
@@ -37,13 +40,17 @@ for (const customNames of [["user-skill"], ["user-skill", "pico-schedule"]]) {
   const schedulePath = customNames.includes("pico-schedule")
     ? join(customDir, "pico-schedule", "SKILL.md")
     : bundledSchedulePath;
+  const instructionsPath = customNames.includes("pico-instructions")
+    ? join(customDir, "pico-instructions", "SKILL.md")
+    : bundledInstructionsPath;
   const expected = [
+    { name: "pico-instructions", filePath: await realpath(instructionsPath) },
     { name: "pico-schedule", filePath: await realpath(schedulePath) },
     { name: "user-skill", filePath: await realpath(join(customDir, "user-skill", "SKILL.md")) },
   ];
 
   for (let attempt = 0; attempt < 2; attempt += 1) {
-    const { settings } = await Effect.runPromise(prepareSessionOptions(cwd, null));
+    const settings = await Effect.runPromise(prepareSessionSettings(cwd, null));
     const { skills } = await loadSkills({ cwd, ...settings.getGroup("skills") });
     const discovered = await Promise.all(
       skills.map(async (skill) => ({ name: skill.name, filePath: await realpath(skill.filePath) })),

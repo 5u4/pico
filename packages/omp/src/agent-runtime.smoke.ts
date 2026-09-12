@@ -7,8 +7,8 @@ import * as AgentMessage from "@pico/contract/agent-message";
 import { AgentRuntime } from "@pico/contract/agent-runtime";
 import { BranchNaming } from "@pico/contract/branch-naming";
 import * as Chat from "@pico/contract/chat-model";
-import { ChatPlatformResolver } from "@pico/contract/chat-platform-resolver";
 import { ChatRepository } from "@pico/contract/chat-repository";
+import { ChatSessionContext } from "@pico/contract/chat-session-context";
 import { AbsolutePath } from "@pico/contract/path";
 import { Schedules } from "@pico/contract/schedule";
 import * as Workspace from "@pico/contract/workspace-model";
@@ -52,20 +52,21 @@ const smoke = Effect.fn("AgentRuntime.smoke")(function* () {
     start: () => Effect.die("unexpected scheduler start"),
   });
   const persistenceLayer = Persistence.layer(storeFile);
-  const chatPlatformResolver = Layer.succeed(
-    ChatPlatformResolver,
-    ChatPlatformResolver.of({
+  const chatSessionContext = Layer.succeed(
+    ChatSessionContext,
+    ChatSessionContext.of({
       resolve: () =>
         Effect.succeed({
           chat: resolvedChat,
           platform: null,
+          appendSystemPrompt: "You are pico, a personal agent assistant.",
         }),
     }),
   );
   const runtimeLayer = AgentRuntimeLayer.layer(sessionsDir, schedules).pipe(
     Layer.provide(
       Layer.merge(
-        chatPlatformResolver,
+        chatSessionContext,
         Layer.succeed(
           BranchNaming,
           BranchNaming.of({

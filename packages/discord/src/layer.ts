@@ -97,7 +97,10 @@ export const pumpOutput = Effect.fn("Discord.pumpOutput")(function* (
   );
 });
 
-const start = Effect.fn("Discord.start")(function* (config: DiscordConfig) {
+const start = Effect.fn("Discord.start")(function* (
+  config: DiscordConfig,
+  onAuthenticated: (botId: string) => void,
+) {
   const eventRouter = yield* EventRouter;
   const httpClient = yield* HttpClient.HttpClient;
   const allowedMentions = { parse: [], repliedUser: false };
@@ -149,7 +152,8 @@ const start = Effect.fn("Discord.start")(function* (config: DiscordConfig) {
     catch: (cause) => DiscordInput.discordError("Failed to create Discord bot", cause),
   });
   const joinedGuildIds = new Set<string>();
-  bot.events.ready = ({ guilds }) => {
+  bot.events.ready = ({ guilds, user }) => {
+    onAuthenticated(user.id.toString());
     for (const guildId of guilds) joinedGuildIds.add(guildId.toString());
   };
   type InputMessage = Parameters<NonNullable<typeof bot.events.messageCreate>>[0];
@@ -194,8 +198,9 @@ const start = Effect.fn("Discord.start")(function* (config: DiscordConfig) {
   yield* openBot(bot, config, joinedGuildIds);
 });
 
-export const layer = (config: DiscordConfig) =>
-  Layer.effectDiscard(start(config)).pipe(
+// Daemon starts Discord and receives the authenticated bot identity on READY.
+export const layer = (config: DiscordConfig, onAuthenticated: (botId: string) => void) =>
+  Layer.effectDiscard(start(config, onAuthenticated)).pipe(
     Layer.provide(
       FetchHttpClient.layer.pipe(
         Layer.provide(Layer.succeed(FetchHttpClient.RequestInit, { redirect: "error" })),

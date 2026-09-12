@@ -4,15 +4,16 @@ import type { Chat, ChatId } from "./chat-model.ts";
 import type { AgentError } from "./errors.ts";
 import type { WorkspacePlatform } from "./workspace-model.ts";
 
-export interface ResolvedChatPlatform {
+export interface ResolvedChatSessionContext {
   readonly chat: Chat;
   readonly platform: WorkspacePlatform | null;
+  readonly appendSystemPrompt: string;
 }
 
-export class ChatPlatformResolver extends Context.Service<
-  ChatPlatformResolver,
+export class ChatSessionContext extends Context.Service<
+  ChatSessionContext,
   {
     // OMP calls this once when opening a live chat session.
-    readonly resolve: (chatId: ChatId) => Effect.Effect<ResolvedChatPlatform, AgentError>;
+    readonly resolve: (chatId: ChatId) => Effect.Effect<ResolvedChatSessionContext, AgentError>;
   }
->()("@pico/contract/chat-platform/ChatPlatformResolver") {}
+>()("@pico/contract/chat-session-context/ChatSessionContext") {}
