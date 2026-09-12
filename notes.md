@@ -9,6 +9,9 @@
 - secret detection is format- and configuration-based, not a guarantee for arbitrary passwords, encoded values, or images. Local tool details, journals, and logs may retain plaintext.
 - share omp auth/model registry
 - append pico identity and platform context through the omp sdk; do not replace its system prompt, so omp's coding instructions remain intact
+- register bundled `pico-schedule` through per-session OMP `skills.customDirectories`; append after configured directories without copying into user settings
+  - keep native skill filters and opt-outs; user custom directories win name collisions, but OMP custom-directory skills override ordinary project/provider skills
+  - resolve bundled skill files relative to the package, not the chat cwd; deployments must retain these disk-backed resources
 - workspace is like folder
 - chat is like file; one chat = one omp session
 - one workspace can have multiple chats
