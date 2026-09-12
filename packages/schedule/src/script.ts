@@ -39,6 +39,31 @@ const scriptError = (message: string) => new ScriptRunError({ stage: "script", m
 
 const protocolError = (message: string) => new ScriptRunError({ stage: "protocol", message });
 
+const nativeScriptError = (message: string, cause: unknown) => {
+  if (typeof cause === "object" && cause !== null && "code" in cause) {
+    switch (cause.code) {
+      case "ENOENT":
+      case "EACCES":
+      case "EPERM":
+      case "EPIPE":
+      case "EIO":
+      case "EBADF":
+      case "EAGAIN":
+      case "ENOMEM":
+      case "EMFILE":
+      case "ENFILE":
+      case "E2BIG":
+      case "ENOEXEC":
+      case "ENOTDIR":
+      case "EISDIR":
+      case "EINVAL":
+      case "ETXTBSY":
+        return scriptError(`${message} (${cause.code})`);
+    }
+  }
+  return scriptError(message);
+};
+
 const recordFailureArtifact = Effect.fn("Schedules.recordScriptFailureArtifact")(function* (
   storage: Storage,
   run: Schedule.ScheduleRunLifecycle,
@@ -205,7 +230,7 @@ export const runScript = Effect.fn("Schedules.runScript")(
             stderrCapture: captureStream(child.stderr),
           };
         },
-        catch: () => scriptError("Failed to spawn schedule script"),
+        catch: (cause) => nativeScriptError("Failed to spawn schedule script", cause),
       }),
       ({ child, stdoutCapture, stderrCapture }) =>
         Effect.tryPromise({
@@ -258,7 +283,7 @@ export const runScript = Effect.fn("Schedules.runScript")(
               void cancelCaptures();
             }
           },
-          catch: () => scriptError("Failed to capture schedule script execution"),
+          catch: (cause) => nativeScriptError("Failed to capture schedule script execution", cause),
         }),
       ({ child, stdoutCapture, stderrCapture }) =>
         Effect.promise(async () => {

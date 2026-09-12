@@ -346,12 +346,22 @@ process.stdout.write("{");
       );
       const spawnError = yield* runScript(
         storage,
-        path.join(root, "missing-executable"),
+        path.join(root, "private-missing-executable"),
         spawnRun,
         target,
       ).pipe(Effect.flip);
       assert.instanceOf(spawnError, ScriptRunError);
-      assert.strictEqual((yield* readFailedDecision(spawnRun.id)).kind, "failed");
+      if (!(spawnError instanceof ScriptRunError)) return;
+      const spawnDecision = yield* readFailedDecision(spawnRun.id);
+      assert.strictEqual(spawnDecision.kind, "failed");
+      const spawnResult = yield* fileSystem.readFileString(
+        path.join(runDirectory(storage, scheduleId, spawnRun.id), "script", "result.json"),
+      );
+      for (const diagnostic of [spawnError.message, spawnDecision.message, spawnResult]) {
+        assert.include(diagnostic, "ENOENT");
+        assert.notInclude(diagnostic, root);
+        assert.notInclude(diagnostic, "private-missing-executable");
+      }
 
       const oversizedRun: Schedule.ScheduleRunLifecycle = {
         ...run,

@@ -140,8 +140,12 @@ export const make = Effect.fn("Logging.make")(function* (logsDir: AbsolutePath) 
       return;
     }
 
-    lastPrunedDay = latest.day;
     yield* prune(fileSystem, path, logsDir, latest.retainedFrom).pipe(
+      Effect.tap(
+        Effect.sync(() => {
+          lastPrunedDay = latest.day;
+        }),
+      ),
       Effect.catch((error) => reportSinkFailure(error, "prune", latest.day)),
     );
   });
