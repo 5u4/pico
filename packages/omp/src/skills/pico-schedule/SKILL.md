@@ -27,6 +27,8 @@ Do not author root `meta.json` or `definition.json`, including case variants suc
 
 Creation copies the complete supported source tree into Pico's managed directory. Later edits to the original directory do not affect that owned copy. Put every helper and asset the script needs inside the source directory. Pico does not crawl imports or copy dependencies from outside it.
 
+Creation and run capture copy files sequentially into private staging before publishing the complete snapshot. Helpers and assets do not accumulate in a whole-tree memory buffer. Entrypoints still require memory for text validation, and the agent receives the complete prompt.
+
 ## Edit or pause a schedule
 
 Read the schedule with `schedule_get`. The result contains the current `sourceDirectory`, not source text. Edit files in that directory with ordinary filesystem tools. Future immutable run snapshots include the edited entrypoints, helpers, assets, and directories. Existing snapshots do not change.
@@ -61,6 +63,8 @@ Write one JSON object to stdout and exit successfully. Send logs to stderr with 
 | `{"agent":false,"content":"Time for a break."}` | Publish text directly. Ignore any prompt. |
 | `{"agent":true}` | Send `prompt.md` to the agent. Requires a prompt. |
 | `{"agent":true,"content":"Review these changes."}` | Send content to the agent, followed by two newlines and `prompt.md` if present. |
+
+Pico captures the prompt from the completed snapshot before starting the script. A script that edits its snapshot's `prompt.md` does not change that run's agent input.
 
 The default script timeout is 60 seconds. `scriptTimeoutMs` controls only the script, not the agent. A nonzero exit, timeout, invalid decision, or stdout larger than 256 KiB fails the run. Failures are recorded in run history, not automatically posted to the chat.
 

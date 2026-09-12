@@ -20,9 +20,9 @@ import { runScript } from "./script.ts";
 import {
   appendArtifactString,
   bootstrap,
+  type ExecutionInput,
   type LoadedSchedule,
   loadSchedule,
-  loadSourceTree,
   moveDefinition,
   publishDefinition,
   publishRun,
@@ -30,7 +30,6 @@ import {
   readRuns,
   reconcileUpdates,
   removeDefinition,
-  type SourceTree,
   type Storage,
   scanSchedules,
   updateDefinition,
@@ -204,7 +203,7 @@ const capture = Effect.fn("Schedules.capture")(function* (
           id,
           input.enabled ? "enabled" : "disabled",
           definition,
-          yield* loadSourceTree(storage, input.sourceDirectory),
+          input.sourceDirectory,
           yield* transactionId(),
         );
         const loaded = yield* loadSchedule(storage, id);
@@ -370,7 +369,7 @@ const capture = Effect.fn("Schedules.capture")(function* (
       host: Schedule.ScheduleRunHost,
       run: Schedule.ScheduleRunLifecycle,
       definition: Schedule.ScheduleDefinition,
-      source: SourceTree,
+      input: ExecutionInput,
     ) {
       let current = run;
       let failureStage: Extract<Schedule.TerminalOutcome, { readonly kind: "failed" }>["stage"] =
@@ -419,7 +418,7 @@ const capture = Effect.fn("Schedules.capture")(function* (
         failureStage = "protocol";
 
         let decision: Schedule.ScriptDecision;
-        if (!source.files.has("script.js")) {
+        if (!input.hasScript) {
           decision = { agent: true };
           yield* writeArtifactString(storage, current, "decision.json", JSON.stringify(decision));
         } else {
@@ -462,8 +461,7 @@ const capture = Effect.fn("Schedules.capture")(function* (
           return;
         }
 
-        const promptBytes = source.files.get("prompt.md");
-        const prompt = promptBytes === undefined ? null : new TextDecoder().decode(promptBytes);
+        const prompt = input.prompt;
         const request =
           decision.content === undefined
             ? prompt
@@ -650,7 +648,6 @@ const capture = Effect.fn("Schedules.capture")(function* (
 
   const claim = Effect.fn("Schedules.claim")(function* (
     view: Schedule.ReadyScheduleView,
-    tree: SourceTree,
     source: Schedule.ScheduleRunSource,
   ) {
     const id = Schedule.ScheduleRunId.make(
@@ -682,11 +679,17 @@ const capture = Effect.fn("Schedules.capture")(function* (
       claimedAt: yield* Clock.currentTimeMillis,
       state: { kind: "claimed" },
     };
-    yield* publishRun(storage, run, view.definition, tree, yield* transactionId());
+    const input = yield* publishRun(
+      storage,
+      run,
+      view.definition,
+      view.sourceDirectory,
+      yield* transactionId(),
+    );
     yield* Effect.logInfo("Scheduled run claimed").pipe(
       Effect.annotateLogs({ ...runAnnotations(run), operation: "claim", phase: "claimed" }),
     );
-    return run;
+    return { run, input };
   });
 
   const scheduleCycle = Effect.fn("Schedules.scheduleCycle")(function* (
@@ -743,7 +746,7 @@ const capture = Effect.fn("Schedules.capture")(function* (
           const pending: Array<{
             readonly run: Schedule.ScheduleRunLifecycle;
             readonly definition: Schedule.ScheduleDefinition;
-            readonly source: SourceTree;
+            readonly input: ExecutionInput;
             readonly missed: boolean;
           }> = [];
           for (const loaded of schedules) {
@@ -771,10 +774,13 @@ const capture = Effect.fn("Schedules.capture")(function* (
               if (currentRuns.some((run) => run.source.scheduledFor === scheduledFor)) continue;
             }
 
-            const source = yield* loadSourceTree(storage, view.sourceDirectory, true).pipe(
-              Effect.result,
+            const claimed = yield* Effect.uninterruptible(
+              claim(view, { kind: "scheduled", scheduledFor }).pipe(
+                Effect.tap(({ run }) => Effect.sync(() => owned.add(run))),
+                Effect.result,
+              ),
             );
-            if (Result.isFailure(source)) {
+            if (Result.isFailure(claimed)) {
               invalid.add(view.id);
               if (!invalidDefinitions.has(view.id)) {
                 yield* Effect.logWarning("Schedule source capture failed").pipe(
@@ -784,21 +790,16 @@ const capture = Effect.fn("Schedules.capture")(function* (
                     phase: "source",
                     scheduleId: view.id,
                     state: view.state,
-                    category: source.failure.kind,
+                    category: claimed.failure.kind,
                   }),
                 );
               }
               continue;
             }
-            const run = yield* Effect.uninterruptible(
-              claim(view, source.success, { kind: "scheduled", scheduledFor }).pipe(
-                Effect.tap((published) => Effect.sync(() => owned.add(published))),
-              ),
-            );
             pending.push({
-              run,
+              run: claimed.success.run,
               definition: view.definition,
-              source: source.success,
+              input: claimed.success.input,
               missed: now - scheduledFor > MISSED_GRACE_MILLIS,
             });
           }
@@ -827,7 +828,7 @@ const capture = Effect.fn("Schedules.capture")(function* (
           owned.delete(item.run);
         } else {
           yield* Effect.uninterruptible(
-            executeRun(host, item.run, item.definition, item.source).pipe(
+            executeRun(host, item.run, item.definition, item.input).pipe(
               Effect.forkScoped({ startImmediately: true }),
               Effect.tap(() => Effect.sync(() => owned.delete(item.run))),
               Effect.asVoid,

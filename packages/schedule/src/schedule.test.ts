@@ -26,13 +26,11 @@ import {
   appendArtifactString,
   bootstrap,
   loadSchedule,
-  loadSourceTree,
   moveDefinition,
   publishDefinition,
   publishRun,
   readRuns,
   runDirectory,
-  type SourceTree,
   type Storage,
   updateDefinition,
   writeArtifactString,
@@ -52,19 +50,6 @@ const decodeScriptResult = Schema.decodeUnknownEffect(
   Schema.fromJsonString(Schema.Struct({ timeoutMillis: Schema.Int })),
 );
 
-const sourceTree = (
-  files: Readonly<Record<string, string | Uint8Array>>,
-  directories: ReadonlyArray<string> = [],
-): SourceTree => ({
-  files: new Map(
-    Object.entries(files).map(([name, contents]) => [
-      name,
-      typeof contents === "string" ? new TextEncoder().encode(contents) : contents,
-    ]),
-  ),
-  directories,
-});
-
 const prepareSource = Effect.fn("Schedules.test.prepareSource")(function* (
   files: Readonly<Record<string, string | Uint8Array>>,
   directories: ReadonlyArray<string> = [],
@@ -75,10 +60,13 @@ const prepareSource = Effect.fn("Schedules.test.prepareSource")(function* (
   for (const name of directories) {
     yield* fileSystem.makeDirectory(path.join(directory, name), { recursive: true });
   }
-  for (const [name, contents] of sourceTree(files).files) {
+  for (const [name, contents] of Object.entries(files)) {
     const file = path.join(directory, name);
     yield* fileSystem.makeDirectory(path.dirname(file), { recursive: true });
-    yield* fileSystem.writeFile(file, contents);
+    yield* fileSystem.writeFile(
+      file,
+      typeof contents === "string" ? new TextEncoder().encode(contents) : contents,
+    );
   }
   return AbsolutePath.make(directory);
 });
@@ -471,6 +459,353 @@ describe("Schedules", () => {
     }).pipe(Effect.provide(platformLayer), Effect.scoped),
   );
 
+  it.effect(
+    "copies assets without whole-file reads and captures prompts before script writes",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-native-copy-" });
+        const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
+        const guardedFileSystem = FileSystem.FileSystem.of({
+          ...fileSystem,
+          readFile: (file) =>
+            file.endsWith("helper.js") || file.endsWith("data.bin")
+              ? Effect.die("Assets must not be buffered by the scheduler")
+              : fileSystem.readFile(file),
+        });
+        const schedules = yield* open(schedulesDir).pipe(
+          Effect.provideService(FileSystem.FileSystem, guardedFileSystem),
+        );
+        const asset = new Uint8Array([0, 255, 128, 10]);
+        const created = yield* schedules.create(caller, {
+          name: "native copying",
+          enabled: true,
+          target: { kind: "current-chat" },
+          trigger: { kind: "once", at: 1_000 },
+          sourceDirectory: yield* prepareSource({
+            "script.js": [
+              'import { content } from "./lib/helper.js";',
+              'import { readFileSync, writeFileSync } from "node:fs";',
+              'const bytes = readFileSync(new URL("./assets/data.bin", import.meta.url));',
+              'writeFileSync(new URL("./prompt.md", import.meta.url), "script changed prompt");',
+              'process.stdout.write(JSON.stringify({agent:true,content:content+":"+[...bytes]}));',
+            ].join("\n"),
+            "prompt.md": "original prompt",
+            "lib/helper.js": 'export const content = "helper";',
+            "assets/data.bin": asset,
+          }),
+        });
+        if (created.kind !== "ready") return yield* Effect.die("Created schedule is invalid");
+        const requests = yield* Queue.unbounded<Agent.AgentPrompt>();
+        yield* TestClock.setTime(1_000);
+        yield* schedules.start({
+          prepare: () => Effect.succeed({ chatId, workspaceId, cwd: AbsolutePath.make(root) }),
+          deliver: () => Effect.void,
+          publish: () => Effect.die("Expected an agent request"),
+          runPrompt: (_chatId, runId, request) =>
+            Queue.offer(requests, request).pipe(
+              Effect.as({ runId, outcome: "completed", events: [], finalAssistantText: "done" }),
+            ),
+        });
+        assert.deepStrictEqual(
+          yield* Queue.take(requests),
+          textPrompt("helper:0,255,128,10\n\noriginal prompt"),
+        );
+        const runId = `scheduled-1000-${created.definition.revision}`;
+        const directory = path.join(schedulesDir, "runs", created.id, runId);
+        const finished = yield* awaitFinished(fileSystem, path.join(directory, "run.json"));
+        assert.strictEqual(
+          finished.state.kind === "finished" && finished.state.outcome.kind,
+          "completed",
+        );
+        assert.strictEqual(
+          yield* fileSystem.readFileString(path.join(directory, "input", "prompt.md")),
+          "script changed prompt",
+        );
+        assert.deepStrictEqual(
+          yield* fileSystem.readFile(path.join(directory, "input", "assets/data.bin")),
+          asset,
+        );
+      }).pipe(Effect.provide(platformLayer), Effect.scoped),
+  );
+
+  it.effect("skips its staging directory through an ancestor path alias", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-source-alias-" });
+      const parent = path.join(root, "parent");
+      const alias = path.join(root, "alias");
+      const sourceDirectory = AbsolutePath.make(path.join(parent, "source"));
+      yield* fileSystem.makeDirectory(sourceDirectory, { recursive: true });
+      yield* fileSystem.writeFileString(path.join(sourceDirectory, "prompt.md"), "aliased source");
+      yield* fileSystem.symlink(parent, alias);
+      const schedulesDir = AbsolutePath.make(path.join(alias, "source", "schedules"));
+      const schedules = yield* open(schedulesDir);
+      const created = yield* schedules.create(caller, {
+        name: "source contains aliased storage",
+        enabled: false,
+        target: { kind: "current-chat" },
+        trigger: { kind: "once", at: 1_000 },
+        sourceDirectory,
+      });
+      if (created.kind !== "ready") return yield* Effect.die("Created schedule is invalid");
+      assert.strictEqual(
+        yield* fileSystem.readFileString(path.join(created.sourceDirectory, "prompt.md")),
+        "aliased source",
+      );
+      assert.deepStrictEqual(
+        yield* fileSystem.readDirectory(
+          path.join(created.sourceDirectory, "schedules", ".staging"),
+        ),
+        [],
+      );
+      assert.deepStrictEqual(yield* schedules.list(caller), [created]);
+    }).pipe(Effect.provide(platformLayer), Effect.scoped),
+  );
+
+  it.effect("rejects case-folded destination collisions without overwriting or merging", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const kinds: ReadonlyArray<"file" | "directory"> = ["file", "directory"];
+      for (const first of kinds) {
+        for (const second of kinds) {
+          const root = yield* fileSystem.makeTempDirectoryScoped({
+            prefix: "pico-source-collision-",
+          });
+          const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
+          const sourceDirectory = yield* prepareSource({
+            "prompt.md": "colliding assets",
+            [first === "file" ? "A.js" : "A.js/first"]: "first asset",
+            [second === "file" ? "other.js" : "other.js/second"]: "second asset",
+          });
+          const canonicalSource = yield* fileSystem.realPath(sourceDirectory);
+          const lowerSource = path.join(sourceDirectory, "a.js");
+          const resolveFile = (file: string) => {
+            if (file === lowerSource || file.startsWith(`${lowerSource}${path.sep}`)) {
+              return path.join(sourceDirectory, "other.js") + file.slice(lowerSource.length);
+            }
+            if (file.startsWith(`${schedulesDir}${path.sep}`)) {
+              return path.join(
+                schedulesDir,
+                ...path
+                  .relative(schedulesDir, file)
+                  .split(path.sep)
+                  .map((name) => (name === "a.js" ? "A.js" : name)),
+              );
+            }
+            return file;
+          };
+          const collisionFileSystem = FileSystem.FileSystem.of({
+            ...fileSystem,
+            readDirectory: (directory) =>
+              fileSystem
+                .readDirectory(resolveFile(directory))
+                .pipe(
+                  Effect.map((names) =>
+                    directory === sourceDirectory
+                      ? names.map((name) => (name === "other.js" ? "a.js" : name)).sort()
+                      : names,
+                  ),
+                ),
+            realPath: (file) =>
+              fileSystem
+                .realPath(resolveFile(file))
+                .pipe(
+                  Effect.map((resolved) =>
+                    resolved.replace(
+                      path.join(canonicalSource, "other.js"),
+                      path.join(canonicalSource, "a.js"),
+                    ),
+                  ),
+                ),
+            stat: (file) => fileSystem.stat(resolveFile(file)),
+            exists: (file) => fileSystem.exists(resolveFile(file)),
+            makeDirectory: (file, options) => fileSystem.makeDirectory(resolveFile(file), options),
+            copyFile: (from, to) => fileSystem.copyFile(resolveFile(from), resolveFile(to)),
+            chmod: (file, mode) => fileSystem.chmod(resolveFile(file), mode),
+          });
+          const schedules = yield* open(schedulesDir).pipe(
+            Effect.provideService(FileSystem.FileSystem, collisionFileSystem),
+          );
+          const error = yield* schedules
+            .create(caller, {
+              name: `${first} collides with ${second}`,
+              enabled: false,
+              target: { kind: "current-chat" },
+              trigger: { kind: "once", at: 1_000 },
+              sourceDirectory,
+            })
+            .pipe(Effect.flip);
+          assert.strictEqual(error.kind, "io");
+          for (const state of ["enabled", "disabled", ".staging"]) {
+            assert.deepStrictEqual(
+              yield* fileSystem.readDirectory(path.join(schedulesDir, state)),
+              [],
+            );
+          }
+        }
+      }
+    }).pipe(Effect.provide(platformLayer), Effect.scoped),
+  );
+
+  it.effect("validates staged entrypoints and rolls back failed definition and run captures", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-staged-entrypoint-" });
+      const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
+      let corruptCopy = true;
+      let rejectCleanup = true;
+      const stagedFileSystem = FileSystem.FileSystem.of({
+        ...fileSystem,
+        copyFile: (from, to) =>
+          fileSystem
+            .copyFile(from, to)
+            .pipe(
+              Effect.andThen(
+                corruptCopy && path.basename(to) === "prompt.md"
+                  ? fileSystem.writeFile(to, new Uint8Array([0xc3, 0x28]))
+                  : Effect.void,
+              ),
+            ),
+        remove: (file, options) =>
+          rejectCleanup && path.dirname(file) === path.join(schedulesDir, ".staging")
+            ? Effect.fail(permissionDenied("remove", file))
+            : fileSystem.remove(file, options),
+      });
+      const schedules = yield* open(schedulesDir).pipe(
+        Effect.provideService(FileSystem.FileSystem, stagedFileSystem),
+      );
+      const sourceDirectory = yield* prepareSource({ "prompt.md": "valid original prompt" });
+      const input: Schedule.CreateSchedule = {
+        name: "staged validation",
+        enabled: true,
+        target: { kind: "current-chat" },
+        trigger: { kind: "once", at: 1_000 },
+        sourceDirectory,
+      };
+      const error = yield* schedules.create(caller, input).pipe(Effect.flip);
+      assert.strictEqual(error.kind, "invalid");
+      assert.deepStrictEqual(yield* schedules.list(caller), []);
+      assert.strictEqual(
+        yield* fileSystem.readFileString(path.join(sourceDirectory, "prompt.md")),
+        "valid original prompt",
+      );
+      rejectCleanup = false;
+      yield* fileSystem.remove(path.join(schedulesDir, ".staging"), { recursive: true });
+      yield* fileSystem.makeDirectory(path.join(schedulesDir, ".staging"), { mode: 0o700 });
+      const rolledBack = yield* schedules.create(caller, input).pipe(Effect.flip);
+      assert.strictEqual(rolledBack.kind, "invalid");
+      assert.deepStrictEqual(
+        yield* fileSystem.readDirectory(path.join(schedulesDir, ".staging")),
+        [],
+      );
+      corruptCopy = false;
+      const created = yield* schedules.create(caller, input);
+      if (created.kind !== "ready") return yield* Effect.die("Created schedule is invalid");
+      corruptCopy = true;
+      const requests = yield* Queue.unbounded<Agent.AgentPrompt>();
+      yield* TestClock.setTime(1_000);
+      yield* schedules.start({
+        prepare: () => Effect.succeed({ chatId, workspaceId, cwd: AbsolutePath.make(root) }),
+        deliver: () => Effect.void,
+        publish: () => Effect.die("Expected an agent request"),
+        runPrompt: (_chatId, runId, request) =>
+          Queue.offer(requests, request).pipe(
+            Effect.as({ runId, outcome: "completed", events: [], finalAssistantText: "done" }),
+          ),
+      });
+      assert.deepStrictEqual(
+        yield* fileSystem.readDirectory(path.join(schedulesDir, ".staging")),
+        [],
+      );
+      assert.deepStrictEqual(yield* fileSystem.readDirectory(path.join(schedulesDir, "runs")), []);
+      assert.strictEqual((yield* schedules.get(caller, created.id)).state, "enabled");
+      corruptCopy = false;
+      yield* TestClock.adjust("30 seconds");
+      assert.deepStrictEqual(yield* Queue.take(requests), textPrompt("valid original prompt"));
+      const runId = `scheduled-1000-${created.definition.revision}`;
+      yield* awaitFinished(
+        fileSystem,
+        path.join(schedulesDir, "runs", created.id, runId, "run.json"),
+      );
+    }).pipe(Effect.provide(platformLayer), Effect.scoped),
+  );
+
+  it.effect("removes staging when its post-creation inspection fails", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "pico-staging-acquisition-",
+      });
+      const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
+      const failingFileSystem = FileSystem.FileSystem.of({
+        ...fileSystem,
+        stat: (file) =>
+          path.dirname(file) === path.join(schedulesDir, ".staging") &&
+          path.basename(file).startsWith("definition-")
+            ? Effect.fail(permissionDenied("stat", file))
+            : fileSystem.stat(file),
+      });
+      const schedules = yield* open(schedulesDir).pipe(
+        Effect.provideService(FileSystem.FileSystem, failingFileSystem),
+      );
+      const error = yield* schedules
+        .create(caller, {
+          name: "staging inspection",
+          enabled: false,
+          target: { kind: "current-chat" },
+          trigger: { kind: "once", at: 1_000 },
+          sourceDirectory: yield* prepareSource({ "prompt.md": "valid" }),
+        })
+        .pipe(Effect.flip);
+      assert.strictEqual(error.kind, "io");
+      assert.deepStrictEqual(
+        yield* fileSystem.readDirectory(path.join(schedulesDir, ".staging")),
+        [],
+      );
+      assert.deepStrictEqual(
+        yield* fileSystem.readDirectory(path.join(schedulesDir, "disabled")),
+        [],
+      );
+    }).pipe(Effect.provide(platformLayer), Effect.scoped),
+  );
+
+  it.effect(
+    "copies sources containing the storage root without recursing into their own staging",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-source-ancestor-" });
+        const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
+        yield* fileSystem.writeFileString(path.join(root, "prompt.md"), "ancestor source");
+        const schedules = yield* open(schedulesDir);
+        const created = yield* schedules.create(caller, {
+          name: "ancestor source",
+          enabled: false,
+          target: { kind: "current-chat" },
+          trigger: { kind: "once", at: 1_000 },
+          sourceDirectory: AbsolutePath.make(root),
+        });
+        if (created.kind !== "ready") return yield* Effect.die("Created schedule is invalid");
+        assert.strictEqual(
+          yield* fileSystem.readFileString(path.join(created.sourceDirectory, "prompt.md")),
+          "ancestor source",
+        );
+        assert.deepStrictEqual(
+          yield* fileSystem.readDirectory(
+            path.join(created.sourceDirectory, "schedules", ".staging"),
+          ),
+          [],
+        );
+      }).pipe(Effect.provide(platformLayer), Effect.scoped),
+  );
+
   it.effect("checks source structure without reading helpers during get, list, or idle scans", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
@@ -486,6 +821,12 @@ describe("Schedules", () => {
             assetReads.push(file);
           }
           return fileSystem.readFile(file);
+        },
+        copyFile: (from, to) => {
+          if (observeReads && (from.endsWith("helper.js") || from.endsWith("data.bin"))) {
+            assetReads.push(from);
+          }
+          return fileSystem.copyFile(from, to);
         },
       });
       const schedules = yield* open(schedulesDir).pipe(
@@ -554,10 +895,10 @@ describe("Schedules", () => {
       let unreadableHelper: string | undefined;
       const failingFileSystem = FileSystem.FileSystem.of({
         ...fileSystem,
-        readFile: (file) =>
-          file === unreadableHelper
-            ? Effect.fail(permissionDenied("readFile", file))
-            : fileSystem.readFile(file),
+        copyFile: (from, to) =>
+          from === unreadableHelper
+            ? Effect.fail(permissionDenied("copyFile", from))
+            : fileSystem.copyFile(from, to),
       });
       const schedules = yield* open(schedulesDir).pipe(
         Effect.provideService(FileSystem.FileSystem, failingFileSystem),
@@ -610,7 +951,13 @@ describe("Schedules", () => {
         });
       }
       assert.sameMembers(published, [first.definition.name, last.definition.name]);
+      // Wait for the queued creation wake's retry to release the capture lock.
+      assert.strictEqual((yield* schedules.get(caller, blocked.id)).state, "enabled");
       assert.isFalse(yield* fileSystem.exists(path.join(schedulesDir, "runs", blocked.id)));
+      assert.deepStrictEqual(
+        yield* fileSystem.readDirectory(path.join(schedulesDir, ".staging")),
+        [],
+      );
       unreadableHelper = undefined;
       yield* TestClock.adjust("30 seconds");
       yield* Queue.take(publishedEvents);
@@ -834,7 +1181,7 @@ describe("Schedules", () => {
         storage,
         run,
         definition,
-        sourceTree({ "prompt.md": "identity" }),
+        yield* prepareSource({ "prompt.md": "identity" }),
         "018f47a0-0000-7000-8000-000000000006",
       );
       assert.deepStrictEqual(yield* readRuns(storage), [run]);
@@ -1172,6 +1519,28 @@ describe("Schedules", () => {
           ),
           created.definition,
         );
+        yield* schedules.update(caller, created.id, { enabled: true });
+        yield* TestClock.adjust("30 seconds");
+        assert.strictEqual(yield* Queue.take(published), "edited helper");
+        const nextRunId = `scheduled-1000-${updated.definition.revision}`;
+        const nextDirectory = path.join(schedulesDir, "runs", created.id, nextRunId);
+        yield* awaitFinished(fileSystem, path.join(nextDirectory, "run.json"));
+        assert.deepStrictEqual(
+          yield* fileSystem.readFile(path.join(nextDirectory, "input", "assets/data.bin")),
+          new Uint8Array([42]),
+        );
+        assert.strictEqual(
+          yield* fileSystem.readFileString(path.join(nextDirectory, "input", "prompt.md")),
+          "edited prompt",
+        );
+        assert.strictEqual(
+          yield* fileSystem.readFileString(path.join(directory, "input", "lib/helper.js")),
+          helper,
+        );
+        assert.deepStrictEqual(
+          yield* fileSystem.readFile(path.join(directory, "input", "assets/data.bin")),
+          asset,
+        );
       }).pipe(Effect.provide(platformLayer), Effect.scoped),
   );
 
@@ -1448,25 +1817,50 @@ describe("Schedules", () => {
       }).pipe(Effect.provide(platformLayer), Effect.scoped),
   );
 
-  it.effect("rejects mixed-case metadata rather than skipping it during owned source capture", () =>
+  it.effect("rejects mixed-case metadata rather than skipping it in managed sources", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
-      const crypto = yield* Crypto.Crypto;
       const path = yield* Path.Path;
-      const directory = yield* prepareSource({ "prompt.md": "valid", "Meta.json": "{}" });
+      const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-managed-case-" });
+      const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
+      const schedules = yield* open(schedulesDir);
+      const created = yield* schedules.create(caller, {
+        name: "managed metadata",
+        enabled: false,
+        target: { kind: "current-chat" },
+        trigger: { kind: "once", at: 1_000 },
+        sourceDirectory: yield* prepareSource({ "prompt.md": "valid" }),
+      });
+      if (created.kind !== "ready") return yield* Effect.die("Created schedule is invalid");
       const storage: Storage = {
         fileSystem,
         path,
-        schedulesDir: directory,
-        temporaryId: () =>
-          crypto.randomUUIDv7.pipe(
-            Effect.mapError(
-              (error) => new Schedule.ScheduleError({ kind: "io", message: error.message }),
-            ),
-          ),
+        schedulesDir,
+        temporaryId: () => Effect.succeed("case-check"),
       };
-      const error = yield* loadSourceTree(storage, directory, true).pipe(Effect.flip);
+      const run: Schedule.ScheduleRunLifecycle = {
+        version: 1,
+        id: Schedule.ScheduleRunId.make(`scheduled-1000-${created.definition.revision}`),
+        scheduleId: created.id,
+        definitionRevision: created.definition.revision,
+        source: { kind: "scheduled", scheduledFor: 1_000 },
+        plannedTarget: { kind: "existing-chat", ownerWorkspaceId: workspaceId, chatId },
+        claimedAt: 1_000,
+        state: { kind: "claimed" },
+      };
+      const error = yield* publishRun(
+        storage,
+        run,
+        created.definition,
+        yield* prepareSource({ "prompt.md": "valid", "Meta.json": "{}" }),
+        "case-check",
+      ).pipe(Effect.flip);
       assert.strictEqual(error.kind, "invalid");
+      assert.deepStrictEqual(yield* readRuns(storage), []);
+      assert.deepStrictEqual(
+        yield* fileSystem.readDirectory(path.join(schedulesDir, ".staging")),
+        [],
+      );
     }).pipe(Effect.provide(platformLayer), Effect.scoped),
   );
 
@@ -1658,7 +2052,7 @@ describe("Schedules", () => {
         target: { kind: "chat", chatId },
         trigger: { kind: "once", at: 1_000 },
       };
-      const source = sourceTree({ "prompt.md": "original" });
+      const source = yield* prepareSource({ "prompt.md": "original" });
       yield* fileSystem.makeDirectory(outside);
       yield* fileSystem.writeFileString(sentinel, "unchanged");
       yield* bootstrap(storage);
@@ -1751,7 +2145,7 @@ describe("Schedules", () => {
         id,
         "enabled",
         definition,
-        sourceTree({ "prompt.md": "move me" }),
+        yield* prepareSource({ "prompt.md": "move me" }),
         "move-source",
       );
       const loaded = yield* loadSchedule(storage, id);
@@ -1795,7 +2189,7 @@ describe("Schedules", () => {
         id,
         "enabled",
         original,
-        sourceTree({ "prompt.md": "original" }),
+        yield* prepareSource({ "prompt.md": "original" }),
         "018f47a0-0000-7000-8000-000000000044",
       );
       const current = yield* loadSchedule(storage, id);
@@ -2161,9 +2555,10 @@ describe("Schedules", () => {
         id,
         "enabled",
         definition,
-        sourceTree({ "prompt.md": "original", "lib/helper.js": "export const value = 1;" }, [
-          "lib",
-        ]),
+        yield* prepareSource(
+          { "prompt.md": "original", "lib/helper.js": "export const value = 1;" },
+          ["lib"],
+        ),
         "original",
       );
       const current = yield* loadSchedule(storage, id);
@@ -2242,9 +2637,10 @@ describe("Schedules", () => {
         id,
         "disabled",
         definition,
-        sourceTree({ "prompt.md": "original", "lib/helper.js": "export const value = 1;" }, [
-          "lib",
-        ]),
+        yield* prepareSource(
+          { "prompt.md": "original", "lib/helper.js": "export const value = 1;" },
+          ["lib"],
+        ),
         "original",
       );
       const transaction = path.join(schedulesDir, ".staging", "update-crashed");
@@ -2445,7 +2841,7 @@ describe("Schedules", () => {
         storage,
         run,
         definition,
-        sourceTree({ "prompt.md": "append" }),
+        yield* prepareSource({ "prompt.md": "append" }),
         "018f47a0-0000-7000-8000-000000000050",
       );
       const original = `${JSON.stringify({ type: "run-started" })}\n`;
@@ -2657,7 +3053,7 @@ describe("Schedules", () => {
         target: { kind: "chat", chatId },
         trigger: { kind: "once", at: 1_000 },
       };
-      const source = sourceTree({ "prompt.md": "original" });
+      const source = yield* prepareSource({ "prompt.md": "original" });
       const staging = path.join(schedulesDir, ".staging");
       yield* fileSystem.makeDirectory(outside);
       yield* fileSystem.writeFileString(sentinel, "unchanged");
@@ -2807,7 +3203,7 @@ describe("Schedules", () => {
         firstId,
         "enabled",
         firstDefinition,
-        sourceTree({ "prompt.md": "first" }),
+        yield* prepareSource({ "prompt.md": "first" }),
         "first-definition",
       );
       yield* publishDefinition(
@@ -2815,7 +3211,7 @@ describe("Schedules", () => {
         secondId,
         "enabled",
         secondDefinition,
-        sourceTree({ "prompt.md": "second" }),
+        yield* prepareSource({ "prompt.md": "second" }),
         "second-definition",
       );
       const firstRunId = Schedule.ScheduleRunId.make(`scheduled-1000-${firstDefinition.revision}`);
@@ -2895,7 +3291,7 @@ describe("Schedules", () => {
         firstId,
         "enabled",
         firstDefinition,
-        sourceTree({ "prompt.md": "first" }),
+        yield* prepareSource({ "prompt.md": "first" }),
         "first-missed-definition",
       );
       yield* publishDefinition(
@@ -2903,7 +3299,7 @@ describe("Schedules", () => {
         secondId,
         "enabled",
         secondDefinition,
-        sourceTree({ "prompt.md": "second" }),
+        yield* prepareSource({ "prompt.md": "second" }),
         "second-missed-definition",
       );
       const firstRunId = Schedule.ScheduleRunId.make(`scheduled-1000-${firstDefinition.revision}`);

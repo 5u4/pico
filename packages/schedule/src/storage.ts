@@ -16,9 +16,9 @@ export interface Storage {
   readonly temporaryId: () => Effect.Effect<string, Schedule.ScheduleError>;
 }
 
-export interface SourceTree {
-  readonly files: ReadonlyMap<string, Uint8Array>;
-  readonly directories: ReadonlyArray<string>;
+export interface ExecutionInput {
+  readonly hasScript: boolean;
+  readonly prompt: string | null;
 }
 
 export interface LoadedSchedule {
@@ -164,7 +164,6 @@ const createDirectory = Effect.fn("Schedules.createDirectory")(function* (
 const prepareStagingDirectory = Effect.fn("Schedules.prepareStagingDirectory")(function* (
   storage: Storage,
   name: string,
-  children: ReadonlyArray<string> = [],
 ) {
   const staging = roots(storage).staging;
   for (const entry of [
@@ -180,22 +179,30 @@ const prepareStagingDirectory = Effect.fn("Schedules.prepareStagingDirectory")(f
   }
 
   const transaction = storage.path.join(staging, name);
-  for (const directory of [
-    transaction,
-    ...children.map((child) => storage.path.join(transaction, child)),
-  ]) {
-    const exists = yield* storage.fileSystem
-      .exists(directory)
-      .pipe(mapIo("Failed to inspect schedule staging path"));
-    if (exists) {
-      return yield* new Schedule.ScheduleError({
-        kind: "corrupt",
-        message: "Schedule staging path must not already exist",
-      });
-    }
-    yield* createDirectory(storage, directory, "schedule staging directory");
+  const exists = yield* storage.fileSystem
+    .exists(transaction)
+    .pipe(mapIo("Failed to inspect schedule staging path"));
+  if (exists) {
+    return yield* new Schedule.ScheduleError({
+      kind: "corrupt",
+      message: "Schedule staging path must not already exist",
+    });
   }
-  return transaction;
+  return yield* Effect.acquireUseRelease(
+    storage.fileSystem
+      .makeDirectory(transaction, { mode: 0o700 })
+      .pipe(mapIo("Failed to create schedule staging directory"), Effect.as(transaction)),
+    (directory) =>
+      inspectDirectory(storage, directory, "schedule staging directory").pipe(Effect.as(directory)),
+    (directory, exit) =>
+      Exit.isFailure(exit)
+        ? ignoreCleanupFailure(
+            "Failed to roll back schedule staging directory",
+            storage.fileSystem.remove(directory, { recursive: true, force: true }),
+            { operation: "staging", phase: "rollback" },
+          )
+        : Effect.void,
+  );
 });
 
 const reconcileUpdate = Effect.fn("Schedules.reconcileUpdate")(function* (
@@ -409,6 +416,7 @@ const ensureDirectPath = Effect.fn("Schedules.ensureDirectPath")(function* (
       message: `${label} must not be a symbolic link`,
     });
   }
+  return resolved;
 });
 export const ensureRunAsset = Effect.fn("Schedules.ensureRunAsset")(function* (
   storage: Storage,
@@ -434,20 +442,26 @@ export const ensureRunAsset = Effect.fn("Schedules.ensureRunAsset")(function* (
   yield* ensureDirectPath(storage, candidate, `run asset ${relative}`);
 });
 
-const inspectSourceTree = Effect.fn("Schedules.inspectSourceTree")(function* (
+const inspectSource = Effect.fn("Schedules.inspectSource")(function* (
   storage: Storage,
   directory: string,
   owned: boolean,
-  files?: Map<string, Uint8Array>,
-): Effect.fn.Return<ReadonlyArray<string>, Schedule.ScheduleError> {
+  destination?: string,
+): Effect.fn.Return<ExecutionInput, Schedule.ScheduleError> {
   if (!storage.path.isAbsolute(directory)) {
     return yield* invalid("sourceDirectory must be an absolute path");
   }
   if (!(yield* inspectDirectory(storage, directory, "schedule source directory"))) {
     return yield* invalid("sourceDirectory must name an existing directory");
   }
-  let hasEntrypoint = false;
-  const directories: Array<string> = [];
+  const resolvedDestination =
+    destination === undefined
+      ? undefined
+      : yield* storage.fileSystem
+          .realPath(destination)
+          .pipe(mapIo("Failed to resolve schedule source destination"));
+  let hasScript = false;
+  let hasPrompt = false;
   const pending = [""];
   for (const relativeDirectory of pending) {
     const current = storage.path.join(directory, relativeDirectory);
@@ -475,7 +489,11 @@ const inspectSourceTree = Effect.fn("Schedules.inspectSourceTree")(function* (
       }
       const relative = storage.path.join(relativeDirectory, name);
       const asset = storage.path.join(directory, relative);
-      yield* ensureDirectPath(storage, asset, `Source asset ${relative}`).pipe(
+      const resolvedAsset = yield* ensureDirectPath(
+        storage,
+        asset,
+        `Source asset ${relative}`,
+      ).pipe(
         Effect.mapError(() =>
           invalid(`Cannot read source asset ${relative}; symbolic links are not supported`),
         ),
@@ -488,25 +506,36 @@ const inspectSourceTree = Effect.fn("Schedules.inspectSourceTree")(function* (
         return yield* invalid(`${relative} must be a nonblank regular file`);
       }
       if (info.type === "Directory") {
-        directories.push(relative);
+        if (resolvedAsset === resolvedDestination) continue;
+        if (destination !== undefined) {
+          yield* createDirectory(
+            storage,
+            storage.path.join(destination, relative),
+            "schedule source directory",
+          );
+        }
         pending.push(relative);
       } else if (info.type === "File") {
-        if (entrypoint || files !== undefined) {
-          const content = yield* storage.fileSystem
-            .readFile(asset)
-            .pipe(mapIo(`Failed to read source asset ${relative}`));
-          if (entrypoint) {
-            const text = yield* Effect.try({
-              try: () => new TextDecoder("utf-8", { fatal: true }).decode(content),
-              catch: () => invalid(`${relative} must contain valid UTF-8 text`),
-            });
-            if (text.trim() === "") {
-              return yield* invalid(`${relative} must be a nonblank regular file`);
-            }
-            hasEntrypoint = true;
-          }
-          files?.set(relative, content);
+        if (destination !== undefined) {
+          const copied = storage.path.join(destination, relative);
+          yield* ensureDirectPath(
+            storage,
+            storage.path.dirname(copied),
+            "schedule source directory",
+          );
+          const exists = yield* storage.fileSystem
+            .exists(copied)
+            .pipe(mapIo(`Failed to inspect source asset destination ${relative}`));
+          if (exists) return yield* io(`Source asset destination already exists: ${relative}`);
+          yield* storage.fileSystem
+            .copyFile(asset, copied)
+            .pipe(mapIo(`Failed to copy source asset ${relative}`));
+          yield* storage.fileSystem
+            .chmod(copied, 0o600)
+            .pipe(mapIo(`Failed to set source asset permissions ${relative}`));
         }
+        if (relative === "script.js") hasScript = true;
+        if (relative === "prompt.md") hasPrompt = true;
       } else {
         return yield* invalid(
           `Source asset ${relative} must be a regular file or directory; links and special files are not supported`,
@@ -514,41 +543,31 @@ const inspectSourceTree = Effect.fn("Schedules.inspectSourceTree")(function* (
       }
     }
   }
-  if (!hasEntrypoint) {
+  if (!hasScript && !hasPrompt) {
     return yield* invalid("sourceDirectory requires script.js and/or prompt.md at its root");
   }
-  return directories;
+  const captured = destination ?? directory;
+  if (hasScript) yield* readEntrypoint(storage, captured, "script.js");
+  const prompt = hasPrompt ? yield* readEntrypoint(storage, captured, "prompt.md") : null;
+  return { hasScript, prompt };
 });
 
-export const loadSourceTree = Effect.fn("Schedules.loadSourceTree")(function* (
+const readEntrypoint = Effect.fn("Schedules.readEntrypoint")(function* (
   storage: Storage,
   directory: string,
-  owned = false,
-): Effect.fn.Return<SourceTree, Schedule.ScheduleError> {
-  const files = new Map<string, Uint8Array>();
-  const directories = yield* inspectSourceTree(storage, directory, owned, files);
-  return { files, directories };
-});
-
-const writeSourceTree = Effect.fn("Schedules.writeSourceTree")(function* (
-  storage: Storage,
-  directory: string,
-  source: SourceTree,
+  name: "script.js" | "prompt.md",
 ) {
-  for (const relative of source.directories) {
-    yield* createDirectory(
-      storage,
-      storage.path.join(directory, relative),
-      "schedule source directory",
-    );
+  const content = yield* storage.fileSystem
+    .readFile(storage.path.join(directory, name))
+    .pipe(mapIo(`Failed to read source asset ${name}`));
+  const text = yield* Effect.try({
+    try: () => new TextDecoder("utf-8", { fatal: true }).decode(content),
+    catch: () => invalid(`${name} must contain valid UTF-8 text`),
+  });
+  if (text.trim() === "") {
+    return yield* invalid(`${name} must be a nonblank regular file`);
   }
-  for (const [relative, content] of source.files) {
-    const file = storage.path.join(directory, relative);
-    yield* ensureDirectPath(storage, storage.path.dirname(file), "schedule source directory");
-    yield* storage.fileSystem
-      .writeFile(file, content, { flag: "wx", mode: 0o600 })
-      .pipe(mapIo("Failed to copy schedule source asset"));
-  }
+  return text;
 });
 
 const ownerFromSource = (source: string) => {
@@ -632,7 +651,7 @@ export const loadSchedule = Effect.fn("Schedules.loadSchedule")(function* (
     const definition = yield* decodeDefinition(metaSource).pipe(
       Effect.mapError(() => invalid("Invalid schedule metadata")),
     );
-    yield* inspectSourceTree(storage, directory, true);
+    yield* inspectSource(storage, directory, true);
     return {
       view: {
         kind: "ready",
@@ -671,39 +690,42 @@ export const scanSchedules = Effect.fn("Schedules.scanSchedules")(function* (sto
   return loaded;
 });
 
-const writeDefinitionDirectory = Effect.fn("Schedules.writeDefinitionDirectory")(function* (
-  storage: Storage,
-  directory: string,
-  definition: Schedule.ScheduleDefinition,
-  source: SourceTree,
-) {
-  yield* ensureDirectPath(storage, directory, "schedule staging directory");
-  yield* storage.fileSystem
-    .writeFileString(storage.path.join(directory, "meta.json"), JSON.stringify(definition), {
-      flag: "wx",
-      mode: 0o600,
-    })
-    .pipe(mapIo("Failed to stage schedule metadata"));
-  yield* writeSourceTree(storage, directory, source);
-});
-
 export const publishDefinition = Effect.fn("Schedules.publishDefinition")(function* (
   storage: Storage,
   id: Schedule.ScheduleId,
   state: Schedule.ScheduleEnabledState,
   definition: Schedule.ScheduleDefinition,
-  source: SourceTree,
+  sourceDirectory: string,
   transactionId: string,
 ) {
   const value = roots(storage);
-  const stage = yield* prepareStagingDirectory(storage, `definition-${transactionId}`);
-  yield* writeDefinitionDirectory(storage, stage, definition, source);
-  const destinationRoot = state === "enabled" ? value.enabled : value.disabled;
-  if (!(yield* inspectDirectory(storage, destinationRoot, "schedule state directory"))) {
-    return yield* invalid("Schedule state directory must exist before publication");
-  }
-  const destination = storage.path.join(destinationRoot, id);
-  yield* storage.fileSystem.rename(stage, destination).pipe(mapIo("Failed to publish schedule"));
+  yield* Effect.acquireUseRelease(
+    prepareStagingDirectory(storage, `definition-${transactionId}`),
+    (stage) =>
+      Effect.gen(function* () {
+        yield* storage.fileSystem
+          .writeFileString(storage.path.join(stage, "meta.json"), JSON.stringify(definition), {
+            flag: "wx",
+            mode: 0o600,
+          })
+          .pipe(mapIo("Failed to stage schedule metadata"));
+        yield* inspectSource(storage, sourceDirectory, false, stage);
+        const destinationRoot = state === "enabled" ? value.enabled : value.disabled;
+        if (!(yield* inspectDirectory(storage, destinationRoot, "schedule state directory"))) {
+          return yield* invalid("Schedule state directory must exist before publication");
+        }
+        const destination = storage.path.join(destinationRoot, id);
+        yield* storage.fileSystem
+          .rename(stage, destination)
+          .pipe(mapIo("Failed to publish schedule"));
+      }),
+    (stage) =>
+      ignoreCleanupFailure(
+        "Failed to remove schedule definition staging",
+        storage.fileSystem.remove(stage, { recursive: true, force: true }),
+        { operation: "create", phase: "cleanup", scheduleId: id },
+      ),
+  );
 });
 
 export const updateDefinition = Effect.fn("Schedules.updateDefinition")(function* (
@@ -839,39 +861,57 @@ export const publishRun = Effect.fn("Schedules.publishRun")(function* (
   storage: Storage,
   run: Schedule.ScheduleRunLifecycle,
   definition: Schedule.ScheduleDefinition,
-  source: SourceTree,
+  sourceDirectory: string,
   transactionId: string,
 ) {
   const value = roots(storage);
-  const stage = yield* prepareStagingDirectory(storage, `run-${transactionId}`, ["input"]);
-  const input = storage.path.join(stage, "input");
-  yield* storage.fileSystem
-    .writeFileString(storage.path.join(stage, "run.json"), JSON.stringify(run), {
-      flag: "wx",
-      mode: 0o600,
-    })
-    .pipe(mapIo("Failed to stage run lifecycle"));
-  yield* storage.fileSystem
-    .writeFileString(storage.path.join(input, "definition.json"), JSON.stringify(definition), {
-      flag: "wx",
-      mode: 0o600,
-    })
-    .pipe(mapIo("Failed to snapshot run definition"));
-  yield* writeSourceTree(storage, input, source);
-  const parent = storage.path.join(value.runs, run.scheduleId);
-  yield* ensureDirectPath(storage, value.runs, "run storage directory");
-  const parentExists = yield* storage.fileSystem
-    .exists(parent)
-    .pipe(mapIo("Failed to inspect run schedule directory"));
-  if (!parentExists) {
-    yield* storage.fileSystem
-      .makeDirectory(parent, { mode: 0o700 })
-      .pipe(mapIo("Failed to create run schedule directory"));
-  }
-  yield* ensureDirectPath(storage, parent, "run schedule directory");
-  yield* storage.fileSystem
-    .rename(stage, storage.path.join(parent, run.id))
-    .pipe(mapIo("Failed to publish schedule run claim"));
+  return yield* Effect.acquireUseRelease(
+    prepareStagingDirectory(storage, `run-${transactionId}`),
+    (stage) =>
+      Effect.gen(function* () {
+        const input = storage.path.join(stage, "input");
+        yield* inspectDirectory(storage, input, "run input directory");
+        yield* createDirectory(storage, input, "run input directory");
+        yield* storage.fileSystem
+          .writeFileString(storage.path.join(stage, "run.json"), JSON.stringify(run), {
+            flag: "wx",
+            mode: 0o600,
+          })
+          .pipe(mapIo("Failed to stage run lifecycle"));
+        yield* storage.fileSystem
+          .writeFileString(
+            storage.path.join(input, "definition.json"),
+            JSON.stringify(definition),
+            {
+              flag: "wx",
+              mode: 0o600,
+            },
+          )
+          .pipe(mapIo("Failed to snapshot run definition"));
+        const execution = yield* inspectSource(storage, sourceDirectory, true, input);
+        const parent = storage.path.join(value.runs, run.scheduleId);
+        yield* ensureDirectPath(storage, value.runs, "run storage directory");
+        const parentExists = yield* storage.fileSystem
+          .exists(parent)
+          .pipe(mapIo("Failed to inspect run schedule directory"));
+        if (!parentExists) {
+          yield* storage.fileSystem
+            .makeDirectory(parent, { mode: 0o700 })
+            .pipe(mapIo("Failed to create run schedule directory"));
+        }
+        yield* ensureDirectPath(storage, parent, "run schedule directory");
+        yield* storage.fileSystem
+          .rename(stage, storage.path.join(parent, run.id))
+          .pipe(mapIo("Failed to publish schedule run claim"));
+        return execution;
+      }),
+    (stage) =>
+      ignoreCleanupFailure(
+        "Failed to remove schedule run staging",
+        storage.fileSystem.remove(stage, { recursive: true, force: true }),
+        { operation: "claim", phase: "cleanup", scheduleId: run.scheduleId, runId: run.id },
+      ),
+  );
 });
 
 const prepareRunFile = Effect.fn("Schedules.prepareRunFile")(function* (
