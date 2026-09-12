@@ -49,7 +49,11 @@ type ManagedWorktreeInspection =
 const validationError = (issue: WorkspaceBindingInvalid["issue"]) =>
   new WorkspaceBindingInvalid({ issue });
 
-const gitError = (action: string) => new GitError({ message: `Failed to ${action}` });
+const gitError = (action: string, reason: string) =>
+  new GitError({ message: `Failed to ${action}: ${reason}` });
+
+const platformFailure = (action: string, phase: string, error: PlatformError.PlatformError) =>
+  gitError(action, `${phase} failed (${error.reason._tag})`);
 
 const runGitResult = Effect.fn("GitWorktree.runGitResult")(function* (
   spawner: Spawner,
@@ -60,9 +64,9 @@ const runGitResult = Effect.fn("GitWorktree.runGitResult")(function* (
 ): Effect.fn.Return<GitResult, GitError> {
   return yield* Effect.scoped(
     Effect.gen(function* () {
-      const handle = yield* spawner.spawn(
-        ChildProcess.make("git", args, { ...options, cwd: repositoryCwd }),
-      );
+      const handle = yield* spawner
+        .spawn(ChildProcess.make("git", args, { ...options, cwd: repositoryCwd }))
+        .pipe(Effect.mapError((error) => platformFailure(action, "spawn", error)));
       return yield* Effect.all(
         {
           output: handle.stdout.pipe(
@@ -71,14 +75,19 @@ const runGitResult = Effect.fn("GitWorktree.runGitResult")(function* (
               () => "",
               (output, chunk) => output + chunk,
             ),
+            Effect.mapError((error) => platformFailure(action, "read stdout", error)),
           ),
-          errors: Stream.runDrain(handle.stderr),
-          exitCode: handle.exitCode,
+          errors: Stream.runDrain(handle.stderr).pipe(
+            Effect.mapError((error) => platformFailure(action, "drain stderr", error)),
+          ),
+          exitCode: handle.exitCode.pipe(
+            Effect.mapError((error) => platformFailure(action, "wait for exit", error)),
+          ),
         },
         { concurrency: "unbounded" },
       );
     }),
-  ).pipe(Effect.mapError(() => gitError(action)));
+  );
 });
 
 const runGitExit = Effect.fn("GitWorktree.runGitExit")(function* (
@@ -96,7 +105,8 @@ const runGit = Effect.fn("GitWorktree.runGit")(function* (
   action: string,
   args: ReadonlyArray<string>,
 ) {
-  if (!(yield* runGitExit(spawner, repositoryCwd, action, args))) return yield* gitError(action);
+  const { exitCode } = yield* runGitResult(spawner, repositoryCwd, action, args);
+  if (exitCode !== 0) return yield* gitError(action, `Git exited with code ${exitCode}`);
 });
 
 const validate = Effect.fn("GitWorktree.validate")(function* (
@@ -163,7 +173,9 @@ const inspectManaged = Effect.fn("GitWorktree.inspectChat")(function* (
   const slot = path.normalize(path.join(worktreesDir, options.chatId));
   if (path.normalize(options.cwd) !== slot) return { kind: "not-managed" };
   if (
-    !(yield* fileSystem.exists(slot).pipe(Effect.mapError(() => gitError("inspect worktree path"))))
+    !(yield* fileSystem
+      .exists(slot)
+      .pipe(Effect.mapError((error) => platformFailure("inspect worktree path", "exists", error))))
   ) {
     return { kind: "managed", state: "absent" };
   }
@@ -171,14 +183,19 @@ const inspectManaged = Effect.fn("GitWorktree.inspectChat")(function* (
   const isSymlink = yield* fileSystem.readLink(slot).pipe(
     Effect.as(true),
     Effect.catch((error) =>
-      isNotSymlink(error) ? Effect.succeed(false) : Effect.fail(gitError("inspect worktree path")),
+      isNotSymlink(error)
+        ? Effect.succeed(false)
+        : Effect.fail(platformFailure("inspect worktree path", "read link", error)),
     ),
   );
-  if (isSymlink) return yield* gitError("inspect worktree path");
+  if (isSymlink)
+    return yield* gitError("inspect worktree path", "unsafe managed path is a symlink");
   const info = yield* fileSystem
     .stat(slot)
-    .pipe(Effect.mapError(() => gitError("inspect worktree path")));
-  if (info.type !== "Directory") return yield* gitError("inspect worktree path");
+    .pipe(Effect.mapError((error) => platformFailure("inspect worktree path", "stat", error)));
+  if (info.type !== "Directory") {
+    return yield* gitError("inspect worktree path", "unsafe managed path is not a directory");
+  }
 
   const identity = yield* runGitResult(spawner, AbsolutePath.make(slot), "inspect worktree", [
     "rev-parse",
@@ -187,7 +204,9 @@ const inspectManaged = Effect.fn("GitWorktree.inspectChat")(function* (
     "--git-dir",
     "--git-common-dir",
   ]);
-  if (identity.exitCode !== 0) return yield* gitError("inspect worktree");
+  if (identity.exitCode !== 0) {
+    return yield* gitError("inspect worktree", `Git exited with code ${identity.exitCode}`);
+  }
   const [topLevel, gitDir, commonDir] = identity.output
     .trim()
     .split("\n")
@@ -199,7 +218,7 @@ const inspectManaged = Effect.fn("GitWorktree.inspectChat")(function* (
     topLevel !== slot ||
     gitDir === commonDir
   ) {
-    return yield* gitError("inspect worktree");
+    return yield* gitError("inspect worktree", "invalid managed worktree identity");
   }
 
   const status = yield* runGitResult(spawner, AbsolutePath.make(slot), "inspect worktree changes", [
@@ -207,7 +226,9 @@ const inspectManaged = Effect.fn("GitWorktree.inspectChat")(function* (
     "--porcelain=v1",
     "--untracked-files=all",
   ]);
-  if (status.exitCode !== 0) return yield* gitError("inspect worktree changes");
+  if (status.exitCode !== 0) {
+    return yield* gitError("inspect worktree changes", `Git exited with code ${status.exitCode}`);
+  }
   return {
     kind: "managed",
     state: status.output.length === 0 ? "clean" : "dirty",
@@ -246,8 +267,11 @@ const symbolicHead = Effect.fn("GitWorktree.symbolicHead")(function* (
   ]);
   if (result.exitCode === 1) return { kind: "detached" };
   const branch = result.output.trim();
-  if (result.exitCode !== 0 || branch.length === 0) {
-    return yield* gitError("inspect worktree branch");
+  if (result.exitCode !== 0) {
+    return yield* gitError("inspect worktree branch", `Git exited with code ${result.exitCode}`);
+  }
+  if (branch.length === 0) {
+    return yield* gitError("inspect worktree branch", "empty symbolic HEAD");
   }
   return { kind: "branch", branch };
 });
@@ -265,7 +289,7 @@ const localBranchExists = Effect.fn("GitWorktree.localBranchExists")(function* (
   ]);
   if (result.exitCode === 0) return true;
   if (result.exitCode === 1) return false;
-  return yield* gitError("inspect local branch");
+  return yield* gitError("inspect local branch", `Git exited with code ${result.exitCode}`);
 });
 
 const remoteCommandOptions: ChildProcess.CommandOptions = {
@@ -284,7 +308,9 @@ const hasRemoteState = Effect.fn("GitWorktree.hasRemoteState")(
       ["remote"],
       remoteCommandOptions,
     );
-    if (remotes.exitCode !== 0) return yield* gitError("inspect remotes");
+    if (remotes.exitCode !== 0) {
+      return yield* gitError("inspect remotes", `Git exited with code ${remotes.exitCode}`);
+    }
 
     const endpoints = new Set<string>();
     for (const remote of remotes.output.trim().split("\n")) {
@@ -300,9 +326,16 @@ const hasRemoteState = Effect.fn("GitWorktree.hasRemoteState")(
           args,
           remoteCommandOptions,
         );
-        if (urls.exitCode !== 0) return yield* gitError("inspect remote endpoints");
+        if (urls.exitCode !== 0) {
+          return yield* gitError(
+            "inspect remote endpoints",
+            `Git exited with code ${urls.exitCode}`,
+          );
+        }
         for (const url of urls.output.replace(/\n$/, "").split("\n")) {
-          if (url.length === 0) return yield* gitError("inspect remote endpoints");
+          if (url.length === 0) {
+            return yield* gitError("inspect remote endpoints", "empty remote endpoint");
+          }
           endpoints.add(url);
         }
       }
@@ -319,7 +352,12 @@ const hasRemoteState = Effect.fn("GitWorktree.hasRemoteState")(
         remoteCommandOptions,
       );
       if (result.exitCode === 2) continue;
-      if (result.exitCode !== 0) return yield* gitError("inspect remote branches");
+      if (result.exitCode !== 0) {
+        return yield* gitError(
+          "inspect remote branches",
+          `Git exited with code ${result.exitCode}`,
+        );
+      }
       for (const line of result.output.split("\n")) {
         const separator = line.indexOf("\t");
         if (separator === -1) continue;
@@ -331,7 +369,10 @@ const hasRemoteState = Effect.fn("GitWorktree.hasRemoteState")(
   },
   Effect.timeoutOrElse({
     duration: "10 seconds",
-    orElse: () => Effect.fail(gitError("inspect remote branches")),
+    orElse: () =>
+      Effect.fail(
+        gitError("inspect remote branches", "remote inspection timed out after 10 seconds"),
+      ),
   }),
 );
 
@@ -377,19 +418,23 @@ const renameChatBranch = Effect.fn("GitWorktree.renameChatBranch")(function* (
     return { kind: "skipped", reason: "target-exists" };
   }
 
-  if (
-    yield* runGitExit(spawner, options.cwd, "rename worktree branch", [
-      "branch",
-      "-m",
-      "--",
-      source,
-      target,
-    ])
-  ) {
-    return { kind: "renamed" };
-  }
+  const { exitCode } = yield* runGitResult(spawner, options.cwd, "rename worktree branch", [
+    "branch",
+    "-m",
+    "--",
+    source,
+    target,
+  ]);
+  if (exitCode === 0) return { kind: "renamed" };
 
-  const afterFailure = yield* symbolicHead(spawner, options.cwd);
+  const afterFailure = yield* symbolicHead(spawner, options.cwd).pipe(
+    Effect.mapError((error) =>
+      gitError(
+        "rename worktree branch",
+        `Git exited with code ${exitCode}; reinspection failed: ${error.message}`,
+      ),
+    ),
+  );
   if (afterFailure.kind === "detached") return { kind: "skipped", reason: "detached" };
   if (afterFailure.branch === target) {
     return { kind: "already-renamed" };
@@ -397,7 +442,7 @@ const renameChatBranch = Effect.fn("GitWorktree.renameChatBranch")(function* (
   if (afterFailure.branch !== source) {
     return { kind: "skipped", reason: "branch-changed" };
   }
-  return yield* gitError("rename worktree branch");
+  return yield* gitError("rename worktree branch", `Git exited with code ${exitCode}`);
 });
 
 const removeChat = Effect.fn("GitWorktree.removeChat")(function* (
@@ -423,18 +468,35 @@ const removeChat = Effect.fn("GitWorktree.removeChat")(function* (
     "--",
     path.normalize(options.cwd),
   ];
-  if (yield* runGitExit(spawner, worktreesDir, "remove worktree", args)) {
+  const { exitCode } = yield* runGitResult(spawner, worktreesDir, "remove worktree", args);
+  if (exitCode === 0) {
+    yield* Effect.logDebug("Worktree removed").pipe(
+      Effect.annotateLogs({
+        component: "git",
+        operation: "removeChat",
+        chatId: options.chatId,
+        force: options.force,
+        outcome: "removed",
+      }),
+    );
     return { kind: "removed" };
   }
 
-  const afterFailure = yield* inspectManaged(fileSystem, path, spawner, worktreesDir, options);
+  const afterFailure = yield* inspectManaged(fileSystem, path, spawner, worktreesDir, options).pipe(
+    Effect.mapError((error) =>
+      gitError(
+        "remove worktree",
+        `Git exited with code ${exitCode}; reinspection failed: ${error.message}`,
+      ),
+    ),
+  );
   if (afterFailure.kind === "managed" && afterFailure.state === "absent") {
     return { kind: "already-absent" };
   }
   if (!options.force && afterFailure.kind === "managed") {
     return { kind: "force-required" };
   }
-  return yield* gitError("remove worktree");
+  return yield* gitError("remove worktree", `Git exited with code ${exitCode}`);
 });
 
 const acquire = Effect.fn("GitWorktree.create.acquire")(function* (
@@ -453,7 +515,9 @@ const acquire = Effect.fn("GitWorktree.create.acquire")(function* (
 
   yield* fileSystem
     .makeDirectory(worktreesDir, { recursive: true, mode: 0o700 })
-    .pipe(Effect.mapError(() => gitError("create worktrees directory")));
+    .pipe(
+      Effect.mapError((error) => platformFailure("create worktrees directory", "mkdir", error)),
+    );
   yield* runGit(spawner, worktree.repositoryCwd, "create worktree", [
     "worktree",
     "add",
@@ -464,23 +528,53 @@ const acquire = Effect.fn("GitWorktree.create.acquire")(function* (
     worktree.cwd,
     options.settings.branch,
   ]);
+  yield* Effect.logDebug("Worktree acquired").pipe(
+    Effect.annotateLogs({
+      component: "git",
+      operation: "create",
+      chatId: options.chatId,
+      phase: "acquire",
+      outcome: "acquired",
+    }),
+  );
 
   return worktree;
 });
 
-const ignoreCleanupFailure = <A, E, R>(message: string, effect: Effect.Effect<A, E, R>) =>
+const ignoreCleanupFailure = <R>(
+  resource: "worktree" | "branch",
+  effect: Effect.Effect<void, GitError, R>,
+): Effect.Effect<boolean, never, R> =>
   effect.pipe(
-    Effect.asVoid,
-    Effect.catchCause((cause) => Effect.logError(message, Cause.pretty(cause))),
+    Effect.as(true),
+    Effect.catchCause((cause) => {
+      if (Cause.hasInterruptsOnly(cause)) {
+        return Effect.failCause(
+          Cause.fromReasons<never>(cause.reasons.filter(Cause.isInterruptReason)),
+        );
+      }
+      const safeCause = Cause.fromReasons(
+        cause.reasons.map((reason) =>
+          Cause.isDieReason(reason)
+            ? Cause.makeDieReason(gitError(`roll back ${resource}`, "unexpected cleanup defect"))
+            : reason,
+        ),
+      );
+      return Effect.logError("Git rollback failed", safeCause).pipe(
+        Effect.annotateLogs({ resource, outcome: "failed" }),
+        Effect.as(false),
+      );
+    }),
   );
 
 const rollback = Effect.fn("GitWorktree.create.rollback")(function* (
   spawner: Spawner,
   worktree: CreatedWorktree,
 ) {
-  yield* ignoreCleanupFailure(
-    "Failed to roll back Git worktree",
-    runGit(spawner, worktree.repositoryCwd, "remove worktree", [
+  yield* Effect.logDebug("Worktree rollback started");
+  const worktreeRemoved = yield* ignoreCleanupFailure(
+    "worktree",
+    runGit(spawner, worktree.repositoryCwd, "roll back worktree", [
       "worktree",
       "remove",
       "--force",
@@ -488,15 +582,20 @@ const rollback = Effect.fn("GitWorktree.create.rollback")(function* (
       worktree.cwd,
     ]),
   );
-  yield* ignoreCleanupFailure(
-    "Failed to roll back Git branch",
-    runGit(spawner, worktree.repositoryCwd, "delete worktree branch", [
+  const branchRemoved = yield* ignoreCleanupFailure(
+    "branch",
+    runGit(spawner, worktree.repositoryCwd, "roll back branch", [
       "branch",
       "-D",
       "--",
       worktree.branch,
     ]),
   );
+  if (worktreeRemoved && branchRemoved) {
+    yield* Effect.logDebug("Worktree rollback completed").pipe(
+      Effect.annotateLogs({ outcome: "rolled-back" }),
+    );
+  }
 });
 
 export const make = Effect.fn("GitWorktree.make")(function* (
@@ -517,8 +616,13 @@ export const make = Effect.fn("GitWorktree.make")(function* (
     return yield* Effect.acquireUseRelease(
       acquire(fileSystem, path, spawner, worktreesDir, options),
       (worktree) => use(worktree.cwd),
-      (worktree, exit) => (Exit.isFailure(exit) ? rollback(spawner, worktree) : Effect.void),
-    );
+      (worktree, exit) =>
+        Exit.isFailure(exit)
+          ? rollback(spawner, worktree).pipe(Effect.annotateLogs({ phase: "rollback" }))
+          : Effect.logDebug("Worktree retained").pipe(
+              Effect.annotateLogs({ phase: "commit", outcome: "retained" }),
+            ),
+    ).pipe(Effect.annotateLogs({ component: "git", operation: "create", chatId: options.chatId }));
   });
 
   return {

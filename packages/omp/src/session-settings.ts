@@ -1,15 +1,10 @@
 import * as OmpSettings from "@oh-my-pi/pi-coding-agent/config/settings";
-import { AgentError } from "@pico/contract/errors";
 import type { AbsolutePath } from "@pico/contract/path";
 import type { WorkspacePlatform } from "@pico/contract/workspace-model";
 import * as Effect from "effect/Effect";
+import { agentError } from "./agent-error.ts";
 
 const bundledSkillsDirectory = Bun.fileURLToPath(new URL("./skills", import.meta.url));
-
-const agentError = (message: string, cause: unknown) =>
-  new AgentError({
-    message: cause instanceof Error ? `${message}: ${cause.message}` : message,
-  });
 
 export const prepareSessionSettings = Effect.fn("OmpSession.prepareSettings")(function* (
   cwd: AbsolutePath,

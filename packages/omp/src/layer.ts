@@ -9,7 +9,7 @@ import { AgentRuntime, type ContextUsage, type ShakeResult } from "@pico/contrac
 import { BranchNaming, type BranchNamingHandler } from "@pico/contract/branch-naming";
 import type * as Chat from "@pico/contract/chat-model";
 import { ChatSessionContext } from "@pico/contract/chat-session-context";
-import { AgentError } from "@pico/contract/errors";
+import type { AgentError } from "@pico/contract/errors";
 import type { AbsolutePath } from "@pico/contract/path";
 import type * as Schedule from "@pico/contract/schedule";
 import * as Cause from "effect/Cause";
@@ -18,6 +18,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import { agentError } from "./agent-error.ts";
 import { normalizeAgentEvent, normalizeTranscript } from "./agent-event.ts";
 import { makeExchangeTitleFlow } from "./exchange-title.ts";
 import { makeOmpPromptSender } from "./omp-prompt-sender.ts";
@@ -96,11 +97,6 @@ export const make = Effect.fn("AgentRuntime.make")(function* (
 export const layer = (sessionsDir: AbsolutePath, schedules: Schedule.Schedules["Service"]) =>
   Layer.effect(AgentRuntime, make(sessionsDir, schedules));
 
-const agentError = (message: string, cause: unknown) =>
-  new AgentError({
-    message: cause instanceof Error ? `${message}: ${cause.message}` : message,
-  });
-
 const promiseBoundary = <A>(message: string, evaluate: () => Promise<A>) =>
   Effect.tryPromise({
     try: evaluate,
@@ -116,7 +112,17 @@ const syncBoundary = <A>(message: string, evaluate: () => A) =>
 const ignoreCleanupFailure = <A, E, R>(message: string, effect: Effect.Effect<A, E, R>) =>
   effect.pipe(
     Effect.asVoid,
-    Effect.catchCause((cause) => Effect.logError(message, Cause.pretty(cause))),
+    Effect.catchCause((cause) =>
+      Cause.hasInterruptsOnly(cause)
+        ? Effect.interrupt
+        : Effect.logError(message).pipe(
+            Effect.annotateLogs({
+              component: "omp",
+              operation: "cleanup",
+              failureKind: Cause.hasDies(cause) ? "defect" : "operation",
+            }),
+          ),
+    ),
   );
 
 const closeManagerAfterFailure = (manager: OmpSessionManager.SessionManager, error: AgentError) =>
@@ -189,6 +195,7 @@ const makeFactory = (
   handleBranchNaming: BranchNamingHandler,
 ): SessionFactory => ({
   open: Effect.fn("OmpSession.open")(function* (chatId, emit) {
+    const runEffect = Effect.runPromiseWith(yield* Effect.context<never>());
     const { chat, platform, appendSystemPrompt } = yield* chatSessionContext.resolve(chatId);
     const sessionFile = path.join(sessionsDir, `${chat.id}.jsonl`);
     const settings = yield* prepareSessionSettings(chat.cwd, platform);
@@ -212,17 +219,29 @@ const makeFactory = (
         extensions: [
           makeScheduleExtension({
             caller: { chatId: chat.id, workspaceId: chat.workspaceId },
+            runEffect,
             schedules,
           }),
         ],
       }),
-    ).pipe(Effect.catch((error) => closeManagerAfterFailure(manager, error)));
+    ).pipe(
+      Effect.catch((error) => closeManagerAfterFailure(manager, error)),
+      Effect.annotateLogs({
+        chatId: chat.id,
+        workspaceId: chat.workspaceId,
+        phase: "session-create-rollback",
+      }),
+    );
 
     const titleFlow = makeExchangeTitleFlow({
       chatId: chat.id,
+      runEffect,
       handleBranchNaming,
       history: created.session.messages,
-      sendPrompt: makeOmpPromptSender(created.session, fileSystem, path, crypto),
+      sendPrompt: makeOmpPromptSender(created.session, fileSystem, path, crypto, {
+        chatId: chat.id,
+        runEffect,
+      }),
       generateTitle: (exchange, systemPrompt) =>
         created.session.generateTitle(exchange, systemPrompt),
       getTitleSource: () => created.session.sessionManager.titleSource,
@@ -233,12 +252,36 @@ const makeFactory = (
 
     const unsubscribe = yield* syncBoundary("Failed to subscribe to OMP session events", () =>
       created.session.subscribe((event) => {
-        const normalized = normalizeAgentEvent(event);
-        if (normalized === undefined) return;
-        emit(normalized);
-        titleFlow.observe(normalized);
+        try {
+          const normalized = normalizeAgentEvent(event);
+          if (normalized === undefined) return;
+          emit(normalized);
+          titleFlow.observe(normalized);
+        } catch (cause) {
+          void runEffect(
+            Effect.logWarning(
+              "OMP event callback failed",
+              Cause.fail(agentError("Failed to process OMP session event", cause)),
+            ).pipe(
+              Effect.annotateLogs({
+                component: "omp",
+                operation: "sdk-callback",
+                chatId: chat.id,
+                workspaceId: chat.workspaceId,
+                eventType: event.type,
+              }),
+            ),
+          );
+        }
       }),
-    ).pipe(Effect.catch((error) => disposeSessionAfterFailure(created.session, error)));
+    ).pipe(
+      Effect.catch((error) => disposeSessionAfterFailure(created.session, error)),
+      Effect.annotateLogs({
+        chatId: chat.id,
+        workspaceId: chat.workspaceId,
+        phase: "subscription-rollback",
+      }),
+    );
 
     const opened: OpenedSession = {
       session: created.session,
@@ -252,6 +295,15 @@ const makeFactory = (
       },
       unsubscribe,
     };
+    yield* Effect.logDebug("OMP session ready").pipe(
+      Effect.annotateLogs({
+        component: "omp",
+        operation: "session-open",
+        chatId: chat.id,
+        workspaceId: chat.workspaceId,
+        platform,
+      }),
+    );
     return opened;
   }),
 });

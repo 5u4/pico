@@ -19,6 +19,7 @@ import {
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
+import * as Logger from "effect/Logger";
 import * as Option from "effect/Option";
 import * as Redacted from "effect/Redacted";
 import * as Scope from "effect/Scope";
@@ -513,11 +514,16 @@ describe("Discord input", () => {
     Effect.scoped(
       Effect.gen(function* () {
         const replies: string[] = [];
+        const logs: Array<ReturnType<typeof Logger.formatStructured.log>> = [];
+        const logger = Logger.make((options) => {
+          logs.push(Logger.formatStructured.log(options));
+        });
         let resolveReply: ((reply: string) => void) | undefined;
         let fetchCount = 0;
         const png = pngBytes;
         const httpClient = HttpClient.make((request, url) => {
           fetchCount += 1;
+          if (url.pathname.endsWith("/timeout")) return Effect.never;
           let response: Response;
           if (url.pathname.endsWith("/valid")) {
             response = new Response(Buffer.from(png));
@@ -530,6 +536,14 @@ describe("Discord input", () => {
                   controller.enqueue(png);
                   controller.enqueue(new Uint8Array(20 * 1024 * 1024));
                   controller.close();
+                },
+              }),
+            );
+          } else if (url.pathname.endsWith("/body-failure")) {
+            response = new Response(
+              new ReadableStream({
+                start(controller) {
+                  controller.error(new Error("private attachment body"));
                 },
               }),
             );
@@ -576,6 +590,7 @@ describe("Discord input", () => {
         yield* install(bot, config, () => Effect.void, httpClient).pipe(
           Effect.provideService(Application, application),
           Effect.provide(BunCrypto.layer),
+          Effect.provide(Logger.layer([logger])),
         );
         const handleMessage = handlerFor(bot);
         handleMessage(message({ guildId: 2n }));
@@ -647,6 +662,7 @@ describe("Discord input", () => {
           ),
           policy,
         );
+        assert.deepStrictEqual(logs, []);
         assert.strictEqual(
           yield* Effect.promise(() =>
             invoke({ attachments: [image("https://cdn.discordapp.com/failed")] }),
@@ -654,6 +670,24 @@ describe("Discord input", () => {
           download,
         );
         assert.strictEqual(fetchCount, 4);
+        assert.strictEqual(logs.length, 1);
+        assert.strictEqual(logs[0]?.annotations.reason, "http");
+        assert.strictEqual(logs[0]?.annotations.channelId, "10");
+        assert.strictEqual(logs[0]?.annotations.messageId, "11");
+        yield* Effect.promise(() =>
+          invoke({
+            attachments: [image("https://cdn.discordapp.com/body-failure")],
+          }),
+        );
+        assert.strictEqual(logs.length, 2);
+        assert.strictEqual(logs[1]?.annotations.reason, "body");
+        const timeoutReply = invoke({ attachments: [image("https://cdn.discordapp.com/timeout")] });
+        yield* TestClock.adjust("15 seconds");
+        yield* Effect.promise(() => timeoutReply);
+        assert.strictEqual(logs.length, 3);
+        assert.strictEqual(logs[2]?.annotations.reason, "timeout");
+        assert.notInclude(JSON.stringify(logs), "private attachment body");
+        assert.notInclude(JSON.stringify(logs), "cdn.discordapp.com");
       }),
     ),
   );
@@ -969,7 +1003,9 @@ describe("Discord input", () => {
           shake: (requestedChatId, mode) => {
             shakes.push([requestedChatId, mode]);
             if (requestedChatId === failingChatId) {
-              return Effect.fail(new ApplicationError({ message: "shake failed" }));
+              return Effect.fail(
+                new ApplicationError({ reason: "operation", message: "shake failed" }),
+              );
             }
             switch (mode) {
               case "elide":
@@ -1146,7 +1182,9 @@ describe("Discord input", () => {
           contextUsage: (requestedChatId) => {
             contextReads.push(requestedChatId);
             if (requestedChatId === failingChatId) {
-              return Effect.fail(new ApplicationError({ message: "context failed" }));
+              return Effect.fail(
+                new ApplicationError({ reason: "operation", message: "context failed" }),
+              );
             }
             if (requestedChatId === unavailableChatId) {
               return Effect.succeed<ContextUsage>({ kind: "unavailable" });
@@ -1908,7 +1946,10 @@ describe("Discord input", () => {
                 if (prompt.text === "opening") {
                   yield* Deferred.succeed(firstStarted, undefined);
                   yield* Deferred.await(releaseFirst);
-                  return yield* new ApplicationError({ message: "opening send failed" });
+                  return yield* new ApplicationError({
+                    reason: "operation",
+                    message: "opening send failed",
+                  });
                 }
                 yield* Deferred.succeed(followupSent, undefined);
               }),
@@ -1978,6 +2019,9 @@ describe("Discord input", () => {
       Effect.gen(function* () {
         const order: Array<string> = [];
         const sent: Array<string> = [];
+        const logs: Array<ReturnType<typeof Logger.formatStructured.log>> = [];
+        const logger = Logger.make((options) => logs.push(Logger.formatStructured.log(options)));
+        let failChannelLookup = false;
         let resolveSent: (() => void) | undefined;
         const delivered = new Promise<void>((resolve) => {
           resolveSent = resolve;
@@ -1990,12 +2034,15 @@ describe("Discord input", () => {
           id: 999n,
           events: {},
           helpers: {
-            getChannel: async () => ({
-              id: 20n,
-              guildId: 1n,
-              type: ChannelTypes.PublicThread,
-              parentId: 10n,
-            }),
+            getChannel: async () => {
+              if (failChannelLookup) throw { status: 403, body: '{"code":50013}' };
+              return {
+                id: 20n,
+                guildId: 1n,
+                type: ChannelTypes.PublicThread,
+                parentId: 10n,
+              };
+            },
             sendMessage: async (_channelId, options) => {
               sent.push(options.content);
               resolveSent?.();
@@ -2049,7 +2096,11 @@ describe("Discord input", () => {
             yield* Deferred.await(releaseDrain);
             order.push("drain-end");
           }),
-        ).pipe(Effect.provideService(Application, application), Effect.provide(BunCrypto.layer));
+        ).pipe(
+          Effect.provideService(Application, application),
+          Effect.provide(BunCrypto.layer),
+          Effect.provide(Logger.layer([logger])),
+        );
         const handleInteraction = interactionHandlerFor(bot);
         const invoke = (overrides: Partial<DiscordInteraction>) =>
           new Promise<Parameters<DiscordInteraction["edit"]>[0]>((resolve) => {
@@ -2127,6 +2178,20 @@ describe("Discord input", () => {
           return yield* Effect.die("missing close confirmation button");
         }
         const secondCustomId = secondButton.customId;
+        failChannelLookup = true;
+        const failedLookup = yield* Effect.promise(() =>
+          invoke({
+            type: InteractionTypes.MessageComponent,
+            message: { id: 51n, channelId: 20n },
+            data: { customId: secondCustomId },
+          }),
+        );
+        assert.deepStrictEqual(failedLookup.components, []);
+        assert.strictEqual(logs.length, 1);
+        assert.strictEqual(logs[0]?.annotations.operation, "close-confirmation");
+        assert.strictEqual(logs[0]?.annotations.phase, "resolve-interaction-channel");
+        assert.strictEqual(logs[0]?.annotations.chatId, chatId);
+        failChannelLookup = false;
         const beforeConfirm = order.length;
         const confirming = yield* Effect.promise(() =>
           invoke({
@@ -2151,7 +2216,7 @@ describe("Discord input", () => {
           "archive-thread",
           "reply",
         ]);
-        assert.strictEqual(componentDeferrals, 3);
+        assert.strictEqual(componentDeferrals, 4);
 
         const repeated = yield* Effect.promise(() =>
           invoke({
@@ -2162,11 +2227,340 @@ describe("Discord input", () => {
         );
         assert.strictEqual(repeated.content, "This close confirmation is no longer valid.");
         assert.strictEqual(order.filter((entry) => entry === "core-force").length, 1);
-        assert.strictEqual(componentDeferrals, 4);
+        assert.strictEqual(componentDeferrals, 5);
 
         handlerFor(bot)(message({ channelId: 20n, content: "late" }));
         yield* Effect.promise(() => delivered);
         assert.strictEqual(sent.at(-1), "This chat is closed. Start a new thread to continue.");
+      }),
+    ),
+  );
+  it.effect("supervises immediate deferral, continuation defects, and canceled requests", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const logs: Array<ReturnType<typeof Logger.formatStructured.log>> = [];
+        let logged = Promise.withResolvers<void>();
+        const logger = Logger.make((options) => {
+          logs.push(Logger.formatStructured.log(options));
+          logged.resolve();
+        });
+        let edited = 0;
+        const bot: DiscordInputBot = {
+          id: 999n,
+          events: {},
+          helpers: {
+            getChannel: async () => {
+              throw new Error("unexpected channel lookup");
+            },
+            sendMessage: async () => undefined,
+            editChannel: async () => undefined,
+            startThreadWithMessage: async () => {
+              throw new Error("unexpected thread creation");
+            },
+          },
+        };
+        const application = Application.of({
+          createWorkspace: () => Effect.die("unexpected workspace creation"),
+          getOrCreateWorkspaceByBinding: () => Effect.die("unexpected workspace creation"),
+          bindWorkspace: () => Effect.die("unexpected workspace binding"),
+          createChat: () => Effect.die("unexpected chat creation"),
+          findWorkspaceByPlatformId: () => Effect.die("unexpected workspace lookup"),
+          findChatByPlatformId: () => Effect.die("unexpected chat lookup"),
+          findChatPlatformBinding: () => Effect.die("unexpected binding lookup"),
+          transcript: () => Effect.die("unexpected transcript read"),
+          sendMessage: () => Effect.die("unexpected message send"),
+          abort: () => Effect.die("unexpected abort"),
+          contextUsage: () => Effect.die("unexpected context read"),
+          shake: () => Effect.die("unexpected shake"),
+          closeChat: () => Effect.die("unexpected close"),
+        });
+        const installed = install(bot, config).pipe(
+          Effect.provideService(Application, application),
+          Effect.provide(BunCrypto.layer),
+          Effect.provide(Logger.layer([logger])),
+        );
+        yield* installed;
+        const invoke = interactionHandlerFor(bot);
+        let acknowledged = false;
+        invoke(
+          interaction({
+            id: 51n,
+            defer: () => {
+              acknowledged = true;
+              throw { status: 403, body: '{"code":50013,"message":"private-defer"}' };
+            },
+            edit: async () => {
+              edited++;
+            },
+          }),
+        );
+        assert.isTrue(acknowledged);
+        yield* Effect.promise(() => logged.promise);
+        assert.strictEqual(logs.length, 1);
+        assert.strictEqual(logs[0]?.annotations.phase, "defer");
+        assert.strictEqual(logs[0]?.annotations.interactionId, "51");
+        logged = Promise.withResolvers<void>();
+        invoke(
+          interaction({
+            defer: () => Promise.reject(new Error("private-defer-rejection")),
+            edit: async () => {
+              edited++;
+            },
+          }),
+        );
+        yield* Effect.promise(() => logged.promise);
+        assert.strictEqual(logs.length, 2);
+        logged = Promise.withResolvers<void>();
+        invoke(
+          interaction({
+            data: {
+              name: "bind",
+              get options(): never {
+                throw new Error("private-continuation");
+              },
+            },
+            edit: async () => {
+              edited++;
+            },
+          }),
+        );
+        yield* Effect.promise(() => logged.promise);
+        assert.strictEqual(logs.length, 3);
+        assert.strictEqual(logs[2]?.annotations.phase, "request");
+        assert.strictEqual(edited, 0);
+        assert.notInclude(JSON.stringify(logs), "private-");
+
+        const pending = Promise.withResolvers<unknown>();
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            yield* installed;
+            interactionHandlerFor(bot)(
+              interaction({
+                defer: () => pending.promise,
+                edit: async () => {
+                  edited++;
+                },
+              }),
+            );
+          }),
+        );
+        pending.resolve(undefined);
+        yield* Effect.yieldNow;
+        assert.strictEqual(logs.length, 3);
+        assert.strictEqual(edited, 0);
+      }),
+    ),
+  );
+
+  it.effect("retains message context across failed sends and independent attachment replies", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const logs: Array<ReturnType<typeof Logger.formatStructured.log>> = [];
+        const sendStarted = yield* Deferred.make<void>();
+        const releaseSend = yield* Deferred.make<void>();
+        const sendReported = Promise.withResolvers<void>();
+        const replyReported = Promise.withResolvers<void>();
+        const logger = Logger.make((options) => {
+          const entry = Logger.formatStructured.log(options);
+          logs.push(entry);
+          if (entry.annotations.operation !== "message-request") return;
+          if (entry.annotations.messageId === "101") sendReported.resolve();
+          if (entry.annotations.messageId === "102") replyReported.resolve();
+        });
+        const bot: DiscordInputBot = {
+          id: 999n,
+          events: {},
+          helpers: {
+            getChannel: async () => ({
+              id: 20n,
+              guildId: 1n,
+              parentId: 10n,
+              type: ChannelTypes.PublicThread,
+            }),
+            sendMessage: () => Promise.reject({ status: 403, body: "private-reply" }),
+            editChannel: async () => undefined,
+            startThreadWithMessage: async () => {
+              throw new Error("unexpected thread creation");
+            },
+          },
+        };
+        const application = Application.of({
+          createWorkspace: () => Effect.die("unexpected workspace creation"),
+          getOrCreateWorkspaceByBinding: () => Effect.die("unexpected workspace creation"),
+          bindWorkspace: () => Effect.die("unexpected workspace binding"),
+          createChat: () => Effect.die("unexpected chat creation"),
+          findWorkspaceByPlatformId: () => Effect.die("unexpected workspace lookup"),
+          findChatByPlatformId: () =>
+            Effect.succeed(
+              Option.some({
+                id: chatId,
+                workspaceId,
+                cwd: defaultCwd,
+                externalId: "20",
+                createdAt: 0,
+                archivedAt: null,
+              }),
+            ),
+          findChatPlatformBinding: () => Effect.die("unexpected binding lookup"),
+          transcript: () => Effect.die("unexpected transcript read"),
+          sendMessage: () =>
+            Effect.gen(function* () {
+              yield* Deferred.succeed(sendStarted, undefined);
+              yield* Deferred.await(releaseSend);
+              return yield* Effect.fail(
+                new ApplicationError({ reason: "operation", message: "Message send failed" }),
+              );
+            }),
+          abort: () => Effect.die("unexpected abort"),
+          contextUsage: () => Effect.die("unexpected context read"),
+          shake: () => Effect.die("unexpected shake"),
+          closeChat: () => Effect.die("unexpected close"),
+        });
+        const httpClient = HttpClient.make((request) =>
+          Effect.succeed(HttpClientResponse.fromWeb(request, new Response(null, { status: 500 }))),
+        );
+        yield* install(bot, config, () => Effect.void, httpClient).pipe(
+          Effect.provideService(Application, application),
+          Effect.provide(BunCrypto.layer),
+          Effect.provide(Logger.layer([logger])),
+        );
+        const invoke = handlerFor(bot);
+        invoke(message({ id: 101n, channelId: 20n, content: "private-prompt" }));
+        yield* Deferred.await(sendStarted);
+        invoke(
+          message({
+            id: 102n,
+            channelId: 30n,
+            content: "private-attachment-prompt",
+            attachments: [
+              {
+                filename: "private-image.png",
+                size: 1,
+                url: "https://cdn.discordapp.com/private-image",
+              },
+            ],
+          }),
+        );
+        yield* Effect.promise(() => replyReported.promise);
+        yield* Deferred.succeed(releaseSend, undefined);
+        yield* Effect.promise(() => sendReported.promise);
+        assert.deepStrictEqual(
+          logs.map((entry) => entry.annotations.operation),
+          ["download-attachment", "message-request", "message-request"],
+        );
+        assert.deepStrictEqual(
+          logs.slice(1).map(({ annotations }) => ({
+            phase: annotations.phase,
+            chatId: annotations.chatId,
+            workspaceId: annotations.workspaceId,
+            threadId: annotations.threadId,
+            guildId: annotations.guildId,
+            channelId: annotations.channelId,
+            messageId: annotations.messageId,
+          })),
+          [
+            {
+              phase: "reject-attachments",
+              chatId: undefined,
+              workspaceId: undefined,
+              threadId: undefined,
+              guildId: "1",
+              channelId: "30",
+              messageId: "102",
+            },
+            {
+              phase: "send-prompt",
+              chatId,
+              workspaceId,
+              threadId: "20",
+              guildId: "1",
+              channelId: "20",
+              messageId: "101",
+            },
+          ],
+        );
+        assert.isTrue(logs.every((entry) => entry.level === "ERROR"));
+        assert.notInclude(JSON.stringify(logs), "private-");
+      }),
+    ),
+  );
+
+  it.effect("reports request failure separately from failed interaction reply delivery", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const logs: Array<ReturnType<typeof Logger.formatStructured.log>> = [];
+        const delivered = Promise.withResolvers<void>();
+        const logger = Logger.make((options) => {
+          logs.push(Logger.formatStructured.log(options));
+          if (logs.length === 2) delivered.resolve();
+        });
+        const bot: DiscordInputBot = {
+          id: 999n,
+          events: {},
+          helpers: {
+            getChannel: async () => ({
+              id: 20n,
+              guildId: 1n,
+              parentId: 10n,
+              type: ChannelTypes.PublicThread,
+            }),
+            sendMessage: async () => undefined,
+            editChannel: async () => undefined,
+            startThreadWithMessage: async () => {
+              throw new Error("unexpected thread creation");
+            },
+          },
+        };
+        const application = Application.of({
+          createWorkspace: () => Effect.die("unexpected workspace creation"),
+          getOrCreateWorkspaceByBinding: () => Effect.die("unexpected workspace creation"),
+          bindWorkspace: () => Effect.die("unexpected workspace binding"),
+          createChat: () => Effect.die("unexpected chat creation"),
+          findWorkspaceByPlatformId: () => Effect.die("unexpected workspace lookup"),
+          findChatByPlatformId: () =>
+            Effect.succeed(
+              Option.some({
+                id: chatId,
+                workspaceId,
+                cwd: defaultCwd,
+                externalId: "20",
+                createdAt: 0,
+                archivedAt: null,
+              }),
+            ),
+          findChatPlatformBinding: () => Effect.die("unexpected binding lookup"),
+          transcript: () => Effect.die("unexpected transcript read"),
+          sendMessage: () => Effect.die("unexpected message send"),
+          abort: () => Effect.die("unexpected abort"),
+          contextUsage: () => Effect.die("unexpected context read"),
+          shake: () =>
+            Effect.fail(new ApplicationError({ reason: "operation", message: "Shake failed" })),
+          closeChat: () => Effect.die("unexpected close"),
+        });
+        yield* install(bot, config).pipe(
+          Effect.provideService(Application, application),
+          Effect.provide(BunCrypto.layer),
+          Effect.provide(Logger.layer([logger])),
+        );
+        interactionHandlerFor(bot)(
+          interaction({
+            channelId: 20n,
+            data: { name: "shake", options: [] },
+            edit: () => Promise.reject({ status: 500, body: "private-response" }),
+          }),
+        );
+        yield* Effect.promise(() => delivered.promise);
+        assert.deepStrictEqual(
+          logs.map((entry) => entry.annotations.operation),
+          ["shake-chat", "edit-interaction"],
+        );
+        assert.isTrue(logs.every((entry) => entry.annotations.chatId === chatId));
+        assert.isTrue(logs.every((entry) => entry.annotations.workspaceId === workspaceId));
+        assert.deepStrictEqual(
+          logs.map((entry) => entry.annotations.phase),
+          ["shake-chat", "edit-interaction"],
+        );
+        assert.notInclude(JSON.stringify(logs), "private-response");
       }),
     ),
   );

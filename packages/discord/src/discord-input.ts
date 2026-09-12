@@ -26,21 +26,7 @@ import * as Stream from "effect/Stream";
 import type * as HttpClient from "effect/unstable/http/HttpClient";
 import type * as HttpClientResponse from "effect/unstable/http/HttpClientResponse";
 import * as DiscordCommand from "./discord-command.ts";
-
-class DiscordError extends Schema.TaggedError<DiscordError>()("DiscordError", {
-  message: Schema.String,
-}) {}
-
-export const discordError = (message: string, cause: unknown) =>
-  new DiscordError({
-    message: cause instanceof Error ? `${message}: ${cause.message}` : message,
-  });
-
-export const promiseBoundary = <A>(message: string, evaluate: () => Promise<A>) =>
-  Effect.tryPromise({
-    try: evaluate,
-    catch: (cause) => discordError(message, cause),
-  });
+import { discordError, promiseBoundary, reportFailure } from "./discord-error.ts";
 
 export interface DiscordMessage {
   readonly guildId?: bigint;
@@ -66,6 +52,7 @@ export interface DiscordChannel {
 }
 
 export interface DiscordInteraction {
+  readonly id?: bigint;
   readonly type: InteractionTypes;
   readonly guildId?: bigint;
   readonly channelId?: bigint;
@@ -134,10 +121,24 @@ const attachmentDownloadMessage =
 
 class DiscordAttachmentError extends Schema.TaggedError<DiscordAttachmentError>()(
   "DiscordAttachmentError",
-  { reply: Schema.String },
+  {
+    reply: Schema.String,
+    reason: Schema.Literals(["policy", "transport", "http", "body", "timeout", "configuration"]),
+    status: Schema.optional(Schema.Number),
+    attachmentIndex: Schema.optional(Schema.Number),
+    phase: Schema.optional(Schema.Literals(["attachment", "prompt"])),
+  },
 ) {}
 
-const attachmentError = (reply: string) => new DiscordAttachmentError({ reply });
+const attachmentError = (
+  reason: DiscordAttachmentError["reason"],
+  fields: Pick<DiscordAttachmentError, "status" | "attachmentIndex" | "phase"> = {},
+) =>
+  new DiscordAttachmentError({
+    reply: reason === "policy" ? attachmentPolicyMessage : attachmentDownloadMessage,
+    reason,
+    ...fields,
+  });
 
 const sanitizeAttachmentName = (name: string, index: number) => {
   const safeCharacters = Array.from(name, (character) => {
@@ -187,7 +188,7 @@ const validateDecodedImage = Effect.fn("Discord.validateDecodedImage")(function*
 ) {
   const metadata = yield* Effect.tryPromise({
     try: () => new Bun.Image(bytes).metadata(),
-    catch: () => attachmentError(attachmentPolicyMessage),
+    catch: () => attachmentError("policy"),
   });
   if (
     metadata.width < 1 ||
@@ -196,7 +197,7 @@ const validateDecodedImage = Effect.fn("Discord.validateDecodedImage")(function*
     metadata.height > maximumImageEdge ||
     metadata.width * metadata.height > maximumImagePixels
   ) {
-    return yield* Effect.fail(attachmentError(attachmentPolicyMessage));
+    return yield* Effect.fail(attachmentError("policy"));
   }
 });
 
@@ -215,7 +216,7 @@ const attachmentUrl = (value: string) =>
       }
       return url;
     },
-    catch: () => attachmentError(attachmentDownloadMessage),
+    catch: () => new DiscordAttachmentError({ reason: "policy", reply: attachmentDownloadMessage }),
   });
 
 interface AttachmentBodyState {
@@ -230,25 +231,25 @@ const readBoundedBody = Effect.fn("Discord.readBoundedAttachment")(function* (
   limit: number,
 ) {
   if (response.status < 200 || response.status >= 300) {
-    return yield* Effect.fail(attachmentError(attachmentDownloadMessage));
+    return yield* Effect.fail(attachmentError("http", { status: response.status }));
   }
   const contentLength = response.headers["content-length"];
   if (contentLength !== undefined) {
     const declared = Number(contentLength);
     if (Number.isFinite(declared) && declared > limit) {
-      return yield* Effect.fail(attachmentError(attachmentPolicyMessage));
+      return yield* Effect.fail(attachmentError("policy"));
     }
   }
 
   const state = yield* response.stream.pipe(
     Stream.runFoldEffect(emptyAttachmentBody, (current, chunk) => {
       const length = current.length + chunk.byteLength;
-      if (length > limit) return Effect.fail(attachmentError(attachmentPolicyMessage));
+      if (length > limit) return Effect.fail(attachmentError("policy"));
       current.chunks.push(chunk);
       return Effect.succeed({ chunks: current.chunks, length });
     }),
     Effect.mapError((error) =>
-      error instanceof DiscordAttachmentError ? error : attachmentError(attachmentDownloadMessage),
+      error instanceof DiscordAttachmentError ? error : attachmentError("body"),
     ),
   );
   const bytes = new Uint8Array(state.length);
@@ -266,43 +267,41 @@ const projectDiscordPrompt = Effect.fn("Discord.projectPrompt")(function* (
 ) {
   const source = message.attachments ?? [];
   if (source.length > maximumAttachmentCount) {
-    return yield* Effect.fail(attachmentError(attachmentPolicyMessage));
+    return yield* Effect.fail(attachmentError("policy"));
   }
   let declaredTotal = 0;
   for (const attachment of source) {
     if (!Number.isSafeInteger(attachment.size) || attachment.size < 0) {
-      return yield* Effect.fail(attachmentError(attachmentPolicyMessage));
+      return yield* Effect.fail(attachmentError("policy"));
     }
     declaredTotal += attachment.size;
     if (attachment.size > maximumAttachmentBytes || declaredTotal > maximumMessageAttachmentBytes) {
-      return yield* Effect.fail(attachmentError(attachmentPolicyMessage));
+      return yield* Effect.fail(attachmentError("policy"));
     }
-  }
-  if (source.length > 0 && httpClient === undefined) {
-    return yield* Effect.fail(attachmentError(attachmentDownloadMessage));
   }
 
   const attachments: AgentMessage.AgentImageAttachment[] = [];
   let actualTotal = 0;
   for (const [index, attachment] of source.entries()) {
     if (httpClient === undefined) {
-      return yield* Effect.fail(attachmentError(attachmentDownloadMessage));
+      return yield* Effect.fail(attachmentError("configuration", { attachmentIndex: index }));
     }
     const url = yield* attachmentUrl(attachment.url);
     const remaining = maximumMessageAttachmentBytes - actualTotal;
     const bytes = yield* httpClient.get(url).pipe(
-      Effect.mapError(() => attachmentError(attachmentDownloadMessage)),
+      Effect.mapError(() => attachmentError("transport")),
       Effect.flatMap((response) =>
         readBoundedBody(response, Math.min(maximumAttachmentBytes, remaining)),
       ),
       Effect.timeout("15 seconds"),
       Effect.catchTag("TimeoutError", () =>
-        Effect.fail(attachmentError(attachmentDownloadMessage)),
+        Effect.fail(attachmentError("timeout", { phase: "attachment" })),
       ),
+      Effect.mapError((error) => new DiscordAttachmentError({ ...error, attachmentIndex: index })),
     );
     const mimeType = sniffImageMimeType(bytes);
     if (mimeType === undefined) {
-      return yield* Effect.fail(attachmentError(attachmentPolicyMessage));
+      return yield* Effect.fail(attachmentError("policy"));
     }
     yield* validateDecodedImage(bytes);
     actualTotal += bytes.byteLength;
@@ -397,7 +396,7 @@ export const install = Effect.fn("DiscordInput.install")(function* <
       return Option.none<bigint>();
     }
     const threadId = yield* decodeThreadId(binding.value.externalId).pipe(
-      Effect.mapError(() => discordError("Invalid Discord thread binding", undefined)),
+      Effect.mapError(() => discordError("decode-thread-binding", undefined)),
     );
     cacheChat(threadId, chatId);
     return Option.some(threadId);
@@ -412,9 +411,8 @@ export const install = Effect.fn("DiscordInput.install")(function* <
     return Option.map(workspace, (value) => value.id);
   });
 
-  const resolveCommandThread = Effect.fn("Discord.resolveCommandThread")(function* (
-    interaction: Interaction,
-  ) {
+  // Effect.fn restores Context on return, so request helpers must stay in the terminal log scope.
+  const resolveCommandThread = Effect.fnUntraced(function* (interaction: Interaction) {
     const guildId = interaction.guildId;
     const channelId = interaction.channelId;
     if (
@@ -425,7 +423,8 @@ export const install = Effect.fn("DiscordInput.install")(function* <
       return Option.none<CommandThread>();
     }
 
-    const channel = yield* promiseBoundary("Failed to resolve Discord interaction channel", () =>
+    yield* Effect.annotateLogsScoped({ phase: "resolve-interaction-channel" });
+    const channel = yield* promiseBoundary("resolve-interaction-channel", () =>
       bot.helpers.getChannel(channelId),
     );
     if (channel.guildId !== guildId || !isThread(channel.type) || channel.parentId === undefined) {
@@ -435,11 +434,16 @@ export const install = Effect.fn("DiscordInput.install")(function* <
     return Option.some({ guildId, parentId: channel.parentId, threadId: channel.id });
   });
 
-  const resolveCommandChatId = Effect.fn("Discord.resolveCommandChatId")(function* (
-    thread: CommandThread,
-  ) {
+  const resolveCommandChatId = Effect.fnUntraced(function* (thread: CommandThread) {
+    yield* Effect.annotateLogsScoped({
+      phase: "resolve-chat",
+      threadId: thread.threadId.toString(),
+    });
     const cached = chatIds.get(thread.threadId);
-    if (cached !== undefined) return Option.some(cached);
+    if (cached !== undefined) {
+      yield* Effect.annotateLogsScoped({ chatId: cached });
+      return Option.some(cached);
+    }
 
     const chat = yield* application.findChatByPlatformId(
       "discord",
@@ -449,32 +453,37 @@ export const install = Effect.fn("DiscordInput.install")(function* <
     if (Option.isNone(chat)) return Option.none<Chat.ChatId>();
     workspaceIds.set(thread.parentId, chat.value.workspaceId);
     cacheChat(thread.threadId, chat.value.id);
+    yield* Effect.annotateLogsScoped({
+      chatId: chat.value.id,
+      workspaceId: chat.value.workspaceId,
+    });
     return Option.some(chat.value.id);
   });
 
-  const sendMessageToChat = Effect.fn("Discord.sendMessageToChat")(function* (
+  const sendMessageToChat = Effect.fnUntraced(function* (
     chatId: Chat.ChatId,
     prompt: AgentMessage.AgentPrompt,
     channelId: bigint,
   ) {
+    yield* Effect.annotateLogsScoped({ phase: "send-prompt", chatId });
     yield* application
       .sendMessage(chatId, prompt)
       .pipe(
         Effect.catchTag("ChatClosed", () =>
-          promiseBoundary("Failed to report closed Discord chat", () =>
+          promiseBoundary("reply-chat-closed", () =>
             bot.helpers.sendMessage(channelId, { content: closedMessage, allowedMentions }),
           ).pipe(Effect.asVoid),
         ),
       );
   });
 
-  const processMessage = Effect.fn("Discord.processMessage")(function* (
+  const processMessage = Effect.fnUntraced(function* (
     message: Message,
     knownChannel?: DiscordChannel,
   ) {
     const sourceAttachments = message.attachments ?? [];
     if (message.content.trim().length === 0 && sourceAttachments.length === 0) {
-      yield* promiseBoundary("Failed to reject empty Discord message", () =>
+      yield* promiseBoundary("reply-empty-message", () =>
         bot.helpers.sendMessage(message.channelId, {
           content: "Send text or an image to start or continue a chat.",
           allowedMentions,
@@ -483,15 +492,32 @@ export const install = Effect.fn("DiscordInput.install")(function* <
       return;
     }
 
+    yield* Effect.annotateLogsScoped({ phase: "project-prompt" });
     const prompt = yield* projectDiscordPrompt(message, httpClient).pipe(
       Effect.timeout("30 seconds"),
       Effect.catchTag("TimeoutError", () =>
-        Effect.fail(attachmentError(attachmentDownloadMessage)),
+        Effect.fail(attachmentError("timeout", { phase: "prompt" })),
       ),
-      Effect.catchTag("DiscordAttachmentError", (error) =>
-        promiseBoundary("Failed to reject Discord attachments", () =>
-          bot.helpers.sendMessage(message.channelId, { content: error.reply, allowedMentions }),
-        ).pipe(Effect.as(undefined)),
+      Effect.catchTag(
+        "DiscordAttachmentError",
+        Effect.fnUntraced(function* (error) {
+          if (error.reason !== "policy") {
+            yield* Effect.logError("Discord attachment download failed", Cause.fail(error)).pipe(
+              Effect.annotateLogs({
+                operation: "download-attachment",
+                reason: error.reason,
+                status: error.status,
+                attachmentIndex: error.attachmentIndex,
+                timeoutPhase: error.phase,
+              }),
+            );
+          }
+          yield* Effect.annotateLogsScoped({ phase: "reject-attachments" });
+          yield* promiseBoundary("reject-attachments", () =>
+            bot.helpers.sendMessage(message.channelId, { content: error.reply, allowedMentions }),
+          );
+          return undefined;
+        }),
       ),
     );
     if (prompt === undefined) return;
@@ -502,15 +528,15 @@ export const install = Effect.fn("DiscordInput.install")(function* <
       return;
     }
 
+    yield* Effect.annotateLogsScoped({ phase: "resolve-channel" });
     const channel =
       knownChannel ??
-      (yield* promiseBoundary("Failed to resolve Discord channel", () =>
-        bot.helpers.getChannel(message.channelId),
-      ));
+      (yield* promiseBoundary("resolve-channel", () => bot.helpers.getChannel(message.channelId)));
 
     if (isThread(channel.type)) {
       if (channel.parentId === undefined) return;
 
+      yield* Effect.annotateLogsScoped({ phase: "resolve-chat", threadId: channel.id.toString() });
       const chat = yield* application.findChatByPlatformId(
         "discord",
         channel.parentId.toString(),
@@ -520,17 +546,20 @@ export const install = Effect.fn("DiscordInput.install")(function* <
 
       workspaceIds.set(channel.parentId, chat.value.workspaceId);
       cacheChat(channel.id, chat.value.id);
+      yield* Effect.annotateLogsScoped({ workspaceId: chat.value.workspaceId });
       yield* sendMessageToChat(chat.value.id, prompt, message.channelId);
       return;
     }
 
     if (channel.type !== ChannelTypes.GuildText) return;
 
+    yield* Effect.annotateLogsScoped({ phase: "resolve-workspace" });
     const maybeWorkspaceId = yield* findWorkspace(channel.id);
     let workspaceId: Workspace.WorkspaceId;
     if (Option.isSome(maybeWorkspaceId)) {
       workspaceId = maybeWorkspaceId.value;
     } else {
+      yield* Effect.annotateLogsScoped({ phase: "create-workspace" });
       const workspace = yield* application.getOrCreateWorkspaceByBinding({
         name: channel.name ?? `Discord channel ${channel.id}`,
         binding: { platform: "discord", externalId: channel.id.toString() },
@@ -540,7 +569,8 @@ export const install = Effect.fn("DiscordInput.install")(function* <
       workspaceIds.set(channel.id, workspace.id);
       workspaceId = workspace.id;
     }
-    const thread = yield* promiseBoundary("Failed to create Discord thread", () =>
+    yield* Effect.annotateLogsScoped({ phase: "create-thread", workspaceId });
+    const thread = yield* promiseBoundary("create-thread", () =>
       bot.helpers.startThreadWithMessage(channel.id, message.id, {
         name:
           threadName(message.content) ||
@@ -549,6 +579,7 @@ export const install = Effect.fn("DiscordInput.install")(function* <
         autoArchiveDuration: 1_440,
       }),
     );
+    yield* Effect.annotateLogsScoped({ phase: "create-chat", threadId: thread.id.toString() });
     yield* threadLock(thread.id).withPermit(
       Effect.gen(function* () {
         const chat = yield* application.createChat({
@@ -561,7 +592,7 @@ export const install = Effect.fn("DiscordInput.install")(function* <
     );
   });
 
-  const handleMessage = Effect.fn("Discord.handleMessage")(function* (message: Message) {
+  const handleMessage = Effect.fnUntraced(function* (message: Message) {
     if (
       message.guildId === undefined ||
       !allowedGuildIds.has(message.guildId.toString()) ||
@@ -577,7 +608,8 @@ export const install = Effect.fn("DiscordInput.install")(function* <
     const entry = inputLock(message.channelId);
     const parentChannel = yield* entry.semaphore.withPermit(
       Effect.gen(function* () {
-        const channel = yield* promiseBoundary("Failed to resolve Discord channel", () =>
+        yield* Effect.annotateLogsScoped({ phase: "resolve-channel" });
+        const channel = yield* promiseBoundary("resolve-channel", () =>
           bot.helpers.getChannel(message.channelId),
         );
         if (isThread(channel.type)) {
@@ -633,7 +665,7 @@ export const install = Effect.fn("DiscordInput.install")(function* <
     }
   };
 
-  const bindResponse = Effect.fn("Discord.bindResponse")(function* (
+  const bindResponse = Effect.fnUntraced(function* (
     interaction: Interaction,
     command: DiscordCommand.BindCommand,
   ) {
@@ -647,13 +679,15 @@ export const install = Effect.fn("DiscordInput.install")(function* <
       return "This command can only be used in a configured server text channel.";
     }
 
-    const channel = yield* promiseBoundary("Failed to resolve Discord interaction channel", () =>
+    yield* Effect.annotateLogsScoped({ phase: "resolve-interaction-channel" });
+    const channel = yield* promiseBoundary("resolve-interaction-channel", () =>
       bot.helpers.getChannel(channelId),
     );
     if (channel.guildId !== guildId || channel.type !== ChannelTypes.GuildText) {
       return "This command can only be used in a configured server text channel.";
     }
 
+    yield* Effect.annotateLogsScoped({ phase: "bind-workspace" });
     switch (command.kind) {
       case "malformedBind":
         return "Use /bind set with cwd, or /bind worktree with repository, branch, and prefix.";
@@ -664,6 +698,7 @@ export const install = Effect.fn("DiscordInput.install")(function* <
           configuration: { kind: "direct", cwd: command.cwd },
         });
         workspaceIds.set(channel.id, workspace.id);
+        yield* Effect.annotateLogsScoped({ workspaceId: workspace.id });
         return `Workspace binding updated to ${workspace.defaultCwd}. Worktrees are disabled for new chats.`;
       }
       case "bindWorktree": {
@@ -677,6 +712,7 @@ export const install = Effect.fn("DiscordInput.install")(function* <
           },
         });
         workspaceIds.set(channel.id, workspace.id);
+        yield* Effect.annotateLogsScoped({ workspaceId: workspace.id });
         return `Workspace worktrees configured from ${workspace.defaultCwd}. This affects new chats only.`;
       }
       default: {
@@ -717,7 +753,7 @@ export const install = Effect.fn("DiscordInput.install")(function* <
     }
   };
 
-  const shakeResponse = Effect.fn("Discord.shakeResponse")(function* (
+  const shakeResponse = Effect.fnUntraced(function* (
     interaction: Interaction,
     command: DiscordCommand.ShakeCommand,
   ) {
@@ -730,6 +766,7 @@ export const install = Effect.fn("DiscordInput.install")(function* <
 
     const chatId = yield* resolveCommandChatId(thread.value);
     if (Option.isNone(chatId)) return policyCopy;
+    yield* Effect.annotateLogsScoped({ phase: "shake-chat" });
     return formatShakeResult(yield* application.shake(chatId.value, command.mode));
   });
 
@@ -752,25 +789,26 @@ export const install = Effect.fn("DiscordInput.install")(function* <
     return lines.join("\n");
   };
 
-  const contextResponse = Effect.fn("Discord.contextResponse")(function* (
-    interaction: Interaction,
-  ) {
+  const contextResponse = Effect.fnUntraced(function* (interaction: Interaction) {
     const policyCopy = "This command can only be used in a pico-owned Discord thread.";
     const thread = yield* resolveCommandThread(interaction);
     if (Option.isNone(thread)) return policyCopy;
 
     const chatId = yield* resolveCommandChatId(thread.value);
     if (Option.isNone(chatId)) return policyCopy;
+    yield* Effect.annotateLogsScoped({ phase: "context-usage" });
     return formatContextUsage(yield* application.contextUsage(chatId.value));
   });
 
-  const archiveThread = Effect.fn("Discord.archiveThread")(function* (threadId: bigint) {
+  const archiveThread = Effect.fnUntraced(function* (threadId: bigint) {
+    yield* Effect.annotateLogsScoped({ phase: "drain-output" });
     yield* drainOutput();
-    yield* promiseBoundary("Failed to archive Discord thread", () =>
+    yield* Effect.annotateLogsScoped({ phase: "archive-thread" });
+    yield* promiseBoundary("archive-thread", () =>
       bot.helpers.editChannel(threadId, { archived: true, locked: true }),
     );
   });
-  const closeResultResponse = Effect.fn("Discord.closeResultResponse")(function* (
+  const closeResultResponse = Effect.fnUntraced(function* (
     result: CloseChatResult,
     thread: CommandThread,
     requesterId: bigint,
@@ -783,8 +821,15 @@ export const install = Effect.fn("DiscordInput.install")(function* <
     };
     if (result.kind === "closed") {
       clearChatConfirmations();
-      yield* archiveThread(thread.threadId);
-      return "Chat closed. The transcript remains available in this archived thread.";
+      return yield* archiveThread(thread.threadId).pipe(
+        Effect.as("Chat closed. The transcript remains available in this archived thread."),
+        Effect.catchCause((cause) =>
+          reportFailure("archive-thread", cause).pipe(
+            Effect.as("Chat closed, but pico could not archive the Discord thread."),
+          ),
+        ),
+        Effect.annotateLogs({ chatId, threadId: thread.threadId.toString() }),
+      );
     }
 
     const nonce = yield* crypto.randomUUIDv4;
@@ -800,6 +845,8 @@ export const install = Effect.fn("DiscordInput.install")(function* <
     run(
       Effect.sleep(Duration.millis(closeConfirmationTtl)).pipe(
         Effect.andThen(Effect.sync(() => closeConfirmations.delete(nonce))),
+        Effect.catchCause((cause) => reportFailure("expire-close-confirmation", cause)),
+        Effect.annotateLogs({ chatId, threadId: thread.threadId.toString() }),
       ),
     );
     return {
@@ -821,7 +868,7 @@ export const install = Effect.fn("DiscordInput.install")(function* <
     } satisfies ComponentResponse;
   });
 
-  const closeResponse = Effect.fn("Discord.closeResponse")(function* (interaction: Interaction) {
+  const closeResponse = Effect.fnUntraced(function* (interaction: Interaction) {
     const policyCopy = "This command can only be used in a persisted pico chat thread.";
     const requesterId = interaction.user?.id;
     if (requesterId === undefined) return policyCopy;
@@ -830,11 +877,12 @@ export const install = Effect.fn("DiscordInput.install")(function* <
     const chatId = yield* resolveCommandChatId(thread.value);
     if (Option.isNone(chatId)) return policyCopy;
 
+    yield* Effect.annotateLogsScoped({ phase: "close-chat" });
     const result = yield* application.closeChat(chatId.value, { allowDirtyWorktree: false });
     return yield* closeResultResponse(result, thread.value, requesterId, chatId.value);
   });
 
-  const closeConfirmationResponse = Effect.fn("Discord.closeConfirmationResponse")(function* (
+  const closeConfirmationResponse = Effect.fnUntraced(function* (
     interaction: Interaction,
     nonce: string,
   ) {
@@ -854,6 +902,7 @@ export const install = Effect.fn("DiscordInput.install")(function* <
       return "Only the person who requested this close can confirm it.";
     }
 
+    yield* Effect.annotateLogsScoped({ chatId: confirmation.chatId });
     const thread = yield* resolveCommandThread(interaction);
     if (Option.isNone(thread)) return "This close confirmation is no longer valid.";
     const chatId = yield* resolveCommandChatId(thread.value);
@@ -870,6 +919,7 @@ export const install = Effect.fn("DiscordInput.install")(function* <
       } satisfies ComponentResponse;
     }
 
+    yield* Effect.annotateLogsScoped({ phase: "close-chat" });
     return yield* application.closeChat(chatId.value, { allowDirtyWorktree: true }).pipe(
       Effect.flatMap((result) =>
         closeResultResponse(result, thread.value, confirmation.requesterId, chatId.value),
@@ -879,18 +929,10 @@ export const install = Effect.fn("DiscordInput.install")(function* <
           ? ({ content: response, components: [] } satisfies ComponentResponse)
           : response,
       ),
-      Effect.catchCause((cause) =>
-        Effect.logError("Discord close confirmation failed", Cause.pretty(cause)).pipe(
-          Effect.as({
-            content: "pico could not close this chat.",
-            components: [],
-          } satisfies ComponentResponse),
-        ),
-      ),
     );
   });
 
-  const handleInteraction = Effect.fn("Discord.handleInteraction")(function* (
+  const handleInteraction = Effect.fnUntraced(function* (
     interaction: Interaction,
     command: DiscordCommand.Command,
   ) {
@@ -904,7 +946,7 @@ export const install = Effect.fn("DiscordInput.install")(function* <
               Effect.succeed(bindingFailureCopy(error)),
             ),
             Effect.catchCause((cause) =>
-              Effect.logError("Discord interaction failed", Cause.pretty(cause)).pipe(
+              reportFailure("bind-workspace", cause).pipe(
                 Effect.as("pico could not update this workspace."),
               ),
             ),
@@ -914,16 +956,14 @@ export const install = Effect.fn("DiscordInput.install")(function* <
           return shakeResponse(interaction, command).pipe(
             Effect.catchTag("ChatClosed", () => Effect.succeed(closedMessage)),
             Effect.catchCause((cause) =>
-              Effect.logError("Discord shake failed", Cause.pretty(cause)).pipe(
-                Effect.as("pico could not shake this chat."),
-              ),
+              reportFailure("shake-chat", cause).pipe(Effect.as("pico could not shake this chat.")),
             ),
           );
         case "context":
           return contextResponse(interaction).pipe(
             Effect.catchTag("ChatClosed", () => Effect.succeed(closedMessage)),
             Effect.catchCause((cause) =>
-              Effect.logError("Discord context failed", Cause.pretty(cause)).pipe(
+              reportFailure("context-usage", cause).pipe(
                 Effect.as("pico could not read this chat's context."),
               ),
             ),
@@ -931,9 +971,7 @@ export const install = Effect.fn("DiscordInput.install")(function* <
         case "close":
           return closeResponse(interaction).pipe(
             Effect.catchCause((cause) =>
-              Effect.logError("Discord close failed", Cause.pretty(cause)).pipe(
-                Effect.as("pico could not close this chat."),
-              ),
+              reportFailure("close-chat", cause).pipe(Effect.as("pico could not close this chat.")),
             ),
           );
         default: {
@@ -942,21 +980,36 @@ export const install = Effect.fn("DiscordInput.install")(function* <
         }
       }
     })();
-    const options =
-      typeof response === "string"
-        ? { content: response, allowedMentions }
-        : { ...response, allowedMentions };
-    yield* promiseBoundary("Failed to edit Discord interaction", () =>
-      interaction.edit(options),
-    ).pipe(
-      Effect.catch((error) => Effect.logError("Discord interaction edit failed", error.message)),
-    );
+    yield* editInteraction(interaction, response);
+  });
+
+  const editInteraction = Effect.fnUntraced(function* (
+    interaction: Interaction,
+    response: string | ComponentResponse,
+  ) {
+    yield* Effect.annotateLogsScoped({ phase: "edit-interaction" });
+    yield* promiseBoundary("edit-interaction", () =>
+      interaction.edit(
+        typeof response === "string"
+          ? { content: response, allowedMentions }
+          : { ...response, allowedMentions },
+      ),
+    ).pipe(Effect.catchCause((cause) => reportFailure("edit-interaction", cause)));
   });
 
   bot.events.messageCreate = (message) => {
     run(
-      handleMessage(message).pipe(
-        Effect.catchCause((cause) => Effect.logError("Discord input failed", Cause.pretty(cause))),
+      Effect.scoped(
+        handleMessage(message).pipe(
+          Effect.catchCause((cause) => reportFailure("message-request", cause)),
+          Effect.annotateLogs({
+            component: "discord",
+            eventType: "messageCreate",
+            guildId: message.guildId?.toString(),
+            channelId: message.channelId.toString(),
+            messageId: message.id.toString(),
+          }),
+        ),
       ),
     );
   };
@@ -974,60 +1027,65 @@ export const install = Effect.fn("DiscordInput.install")(function* <
       (name === "bind" || name === "shake" || name === "context" || name === "close");
     if (closeNonce === undefined && !isCommand) return;
 
-    const deferred = closeNonce === undefined ? interaction.defer(true) : interaction.deferEdit();
-    void deferred.then(
-      () => {
-        const channelId = interaction.channelId;
-        const effect = (() => {
-          if (closeNonce !== undefined) {
-            return closeConfirmationResponse(interaction, closeNonce).pipe(
-              Effect.flatMap((response) => {
-                const options =
-                  typeof response === "string"
-                    ? { content: response, allowedMentions }
-                    : { ...response, allowedMentions };
-                return promiseBoundary("Failed to edit Discord interaction", () =>
-                  interaction.edit(options),
-                );
-              }),
-              Effect.catch((error) =>
-                Effect.logError("Discord interaction edit failed", error.message),
-              ),
-            );
+    run(
+      Effect.scoped(
+        Effect.gen(function* () {
+          yield* Effect.annotateLogsScoped({ phase: "defer" });
+          yield* promiseBoundary("defer-interaction", () =>
+            closeNonce === undefined ? interaction.defer(true) : interaction.deferEdit(),
+          );
+          yield* Effect.annotateLogsScoped({ phase: "request" });
+          const effect = Effect.suspend(() => {
+            if (closeNonce !== undefined) {
+              return closeConfirmationResponse(interaction, closeNonce).pipe(
+                Effect.catchCause((cause) =>
+                  reportFailure("close-confirmation", cause).pipe(
+                    Effect.as({
+                      content: "pico could not close this chat.",
+                      components: [],
+                    } satisfies ComponentResponse),
+                  ),
+                ),
+                Effect.flatMap((response) => editInteraction(interaction, response)),
+              );
+            }
+            const command: DiscordCommand.Command =
+              name === "bind"
+                ? DiscordCommand.parseBind(interaction.data?.options)
+                : name === "shake"
+                  ? DiscordCommand.parseShake(interaction.data?.options)
+                  : name === "close"
+                    ? { kind: "close" }
+                    : { kind: "context" };
+            return handleInteraction(interaction, command);
+          });
+          const channelId = interaction.channelId;
+          if (channelId === undefined) {
+            yield* effect;
+            return;
           }
-          const command: DiscordCommand.Command =
-            name === "bind"
-              ? DiscordCommand.parseBind(interaction.data?.options)
-              : name === "shake"
-                ? DiscordCommand.parseShake(interaction.data?.options)
-                : name === "close"
-                  ? { kind: "close" }
-                  : { kind: "context" };
-          return handleInteraction(interaction, command);
-        })();
-        if (channelId === undefined) {
-          run(effect);
-          return;
-        }
-        if (closeNonce === undefined && name === "bind") {
-          let semaphore = bindLocks.get(channelId);
-          if (semaphore === undefined) {
-            semaphore = Semaphore.makeUnsafe(1);
-            bindLocks.set(channelId, semaphore);
+          if (closeNonce === undefined && name === "bind") {
+            let semaphore = bindLocks.get(channelId);
+            if (semaphore === undefined) {
+              semaphore = Semaphore.makeUnsafe(1);
+              bindLocks.set(channelId, semaphore);
+            }
+            yield* semaphore.withPermit(effect);
+            return;
           }
-          run(semaphore.withPermit(effect));
-          return;
-        }
-        run(inputLock(channelId).semaphore.withPermit(effect));
-      },
-      (cause: unknown) => {
-        run(
-          Effect.logError(
-            "Discord interaction defer failed",
-            discordError("Failed to defer Discord interaction", cause).message,
-          ),
-        );
-      },
+          yield* inputLock(channelId).semaphore.withPermit(effect);
+        }).pipe(
+          Effect.catchCause((cause) => reportFailure("interaction-request", cause)),
+          Effect.annotateLogs({
+            component: "discord",
+            eventType: "interactionCreate",
+            command: closeNonce === undefined ? name : "close-confirmation",
+            interactionId: interaction.id?.toString(),
+            guildId: interaction.guildId?.toString(),
+            channelId: interaction.channelId?.toString(),
+          }),
+        ),
+      ),
     );
   };
 

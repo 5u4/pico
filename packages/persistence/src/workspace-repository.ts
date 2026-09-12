@@ -8,6 +8,7 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as SqlSchema from "effect/unstable/sql/SqlSchema";
+import { failure } from "./error.ts";
 
 const WorkspaceRow = Schema.Struct({
   id: Workspace.WorkspaceId,
@@ -31,8 +32,6 @@ const ReplaceConfiguration = Schema.Struct({
   configuration: Workspace.WorkspaceConfiguration,
 });
 
-const failure = (message: string) => () => new PersistenceError({ message });
-
 const decodeWorkspace = Effect.fn("WorkspaceRepository.decodeWorkspace")(function* (
   row: WorkspaceRow,
 ) {
@@ -42,7 +41,9 @@ const decodeWorkspace = Effect.fn("WorkspaceRepository.decodeWorkspace")(functio
   } else if (row.platform !== null && row.externalId !== null) {
     binding = { platform: row.platform, externalId: row.externalId };
   } else {
-    return yield* Effect.fail(new PersistenceError({ message: "Stored workspace is invalid" }));
+    return yield* Effect.fail(
+      new PersistenceError({ message: "invalid stored workspace binding column pair" }),
+    );
   }
 
   let worktree: Workspace.WorktreeSettings | null;
@@ -51,7 +52,9 @@ const decodeWorkspace = Effect.fn("WorkspaceRepository.decodeWorkspace")(functio
   } else if (row.worktreeBranch !== null && row.worktreePrefix !== null) {
     worktree = { branch: row.worktreeBranch, prefix: row.worktreePrefix };
   } else {
-    return yield* Effect.fail(new PersistenceError({ message: "Stored workspace is invalid" }));
+    return yield* Effect.fail(
+      new PersistenceError({ message: "invalid stored workspace worktree column pair" }),
+    );
   }
 
   return {
@@ -192,7 +195,7 @@ const make = Effect.fn("WorkspaceRepository.make")(function* () {
     function* (workspace: Workspace.Workspace) {
       return yield* decodeWorkspace(yield* insert(workspace));
     },
-    Effect.mapError(failure("Failed to create workspace")),
+    Effect.mapError(failure("workspace.create")),
   );
 
   const getOrCreateByBinding = Effect.fn("WorkspaceRepository.getOrCreateByBinding")(
@@ -212,7 +215,7 @@ const make = Effect.fn("WorkspaceRepository.make")(function* () {
       }
       return Option.some(yield* decodeWorkspace(row.value));
     },
-    Effect.mapError(failure("Failed to find workspace")),
+    Effect.mapError(failure("workspace.findById")),
   );
 
   const findByBinding = Effect.fn("WorkspaceRepository.findByBinding")(
@@ -223,14 +226,14 @@ const make = Effect.fn("WorkspaceRepository.make")(function* () {
       }
       return Option.some(yield* decodeWorkspace(row.value));
     },
-    Effect.mapError(failure("Failed to find workspace")),
+    Effect.mapError(failure("workspace.findByBinding")),
   );
 
   const replaceConfiguration = Effect.fn("WorkspaceRepository.replaceConfiguration")(
     function* (id: Workspace.WorkspaceId, configuration: Workspace.WorkspaceConfiguration) {
       return yield* decodeWorkspace(yield* replaceStoredConfiguration({ id, configuration }));
     },
-    Effect.mapError(failure("Failed to replace workspace configuration")),
+    Effect.mapError(failure("workspace.replaceConfiguration")),
   );
 
   return WorkspaceRepository.of({

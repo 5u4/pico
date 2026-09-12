@@ -2,6 +2,9 @@ import type * as AgentEvent from "@pico/contract/agent-event";
 import type * as AgentMessage from "@pico/contract/agent-message";
 import type { BranchNamingHandler } from "@pico/contract/branch-naming";
 import type { ChatId } from "@pico/contract/chat-model";
+import * as Cause from "effect/Cause";
+import * as Effect from "effect/Effect";
+import { agentError } from "./agent-error.ts";
 
 const TEXT_LIMIT = 500;
 
@@ -21,6 +24,7 @@ interface PromptClaim {
 
 interface ExchangeTitleOptions {
   readonly chatId: ChatId;
+  readonly runEffect: typeof Effect.runPromise;
   readonly handleBranchNaming: BranchNamingHandler;
   readonly history: ReadonlyArray<HistoryMessage>;
   readonly sendPrompt: (prompt: AgentMessage.AgentPrompt) => Promise<void>;
@@ -136,6 +140,7 @@ export const makeExchangeTitleFlow = (options: ExchangeTitleOptions): ExchangeTi
   };
 
   const generateDisplayTitle = async (formattedExchange: string) => {
+    let phase: "generate" | "persist" | "publish" = "generate";
     try {
       if (options.getTitleSource() === "user") return;
       const generated = await options.generateTitle(
@@ -143,11 +148,28 @@ export const makeExchangeTitleFlow = (options: ExchangeTitleOptions): ExchangeTi
         EXCHANGE_TITLE_SYSTEM_PROMPT,
       );
       if (generated === null) return;
+      phase = "persist";
       const stored = await options.setSessionName(generated, "auto");
       if (!stored) return;
+      phase = "publish";
       const title = options.getSessionName();
       if (title !== undefined && title.length > 0) options.emitTitleChanged(title);
-    } catch {}
+    } catch (cause) {
+      if (cause instanceof Error && cause.name === "AbortError") return;
+      await options.runEffect(
+        Effect.logWarning(
+          "OMP title update failed",
+          Cause.fail(agentError("Title operation failed", cause)),
+        ).pipe(
+          Effect.annotateLogs({
+            component: "omp",
+            operation: "title",
+            chatId: options.chatId,
+            phase,
+          }),
+        ),
+      );
+    }
   };
 
   const observe = (event: AgentEvent.AgentEvent) => {

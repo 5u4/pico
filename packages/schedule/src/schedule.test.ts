@@ -3,6 +3,7 @@ import * as BunFileSystem from "@effect/platform-bun/BunFileSystem";
 import * as BunPath from "@effect/platform-bun/BunPath";
 import { assert, describe, it } from "@effect/vitest";
 import * as Agent from "@pico/contract/agent-message";
+import type { CapturedAgentRun } from "@pico/contract/agent-runtime";
 import * as Chat from "@pico/contract/chat-model";
 import { AbsolutePath } from "@pico/contract/path";
 import * as Schedule from "@pico/contract/schedule";
@@ -13,9 +14,11 @@ import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
 import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
 import * as Queue from "effect/Queue";
+import * as References from "effect/References";
 import * as Schema from "effect/Schema";
 import * as TestClock from "effect/testing/TestClock";
 import { make, open } from "./schedule.ts";
@@ -81,6 +84,39 @@ const permissionDenied = (method: string, path: string) =>
       pathOrDescriptor: path,
     }),
   );
+
+interface ScheduleLog {
+  readonly level: Logger.Options<unknown>["logLevel"];
+  readonly annotations: Readonly<Record<string, unknown>>;
+  readonly message: unknown;
+}
+
+const captureLogs = Effect.fn("Schedules.test.captureLogs")(function* () {
+  const events = yield* Queue.unbounded<ScheduleLog>();
+  const entries: Array<ScheduleLog> = [];
+  const layer = Logger.layer([
+    Logger.make((options) => {
+      const entry: ScheduleLog = {
+        level: options.logLevel,
+        annotations: { ...options.fiber.getRef(References.CurrentLogAnnotations) },
+        message: options.message,
+      };
+      entries.push(entry);
+      Queue.offerUnsafe(events, entry);
+    }),
+  ]);
+  return { events, entries, layer };
+});
+
+const awaitLog = Effect.fn("Schedules.test.awaitLog")(function* (
+  events: Queue.Queue<ScheduleLog>,
+  phase: string,
+) {
+  for (;;) {
+    const entry = yield* Queue.take(events);
+    if (entry.annotations.phase === phase) return entry;
+  }
+});
 
 describe("Schedules", () => {
   it.effect("opens usable schedule storage before the runner starts", () =>
@@ -1151,6 +1187,7 @@ describe("Schedules", () => {
       const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-once-disable-" });
       const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
       const cwd = AbsolutePath.make(root);
+      const logs = yield* captureLogs();
       let rejectedDisable = false;
       const failingFileSystem = FileSystem.FileSystem.of({
         ...fileSystem,
@@ -1206,6 +1243,11 @@ describe("Schedules", () => {
           kind: "completed",
           finalAssistantText: "complete",
         });
+        const disableFailure = yield* awaitLog(logs.events, "disable-after-completion");
+        assert.strictEqual(disableFailure.level, "Error");
+        assert.strictEqual(disableFailure.annotations.scheduleId, created.id);
+        assert.strictEqual(disableFailure.annotations.runId, completed.id);
+        assert.strictEqual(disableFailure.annotations.outcome, "completed");
         assert.isTrue(yield* fileSystem.exists(path.join(schedulesDir, "enabled", created.id)));
 
         yield* TestClock.adjust("30 seconds");
@@ -1218,7 +1260,11 @@ describe("Schedules", () => {
           kind: "completed",
           finalAssistantText: "complete",
         });
-      }).pipe(Effect.provide(Layer.succeed(FileSystem.FileSystem, failingFileSystem)));
+      }).pipe(
+        Effect.provide(Layer.succeed(FileSystem.FileSystem, failingFileSystem)),
+        Effect.provide(logs.layer),
+      );
+      assert.strictEqual(logs.entries.filter((entry) => entry.level === "Error").length, 1);
     }).pipe(Effect.provide(platformLayer), Effect.scoped),
   );
   it.effect("records the active phase for unexpected execution failures", () =>
@@ -1592,6 +1638,319 @@ describe("Schedules", () => {
           });
         }
       }).pipe(Effect.provide(Layer.succeed(FileSystem.FileSystem, failingFileSystem)));
+    }).pipe(Effect.provide(platformLayer), Effect.scoped),
+  );
+  it.effect("reports a primary run failure once when finalization also fails", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-run-finalizer-" });
+      const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
+      const logs = yield* captureLogs();
+      const failingFileSystem = FileSystem.FileSystem.of({
+        ...fileSystem,
+        rename: (from, to) =>
+          path.basename(to) === "run.json"
+            ? Effect.fail(permissionDenied("rename", from))
+            : fileSystem.rename(from, to),
+      });
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const schedules = yield* make(schedulesDir);
+          yield* TestClock.setTime(1_000);
+          yield* schedules.start({
+            prepare: () =>
+              Effect.fail(new Schedule.ScheduleHostError({ message: "private target detail" })),
+            deliver: () => Effect.die("Failed targets cannot deliver"),
+            publish: () => Effect.die("Failed targets cannot publish"),
+            runPrompt: () => Effect.die("Failed targets cannot run"),
+          });
+          const created = yield* schedules.create(caller, {
+            name: "private schedule name",
+            enabled: true,
+            target: { kind: "current-chat" },
+            trigger: { kind: "once", at: 1_000 },
+            prompt: "private prompt",
+          });
+          assert.strictEqual(created.kind, "ready");
+          if (created.kind !== "ready") return;
+          const finalized = yield* awaitLog(logs.events, "finalize");
+          const runId = `scheduled-1000-${created.definition.revision}`;
+          assert.strictEqual(finalized.annotations.runId, runId);
+          const failures = logs.entries.filter((entry) => entry.level === "Error");
+          assert.deepStrictEqual(
+            failures.map((entry) => entry.annotations.phase),
+            ["target", "finalize"],
+          );
+          assert.isTrue(failures.every((entry) => entry.annotations.scheduleId === created.id));
+          assert.strictEqual(failures[0]?.annotations.outcome, "failed");
+          assert.strictEqual(failures[0]?.annotations.persisted, false);
+          const durable = yield* fileSystem
+            .readFileString(path.join(schedulesDir, "runs", created.id, runId, "run.json"))
+            .pipe(Effect.flatMap(decodeRun));
+          assert.strictEqual(durable.state.kind, "claimed");
+        }),
+      ).pipe(
+        Effect.provide(Layer.succeed(FileSystem.FileSystem, failingFileSystem)),
+        Effect.provide(logs.layer),
+      );
+      assert.strictEqual(logs.entries.filter((entry) => entry.level === "Error").length, 2);
+      assert.notInclude(JSON.stringify(logs.entries), "private");
+    }).pipe(Effect.provide(platformLayer), Effect.scoped),
+  );
+
+  it.effect(
+    "terminalizes and reports a detached execution defect without exposing its contents",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-run-defect-" });
+        const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
+        const logs = yield* captureLogs();
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const schedules = yield* make(schedulesDir);
+            yield* TestClock.setTime(1_000);
+            yield* schedules.start({
+              prepare: () => Effect.die(new Error("private SDK payload")),
+              deliver: () => Effect.die("Failed targets cannot deliver"),
+              publish: () => Effect.die("Failed targets cannot publish"),
+              runPrompt: () => Effect.die("Failed targets cannot run"),
+            });
+            const created = yield* schedules.create(caller, {
+              name: "defect",
+              enabled: true,
+              target: { kind: "current-chat" },
+              trigger: { kind: "once", at: 1_000 },
+              prompt: "private prompt",
+            });
+            assert.strictEqual(created.kind, "ready");
+            if (created.kind !== "ready") return;
+            const terminal = yield* awaitLog(logs.events, "target");
+            assert.strictEqual(terminal.level, "Error");
+            assert.strictEqual(terminal.annotations.category, "defect");
+            const durable = yield* awaitFinished(
+              fileSystem,
+              path.join(
+                schedulesDir,
+                "runs",
+                created.id,
+                `scheduled-1000-${created.definition.revision}`,
+                "run.json",
+              ),
+            );
+            assert.deepInclude(durable.state.kind === "finished" ? durable.state.outcome : {}, {
+              kind: "failed",
+              stage: "target",
+            });
+          }),
+        ).pipe(Effect.provide(logs.layer));
+        assert.strictEqual(logs.entries.filter((entry) => entry.level === "Error").length, 1);
+        assert.notInclude(JSON.stringify(logs.entries), "private");
+      }).pipe(Effect.provide(platformLayer), Effect.scoped),
+  );
+
+  it.effect("keeps user aborts and scheduler interruption out of error logs", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-run-cancel-" });
+      const logs = yield* captureLogs();
+      for (const mode of ["aborted", "interrupted"] as const) {
+        const schedulesDir = AbsolutePath.make(path.join(root, mode));
+        const started = yield* Deferred.make<void>();
+        const created = yield* Effect.scoped(
+          Effect.gen(function* () {
+            const schedules = yield* make(schedulesDir);
+            yield* TestClock.setTime(1_000);
+            yield* schedules.start({
+              prepare: (target) =>
+                Effect.succeed({
+                  chatId: target.chatId,
+                  workspaceId: target.ownerWorkspaceId,
+                  cwd: AbsolutePath.make(root),
+                }),
+              deliver: () => Effect.die("Cancelled runs cannot deliver"),
+              publish: () => Effect.die("Cancelled runs cannot publish"),
+              runPrompt: (_chatId, runId) =>
+                Deferred.succeed(started, undefined).pipe(
+                  Effect.andThen(
+                    mode === "interrupted"
+                      ? Effect.never
+                      : Effect.succeed({
+                          runId,
+                          outcome: "aborted",
+                          events: [],
+                          finalAssistantText: "",
+                        } satisfies CapturedAgentRun),
+                  ),
+                ),
+            });
+            const created = yield* schedules.create(caller, {
+              name: mode,
+              enabled: true,
+              target: { kind: "current-chat" },
+              trigger: { kind: "once", at: 1_000 },
+              prompt: "private cancellation prompt",
+            });
+            yield* Deferred.await(started);
+            if (mode === "aborted") yield* awaitLog(logs.events, "omp");
+            return created;
+          }),
+        ).pipe(Effect.provide(logs.layer));
+        assert.strictEqual(created.kind, "ready");
+        if (created.kind !== "ready") return;
+        const durable = yield* awaitFinished(
+          fileSystem,
+          path.join(
+            schedulesDir,
+            "runs",
+            created.id,
+            `scheduled-1000-${created.definition.revision}`,
+            "run.json",
+          ),
+        );
+        assert.deepInclude(durable.state.kind === "finished" ? durable.state.outcome : {}, {
+          kind: mode === "aborted" ? "failed" : "interrupted",
+        });
+      }
+      assert.deepStrictEqual(
+        logs.entries.filter((entry) => entry.level === "Error"),
+        [],
+      );
+      assert.notInclude(JSON.stringify(logs.entries), "private");
+    }).pipe(Effect.provide(platformLayer), Effect.scoped),
+  );
+
+  it.effect("discards journal-free staging but retains corrupt and unreadable replacements", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-recovery-journal-" });
+      const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
+      const storage: Storage = {
+        fileSystem,
+        path,
+        schedulesDir,
+        temporaryId: () => Effect.succeed("unused"),
+      };
+      const logs = yield* captureLogs();
+      yield* bootstrap(storage);
+      const abandoned = path.join(schedulesDir, ".staging", "definition-abandoned");
+      yield* fileSystem.makeDirectory(abandoned);
+      yield* bootstrap(storage).pipe(Effect.provide(logs.layer));
+      assert.isFalse(yield* fileSystem.exists(abandoned));
+      assert.deepStrictEqual(
+        logs.entries.filter((entry) => entry.level === "Error"),
+        [],
+      );
+
+      const transaction = path.join(schedulesDir, ".staging", "replace-broken");
+      const previous = path.join(transaction, "previous");
+      const journal = path.join(transaction, "transaction.json");
+      const retained = path.join(previous, "meta.json");
+      yield* fileSystem.makeDirectory(previous, { recursive: true });
+      yield* fileSystem.writeFileString(retained, "retained definition");
+      const absent = yield* bootstrap(storage).pipe(Effect.flip);
+      assert.strictEqual(absent.kind, "corrupt");
+      assert.strictEqual(yield* fileSystem.readFileString(retained), "retained definition");
+      yield* fileSystem.writeFileString(journal, '{"private":"corrupt journal"}');
+      const corrupt = yield* bootstrap(storage).pipe(Effect.flip);
+      assert.strictEqual(corrupt.kind, "corrupt");
+      assert.strictEqual(yield* fileSystem.readFileString(retained), "retained definition");
+      assert.strictEqual(
+        yield* fileSystem.readFileString(journal),
+        '{"private":"corrupt journal"}',
+      );
+      const unreadable = yield* bootstrap({
+        ...storage,
+        fileSystem: FileSystem.FileSystem.of({
+          ...fileSystem,
+          readFileString: (file, encoding) =>
+            file === journal
+              ? Effect.fail(permissionDenied("readFileString", file))
+              : fileSystem.readFileString(file, encoding),
+        }),
+      }).pipe(Effect.flip);
+      assert.strictEqual(unreadable.kind, "io");
+      assert.strictEqual(yield* fileSystem.readFileString(retained), "retained definition");
+      assert.isTrue(yield* fileSystem.exists(journal));
+    }).pipe(Effect.provide(platformLayer), Effect.scoped),
+  );
+  it.effect("warns again only after an invalid definition returns to a valid state", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-invalid-scan-" });
+      const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
+      const logs = yield* captureLogs();
+      const scans = yield* Queue.unbounded<void>();
+      let observeScans = false;
+      const observedFileSystem = FileSystem.FileSystem.of({
+        ...fileSystem,
+        readDirectory: (directory) =>
+          fileSystem
+            .readDirectory(directory)
+            .pipe(
+              Effect.tap(() =>
+                observeScans && directory === path.join(schedulesDir, "disabled")
+                  ? Queue.offer(scans, undefined).pipe(Effect.asVoid)
+                  : Effect.void,
+              ),
+            ),
+      });
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const schedules = yield* open(schedulesDir);
+          const created = yield* schedules.create(caller, {
+            name: "invalid definition",
+            enabled: false,
+            target: { kind: "current-chat" },
+            trigger: { kind: "once", at: 1_000 },
+            prompt: "private prompt",
+          });
+          assert.strictEqual(created.kind, "ready");
+          if (created.kind !== "ready") return;
+          const metadata = path.join(schedulesDir, "disabled", created.id, "meta.json");
+          const validSource = yield* fileSystem.readFileString(metadata);
+          yield* fileSystem.writeFileString(metadata, '{"private":"invalid metadata"}');
+          yield* schedules.start({
+            prepare: () => Effect.die("Disabled schedules cannot execute"),
+            deliver: () => Effect.die("Disabled schedules cannot execute"),
+            publish: () => Effect.die("Disabled schedules cannot execute"),
+            runPrompt: () => Effect.die("Disabled schedules cannot execute"),
+          });
+          const invalid = yield* awaitLog(logs.events, "definition");
+          assert.strictEqual(invalid.level, "Warn");
+          assert.strictEqual(invalid.annotations.scheduleId, created.id);
+          observeScans = true;
+          const advanceScan = Effect.gen(function* () {
+            yield* TestClock.adjust("30 seconds");
+            yield* Queue.take(scans);
+            yield* schedules.setEnabled(caller, created.id, false).pipe(Effect.exit);
+          });
+          yield* advanceScan;
+          yield* advanceScan;
+          assert.strictEqual(
+            logs.entries.filter((entry) => entry.annotations.phase === "definition").length,
+            1,
+          );
+          yield* fileSystem.writeFileString(metadata, validSource);
+          yield* advanceScan;
+          yield* fileSystem.writeFileString(metadata, '{"private":"invalid again"}');
+          yield* advanceScan;
+          yield* awaitLog(logs.events, "definition");
+        }),
+      ).pipe(
+        Effect.provide(logs.layer),
+        Effect.provideService(FileSystem.FileSystem, observedFileSystem),
+      );
+      assert.strictEqual(
+        logs.entries.filter((entry) => entry.annotations.phase === "definition").length,
+        2,
+      );
+      assert.notInclude(JSON.stringify(logs.entries), "private");
     }).pipe(Effect.provide(platformLayer), Effect.scoped),
   );
 });

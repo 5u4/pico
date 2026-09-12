@@ -8,6 +8,7 @@ import * as Path from "effect/Path";
 import type * as PlatformError from "effect/PlatformError";
 import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
+import * as SchemaIssue from "effect/SchemaIssue";
 
 const DiscordSection = Schema.Struct({
   allowed_guild: Schema.Array(Schema.NonEmptyString),
@@ -32,10 +33,17 @@ export interface PicoConfig {
   readonly discord: Option.Option<DiscordConfig>;
 }
 
-const platformError = (error: PlatformError.PlatformError) =>
-  new ConfigError({ message: error.message });
+const platformError = (operation: string) => (error: PlatformError.PlatformError) =>
+  new ConfigError({ message: `${operation} failed (${error.reason._tag})` });
 
-const parseError = () => new ConfigError({ message: "Failed to parse config.toml" });
+const formatIssue = SchemaIssue.makeFormatterStandardSchemaV1({
+  leafHook: (issue) =>
+    issue._tag === "MissingKey" ? "required field is missing" : "invalid field type",
+  checkHook: () => "invalid field value",
+});
+
+const fieldError = (field: string, expected: string) =>
+  new ConfigError({ message: `Invalid config.toml field ${field}; ${expected}` });
 
 const disabled = (): PicoConfig => ({ discord: Option.none() });
 
@@ -43,40 +51,58 @@ export const load = Effect.fn("PicoConfig.load")(function* (paths: PicoPaths) {
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
 
-  if (!(yield* fileSystem.exists(paths.configFile).pipe(Effect.mapError(platformError)))) {
+  if (
+    !(yield* fileSystem
+      .exists(paths.configFile)
+      .pipe(Effect.mapError(platformError("Inspect config.toml"))))
+  ) {
     return disabled();
   }
 
   const source = yield* fileSystem
     .readFileString(paths.configFile)
-    .pipe(Effect.mapError(platformError));
+    .pipe(Effect.mapError(platformError("Read config.toml")));
   const input = yield* Effect.try({
     try: () => Bun.TOML.parse(source),
-    catch: parseError,
+    catch: () => new ConfigError({ message: "Invalid TOML syntax in config.toml" }),
   });
   const config = yield* Schema.decodeUnknownEffect(PicoConfigFile)(input).pipe(
-    Effect.mapError(parseError),
+    Effect.mapError((error) => {
+      const issue = formatIssue(error.issue).issues[0];
+      const field =
+        issue?.path
+          ?.map((segment) => (typeof segment === "object" ? String(segment.key) : String(segment)))
+          .join(".") || "discord";
+      return fieldError(field, issue?.message ?? "invalid configuration");
+    }),
   );
   if (config.discord === undefined) return disabled();
 
   const tokenPath = path.join(paths.secretsDir, "discord_bot_token");
-  if (!(yield* fileSystem.exists(tokenPath).pipe(Effect.mapError(platformError)))) {
+  if (
+    !(yield* fileSystem
+      .exists(tokenPath)
+      .pipe(Effect.mapError(platformError("Inspect Discord token file"))))
+  ) {
     return disabled();
   }
 
   const tokenValue = (yield* fileSystem
     .readFileString(tokenPath)
-    .pipe(Effect.mapError(platformError))).trim();
+    .pipe(Effect.mapError(platformError("Read Discord token file")))).trim();
   const defaultCwd = config.discord.default_cwd.trim();
   const allowedGuildIds = config.discord.allowed_guild.map((guildId) => guildId.trim());
 
   if (tokenValue.length === 0 || allowedGuildIds.length === 0) return disabled();
-  if (
-    defaultCwd.length === 0 ||
-    !path.isAbsolute(defaultCwd) ||
-    allowedGuildIds.some((guildId) => guildId.length === 0)
-  ) {
-    return yield* Effect.fail(parseError());
+  if (defaultCwd.length === 0 || !path.isAbsolute(defaultCwd)) {
+    return yield* fieldError("discord.default_cwd", "expected an absolute, nonblank path");
+  }
+  const blankGuildIndex = allowedGuildIds.findIndex((guildId) => guildId.length === 0);
+  if (blankGuildIndex !== -1) {
+    return yield* fieldError(
+      `discord.allowed_guild.${blankGuildIndex}`,
+      "expected a nonblank guild ID",
+    );
   }
 
   const [firstGuildId, ...restGuildIds] = allowedGuildIds;

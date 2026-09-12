@@ -1,10 +1,12 @@
 import type { ExtensionFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import * as Schedule from "@pico/contract/schedule";
+import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 
 interface Options {
   readonly caller: Schedule.ScheduleCaller;
   readonly schedules: Schedule.Schedules["Service"];
+  readonly runEffect: typeof Effect.runPromise;
 }
 export const scheduleToolNames = {
   create: "schedule_create",
@@ -14,6 +16,12 @@ export const scheduleToolNames = {
   setEnabled: "schedule_set_enabled",
   remove: "schedule_delete",
 } as const;
+interface OperationContext {
+  readonly operation: keyof typeof scheduleToolNames;
+  readonly caller: Schedule.ScheduleCaller;
+  readonly scheduleId?: Schedule.ScheduleId;
+  readonly runEffect: typeof Effect.runPromise;
+}
 
 const textContent = (text: string): { readonly type: "text"; readonly text: string } => ({
   type: "text",
@@ -26,8 +34,7 @@ const result = (value: unknown) => ({
   isError: false,
 });
 
-const failure = (cause: unknown) => {
-  const message = cause instanceof Error ? cause.message : "Schedule operation failed";
+const failure = (message: string) => {
   return {
     content: [textContent(`Schedule operation failed: ${message}`)],
     details: { message },
@@ -35,20 +42,53 @@ const failure = (cause: unknown) => {
   };
 };
 
-export const executeScheduleOperation = async <A>(
+export const executeScheduleOperation = <A>(
   effect: Effect.Effect<A, Schedule.ScheduleError>,
-) => {
-  try {
-    return result(await Effect.runPromise(effect));
-  } catch (cause) {
-    return failure(cause);
-  }
-};
+  { operation, caller, scheduleId, runEffect }: OperationContext,
+) =>
+  runEffect(
+    effect.pipe(
+      Effect.map(result),
+      Effect.catchCause((cause) => {
+        if (Cause.hasInterruptsOnly(cause)) return Effect.interrupt;
+        const error = cause.reasons.find(Cause.isFailReason)?.error;
+        const defect = Cause.hasDies(cause);
+        const toolResult = failure(
+          defect ? "Schedule operation failed" : (error?.message ?? "Schedule operation failed"),
+        );
+        if (!defect && error?.kind !== "io" && error?.kind !== "corrupt") {
+          return Effect.succeed(toolResult);
+        }
+        return Effect.logError("Schedule tool operation failed").pipe(
+          Effect.annotateLogs({
+            component: "omp",
+            operation: `schedule-${operation}`,
+            chatId: caller.chatId,
+            workspaceId: caller.workspaceId,
+            scheduleId,
+            failureKind: defect ? "defect" : error?.kind,
+          }),
+          Effect.as(toolResult),
+        );
+      }),
+    ),
+  );
 
 export const make =
-  ({ caller, schedules }: Options): ExtensionFactory =>
+  ({ caller, schedules, runEffect }: Options): ExtensionFactory =>
   (api) => {
     const Type = api.typebox.Type;
+    const execute = <A>(
+      operation: OperationContext["operation"],
+      effect: Effect.Effect<A, Schedule.ScheduleError>,
+      id?: string,
+    ) =>
+      executeScheduleOperation(effect, {
+        caller,
+        operation,
+        runEffect,
+        ...(id === undefined ? {} : { scheduleId: Schedule.ScheduleId.make(id) }),
+      });
     const scheduleId = Type.String({
       pattern:
         "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-7[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$",
@@ -112,8 +152,7 @@ export const make =
         Type.Object({ ...createFields, ...scriptSource }, { additionalProperties: false }),
         Type.Object({ ...createFields, ...promptSource }, { additionalProperties: false }),
       ]),
-      execute: (_toolCallId, params) =>
-        schedules.create(caller, params).pipe(executeScheduleOperation),
+      execute: (_toolCallId, params) => execute("create", schedules.create(caller, params)),
     });
 
     api.registerTool({
@@ -123,7 +162,7 @@ export const make =
         "List schedules owned by the current workspace, including invalid external edits.",
       approval: "read",
       parameters: Type.Object({}, { additionalProperties: false }),
-      execute: () => schedules.list(caller).pipe(executeScheduleOperation),
+      execute: () => execute("list", schedules.list(caller)),
     });
 
     api.registerTool({
@@ -133,9 +172,11 @@ export const make =
       approval: "read",
       parameters: Type.Object({ scheduleId }, { additionalProperties: false }),
       execute: (_toolCallId, params) =>
-        schedules
-          .get(caller, Schedule.ScheduleId.make(params.scheduleId))
-          .pipe(executeScheduleOperation),
+        execute(
+          "get",
+          schedules.get(caller, Schedule.ScheduleId.make(params.scheduleId)),
+          params.scheduleId,
+        ),
     });
 
     api.registerTool({
@@ -150,9 +191,11 @@ export const make =
       ]),
       execute: (_toolCallId, params) => {
         const { scheduleId: id, ...input } = params;
-        return schedules
-          .replace(caller, Schedule.ScheduleId.make(id), input)
-          .pipe(executeScheduleOperation);
+        return execute(
+          "update",
+          schedules.replace(caller, Schedule.ScheduleId.make(id), input),
+          id,
+        );
       },
     });
 
@@ -167,9 +210,11 @@ export const make =
         { additionalProperties: false },
       ),
       execute: (_toolCallId, params) =>
-        schedules
-          .setEnabled(caller, Schedule.ScheduleId.make(params.scheduleId), params.enabled)
-          .pipe(executeScheduleOperation),
+        execute(
+          "setEnabled",
+          schedules.setEnabled(caller, Schedule.ScheduleId.make(params.scheduleId), params.enabled),
+          params.scheduleId,
+        ),
     });
 
     api.registerTool({
@@ -181,9 +226,11 @@ export const make =
       parameters: Type.Object({ scheduleId }, { additionalProperties: false }),
       execute: (_toolCallId, params) => {
         const id = Schedule.ScheduleId.make(params.scheduleId);
-        return schedules
-          .remove(caller, id)
-          .pipe(Effect.as({ scheduleId: id, deleted: true }), executeScheduleOperation);
+        return execute(
+          "remove",
+          schedules.remove(caller, id).pipe(Effect.as({ scheduleId: id, deleted: true })),
+          id,
+        );
       },
     });
   };

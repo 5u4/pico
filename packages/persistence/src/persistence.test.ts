@@ -173,23 +173,26 @@ describe("Persistence.layer", () => {
           id: Workspace.WorkspaceId.make("018f47a0-0000-7000-8000-000000000004"),
           name: "duplicate binding",
         };
-        assert.instanceOf(
-          yield* Effect.flip(workspaces.create(duplicateBinding)),
-          PersistenceError,
-        );
+        const duplicate = yield* Effect.flip(workspaces.create(duplicateBinding));
+        assert.instanceOf(duplicate, PersistenceError);
+        assert.include(duplicate.message, "workspace.create");
+        assert.include(duplicate.message, "UniqueViolation");
+        assert.match(duplicate.message, /SQLite code \d+/);
+        assert.notInclude(duplicate.message, "channel-1");
+        assert.notInclude(duplicate.message, duplicateBinding.name);
         assert.instanceOf(
           yield* Effect.flip(workspaces.create(regularWorkspace)),
           PersistenceError,
         );
-        assert.instanceOf(
-          yield* Effect.flip(
-            workspaces.replaceConfiguration(missingWorkspaceId, {
-              defaultCwd: cwdB,
-              worktree: null,
-            }),
-          ),
-          PersistenceError,
+        const missing = yield* Effect.flip(
+          workspaces.replaceConfiguration(missingWorkspaceId, {
+            defaultCwd: cwdB,
+            worktree: null,
+          }),
         );
+        assert.instanceOf(missing, PersistenceError);
+        assert.include(missing.message, "workspace.replaceConfiguration");
+        assert.include(missing.message, "required row missing");
 
         const firstRegular = yield* chats.create({
           id: chatId(1),
@@ -273,18 +276,20 @@ describe("Persistence.layer", () => {
           createdAt: 14,
         });
         assert.strictEqual(worktreeCwdInRegularWorkspace.cwd, worktreeCwd);
-        assert.instanceOf(
-          yield* Effect.flip(
-            chats.create({
-              id: chatId(6),
-              workspaceId: missingWorkspaceId,
-              cwd: worktreeCwd,
-              externalId: null,
-              createdAt: 15,
-            }),
-          ),
-          PersistenceError,
+        const foreignKey = yield* Effect.flip(
+          chats.create({
+            id: chatId(6),
+            workspaceId: missingWorkspaceId,
+            cwd: worktreeCwd,
+            externalId: null,
+            createdAt: 15,
+          }),
         );
+        assert.instanceOf(foreignKey, PersistenceError);
+        assert.include(foreignKey.message, "chat.create");
+        assert.include(foreignKey.message, "ConstraintError");
+        assert.match(foreignKey.message, /SQLite code \d+/);
+        assert.notInclude(foreignKey.message, worktreeCwd);
 
         const externalChat = yield* chats.create({
           id: chatId(7),
@@ -361,6 +366,104 @@ describe("Persistence.layer", () => {
             archivedAt: null,
           },
         );
+      }).pipe(Effect.provide(layer(storeFile)), Effect.scoped);
+    }).pipe(Effect.provide(platformLayer)),
+  );
+
+  it.effect("reports a safe connection failure when the store path is a directory", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const directory = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "pico-persistence-open-",
+      });
+      const error = yield* Effect.void.pipe(
+        Effect.provide(layer(AbsolutePath.make(directory))),
+        Effect.scoped,
+        Effect.flip,
+      );
+      assert.instanceOf(error, PersistenceError);
+      assert.include(error.message, "persistence.open");
+      assert.include(error.message, "ConnectionError");
+      assert.notInclude(error.message, directory);
+    }).pipe(Effect.provide(platformLayer)),
+  );
+
+  it.effect("preserves safe migration failure context from a migration defect", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const directory = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "pico-persistence-migrate-",
+      });
+      const storeFile = AbsolutePath.make(path.join(directory, "store.db"));
+      yield* Effect.sync(() => {
+        const database = new Database(storeFile);
+        try {
+          database.exec("CREATE TABLE workspaces (private_column TEXT)");
+        } finally {
+          database.close();
+        }
+      });
+      const error = yield* Effect.void.pipe(
+        Effect.provide(layer(storeFile)),
+        Effect.scoped,
+        Effect.flip,
+      );
+      assert.instanceOf(error, PersistenceError);
+      assert.include(error.message, "persistence.migrate");
+      assert.include(error.message, "migration Failed");
+      assert.match(error.message, /SQLite code \d+/);
+      assert.notInclude(error.message, storeFile);
+      assert.notInclude(error.message, "CREATE TABLE");
+      assert.notInclude(error.message, "private_column");
+    }).pipe(Effect.provide(platformLayer)),
+  );
+
+  it.effect("distinguishes invalid stored data without exposing the rejected row", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const directory = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "pico-persistence-row-",
+      });
+      const storeFile = AbsolutePath.make(path.join(directory, "store.db"));
+      yield* Effect.gen(function* () {
+        const workspaces = yield* WorkspaceRepository;
+        const chats = yield* ChatRepository;
+        yield* workspaces.create(regularWorkspace);
+        yield* chats.create({
+          id: chatId(1),
+          workspaceId: regularWorkspaceId,
+          cwd: cwdA,
+          externalId: null,
+          createdAt: 1,
+        });
+      }).pipe(Effect.provide(layer(storeFile)), Effect.scoped);
+      yield* Effect.sync(() => {
+        const database = new Database(storeFile);
+        try {
+          database.exec("PRAGMA ignore_check_constraints = ON");
+          database
+            .query("UPDATE chats SET created_at = -1, cwd = ? WHERE id = ?")
+            .run("private-relative-path", chatId(1));
+          database
+            .query("UPDATE workspaces SET external_id = ? WHERE id = ?")
+            .run("private-external-id", regularWorkspaceId);
+        } finally {
+          database.close();
+        }
+      });
+      yield* Effect.gen(function* () {
+        const workspaces = yield* WorkspaceRepository;
+        const chats = yield* ChatRepository;
+        const chat = yield* chats.findById(chatId(1)).pipe(Effect.flip);
+        assert.include(chat.message, "chat.findById");
+        assert.include(chat.message, "invalid stored row");
+        assert.notInclude(chat.message, "private-relative-path");
+        const workspace = yield* workspaces.findById(regularWorkspaceId).pipe(Effect.flip);
+        assert.include(workspace.message, "workspace.findById");
+        assert.include(workspace.message, "binding column pair");
+        assert.notInclude(workspace.message, "private-external-id");
       }).pipe(Effect.provide(layer(storeFile)), Effect.scoped);
     }).pipe(Effect.provide(platformLayer)),
   );

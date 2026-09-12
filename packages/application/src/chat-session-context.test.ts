@@ -210,7 +210,7 @@ describe("ChatSessionContext", () => {
 
   it.effect("loads global and channel when Discord is disabled and retains read diagnostics", () =>
     Effect.gen(function* () {
-      const { instructions, put, repositories, fileSystem, path, root } = yield* fixture;
+      const { instructions, put, repositories, fileSystem } = yield* fixture;
       yield* put("instructions.md", "GLOBAL_WITHOUT_BOT");
       yield* put("discord/bots/123/instructions.md", "UNAVAILABLE_BOT");
       const channelFile = yield* put("discord/channels/456/instructions.md", "BOUND_CHANNEL");
@@ -235,11 +235,8 @@ describe("ChatSessionContext", () => {
         const error = yield* resolver.resolve(chatId).pipe(Effect.flip);
         const cause = yield* fileSystem.readFileString(channelFile).pipe(Effect.flip);
         assert.instanceOf(error, AgentError);
-        assert.include(
-          error.message,
-          path.join(root, "agents", "discord", "channels", "456", "instructions.md"),
-        );
-        assert.include(error.message, cause.message);
+        assert.notInclude(error.message, channelFile);
+        assert.include(error.message, cause.reason._tag);
       }).pipe(Effect.provide(context));
     }).pipe(Effect.provide(platformLayer)),
   );

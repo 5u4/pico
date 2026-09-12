@@ -2,6 +2,8 @@ import { assert, describe, it } from "@effect/vitest";
 import type * as AgentEvent from "@pico/contract/agent-event";
 import * as AgentMessage from "@pico/contract/agent-message";
 import * as Chat from "@pico/contract/chat-model";
+import * as Effect from "effect/Effect";
+import * as Logger from "effect/Logger";
 import {
   BRANCH_TOPIC_SYSTEM_PROMPT,
   EXCHANGE_TITLE_SYSTEM_PROMPT,
@@ -98,6 +100,7 @@ describe("exchange titles", () => {
         calls.push("emit");
         emitted.push(title);
       },
+      runEffect: Effect.runPromise,
     });
 
     await flow.sendPrompt(
@@ -187,6 +190,7 @@ describe("exchange titles", () => {
       setSessionName: async () => true,
       getSessionName: () => "Image request",
       emitTitleChanged: () => {},
+      runEffect: Effect.runPromise,
     });
 
     await flow.sendPrompt(
@@ -229,6 +233,7 @@ describe("exchange titles", () => {
       setSessionName: async () => true,
       getSessionName: () => "First title",
       emitTitleChanged: () => {},
+      runEffect: Effect.runPromise,
     });
 
     const rejected = flow.sendPrompt(prompt("rejected first"));
@@ -268,6 +273,7 @@ describe("exchange titles", () => {
       setSessionName: async () => true,
       getSessionName: () => "Recovered title",
       emitTitleChanged: () => {},
+      runEffect: Effect.runPromise,
     });
 
     await flow.sendPrompt(prompt("failed prompt"));
@@ -307,6 +313,7 @@ describe("exchange titles", () => {
       setSessionName: async () => true,
       getSessionName: () => "Late title",
       emitTitleChanged: () => {},
+      runEffect: Effect.runPromise,
     });
 
     await flow.sendPrompt(prompt("new prompt after restart"));
@@ -339,6 +346,7 @@ describe("exchange titles", () => {
       },
       getSessionName: () => "Manual title",
       emitTitleChanged: () => {},
+      runEffect: Effect.runPromise,
     });
 
     await flow.sendPrompt(prompt("fix the widget"));
@@ -375,6 +383,7 @@ describe("exchange titles", () => {
       setSessionName: async () => true,
       getSessionName: () => "unused",
       emitTitleChanged: () => {},
+      runEffect: Effect.runPromise,
     });
     await failingDisplayFlow.sendPrompt(prompt("second"));
     failingDisplayFlow.observe(assistant("stop", [{ type: "text", text: "done" }]));
@@ -404,6 +413,7 @@ describe("exchange titles", () => {
       },
       getSessionName: () => "Manual title",
       emitTitleChanged: (title) => emitted.push(title),
+      runEffect: Effect.runPromise,
     });
     await existingUserFlow.sendPrompt(prompt("first"));
     existingUserFlow.observe(assistant("stop", [{ type: "text", text: "answer" }]));
@@ -429,6 +439,7 @@ describe("exchange titles", () => {
       },
       getSessionName: () => "Manual title",
       emitTitleChanged: (title) => emitted.push(title),
+      runEffect: Effect.runPromise,
     });
     await racingFlow.sendPrompt(prompt("second"));
     racingFlow.observe(assistant("stop", [{ type: "text", text: "answer" }]));
@@ -441,12 +452,17 @@ describe("exchange titles", () => {
   });
 
   it("contains null generation and generation or persistence failures", async () => {
+    const records: Array<ReturnType<typeof Logger.formatStructured.log>> = [];
+    const logger = Logger.layer([
+      Logger.make((options) => records.push(Logger.formatStructured.log(options))),
+    ]);
     const emitted: string[] = [];
-    const outcomes: Array<"null" | "generate-error" | "store-error" | "store-false"> = [
+    const outcomes: Array<"null" | "generate-error" | "store-error" | "store-false" | "aborted"> = [
       "null",
       "generate-error",
       "store-error",
       "store-false",
+      "aborted",
     ];
 
     for (const outcome of outcomes) {
@@ -456,6 +472,7 @@ describe("exchange titles", () => {
         history: [],
         sendPrompt: async () => {},
         generateTitle: async () => {
+          if (outcome === "aborted") throw new DOMException("cancelled", "AbortError");
           if (outcome === "null") return null;
           if (outcome === "generate-error") throw new Error("generation failed");
           return "Generated title";
@@ -467,6 +484,7 @@ describe("exchange titles", () => {
         },
         getSessionName: () => "Generated title",
         emitTitleChanged: (title) => emitted.push(title),
+        runEffect: (effect) => Effect.runPromise(effect.pipe(Effect.provide(logger))),
       });
       await flow.sendPrompt(prompt(outcome));
       flow.observe(assistant("stop", [{ type: "text", text: "answer" }]));
@@ -475,5 +493,15 @@ describe("exchange titles", () => {
 
     await flush();
     assert.deepStrictEqual(emitted, []);
+    assert.deepStrictEqual(records.map((record) => record.annotations.phase).sort(), [
+      "generate",
+      "persist",
+    ]);
+    assert.isTrue(
+      records.every((record) => record.level === "WARN" && record.annotations.chatId === chatId),
+    );
+    assert.notInclude(JSON.stringify(records), "Generated title");
+    assert.notInclude(JSON.stringify(records), "generation failed");
+    assert.notInclude(JSON.stringify(records), "persistence failed");
   });
 });

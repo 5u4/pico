@@ -78,8 +78,8 @@
   - automatic branch naming waits for the first completed exchange and uses its user prompt and terminal assistant reply. It only renames the generated local placeholder; user-chosen names and remote branches remain untouched.
   - before renaming, pico checks the exact source and target branch names on every configured fetch and push endpoint. Upstream configuration and cached remote refs do not establish publication. A remote match, query failure, or 10-second lookup timeout preserves the original name.
   - this check covers currently advertised names on configured endpoints, not arbitrary aliases or historical pushes. It cannot prevent a separate process from publishing between the check and the local rename. Naming remains a one-shot attempt, with no automatic retry or old-branch migration.
-- MVP make happy path work; errors no need to be so specific
-  - I mean we can define very generic boundary errors that contains just a `message: string` which can be used for the errors; until we need to pattern match and handle some specific errors, we split it out from the generic error
+- keep boundary error tags small; make messages specific to the failed operation and safe reason
+  - use `ApplicationError.reason` to distinguish expected rejection from operational failure; add narrower types when a caller handles them differently
 - errors should be grouped by boundary and mostly defined in contract unless the error would not go out the boundary
 - apps/pico would be the daemon that serves as a backend of the app
 - need a packages/controller or something that groups the available application logics for multi platform reusability

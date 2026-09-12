@@ -4,8 +4,11 @@ import type { AgentAssistantMessage } from "@pico/contract/agent-message";
 import * as Chat from "@pico/contract/chat-model";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Logger from "effect/Logger";
 import * as Scope from "effect/Scope";
 import * as TestClock from "effect/testing/TestClock";
+import { reportFailure } from "./discord-error.ts";
 import {
   type DiscordOutputPolicy,
   make,
@@ -547,4 +550,175 @@ describe("Discord output", () => {
       }),
     ),
   );
+  it.effect("warns only after edit recovery and reports failed replacement once", () => {
+    const logs: Array<ReturnType<typeof Logger.formatStructured.log>> = [];
+    const logger = Logger.make((options) => logs.push(Logger.formatStructured.log(options)));
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const scope = yield* Scope.Scope;
+        let sendFails = false;
+        const dispatch = make(
+          {
+            send: () =>
+              sendFails
+                ? Effect.fail(
+                    new Error("private-send-wrapper", {
+                      cause: { status: 503, body: "private-send-body" },
+                    }),
+                  )
+                : Effect.succeed(1n),
+            edit: () =>
+              Effect.fail(
+                new Error("private-edit-wrapper", {
+                  cause: { status: 403, body: '{"code":50013,"message":"private-edit-body"}' },
+                }),
+              ),
+            renameThread: () => Effect.void,
+            triggerTyping: () => Effect.void,
+          },
+          scope,
+          visiblePolicy,
+        );
+        yield* dispatch(
+          11n,
+          envelope(chatA, {
+            type: "tool-started",
+            toolCallId: "first",
+            toolName: "bash",
+            argumentsJson: "{}",
+          }),
+        );
+        yield* dispatch(
+          11n,
+          envelope(chatA, {
+            type: "tool-finished",
+            toolCallId: "first",
+            toolName: "bash",
+            status: "succeeded",
+          }),
+        );
+        assert.strictEqual(logs.length, 1);
+        assert.strictEqual(logs[0]?.annotations.outcome, "sent-replacement");
+        yield* dispatch(
+          11n,
+          envelope(chatA, {
+            type: "tool-started",
+            toolCallId: "second",
+            toolName: "bash",
+            argumentsJson: "{}",
+          }),
+        );
+        sendFails = true;
+        const result = yield* Effect.exit(
+          dispatch(
+            11n,
+            envelope(chatA, {
+              type: "tool-finished",
+              toolCallId: "second",
+              toolName: "bash",
+              status: "succeeded",
+            }),
+          ),
+        );
+        assert.isTrue(Exit.isFailure(result));
+        assert.strictEqual(logs.length, 1);
+        if (Exit.isFailure(result)) yield* reportFailure("deliver-event", result.cause);
+        assert.strictEqual(logs.length, 2);
+        assert.strictEqual(logs[1]?.annotations.discordOperation, "edit-message-fallback");
+        assert.strictEqual(logs[1]?.annotations.status, 503);
+        assert.strictEqual(logs[1]?.annotations.editStatus, 403);
+        assert.strictEqual(logs[1]?.annotations.editDiscordCode, 50013);
+        assert.notInclude(JSON.stringify(logs), "private-");
+      }),
+    ).pipe(Effect.provide(Logger.layer([logger])));
+  });
+
+  it.effect("silently replaces a tool message deleted from Discord", () => {
+    const logs: Array<ReturnType<typeof Logger.formatStructured.log>> = [];
+    const logger = Logger.make((options) => logs.push(Logger.formatStructured.log(options)));
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const scope = yield* Scope.Scope;
+        const sent: RenderedMessage[] = [];
+        const dispatch = make(
+          {
+            send: (_threadId, message) =>
+              Effect.sync(() => {
+                sent.push(message);
+                return 1n;
+              }),
+            edit: () =>
+              Effect.fail(
+                new Error("private-sdk-wrapper", {
+                  cause: { status: 404, body: '{"code":10008,"message":"private-response"}' },
+                }),
+              ),
+            renameThread: () => Effect.void,
+            triggerTyping: () => Effect.void,
+          },
+          scope,
+          visiblePolicy,
+        );
+        yield* dispatch(
+          11n,
+          envelope(chatA, {
+            type: "tool-started",
+            toolCallId: "deleted",
+            toolName: "bash",
+            argumentsJson: "{}",
+          }),
+        );
+        yield* dispatch(
+          11n,
+          envelope(chatA, {
+            type: "tool-finished",
+            toolCallId: "deleted",
+            toolName: "bash",
+            status: "succeeded",
+          }),
+        );
+        assert.strictEqual(sent.length, 2);
+        assert.deepStrictEqual(sent[1], { content: "💻 Ran command", silent: true });
+        assert.deepStrictEqual(logs, []);
+      }),
+    ).pipe(Effect.provide(Logger.layer([logger])));
+  });
+
+  it.effect("logs one degraded typing transition, recovery, and no shutdown failure", () => {
+    const logs: Array<ReturnType<typeof Logger.formatStructured.log>> = [];
+    const logger = Logger.make((options) => logs.push(Logger.formatStructured.log(options)));
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const scope = yield* Scope.Scope;
+        let attempts = 0;
+        const dispatch = make(
+          {
+            send: () => Effect.succeed(1n),
+            edit: () => Effect.void,
+            renameThread: () => Effect.void,
+            triggerTyping: () =>
+              Effect.suspend(() => {
+                attempts++;
+                return attempts < 3 ? Effect.fail(new Error("private-typing-error")) : Effect.void;
+              }),
+          },
+          scope,
+          hiddenPolicy,
+        );
+        yield* dispatch(11n, envelope(chatA, { type: "run-started" }));
+        yield* TestClock.adjust("8 seconds");
+        assert.strictEqual(attempts, 2);
+        assert.strictEqual(logs.length, 1);
+        yield* TestClock.adjust("8 seconds");
+        assert.strictEqual(attempts, 3);
+        assert.strictEqual(logs.length, 2);
+        assert.strictEqual(logs[1]?.annotations.outcome, "recovered");
+        yield* dispatch(11n, envelope(chatA, { type: "run-finished", outcome: "completed" }));
+        yield* TestClock.adjust("8 seconds");
+        assert.strictEqual(attempts, 3);
+        assert.strictEqual(logs.length, 2);
+        assert.notInclude(JSON.stringify(logs), "private-");
+      }),
+    ).pipe(Effect.provide(Logger.layer([logger])));
+  });
 });

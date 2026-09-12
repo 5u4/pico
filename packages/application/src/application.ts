@@ -22,6 +22,8 @@ import {
   AgentError,
   ApplicationError,
   ChatClosed,
+  GitError,
+  PersistenceError,
   WorkspaceBindingInvalid,
 } from "@pico/contract/errors";
 import { AbsolutePath } from "@pico/contract/path";
@@ -43,9 +45,26 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 
-const failure = (message: string) => () => new ApplicationError({ message });
-const runtimeFailure = (message: string) => (cause: AgentError) =>
-  new ApplicationError({ message: `${message}: ${cause.message}` });
+const failure =
+  (message: string) =>
+  (cause: unknown): ApplicationError => {
+    if (cause instanceof ApplicationError) return cause;
+    if (cause instanceof WorkspaceBindingInvalid) {
+      return new ApplicationError({
+        reason: "invalid-state",
+        message: `${message}: ${cause.issue.field} ${cause.issue.reason}`,
+      });
+    }
+    return new ApplicationError({
+      reason: "operation",
+      message:
+        cause instanceof AgentError ||
+        cause instanceof GitError ||
+        cause instanceof PersistenceError
+          ? `${message}: ${cause.message}`
+          : message,
+    });
+  };
 const scheduleHostError = (cause: { readonly message?: string }) =>
   new Schedule.ScheduleHostError({
     message: cause.message ?? "Scheduled application operation failed",
@@ -102,29 +121,58 @@ const runBranchNaming = Effect.fn("Application.runBranchNaming")(function* (
   workspaces: WorkspaceRepository["Service"],
   request: BranchNamingRequest,
 ) {
-  const before = yield* findBranchNamingContext(chats, workspaces, request.chatId);
-  if (before === null) return;
+  let phase = "eligibility";
+  let workspaceId: Workspace.WorkspaceId | undefined;
+  yield* Effect.gen(function* () {
+    const before = yield* findBranchNamingContext(chats, workspaces, request.chatId);
+    if (before === null) return;
+    workspaceId = before.workspaceId;
 
-  const generated = yield* Effect.tryPromise({
-    try: request.generateTopic,
-    catch: (cause) => cause,
-  });
-  if (generated === null) return;
-  const topic = parseBranchTopic(generated);
-  if (topic === undefined) return;
+    phase = "generation";
+    const generated = yield* Effect.tryPromise({
+      try: request.generateTopic,
+      catch: () => new AgentError({ message: "Branch topic generation failed" }),
+    });
+    if (generated === null) return;
+    const topic = parseBranchTopic(generated);
+    if (topic === undefined) return;
 
-  const after = yield* findBranchNamingContext(chats, workspaces, request.chatId);
-  if (after === null || !sameBranchNamingContext(before, after)) return;
+    phase = "revalidation";
+    const after = yield* findBranchNamingContext(chats, workspaces, request.chatId);
+    if (after === null || !sameBranchNamingContext(before, after)) return;
 
-  const result = yield* gitWorktree.renameChatBranch({
-    chatId: request.chatId,
-    cwd: after.cwd,
-    prefix: after.prefix,
-    topic,
-  });
-  const detail = result.kind === "skipped" ? ` reason=${result.reason}` : "";
-  yield* Effect.logDebug(
-    `pico.branch-naming chatId=${request.chatId} result=${result.kind}${detail}`,
+    phase = "rename";
+    const result = yield* gitWorktree.renameChatBranch({
+      chatId: request.chatId,
+      cwd: after.cwd,
+      prefix: after.prefix,
+      topic,
+    });
+    yield* Effect.logDebug("Branch naming finished").pipe(
+      Effect.annotateLogs({
+        component: "application",
+        operation: "branch-naming",
+        chatId: request.chatId,
+        workspaceId,
+        outcome: result.kind,
+        ...(result.kind === "skipped" ? { reason: result.reason } : {}),
+      }),
+    );
+  }).pipe(
+    Effect.catchCause((cause) =>
+      Cause.hasInterruptsOnly(cause)
+        ? Effect.interrupt
+        : Effect.logError("Background branch naming failed").pipe(
+            Effect.annotateLogs({
+              component: "application",
+              operation: "branch-naming",
+              chatId: request.chatId,
+              ...(workspaceId === undefined ? {} : { workspaceId }),
+              phase,
+              reason: Cause.hasDies(cause) ? "defect" : "operation",
+            }),
+          ),
+    ),
   );
 });
 
@@ -136,15 +184,7 @@ export const makeBranchNaming = Effect.fn("BranchNaming.make")(function* (
   const run = yield* FiberSet.makeRuntime<never, void, never>();
 
   const handle: BranchNamingHandler = (request) => {
-    run(
-      runBranchNaming(gitWorktree, chats, workspaces, request).pipe(
-        Effect.catchCause((cause) =>
-          Effect.logError(
-            `pico.branch-naming chatId=${request.chatId} failed=${Cause.pretty(cause)}`,
-          ),
-        ),
-      ),
-    );
+    run(runBranchNaming(gitWorktree, chats, workspaces, request));
   };
   return BranchNaming.of({ handle });
 });
@@ -195,7 +235,7 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
       .findById(chatId)
       .pipe(Effect.mapError(failure("Failed to find chat")));
     if (Option.isNone(chat)) {
-      return yield* new ApplicationError({ message: "Chat not found" });
+      return yield* new ApplicationError({ reason: "not-found", message: "Chat not found" });
     }
     return chat.value;
   });
@@ -205,7 +245,9 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
     errorMessage: string,
   ) {
     const chat = yield* chats.findById(chatId).pipe(Effect.mapError(failure(errorMessage)));
-    if (Option.isNone(chat)) return yield* new ApplicationError({ message: "Chat not found" });
+    if (Option.isNone(chat)) {
+      return yield* new ApplicationError({ reason: "not-found", message: "Chat not found" });
+    }
     if (chat.value.archivedAt !== null) return yield* new ChatClosed();
   });
 
@@ -213,7 +255,15 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
     function* (input: CreateWorkspace) {
       const id = Workspace.WorkspaceId.make(yield* crypto.randomUUIDv7);
       const createdAt = yield* Clock.currentTimeMillis;
-      return yield* workspaces.create({ ...input, id, createdAt });
+      const workspace = yield* workspaces.create({ ...input, id, createdAt });
+      yield* Effect.logInfo("Workspace created").pipe(
+        Effect.annotateLogs({
+          component: "application",
+          operation: "create-workspace",
+          workspaceId: id,
+        }),
+      );
+      return workspace;
     },
     Effect.mapError(failure("Failed to create workspace")),
   );
@@ -318,9 +368,17 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
     ) {
       return existing;
     }
-    return yield* workspaces
+    const workspace = yield* workspaces
       .replaceConfiguration(existing.id, configuration)
       .pipe(Effect.mapError(failure("Failed to bind workspace")));
+    yield* Effect.logInfo("Workspace binding updated").pipe(
+      Effect.annotateLogs({
+        component: "application",
+        operation: "bind-workspace",
+        workspaceId: workspace.id,
+      }),
+    );
+    return workspace;
   });
 
   const persistChat = Effect.fn("Application.persistChat")(function* (
@@ -334,13 +392,22 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
       () => chats.create({ ...input, id, cwd, createdAt }),
       (_, exit) =>
         Exit.isFailure(exit)
-          ? sessions
-              .remove(id)
-              .pipe(
-                Effect.catchCause((cause) =>
-                  Effect.logError("Failed to roll back OMP session", Cause.pretty(cause)),
-                ),
-              )
+          ? sessions.remove(id).pipe(
+              Effect.catchCause((cause) =>
+                Cause.hasInterruptsOnly(cause)
+                  ? Effect.void
+                  : Effect.logError("Failed to roll back OMP session").pipe(
+                      Effect.annotateLogs({
+                        component: "application",
+                        operation: "create-chat",
+                        phase: "session-rollback",
+                        chatId: id,
+                        workspaceId: input.workspaceId,
+                        reason: Cause.hasDies(cause) ? "defect" : "operation",
+                      }),
+                    ),
+              ),
+            )
           : Effect.void,
     );
   });
@@ -349,7 +416,10 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
     function* (input: CreateChat, id: Chat.ChatId, createdAt: number) {
       const maybeWorkspace = yield* workspaces.findById(input.workspaceId);
       if (Option.isNone(maybeWorkspace)) {
-        return yield* Effect.fail(new ApplicationError({ message: "Failed to create chat" }));
+        return yield* new ApplicationError({
+          reason: "not-found",
+          message: "Cannot create chat: workspace not found",
+        });
       }
 
       const workspace = maybeWorkspace.value;
@@ -368,6 +438,19 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
       );
     },
     Effect.mapError(failure("Failed to create chat")),
+    (effect, input, id) =>
+      effect.pipe(
+        Effect.tap(() =>
+          Effect.logInfo("Chat created").pipe(
+            Effect.annotateLogs({
+              component: "application",
+              operation: "create-chat",
+              chatId: id,
+              workspaceId: input.workspaceId,
+            }),
+          ),
+        ),
+      ),
   );
 
   const createChat = Effect.fn("Application.createChat")(function* (input: CreateChat) {
@@ -389,7 +472,10 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
       .pipe(Effect.mapError(failure("Failed to create chat")));
     if (Option.isSome(existing)) {
       if (existing.value.workspaceId !== workspaceId) {
-        return yield* new ApplicationError({ message: "Failed to create chat" });
+        return yield* new ApplicationError({
+          reason: "conflict",
+          message: "Scheduled chat identity belongs to another workspace",
+        });
       }
       return existing.value;
     }
@@ -407,6 +493,7 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
     const chat = yield* findChat(chatId);
     if (chat.workspaceId !== ownerWorkspaceId) {
       return yield* new ApplicationError({
+        reason: "conflict",
         message: "Scheduled chat does not belong to its owner workspace",
       });
     }
@@ -446,7 +533,10 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
       }
       const workspace = yield* workspaces.findById(chat.value.workspaceId);
       if (Option.isNone(workspace)) {
-        return yield* new ApplicationError({ message: "Chat workspace not found" });
+        return yield* new ApplicationError({
+          reason: "not-found",
+          message: "Chat workspace not found",
+        });
       }
       if (workspace.value.binding === null) return Option.none<ChatPlatformBinding>();
       return Option.some({
@@ -488,14 +578,38 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
           .archive(chatId, archivedAt)
           .pipe(Effect.mapError(failure("Failed to archive chat")));
         if (Option.isNone(archived)) {
-          return yield* new ApplicationError({ message: "Chat not found" });
+          return yield* new ApplicationError({ reason: "not-found", message: "Chat not found" });
         }
-        yield* runtime.close(chatId).pipe(Effect.mapError(failure("Failed to close chat runtime")));
+        yield* Effect.logInfo("Chat archived").pipe(
+          Effect.annotateLogs({
+            component: "application",
+            operation: "close-chat",
+            phase: "archive",
+            chatId,
+            workspaceId: chat.workspaceId,
+          }),
+        );
+        yield* runtime
+          .close(chatId)
+          .pipe(Effect.mapError(failure("Chat archived, but runtime close failed")));
+        yield* Effect.logDebug("Chat runtime closed").pipe(
+          Effect.annotateLogs({
+            component: "application",
+            operation: "close-chat",
+            phase: "runtime-close",
+            chatId,
+            workspaceId: chat.workspaceId,
+          }),
+        );
 
         if (inspection.kind === "managed" && inspection.state !== "absent") {
           const removal = yield* gitWorktree
             .removeChat({ chatId, cwd: chat.cwd, force: options.allowDirtyWorktree })
-            .pipe(Effect.mapError(failure("Failed to remove chat worktree")));
+            .pipe(
+              Effect.mapError(
+                failure("Chat archived and runtime closed, but worktree removal failed"),
+              ),
+            );
           switch (removal.kind) {
             case "removed":
             case "already-absent":
@@ -504,7 +618,8 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
               return { kind: "worktree-confirmation-required" } satisfies CloseChatResult;
             case "not-managed":
               return yield* new ApplicationError({
-                message: "Failed to remove chat worktree",
+                reason: "invalid-state",
+                message: "Chat archived and runtime closed, but worktree is no longer managed",
               });
             default: {
               const exhaustive: never = removal;
@@ -512,6 +627,14 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
             }
           }
         }
+        yield* Effect.logInfo("Chat closed").pipe(
+          Effect.annotateLogs({
+            component: "application",
+            operation: "close-chat",
+            chatId,
+            workspaceId: chat.workspaceId,
+          }),
+        );
         return { kind: "closed" } satisfies CloseChatResult;
       }),
     );
@@ -527,7 +650,7 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
         yield* ensureChatOpen(chatId, "Failed to send message");
         yield* runtime
           .send(chatId, prompt)
-          .pipe(Effect.mapError(runtimeFailure("Failed to send message")));
+          .pipe(Effect.mapError(failure("Failed to send message")));
       }),
     );
   });
@@ -543,7 +666,7 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
         yield* ensureChatOpen(chatId, "Failed to run scheduled prompt");
         return yield* runtime
           .sendCaptured(chatId, runId, prompt, onEvent)
-          .pipe(Effect.mapError(runtimeFailure("Failed to run scheduled prompt")));
+          .pipe(Effect.mapError(failure("Failed to run scheduled prompt")));
       }),
     );
   });
@@ -573,7 +696,7 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
         yield* ensureChatOpen(chatId, "Failed to publish scheduled result");
         yield* runtime
           .publish(chatId, content)
-          .pipe(Effect.mapError(runtimeFailure("Failed to publish scheduled result")));
+          .pipe(Effect.mapError(failure("Failed to publish scheduled result")));
       }),
     );
   });
@@ -582,7 +705,9 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
     const chat = yield* chats
       .findById(chatId)
       .pipe(Effect.mapError(failure("Failed to abort chat")));
-    if (Option.isNone(chat)) return yield* new ApplicationError({ message: "Chat not found" });
+    if (Option.isNone(chat)) {
+      return yield* new ApplicationError({ reason: "not-found", message: "Chat not found" });
+    }
     if (chat.value.archivedAt !== null) return;
     yield* runtime.abort(chatId).pipe(Effect.mapError(failure("Failed to abort chat")));
   });
@@ -594,7 +719,7 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
         yield* ensureChatOpen(chatId, "Failed to read chat context");
         return yield* runtime
           .contextUsage(chatId)
-          .pipe(Effect.mapError(runtimeFailure("Failed to read chat context")));
+          .pipe(Effect.mapError(failure("Failed to read chat context")));
       }),
     );
   });
@@ -606,7 +731,7 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
         yield* ensureChatOpen(chatId, "Failed to shake chat");
         return yield* runtime
           .shake(chatId, mode)
-          .pipe(Effect.mapError(runtimeFailure("Failed to shake chat")));
+          .pipe(Effect.mapError(failure("Failed to shake chat")));
       }),
     );
   });

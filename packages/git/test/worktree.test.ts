@@ -5,11 +5,15 @@ import * as Chat from "@pico/contract/chat-model";
 import { GitError, PersistenceError, WorkspaceBindingInvalid } from "@pico/contract/errors";
 import { AbsolutePath } from "@pico/contract/path";
 import { BRANCH_ID_SUFFIX_LENGTH, make } from "@pico/git/worktree";
+import * as Cause from "effect/Cause";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
+import * as Logger from "effect/Logger";
 import * as Path from "effect/Path";
+import * as References from "effect/References";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
@@ -265,6 +269,104 @@ describe("GitWorktree.create", () => {
     }).pipe(Effect.provide(BunServices.layer)),
   );
 
+  it.effect("reports independent rollback failures without replacing the primary error", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const { repositoryCwd, worktreesDir } = yield* makeRepository();
+      const { create } = yield* make(worktreesDir);
+      const id = chatId(4);
+      const cwd = AbsolutePath.make(path.join(worktreesDir, id));
+      const branch = `chat/${id}`;
+      const primary = new PersistenceError({ message: "private primary failure" });
+      const logs: Array<{
+        readonly cause: Cause.Cause<unknown>;
+        readonly annotations: Readonly<Record<string, unknown>>;
+      }> = [];
+      const logger = Logger.make<unknown, void>((entry) => {
+        if (entry.logLevel === "Error") {
+          logs.push({
+            cause: entry.cause,
+            annotations: entry.fiber.getRef(References.CurrentLogAnnotations),
+          });
+        }
+      });
+
+      const error = yield* create(options(id, repositoryCwd), (createdCwd) =>
+        git(createdCwd, ["worktree", "lock", "--", createdCwd]).pipe(
+          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+          Effect.scoped,
+          Effect.andThen(Effect.fail(primary)),
+        ),
+      ).pipe(Effect.provide(Logger.layer([logger])), Effect.flip);
+
+      assert.strictEqual(error, primary);
+      assert.strictEqual(logs.length, 2);
+      assert.deepStrictEqual(
+        logs.map((entry) => entry.annotations.resource),
+        ["worktree", "branch"],
+      );
+      for (const entry of logs) {
+        assert.strictEqual(entry.annotations.chatId, id);
+        assert.strictEqual(entry.annotations.phase, "rollback");
+        const failures = entry.cause.reasons.filter(Cause.isFailReason);
+        assert.strictEqual(failures.length, 1);
+        for (const failure of failures) {
+          assert.instanceOf(failure.error, GitError);
+          if (!(failure.error instanceof GitError)) continue;
+          assert.match(failure.error.message, /Git exited with code [1-9]\d*/);
+          assert.notInclude(failure.error.message, repositoryCwd);
+          assert.notInclude(failure.error.message, branch);
+          assert.notInclude(failure.error.message, primary.message);
+        }
+      }
+      assert.isTrue(yield* fileSystem.exists(cwd));
+      assert.strictEqual(
+        (yield* git(repositoryCwd, [
+          "for-each-ref",
+          "--format=%(refname)",
+          `refs/heads/${branch}`,
+        ])).trim(),
+        `refs/heads/${branch}`,
+      );
+      yield* git(repositoryCwd, ["worktree", "unlock", "--", cwd]);
+      yield* git(repositoryCwd, ["worktree", "remove", "--force", "--", cwd]);
+      yield* git(repositoryCwd, ["branch", "-D", "--", branch]);
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
+
+  it.effect("rolls back interrupted use without reporting an operational failure", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const { repositoryCwd, worktreesDir } = yield* makeRepository();
+      const { create } = yield* make(worktreesDir);
+      const id = chatId(5);
+      const cwd = AbsolutePath.make(path.join(worktreesDir, id));
+      const acquired = yield* Deferred.make<void>();
+      const logs: Array<unknown> = [];
+      const logger = Logger.make<unknown, void>((entry) => {
+        if (entry.logLevel === "Error") logs.push(entry.cause);
+      });
+      const fiber = yield* create(options(id, repositoryCwd), () =>
+        Deferred.succeed(acquired, undefined).pipe(Effect.andThen(Effect.never)),
+      ).pipe(Effect.provide(Logger.layer([logger])), Effect.forkChild);
+
+      yield* Deferred.await(acquired);
+      yield* Fiber.interrupt(fiber);
+      const exit = yield* Fiber.await(fiber);
+      assert.isTrue(Exit.isFailure(exit));
+      if (Exit.isFailure(exit)) assert.isTrue(Cause.hasInterruptsOnly(exit.cause));
+      assert.deepStrictEqual(logs, []);
+      assert.isFalse(yield* fileSystem.exists(cwd));
+      assert.strictEqual(
+        (yield* git(repositoryCwd, ["branch", "--list", `chat/${id}`])).trim(),
+        "",
+      );
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
+
   it.effect("does not commit or delete existing state when acquisition fails", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
@@ -284,6 +386,9 @@ describe("GitWorktree.create", () => {
       ).pipe(Effect.flip);
 
       assert.instanceOf(error, GitError);
+      assert.match(error.message, /Git exited with code [1-9]\d*/);
+      assert.notInclude(error.message, repositoryCwd);
+      assert.notInclude(error.message, branch);
       assert.isFalse(callbackRan);
       assert.isFalse(yield* fileSystem.exists(cwd));
       assert.strictEqual((yield* git(repositoryCwd, ["branch", "--list", branch])).trim(), branch);
@@ -360,10 +465,14 @@ describe("GitWorktree.validate", () => {
       const { validate } = yield* make(worktreesDir);
       const missingRepository = AbsolutePath.make(path.join(worktreesDir, "missing"));
 
-      assert.instanceOf(
-        yield* validate({ repositoryCwd: missingRepository, settings }).pipe(Effect.flip),
-        GitError,
+      const error = yield* validate({ repositoryCwd: missingRepository, settings }).pipe(
+        Effect.flip,
       );
+      assert.instanceOf(error, GitError);
+      if (!(error instanceof GitError)) return;
+      assert.include(error.message, "spawn");
+      assert.include(error.message, "NotFound");
+      assert.notInclude(error.message, missingRepository);
     }).pipe(Effect.provide(BunServices.layer)),
   );
 });
@@ -653,13 +762,19 @@ describe("GitWorktree.renameChatBranch", () => {
       yield* worktree.create(options(id, repositoryCwd), () => Effect.void);
       const head = yield* git(cwd, ["rev-parse", "HEAD"]);
       const remoteRefs = yield* git(remoteCwd, ["show-ref"]);
+      const logs: Array<unknown> = [];
+      const logger = Logger.make<unknown, void>((entry) => {
+        if (entry.logLevel === "Error") logs.push(entry.cause);
+      });
 
-      assert.instanceOf(
-        yield* worktree
-          .renameChatBranch(renameOptions(id, cwd, "inaccessible-topic"))
-          .pipe(Effect.flip),
-        GitError,
-      );
+      const error = yield* worktree
+        .renameChatBranch(renameOptions(id, cwd, "inaccessible-topic"))
+        .pipe(Effect.provide(Logger.layer([logger])), Effect.flip);
+      assert.instanceOf(error, GitError);
+      assert.match(error.message, /Git exited with code [1-9]\d*/);
+      assert.notInclude(error.message, missingCwd);
+      assert.notInclude(error.message, source);
+      assert.deepStrictEqual(logs, []);
       assert.strictEqual((yield* git(cwd, ["branch", "--show-current"])).trim(), source);
       assert.strictEqual(yield* git(cwd, ["rev-parse", "HEAD"]), head);
       assert.strictEqual(yield* git(remoteCwd, ["show-ref"]), remoteRefs);
@@ -732,46 +847,58 @@ describe("GitWorktree.renameChatBranch", () => {
       const path = yield* Path.Path;
       const { repositoryCwd, worktreesDir } = yield* makeRepository();
       const worktree = yield* make(worktreesDir);
+      const commit = (yield* git(repositoryCwd, ["rev-parse", "main^{commit}"])).trim();
 
       const sameId = chatId(60);
       const sameCwd = AbsolutePath.make(path.join(worktreesDir, sameId));
       yield* worktree.create(options(sameId, repositoryCwd), () => Effect.void);
-      const sameResults = yield* Effect.all(
+      yield* Effect.all(
         [
           worktree.renameChatBranch(renameOptions(sameId, sameCwd, "same-topic")),
           worktree.renameChatBranch(renameOptions(sameId, sameCwd, "same-topic")),
         ],
-        { concurrency: "unbounded" },
+        { concurrency: "unbounded", discard: true },
       );
-      assert.deepStrictEqual(sameResults.map((result) => result.kind).sort(), [
-        "already-renamed",
-        "renamed",
-      ]);
       assert.strictEqual(
         (yield* git(sameCwd, ["branch", "--show-current"])).trim(),
         renamedBranch(sameId, "same-topic"),
+      );
+      assert.strictEqual((yield* git(sameCwd, ["rev-parse", "HEAD^{commit}"])).trim(), commit);
+      assert.strictEqual(
+        (yield* git(repositoryCwd, [
+          "for-each-ref",
+          "--format=%(refname) %(objectname)",
+          `refs/heads/chat/${sameId}`,
+          `refs/heads/${renamedBranch(sameId, "same-topic")}`,
+        ])).trim(),
+        `refs/heads/${renamedBranch(sameId, "same-topic")} ${commit}`,
       );
 
       const differentId = chatId(61);
       const differentCwd = AbsolutePath.make(path.join(worktreesDir, differentId));
       yield* worktree.create(options(differentId, repositoryCwd), () => Effect.void);
-      const differentResults = yield* Effect.all(
+      yield* Effect.all(
         [
           worktree.renameChatBranch(renameOptions(differentId, differentCwd, "first-topic")),
           worktree.renameChatBranch(renameOptions(differentId, differentCwd, "second-topic")),
         ],
-        { concurrency: "unbounded" },
+        { concurrency: "unbounded", discard: true },
       );
-      assert.strictEqual(differentResults.filter((result) => result.kind === "renamed").length, 1);
-      assert.strictEqual(
-        differentResults.filter(
-          (result) => result.kind === "skipped" && result.reason === "branch-changed",
-        ).length,
-        1,
-      );
+      const finalBranch = (yield* git(differentCwd, ["branch", "--show-current"])).trim();
       assert.include(
         [renamedBranch(differentId, "first-topic"), renamedBranch(differentId, "second-topic")],
-        (yield* git(differentCwd, ["branch", "--show-current"])).trim(),
+        finalBranch,
+      );
+      assert.strictEqual((yield* git(differentCwd, ["rev-parse", "HEAD^{commit}"])).trim(), commit);
+      assert.strictEqual(
+        (yield* git(repositoryCwd, [
+          "for-each-ref",
+          "--format=%(refname) %(objectname)",
+          `refs/heads/chat/${differentId}`,
+          `refs/heads/${renamedBranch(differentId, "first-topic")}`,
+          `refs/heads/${renamedBranch(differentId, "second-topic")}`,
+        ])).trim(),
+        `refs/heads/${finalBranch} ${commit}`,
       );
     }).pipe(Effect.provide(BunServices.layer)),
   );

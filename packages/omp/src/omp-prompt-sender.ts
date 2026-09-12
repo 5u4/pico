@@ -1,12 +1,20 @@
 import { tryRunRpcSkillCommand } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
 import type * as OmpAgentSession from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import * as AgentMessage from "@pico/contract/agent-message";
+import type { ChatId } from "@pico/contract/chat-model";
+import { AgentError } from "@pico/contract/errors";
+import * as Cause from "effect/Cause";
 import type * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import type * as FileSystem from "effect/FileSystem";
 import type * as Path from "effect/Path";
 import type * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
+
+interface PromptDiagnostics {
+  readonly chatId: ChatId;
+  readonly runEffect: typeof Effect.runPromise;
+}
 
 type OmpPromptSession = Parameters<typeof tryRunRpcSkillCommand>[0] &
   Pick<OmpAgentSession.AgentSession, "prompt" | "sendUserMessage" | "setPromptDropped"> & {
@@ -59,7 +67,7 @@ const validateImageBytes = async (
   try {
     metadata = await new Bun.Image(bytes).metadata();
   } catch {
-    throw new Error(`Invalid image attachment: ${JSON.stringify(attachment.name)}`);
+    throw new AgentError({ message: "Invalid image attachment bytes" });
   }
   if (
     metadata.format !== bunFormatFor(attachment.mimeType) ||
@@ -69,7 +77,7 @@ const validateImageBytes = async (
     metadata.height > AgentMessage.MAX_AGENT_IMAGE_EDGE ||
     metadata.width * metadata.height > AgentMessage.MAX_AGENT_IMAGE_PIXELS
   ) {
-    throw new Error(`Invalid image attachment: ${JSON.stringify(attachment.name)}`);
+    throw new AgentError({ message: "Image attachment format or dimensions are invalid" });
   }
 };
 
@@ -140,6 +148,7 @@ export const makeOmpPromptSender = (
   fileSystem: FileSystem.FileSystem,
   path: Path.Path,
   crypto: Crypto.Crypto,
+  diagnostics: PromptDiagnostics,
 ) => {
   const runSerialized = serialize();
   return (input: AgentMessage.AgentPrompt): Promise<void> =>
@@ -160,7 +169,8 @@ export const makeOmpPromptSender = (
       );
 
       const sessionFile = session.sessionManager.getSessionFile();
-      if (sessionFile === undefined) throw new Error("OMP session has no journal path");
+      if (sessionFile === undefined)
+        throw new AgentError({ message: "OMP session has no journal path" });
       const sessionDirectory = path.join(
         path.dirname(sessionFile),
         path.basename(sessionFile, path.extname(sessionFile)),
@@ -220,7 +230,7 @@ export const makeOmpPromptSender = (
         } finally {
           session.setPromptDropped(undefined);
         }
-        if (dropped) throw new Error("OMP did not accept the image prompt");
+        if (dropped) throw new DOMException("OMP image prompt was dropped", "AbortError");
       } catch (error) {
         try {
           await removeWrittenOriginals(
@@ -231,10 +241,19 @@ export const makeOmpPromptSender = (
             createdAttachmentsDirectory,
             createdSessionDirectory,
           );
-        } catch (cleanupError) {
-          throw new AggregateError(
-            [error, cleanupError],
-            "OMP rejected the image prompt and cleanup failed",
+        } catch {
+          await diagnostics.runEffect(
+            Effect.logError(
+              "Failed to remove image originals after prompt rejection",
+              Cause.fail(new AgentError({ message: "Image rollback failed" })),
+            ).pipe(
+              Effect.annotateLogs({
+                component: "omp",
+                operation: "image-cleanup",
+                chatId: diagnostics.chatId,
+                phase: "prompt-rollback",
+              }),
+            ),
           );
         }
         throw error;

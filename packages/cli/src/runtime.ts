@@ -8,7 +8,10 @@ type ShutdownState =
   | { readonly kind: "running" }
   | { readonly kind: "stopping" }
   | { readonly kind: "completed" };
-type RunMain = <A, E>(effect: Effect.Effect<A, E>) => void;
+type RunMain = <A, E>(
+  effect: Effect.Effect<A, E>,
+  options?: { readonly disableErrorReporting?: boolean },
+) => void;
 
 const INTERRUPTED_EXIT_CODE = 130;
 const exitProcess = (code: number): never => {
@@ -68,7 +71,7 @@ const makeRuntime = () => {
     onSignal("SIGTERM");
   }
 
-  const runMain: RunMain = (effect) => {
+  const runMain: RunMain = (effect, options) => {
     const completed = Promise.withResolvers<void>();
     const cancelPostmortem = postmortem.register("pico-daemon", () => completed.promise, {
       exitOnly: true,
@@ -95,7 +98,7 @@ const makeRuntime = () => {
     process.on("SIGTERM", onSigterm);
 
     try {
-      runEffect(effect);
+      runEffect(effect, options);
     } catch (error) {
       state = { kind: "completed" };
       completed.resolve();

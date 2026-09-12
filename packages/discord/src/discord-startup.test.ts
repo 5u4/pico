@@ -3,6 +3,7 @@ import { AbsolutePath } from "@pico/contract/path";
 import type { CreateApplicationCommand } from "discordeno";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as Logger from "effect/Logger";
 import * as Redacted from "effect/Redacted";
 import * as DiscordCommand from "./discord-command.ts";
 import { type DiscordStartupBot, openBot } from "./layer.ts";
@@ -109,6 +110,38 @@ describe("Discord startup", () => {
         { kind: "guild", guildId: "2", commands: DiscordCommand.applicationCommands },
         { kind: "shutdown" },
       ]);
+    }),
+  );
+  it.effect("retains reconciliation context while reporting independent rollback failure", () =>
+    Effect.gen(function* () {
+      const harness = makeBot(["1", "2"]);
+      const logs: Array<ReturnType<typeof Logger.formatStructured.log>> = [];
+      const logger = Logger.make((options) => logs.push(Logger.formatStructured.log(options)));
+      const bot: DiscordStartupBot = {
+        ...harness.bot,
+        id: 999n,
+        helpers: {
+          ...harness.bot.helpers,
+          upsertGuildApplicationCommands: () =>
+            Promise.reject({
+              status: 403,
+              body: '{"code":50013,"message":"private-startup-body"}',
+            }),
+        },
+        shutdown: () => Promise.reject({ status: 504, body: "private-shutdown-body" }),
+      };
+      const failure = yield* Effect.flip(
+        Effect.scoped(openBot(bot, config, harness.collectedGuildIds)),
+      ).pipe(Effect.provide(Logger.layer([logger])));
+      assert.strictEqual(failure.operation, "register-guild-commands");
+      assert.strictEqual(failure.guildId, "1");
+      assert.strictEqual(failure.status, 403);
+      assert.strictEqual(failure.discordCode, 50013);
+      assert.strictEqual(logs.length, 1);
+      assert.strictEqual(logs[0]?.annotations.operation, "stop-bot");
+      assert.strictEqual(logs[0]?.annotations.botId, "999");
+      assert.notInclude(JSON.stringify(logs), "private-");
+      assert.notInclude(JSON.stringify(failure), "private-");
     }),
   );
 });

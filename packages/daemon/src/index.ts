@@ -4,9 +4,16 @@ import * as Config from "@pico/config/config";
 import * as Instructions from "@pico/config/instructions";
 import * as ConfigRoot from "@pico/config/root";
 import type { PicoPaths, PicoRoot } from "@pico/contract/config";
-import { AgentError } from "@pico/contract/errors";
+import {
+  AgentError,
+  ApplicationError,
+  ConfigError,
+  GitError,
+  LoggingError,
+  PersistenceError,
+} from "@pico/contract/errors";
 import { EventRouter } from "@pico/contract/event-router";
-import { ScheduleRunHostService } from "@pico/contract/schedule";
+import { ScheduleError, ScheduleHostError, ScheduleRunHostService } from "@pico/contract/schedule";
 import * as DiscordLayer from "@pico/discord/layer";
 import * as EventRouterLayer from "@pico/event-router/layer";
 import * as GitWorktree from "@pico/git/worktree";
@@ -15,21 +22,126 @@ import * as AgentSessionStoreLayer from "@pico/omp/agent-session-store";
 import * as AgentRuntimeLayer from "@pico/omp/layer";
 import * as PersistenceLayer from "@pico/persistence/layer";
 import * as ScheduleLayer from "@pico/schedule/layer";
+import * as Cause from "effect/Cause";
+import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Scope from "effect/Scope";
 
+// Embedders acquire a daemon in their own scope and own any propagated failure.
 export const open = Effect.fn("Daemon.open")(function* (root: PicoRoot) {
   const paths = yield* ConfigRoot.open(root);
-  const config = yield* Config.load(paths);
   const loggingContext = yield* Layer.build(LoggingLayer.layer(paths.logsDir));
+  yield* Effect.gen(function* () {
+    const config = yield* Config.load(paths);
+    yield* openComponents(paths, config);
+  }).pipe(Effect.provide(loggingContext));
+});
 
-  yield* Layer.build(daemonLayer(paths, config)).pipe(
-    Effect.andThen(Effect.logInfo(`pico.daemon.ready root=${paths.root}`)),
-    Effect.provide(loggingContext),
+// The CLI receives the reported result only after resources and loggers have closed.
+export const run = Effect.fn("Daemon.run")(
+  function* <E, R>(root: PicoRoot, lifetime: Effect.Effect<void, E, R>) {
+    return yield* Effect.uninterruptibleMask((restore) =>
+      Effect.gen(function* () {
+        const loggerScope = yield* Scope.make();
+        const resourceScope = yield* Scope.make();
+        let loggingContext = Context.empty();
+        let phase: "startup" | "running" | "shutdown" = "startup";
+        const bodyExit = yield* restore(
+          Effect.gen(function* () {
+            const paths = yield* ConfigRoot.open(root);
+            loggingContext = yield* Layer.buildWithScope(
+              LoggingLayer.layer(paths.logsDir),
+              loggerScope,
+            );
+            yield* Effect.gen(function* () {
+              yield* Effect.logInfo("pico.daemon.starting").pipe(
+                Effect.annotateLogs({ phase: "startup" }),
+              );
+              const config = yield* Config.load(paths);
+              yield* openComponents(paths, config);
+              phase = "running";
+              yield* lifetime;
+              phase = "shutdown";
+              yield* Effect.logInfo("pico.daemon.stopping").pipe(
+                Effect.annotateLogs({ phase: "shutdown" }),
+              );
+            }).pipe(Effect.provide(loggingContext));
+          }).pipe(Scope.provide(resourceScope)),
+        ).pipe(Effect.exit);
+        const resourceExit = yield* Scope.close(resourceScope, bodyExit).pipe(
+          Effect.provide(loggingContext),
+          Effect.exit,
+        );
+        const exit = Exit.asVoidAll([bodyExit, resourceExit]);
+
+        yield* (
+          Exit.isFailure(exit)
+            ? reportFailure(exit.cause, phase)
+            : Effect.logInfo("pico.daemon.stopped").pipe(
+                Effect.annotateLogs({ phase: "shutdown", outcome: "success" }),
+              )
+        ).pipe(Effect.provide(loggingContext));
+
+        const loggerExit = yield* Scope.close(loggerScope, exit).pipe(Effect.exit);
+        if (Exit.isFailure(loggerExit)) {
+          yield* reportFailure(loggerExit.cause, "logging-close");
+        }
+        return Exit.asVoidAll([exit, loggerExit]);
+      }),
+    ).pipe(Effect.annotateLogs({ root }));
+  },
+  Effect.annotateLogs({ component: "daemon", operation: "run" }),
+);
+
+const openComponents = Effect.fn("Daemon.openComponents")(function* (
+  paths: PicoPaths,
+  config: Config.PicoConfig,
+) {
+  yield* Layer.build(daemonLayer(paths, config));
+  yield* Effect.logInfo("pico.daemon.ready").pipe(
+    Effect.annotateLogs({
+      phase: "ready",
+      root: paths.root,
+      discord: Option.isSome(config.discord) ? "enabled" : "disabled",
+      rpc: "disabled",
+    }),
   );
 });
+
+const reportFailure = (cause: Cause.Cause<unknown>, phase: string) => {
+  if (Cause.hasInterruptsOnly(cause)) return Effect.void;
+  const safeCause = Cause.fromReasons(
+    cause.reasons.map((reason) => {
+      if (reason._tag === "Interrupt") return reason;
+      const error = reason._tag === "Fail" ? reason.error : reason.defect;
+      if (
+        error instanceof ConfigError ||
+        error instanceof LoggingError ||
+        error instanceof PersistenceError ||
+        error instanceof GitError ||
+        error instanceof AgentError ||
+        error instanceof ApplicationError ||
+        error instanceof ScheduleError ||
+        error instanceof ScheduleHostError ||
+        error instanceof DiscordLayer.DiscordError
+      )
+        return reason;
+      const safeError = new Error(
+        reason._tag === "Fail" ? "Daemon operation failed" : "Unexpected daemon defect",
+      );
+      return reason._tag === "Fail"
+        ? Cause.makeFailReason(safeError)
+        : Cause.makeDieReason(safeError);
+    }),
+  );
+  return Effect.logError("pico.daemon.failed", safeCause).pipe(
+    Effect.annotateLogs({ phase, outcome: "failure" }),
+  );
+};
 
 const daemonLayer = (paths: PicoPaths, config: Config.PicoConfig) =>
   Layer.unwrap(

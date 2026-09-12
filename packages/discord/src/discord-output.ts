@@ -7,6 +7,7 @@ import * as Fiber from "effect/Fiber";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import type * as Scope from "effect/Scope";
+import { DiscordError, discordError, reportFailure } from "./discord-error.ts";
 import * as Markdown from "./discord-markdown.ts";
 
 const FAILED_MESSAGE = "The request failed.";
@@ -240,14 +241,27 @@ export const make = (
     state: RunState,
   ) {
     yield* interruptTyping(state);
+    let degraded = false;
     const loop = Effect.forever(
       client.triggerTyping(threadId).pipe(
-        Effect.catchCause((cause) =>
-          Effect.logWarning("Discord typing indicator failed", Cause.pretty(cause)),
+        Effect.andThen(
+          Effect.suspend(() => {
+            if (!degraded) return Effect.void;
+            degraded = false;
+            return Effect.logInfo("Discord typing indicator recovered").pipe(
+              Effect.annotateLogs({ operation: "trigger-typing", outcome: "recovered" }),
+            );
+          }),
         ),
+        Effect.catchCause((cause) => {
+          if (Cause.hasInterruptsOnly(cause)) return Effect.interrupt;
+          if (degraded) return Effect.void;
+          degraded = true;
+          return reportFailure("trigger-typing", cause, "warning");
+        }),
         Effect.andThen(Effect.sleep(TYPING_INTERVAL)),
       ),
-    );
+    ).pipe(Effect.annotateLogs({ component: "discord", threadId: threadId.toString() }));
     state.typing = yield* Effect.forkIn(loop, scope, { startImmediately: true });
   });
   const updateToolMessage = Effect.fn("Discord.output.updateToolMessage")(function* (
@@ -259,11 +273,34 @@ export const make = (
       yield* client.send(threadId, { content, silent: SILENT });
       return;
     }
-    yield* client
-      .edit(threadId, messageId, content)
-      .pipe(
-        Effect.catch(() => client.send(threadId, { content, silent: SILENT }).pipe(Effect.asVoid)),
-      );
+    yield* client.edit(threadId, messageId, content).pipe(
+      Effect.catch((error) => {
+        const edit = discordError("edit-message", error);
+        return client.send(threadId, { content, silent: SILENT }).pipe(
+          Effect.mapError((failure) => {
+            const delivery = discordError("send-message", failure);
+            return new DiscordError({
+              ...delivery,
+              message: "Discord tool message replacement failed",
+              operation: "edit-message-fallback",
+              messageId: messageId.toString(),
+              ...(edit.status === undefined ? {} : { editStatus: edit.status }),
+              ...(edit.discordCode === undefined ? {} : { editDiscordCode: edit.discordCode }),
+            });
+          }),
+          Effect.andThen(
+            edit.discordCode === 10008
+              ? Effect.void
+              : reportFailure("edit-message", Cause.fail(edit), "warning").pipe(
+                  Effect.annotateLogs({
+                    messageId: messageId.toString(),
+                    outcome: "sent-replacement",
+                  }),
+                ),
+          ),
+        );
+      }),
+    );
   });
 
   const finishTool = Effect.fn("Discord.output.finishTool")(function* (
@@ -295,84 +332,97 @@ export const make = (
     }
   });
 
-  return Effect.fn("Discord.output.dispatch")(function* (
-    threadId: bigint,
-    envelope: AgentEventEnvelope,
-  ) {
-    const event = envelope.event;
-    if (
-      !policy.showToolCalls &&
-      (event.type === "tool-started" || event.type === "tool-finished")
-    ) {
-      return;
-    }
-    const state = stateFor(envelope.chatId);
+  return Effect.fn("Discord.output.dispatch")(
+    function* (threadId: bigint, envelope: AgentEventEnvelope) {
+      const event = envelope.event;
+      if (
+        !policy.showToolCalls &&
+        (event.type === "tool-started" || event.type === "tool-finished")
+      ) {
+        return;
+      }
+      const state = stateFor(envelope.chatId);
 
-    switch (event.type) {
-      case "run-started": {
-        yield* interruptTyping(state);
-        yield* flushTools(threadId, state).pipe(
-          Effect.catchCause((cause) =>
-            Effect.logWarning("Discord stale tool finalization failed", Cause.pretty(cause)),
-          ),
-        );
-        const next = newRunState();
-        states.set(envelope.chatId, next);
-        yield* startTyping(threadId, next);
-        return;
-      }
-      case "text-delta":
-      case "thinking-delta":
-      case "notice":
-        return;
-      case "title-changed":
-        yield* client
-          .renameThread(threadId, event.title)
-          .pipe(
-            Effect.catchCause((cause) =>
-              Effect.logWarning("Discord thread rename failed", Cause.pretty(cause)),
-            ),
+      switch (event.type) {
+        case "run-started": {
+          yield* interruptTyping(state);
+          yield* flushTools(threadId, state).pipe(
+            Effect.catchCause((cause) => reportFailure("finalize-stale-tools", cause, "warning")),
           );
-        return;
-      case "tool-started": {
-        if (state.tools.has(event.toolCallId) || state.finishedTools.has(event.toolCallId)) return;
-        const presentation = toolPresentation(
-          event.toolName,
-          parseToolArguments(event.argumentsJson),
-        );
-        const tool: ToolState = { presentation, messageId: undefined };
-        state.tools.set(event.toolCallId, tool);
-        tool.messageId = yield* client.send(threadId, {
-          content: presentation.started,
-          silent: SILENT,
-        });
-        return;
-      }
-      case "tool-finished":
-        yield* finishTool(threadId, state, event.toolCallId, event.toolName, event.status);
-        return;
-      case "message-settled": {
-        if (event.message.role !== "assistant") return;
-        const terminal =
-          event.message.status === "failed" || event.message.stopReason !== "tool-use";
-        if (terminal && state.terminalClaimed) return;
-        if (terminal) state.terminalClaimed = true;
-        for (const message of renderAssistant(event.message, policy.showThinking)) {
-          yield* client.send(threadId, message);
+          const next = newRunState();
+          states.set(envelope.chatId, next);
+          yield* startTyping(threadId, next);
+          return;
         }
-        return;
+        case "text-delta":
+        case "thinking-delta":
+        case "notice":
+          return;
+        case "title-changed":
+          yield* client
+            .renameThread(threadId, event.title)
+            .pipe(Effect.catchCause((cause) => reportFailure("rename-thread", cause, "warning")));
+          return;
+        case "tool-started": {
+          if (state.tools.has(event.toolCallId) || state.finishedTools.has(event.toolCallId))
+            return;
+          const presentation = toolPresentation(
+            event.toolName,
+            parseToolArguments(event.argumentsJson),
+          );
+          const tool: ToolState = { presentation, messageId: undefined };
+          state.tools.set(event.toolCallId, tool);
+          tool.messageId = yield* client.send(threadId, {
+            content: presentation.started,
+            silent: SILENT,
+          });
+          return;
+        }
+        case "tool-finished":
+          yield* finishTool(threadId, state, event.toolCallId, event.toolName, event.status);
+          return;
+        case "message-settled": {
+          if (event.message.role !== "assistant") return;
+          const terminal =
+            event.message.status === "failed" || event.message.stopReason !== "tool-use";
+          if (terminal && state.terminalClaimed) return;
+          if (terminal) state.terminalClaimed = true;
+          const messages = renderAssistant(event.message, policy.showThinking);
+          for (const [chunkIndex, message] of messages.entries()) {
+            yield* client.send(threadId, message).pipe(
+              Effect.mapError(
+                (error) =>
+                  new DiscordError({
+                    ...discordError("send-message", error),
+                    chunkIndex,
+                    chunkCount: messages.length,
+                  }),
+              ),
+            );
+          }
+          return;
+        }
+        case "run-finished": {
+          yield* interruptTyping(state);
+          yield* flushTools(threadId, state);
+          if (event.outcome === "completed" || state.terminalClaimed) return;
+          state.terminalClaimed = true;
+          yield* client.send(threadId, {
+            content: event.outcome === "aborted" ? ABORTED_MESSAGE : FAILED_MESSAGE,
+            silent: false,
+          });
+          return;
+        }
       }
-      case "run-finished": {
-        yield* interruptTyping(state);
-        yield* flushTools(threadId, state);
-        if (event.outcome === "completed" || state.terminalClaimed) return;
-        state.terminalClaimed = true;
-        yield* client.send(threadId, {
-          content: event.outcome === "aborted" ? ABORTED_MESSAGE : FAILED_MESSAGE,
-          silent: false,
-        });
-        return;
-      }
-    }
-  });
+    },
+    (effect, threadId, envelope) =>
+      effect.pipe(
+        Effect.annotateLogs({
+          component: "discord",
+          chatId: envelope.chatId,
+          threadId: threadId.toString(),
+          eventType: envelope.event.type,
+        }),
+      ),
+  );
 };

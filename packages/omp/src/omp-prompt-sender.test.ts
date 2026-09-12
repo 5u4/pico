@@ -5,11 +5,14 @@ import { assert, describe, it } from "@effect/vitest";
 import type { tryRunRpcSkillCommand } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
 import type * as OmpAgentSession from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import * as AgentMessage from "@pico/contract/agent-message";
+import * as Chat from "@pico/contract/chat-model";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
 import * as Path from "effect/Path";
+import * as PlatformError from "effect/PlatformError";
 import { makeOmpPromptSender } from "./omp-prompt-sender.ts";
 
 type HelperSession = Parameters<typeof tryRunRpcSkillCommand>[0];
@@ -22,6 +25,10 @@ type PromptDropped = Parameters<OmpAgentSession.AgentSession["setPromptDropped"]
 
 const platformLayer = Layer.mergeAll(BunCrypto.layer, BunFileSystem.layer, BunPath.layer);
 const textPrompt = (text: string) => AgentMessage.AgentPrompt.make({ text, attachments: [] });
+const diagnostics = {
+  chatId: Chat.ChatId.make("018f47a0-0000-7000-8000-000000000001"),
+  runEffect: Effect.runPromise,
+};
 const hex = (bytes: Uint8Array) =>
   Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 const pngBase64 =
@@ -99,6 +106,7 @@ describe("makeOmpPromptSender", () => {
           fileSystem,
           path,
           crypto,
+          diagnostics,
         )(textPrompt("/skill:focused-skill inspect auth")),
       );
       assert.deepStrictEqual(enabled.literalPrompts, []);
@@ -134,6 +142,7 @@ describe("makeOmpPromptSender", () => {
           fileSystem,
           path,
           crypto,
+          diagnostics,
         )(textPrompt("  ordinary text stays exact  ")),
       );
       assert.deepStrictEqual(ordinary.literalPrompts, ["  ordinary text stays exact  "]);
@@ -146,6 +155,7 @@ describe("makeOmpPromptSender", () => {
           fileSystem,
           path,
           crypto,
+          diagnostics,
         )(textPrompt("/skill:unknown keep this exact")),
       );
       assert.deepStrictEqual(unknown.literalPrompts, ["/skill:unknown keep this exact"]);
@@ -157,6 +167,7 @@ describe("makeOmpPromptSender", () => {
           fileSystem,
           path,
           crypto,
+          diagnostics,
         )(textPrompt("/skill:focused-skill still literal")),
       );
       assert.deepStrictEqual(disabled.literalPrompts, ["/skill:focused-skill still literal"]);
@@ -173,6 +184,7 @@ describe("makeOmpPromptSender", () => {
             fileSystem,
             path,
             crypto,
+            diagnostics,
           )(textPrompt("/skill:focused-skill cannot build")),
         catch: (error) => error,
       }).pipe(Effect.flip);
@@ -217,7 +229,7 @@ describe("makeOmpPromptSender", () => {
       });
       const fake = makeFakeSession(skill, true, sessionFile);
       yield* Effect.promise(() =>
-        makeOmpPromptSender(fake.session, fileSystem, path, crypto)(prompt),
+        makeOmpPromptSender(fake.session, fileSystem, path, crypto, diagnostics)(prompt),
       );
 
       assert.deepStrictEqual(fake.literalPrompts, []);
@@ -260,6 +272,7 @@ describe("makeOmpPromptSender", () => {
           fileSystem,
           path,
           crypto,
+          diagnostics,
         )(
           AgentMessage.AgentPrompt.make({
             text: "/skill:focused-skill keep the image",
@@ -298,6 +311,7 @@ describe("makeOmpPromptSender", () => {
             fileSystem,
             path,
             crypto,
+            diagnostics,
           )(
             AgentMessage.AgentPrompt.make({
               text: "image",
@@ -313,7 +327,7 @@ describe("makeOmpPromptSender", () => {
           ),
         catch: (error) => error,
       }).pipe(Effect.flip);
-      assert.instanceOf(failure, Error);
+      assert.isTrue(failure instanceof DOMException && failure.name === "AbortError");
       assert.isFalse(yield* fileSystem.exists(path.join(root, "chat")));
     }).pipe(Effect.provide(platformLayer)),
   );
@@ -333,7 +347,7 @@ describe("makeOmpPromptSender", () => {
         source: "test",
       } satisfies Skill;
       const fake = makeFakeSession(skill, true, sessionFile);
-      const send = makeOmpPromptSender(fake.session, fileSystem, path, crypto);
+      const send = makeOmpPromptSender(fake.session, fileSystem, path, crypto, diagnostics);
 
       for (const attachment of [
         { type: "image", name: "fake.png", data: "bm90IGFuIGltYWdl", mimeType: "image/png" },
@@ -381,7 +395,8 @@ describe("makeOmpPromptSender", () => {
       };
 
       const failure = yield* Effect.tryPromise({
-        try: () => makeOmpPromptSender(fake.session, fileSystem, path, crypto)(invalidPrompt),
+        try: () =>
+          makeOmpPromptSender(fake.session, fileSystem, path, crypto, diagnostics)(invalidPrompt),
         catch: (error) => error,
       }).pipe(Effect.flip);
 
@@ -412,7 +427,7 @@ describe("makeOmpPromptSender", () => {
         firstStarted.resolve();
         await releaseFirst.promise;
       });
-      const send = makeOmpPromptSender(fake.session, fileSystem, path, crypto);
+      const send = makeOmpPromptSender(fake.session, fileSystem, path, crypto, diagnostics);
       const attachment = (name: string): AgentMessage.AgentImageAttachment => ({
         type: "image",
         name,
@@ -434,4 +449,76 @@ describe("makeOmpPromptSender", () => {
       );
     }).pipe(Effect.provide(platformLayer)),
   );
+  it.effect("reports failed image rollback without replacing the rejected prompt", () => {
+    const records: Array<ReturnType<typeof Logger.formatStructured.log>> = [];
+    return Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const crypto = yield* Crypto.Crypto;
+      const runEffect = Effect.runPromiseWith(yield* Effect.context<never>());
+      const root = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "pico-omp-rollback-failure-",
+      });
+      const primary = new Error("private prompt rejection");
+      const fake = makeFakeSession(
+        {
+          name: "focused-skill",
+          description: "Focused adapter test",
+          filePath: path.join(root, "SKILL.md"),
+          baseDir: root,
+          source: "test",
+        },
+        true,
+        path.join(root, "chat.jsonl"),
+        true,
+        async () => {
+          throw primary;
+        },
+      );
+      const failingCleanup = FileSystem.FileSystem.of({
+        ...fileSystem,
+        remove: () =>
+          Effect.fail(
+            PlatformError.systemError({
+              _tag: "PermissionDenied",
+              module: "FileSystem",
+              method: "remove",
+              description: "private filesystem details",
+            }),
+          ),
+      });
+      const failure = yield* Effect.tryPromise({
+        try: () =>
+          makeOmpPromptSender(fake.session, failingCleanup, path, crypto, {
+            ...diagnostics,
+            runEffect,
+          })({
+            text: "private prompt",
+            attachments: [
+              {
+                type: "image",
+                name: "private filename.png",
+                data: pngBase64,
+                mimeType: "image/png",
+              },
+            ],
+          }),
+        catch: (error) => error,
+      }).pipe(Effect.flip);
+      assert.strictEqual(failure, primary);
+      const errors = records.filter((record) => record.level === "ERROR");
+      assert.strictEqual(errors.length, 1);
+      assert.strictEqual(errors[0]?.annotations.chatId, diagnostics.chatId);
+      assert.strictEqual(errors[0]?.annotations.phase, "prompt-rollback");
+      assert.notInclude(JSON.stringify(records), "private");
+      assert.isTrue(yield* fileSystem.exists(path.join(root, "chat", "attachments")));
+    }).pipe(
+      Effect.provide(platformLayer),
+      Effect.provide(
+        Logger.layer([
+          Logger.make((options) => records.push(Logger.formatStructured.log(options))),
+        ]),
+      ),
+    );
+  });
 });

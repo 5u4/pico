@@ -24,18 +24,18 @@ export const make = Effect.fn("Instructions.make")(function* (root: PicoRoot) {
     if (scope.kind === "discord") {
       const channelId = yield* decodeDiscordId(scope.channelId).pipe(
         Effect.mapError(
-          (cause) =>
+          () =>
             new ConfigError({
-              message: `Invalid Discord channel ID for instructions ${JSON.stringify(scope.channelId)}: ${cause.message}`,
+              message: "Invalid Discord channel ID for instructions",
             }),
         ),
       );
       if (scope.botId !== null) {
         const botId = yield* decodeDiscordId(scope.botId).pipe(
           Effect.mapError(
-            (cause) =>
+            () =>
               new ConfigError({
-                message: `Invalid Discord bot ID for instructions ${JSON.stringify(scope.botId)}: ${cause.message}`,
+                message: "Invalid Discord bot ID for instructions",
               }),
           ),
         );
@@ -57,7 +57,7 @@ export const make = Effect.fn("Instructions.make")(function* (root: PicoRoot) {
             ? Effect.succeed("")
             : Effect.fail(
                 new ConfigError({
-                  message: `Failed to read instructions file ${sourcePath}: ${cause.message}`,
+                  message: `Failed to read ${heading.toLowerCase()} (${cause.reason._tag})`,
                 }),
               ),
         ),

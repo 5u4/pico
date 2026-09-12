@@ -3,6 +3,7 @@ import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import type * as FileSystem from "effect/FileSystem";
 import type * as Path from "effect/Path";
+import * as PlatformError from "effect/PlatformError";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 
@@ -43,16 +44,31 @@ const decodeRunId = Schema.decodeUnknownOption(Schedule.ScheduleRunId);
 const io = (message: string, cause?: unknown) =>
   new Schedule.ScheduleError({
     kind: "io",
-    message: cause instanceof Error ? `${message}: ${cause.message}` : message,
+    message:
+      cause instanceof PlatformError.PlatformError ? `${message}: ${cause.reason._tag}` : message,
   });
 
 const invalid = (message: string) => new Schedule.ScheduleError({ kind: "invalid", message });
 const mapIo = (message: string) => Effect.mapError((cause: unknown) => io(message, cause));
 
-const ignoreCleanupFailure = <A, E, R>(message: string, effect: Effect.Effect<A, E, R>) =>
+const ignoreCleanupFailure = <A, E, R>(
+  message: string,
+  effect: Effect.Effect<A, E, R>,
+  annotations: Readonly<Record<string, string>>,
+) =>
   effect.pipe(
     Effect.asVoid,
-    Effect.catchCause((cause) => Effect.logError(message, Cause.pretty(cause))),
+    Effect.catchCause((cause) =>
+      Cause.hasInterruptsOnly(cause)
+        ? Effect.void
+        : Effect.logError(message).pipe(
+            Effect.annotateLogs({
+              component: "schedule",
+              ...annotations,
+              category: cause.reasons.some(Cause.isDieReason) ? "defect" : "io",
+            }),
+          ),
+    ),
   );
 
 const ensureRegularDestination = Effect.fn("Schedules.ensureRegularDestination")(function* (
@@ -186,35 +202,57 @@ export const bootstrap = Effect.fn("Schedules.bootstrap")(function* (storage: St
     const transaction = storage.path.join(value.staging, name);
     yield* ensureDirectPath(storage, transaction, "schedule staging transaction");
     const journalFile = storage.path.join(transaction, "transaction.json");
-    const journalSource = yield* readDirectFileString(
-      storage,
-      journalFile,
-      "schedule replacement journal",
-    ).pipe(
-      Effect.catch((error) =>
-        Effect.logError("Failed to read schedule replacement journal", {
-          message: error.message,
-          kind: error.kind,
-        }).pipe(Effect.as("")),
-      ),
-    );
-    const journal = decodeReplaceTransaction(journalSource);
-    if (journal._tag === "Some") {
+    const entries = yield* storage.fileSystem
+      .readDirectory(transaction)
+      .pipe(mapIo("Failed to inspect schedule staging transaction"));
+    if (!entries.includes("transaction.json")) {
+      if (entries.includes("previous")) {
+        return yield* new Schedule.ScheduleError({
+          kind: "corrupt",
+          message: "Retained schedule definition has no replacement journal",
+        });
+      }
+    } else {
+      const journalSource = yield* readDirectFileString(
+        storage,
+        journalFile,
+        "schedule replacement journal",
+      );
+      const journal = decodeReplaceTransaction(journalSource);
+      if (journal._tag === "None") {
+        return yield* new Schedule.ScheduleError({
+          kind: "corrupt",
+          message: "Invalid schedule replacement journal",
+        });
+      }
       const destination = storage.path.join(
         journal.value.state === "enabled" ? value.enabled : value.disabled,
         journal.value.id,
       );
       const previous = storage.path.join(transaction, "previous");
-      const destinationExists = yield* storage.fileSystem
-        .exists(destination)
-        .pipe(mapIo("Failed to inspect replacement destination"));
-      const previousExists = yield* storage.fileSystem
-        .exists(previous)
-        .pipe(mapIo("Failed to inspect retained schedule definition"));
+      const destinationExists = yield* inspectDirectory(
+        storage,
+        destination,
+        "replacement destination",
+      );
+      const previousExists = yield* inspectDirectory(
+        storage,
+        previous,
+        "retained schedule definition",
+      );
       if (!destinationExists && previousExists) {
         yield* storage.fileSystem
           .rename(previous, destination)
           .pipe(mapIo("Failed to recover retained schedule definition"));
+        yield* Effect.logInfo("Schedule replacement recovered").pipe(
+          Effect.annotateLogs({
+            component: "schedule",
+            operation: "bootstrap",
+            phase: "replacement-recovery",
+            scheduleId: journal.value.id,
+            state: journal.value.state,
+          }),
+        );
       }
     }
     yield* storage.fileSystem
@@ -339,7 +377,7 @@ export const loadSchedule = Effect.fn("Schedules.loadSchedule")(function* (
   const metaSource = metadata.success;
   const loaded = yield* Effect.gen(function* () {
     const definition = yield* decodeDefinition(metaSource).pipe(
-      Effect.mapError((cause) => invalid(`Invalid schedule metadata: ${cause}`)),
+      Effect.mapError(() => invalid("Invalid schedule metadata")),
     );
     const names = yield* storage.fileSystem
       .readDirectory(directory)
@@ -497,6 +535,12 @@ export const replaceDefinition = Effect.fn("Schedules.replaceDefinition")(functi
           ignoreCleanupFailure(
             "Failed to restore retained schedule definition",
             storage.fileSystem.rename(previous, destination),
+            {
+              operation: "replace",
+              phase: "rollback",
+              scheduleId: current.view.id,
+              definitionRevision: definition.revision,
+            },
           ),
         ),
         mapIo("Failed to install schedule replacement"),
@@ -505,7 +549,7 @@ export const replaceDefinition = Effect.fn("Schedules.replaceDefinition")(functi
   );
   yield* storage.fileSystem
     .remove(transaction, { recursive: true, force: true })
-    .pipe(mapIo("Failed to clean schedule replacement"));
+    .pipe(mapIo("Schedule replaced, but staging cleanup failed"));
 });
 
 export const moveDefinition = Effect.fn("Schedules.moveDefinition")(function* (
@@ -680,6 +724,13 @@ const writeRunFile = Effect.fn("Schedules.writeRunFile")(function* (
       ignoreCleanupFailure(
         "Failed to remove temporary run artifact",
         storage.fileSystem.remove(temporary, { force: true }),
+        {
+          operation: "write-artifact",
+          phase: "temporary-cleanup",
+          scheduleId: run.scheduleId,
+          runId: run.id,
+          artifact: relative,
+        },
       ),
     ),
     mapIo("Failed to commit run artifact"),
@@ -732,10 +783,10 @@ export const readRuns = Effect.fn("Schedules.readRuns")(function* (
       const source = yield* readDirectFileString(storage, runFile, "run lifecycle");
       const run = yield* decodeRun(source).pipe(
         Effect.mapError(
-          (cause) =>
+          () =>
             new Schedule.ScheduleError({
               kind: "corrupt",
-              message: `Invalid run lifecycle: ${cause}`,
+              message: "Invalid run lifecycle",
             }),
         ),
       );
@@ -771,10 +822,10 @@ export const readRunDefinition = Effect.fn("Schedules.readRunDefinition")(functi
   const source = yield* readDirectFileString(storage, file, "run definition snapshot");
   return yield* decodeDefinition(source).pipe(
     Effect.mapError(
-      (cause) =>
+      () =>
         new Schedule.ScheduleError({
           kind: "corrupt",
-          message: `Invalid run definition snapshot: ${cause}`,
+          message: "Invalid run definition snapshot",
         }),
     ),
   );
@@ -809,6 +860,13 @@ export const appendArtifactString = Effect.fn("Schedules.appendArtifactString")(
   const cleanup = ignoreCleanupFailure(
     "Failed to remove temporary run append target",
     storage.fileSystem.remove(temporary, { force: true }),
+    {
+      operation: "append-artifact",
+      phase: "temporary-cleanup",
+      scheduleId: run.scheduleId,
+      runId: run.id,
+      artifact: relative,
+    },
   );
   yield* Effect.uninterruptibleMask((restore) =>
     restore(

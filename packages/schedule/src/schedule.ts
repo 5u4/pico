@@ -8,6 +8,7 @@ import * as Cron from "effect/Cron";
 import * as Crypto from "effect/Crypto";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
@@ -122,6 +123,25 @@ const toFinished = (
   state: { kind: "finished", finishedAt, outcome },
 });
 
+const runAnnotations = (run: Schedule.ScheduleRunLifecycle) => ({
+  component: "schedule",
+  scheduleId: run.scheduleId,
+  runId: run.id,
+  definitionRevision: run.definitionRevision,
+  chatId: run.plannedTarget.chatId,
+  workspaceId: run.plannedTarget.ownerWorkspaceId,
+});
+
+const failureCategory = (cause: Cause.Cause<unknown>) => {
+  if (cause.reasons.some(Cause.isDieReason)) return "defect";
+  for (const reason of cause.reasons) {
+    if (Cause.isFailReason(reason) && reason.error instanceof Schedule.ScheduleError) {
+      return reason.error.kind;
+    }
+  }
+  return "operation";
+};
+
 const latestCronSlot = (
   trigger: Extract<Schedule.ScheduleTrigger, { readonly kind: "cron" }>,
   now: number,
@@ -140,12 +160,11 @@ const capture = Effect.fn("Schedules.capture")(function* (
   const crypto = yield* Crypto.Crypto;
   const mutation = Semaphore.makeUnsafe(1);
   const wake = yield* Queue.sliding<void>(1);
+  const invalidDefinitions = new Set<Schedule.ScheduleId>();
 
   const transactionId = () =>
     crypto.randomUUIDv7.pipe(
-      Effect.mapError((cause) =>
-        scheduleError("io", `Failed to generate schedule identity: ${cause}`),
-      ),
+      Effect.mapError(() => scheduleError("io", "Failed to generate schedule identity")),
     );
   const storage: Storage = { fileSystem, path, schedulesDir, temporaryId: transactionId };
 
@@ -332,183 +351,286 @@ const capture = Effect.fn("Schedules.capture")(function* (
     }
   });
 
-  const executeRun = Effect.fn("Schedules.executeRun")(function* (
-    host: Schedule.ScheduleRunHost,
-    run: Schedule.ScheduleRunLifecycle,
-    definition: Schedule.ScheduleDefinition,
-    source: Schedule.ScheduleSource,
-  ) {
-    let current = run;
-    let failureStage: Extract<Schedule.TerminalOutcome, { readonly kind: "failed" }>["stage"] =
-      "target";
-    const complete = Effect.fn("Schedules.completeRun")(function* (
-      outcome: Schedule.TerminalOutcome,
+  const executeRun = Effect.fn("Schedules.executeRun")(
+    function* (
+      host: Schedule.ScheduleRunHost,
+      run: Schedule.ScheduleRunLifecycle,
+      definition: Schedule.ScheduleDefinition,
+      source: Schedule.ScheduleSource,
     ) {
-      current = yield* finish(current, outcome);
-      yield* disableFinishedOnce(current, definition);
-      return current;
-    });
-    const fail = (
-      stage: Extract<Schedule.TerminalOutcome, { readonly kind: "failed" }>["stage"],
-      message: string,
-    ) => {
-      failureStage = stage;
-      return complete({ kind: "failed", stage, message });
-    };
-
-    yield* Effect.gen(function* () {
-      const targetResult = yield* host.prepare(run.plannedTarget).pipe(Effect.result);
-      if (Result.isFailure(targetResult)) {
-        yield* fail("target", targetResult.failure.message);
-        return;
-      }
-      const target = targetResult.success;
-      current = {
-        ...scheduleRunBase(run),
-        state: { kind: "target-resolved", target },
+      let current = run;
+      let failureStage: Extract<Schedule.TerminalOutcome, { readonly kind: "failed" }>["stage"] =
+        "target";
+      let completion:
+        | { readonly outcome: Schedule.TerminalOutcome; readonly category: string }
+        | undefined;
+      const complete = (
+        outcome: Schedule.TerminalOutcome,
+        category = outcome.kind === "failed" ? "operation" : outcome.kind,
+      ) =>
+        Effect.sync(() => {
+          completion = { outcome, category };
+        });
+      const fail = (
+        stage: Extract<Schedule.TerminalOutcome, { readonly kind: "failed" }>["stage"],
+        message: string,
+      ) => {
+        failureStage = stage;
+        return complete({ kind: "failed", stage, message });
       };
-      yield* writeRun(storage, current, yield* transactionId());
-      yield* writeArtifactString(
-        storage,
-        current,
-        "target/result.json",
-        JSON.stringify({ chatId: target.chatId, workspaceId: target.workspaceId, cwd: target.cwd }),
-      );
-      failureStage = "protocol";
 
-      let decision: Schedule.ScriptDecision;
-      if (source.script === null) {
-        decision = { agent: true };
-        yield* writeArtifactString(storage, current, "decision.json", JSON.stringify(decision));
-      } else {
-        failureStage = "script";
+      yield* Effect.logInfo("Scheduled run started");
+      yield* Effect.gen(function* () {
+        const targetResult = yield* host.prepare(run.plannedTarget).pipe(Effect.result);
+        if (Result.isFailure(targetResult)) {
+          yield* fail("target", targetResult.failure.message);
+          return;
+        }
+        const target = targetResult.success;
         current = {
-          ...scheduleRunBase(current),
-          state: { kind: "running-script", target, startedAt: yield* Clock.currentTimeMillis },
+          ...scheduleRunBase(run),
+          state: { kind: "target-resolved", target },
         };
         yield* writeRun(storage, current, yield* transactionId());
-        const script = yield* runScript(
-          storage,
-          executable,
-          current,
-          target,
-          definition.scriptTimeoutMs ?? Schedule.DEFAULT_SCRIPT_TIMEOUT_MS,
-        ).pipe(Effect.result);
-        if (Result.isFailure(script)) {
-          const stage = script.failure._tag === "ScriptRunError" ? script.failure.stage : "script";
-          yield* fail(stage, script.failure.message);
-          return;
-        }
-        decision = script.success.decision;
-      }
-
-      if (!decision.agent) {
-        if (decision.content === undefined) {
-          yield* complete({ kind: "skipped" });
-          return;
-        }
-        failureStage = "publish";
-        const published = yield* host.publish(target.chatId, decision.content).pipe(Effect.result);
-        if (Result.isFailure(published)) {
-          yield* fail("publish", published.failure.message);
-          return;
-        }
-        yield* complete({ kind: "published", content: decision.content });
-        return;
-      }
-
-      const request =
-        decision.content === undefined
-          ? source.prompt
-          : source.prompt === null
-            ? decision.content
-            : `${decision.content}\n\n${source.prompt}`;
-      if (request === null) {
-        yield* fail("protocol", "Script requested an agent run without providing input");
-        return;
-      }
-      failureStage = "omp";
-      yield* writeArtifactString(storage, current, "omp/request.md", request);
-      current = {
-        ...scheduleRunBase(current),
-        state: { kind: "running-omp", target, startedAt: yield* Clock.currentTimeMillis },
-      };
-      yield* writeRun(storage, current, yield* transactionId());
-      yield* Effect.all(
-        [
-          writeArtifactString(storage, current, "omp/events.jsonl", ""),
-          writeArtifactString(storage, current, "omp/final.md", ""),
-          writeArtifactString(
-            storage,
-            current,
-            "omp/result.json",
-            JSON.stringify({ kind: "started" }),
-          ),
-        ],
-        { concurrency: "unbounded", discard: true },
-      );
-      const captured = yield* host
-        .runPrompt(
-          target.chatId,
-          current.id,
-          AgentMessage.AgentPrompt.make({ text: request, attachments: [] }),
-          (event) =>
-            appendArtifactString(
-              storage,
-              current,
-              "omp/events.jsonl",
-              `${JSON.stringify(event)}\n`,
-            ).pipe(
-              Effect.mapError(
-                (error) => new Schedule.ScheduleHostError({ message: error.message }),
-              ),
-            ),
-        )
-        .pipe(Effect.result);
-      if (Result.isFailure(captured)) {
         yield* writeArtifactString(
           storage,
           current,
-          "omp/result.json",
-          JSON.stringify({ kind: "failed", message: captured.failure.message }),
+          "target/result.json",
+          JSON.stringify({
+            chatId: target.chatId,
+            workspaceId: target.workspaceId,
+            cwd: target.cwd,
+          }),
         );
-        yield* fail("omp", captured.failure.message);
-        return;
-      }
-      const text = captured.success.finalAssistantText;
-      yield* Effect.all(
-        [
-          writeArtifactString(storage, current, "omp/final.md", text),
-          writeArtifactString(
+        failureStage = "protocol";
+
+        let decision: Schedule.ScriptDecision;
+        if (source.script === null) {
+          decision = { agent: true };
+          yield* writeArtifactString(storage, current, "decision.json", JSON.stringify(decision));
+        } else {
+          failureStage = "script";
+          current = {
+            ...scheduleRunBase(current),
+            state: { kind: "running-script", target, startedAt: yield* Clock.currentTimeMillis },
+          };
+          yield* writeRun(storage, current, yield* transactionId());
+          const script = yield* runScript(
+            storage,
+            executable,
+            current,
+            target,
+            definition.scriptTimeoutMs ?? Schedule.DEFAULT_SCRIPT_TIMEOUT_MS,
+          ).pipe(Effect.result);
+          if (Result.isFailure(script)) {
+            const stage =
+              script.failure._tag === "ScriptRunError" ? script.failure.stage : "script";
+            yield* fail(stage, script.failure.message);
+            return;
+          }
+          decision = script.success.decision;
+        }
+
+        if (!decision.agent) {
+          if (decision.content === undefined) {
+            yield* complete({ kind: "skipped" });
+            return;
+          }
+          failureStage = "publish";
+          const published = yield* host
+            .publish(target.chatId, decision.content)
+            .pipe(Effect.result);
+          if (Result.isFailure(published)) {
+            yield* fail("publish", published.failure.message);
+            return;
+          }
+          yield* complete({ kind: "published", content: decision.content });
+          return;
+        }
+
+        const request =
+          decision.content === undefined
+            ? source.prompt
+            : source.prompt === null
+              ? decision.content
+              : `${decision.content}\n\n${source.prompt}`;
+        if (request === null) {
+          yield* fail("protocol", "Script requested an agent run without providing input");
+          return;
+        }
+        failureStage = "omp";
+        yield* writeArtifactString(storage, current, "omp/request.md", request);
+        current = {
+          ...scheduleRunBase(current),
+          state: { kind: "running-omp", target, startedAt: yield* Clock.currentTimeMillis },
+        };
+        yield* writeRun(storage, current, yield* transactionId());
+        yield* Effect.all(
+          [
+            writeArtifactString(storage, current, "omp/events.jsonl", ""),
+            writeArtifactString(storage, current, "omp/final.md", ""),
+            writeArtifactString(
+              storage,
+              current,
+              "omp/result.json",
+              JSON.stringify({ kind: "started" }),
+            ),
+          ],
+          { concurrency: "unbounded", discard: true },
+        );
+        const captured = yield* host
+          .runPrompt(
+            target.chatId,
+            current.id,
+            AgentMessage.AgentPrompt.make({ text: request, attachments: [] }),
+            (event) =>
+              appendArtifactString(
+                storage,
+                current,
+                "omp/events.jsonl",
+                `${JSON.stringify(event)}\n`,
+              ).pipe(
+                Effect.mapError(
+                  (error) => new Schedule.ScheduleHostError({ message: error.message }),
+                ),
+              ),
+          )
+          .pipe(Effect.result);
+        if (Result.isFailure(captured)) {
+          yield* fail("omp", captured.failure.message);
+          yield* writeArtifactString(
             storage,
             current,
             "omp/result.json",
-            JSON.stringify(captured.success),
-          ),
-        ],
-        { concurrency: "unbounded", discard: true },
+            JSON.stringify({ kind: "failed", message: captured.failure.message }),
+          ).pipe(
+            Effect.catchCause((cause) =>
+              Cause.hasInterruptsOnly(cause)
+                ? Effect.failCause(cause)
+                : Effect.logError("Failed to record OMP failure artifact").pipe(
+                    Effect.annotateLogs({
+                      phase: "failure-artifact",
+                      artifact: "omp/result.json",
+                      category: failureCategory(cause),
+                    }),
+                  ),
+            ),
+          );
+          return;
+        }
+        const text = captured.success.finalAssistantText;
+        if (captured.success.outcome !== "completed") {
+          yield* complete(
+            { kind: "failed", stage: "omp", message: `OMP run ${captured.success.outcome}` },
+            captured.success.outcome === "aborted" ? "cancelled" : "agent",
+          );
+        }
+        yield* Effect.all(
+          [
+            writeArtifactString(storage, current, "omp/final.md", text),
+            writeArtifactString(
+              storage,
+              current,
+              "omp/result.json",
+              JSON.stringify(captured.success),
+            ),
+          ],
+          { concurrency: "unbounded", discard: true },
+        ).pipe(
+          Effect.catchCause((cause) => {
+            if (completion === undefined || Cause.hasInterruptsOnly(cause)) {
+              return Effect.failCause(cause);
+            }
+            return Effect.logError("Failed to record OMP outcome artifacts").pipe(
+              Effect.annotateLogs({ phase: "failure-artifact", category: failureCategory(cause) }),
+            );
+          }),
+        );
+        if (captured.success.outcome !== "completed") {
+          return;
+        }
+        failureStage = "publish";
+        const delivery = yield* host.deliver(target.chatId, text).pipe(Effect.result);
+        if (Result.isFailure(delivery)) {
+          yield* fail("publish", delivery.failure.message);
+          return;
+        }
+        yield* complete({ kind: "completed", finalAssistantText: text });
+      }).pipe(
+        Effect.onExit((exit) =>
+          Effect.gen(function* () {
+            if (completion === undefined) {
+              if (Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause)) {
+                completion = {
+                  outcome: { kind: "interrupted", phase: "scheduler-scope" },
+                  category: "cancelled",
+                };
+              } else {
+                const reason = Exit.isFailure(exit)
+                  ? exit.cause.reasons.find(Cause.isFailReason)
+                  : undefined;
+                completion = {
+                  outcome: {
+                    kind: "failed",
+                    stage: failureStage,
+                    message:
+                      reason?.error instanceof Schedule.ScheduleError
+                        ? reason.error.message
+                        : "Unexpected scheduled execution failure",
+                  },
+                  category: Exit.isFailure(exit) ? failureCategory(exit.cause) : "defect",
+                };
+              }
+            }
+            const { outcome, category } = completion;
+            const finalized = yield* finishFallback(current, outcome).pipe(Effect.exit);
+            const annotations = {
+              phase: outcome.kind === "failed" ? outcome.stage : current.state.kind,
+              outcome: outcome.kind,
+              category,
+              persisted: Exit.isSuccess(finalized),
+            };
+            yield* (
+              outcome.kind === "failed" && category !== "cancelled"
+                ? Effect.logError("Scheduled run failed")
+                : Effect.logInfo("Scheduled run finished")
+            ).pipe(Effect.annotateLogs(annotations));
+            if (Exit.isFailure(finalized)) {
+              if (!Cause.hasInterruptsOnly(finalized.cause)) {
+                yield* Effect.logError("Failed to finalize scheduled run").pipe(
+                  Effect.annotateLogs({
+                    phase: "finalize",
+                    outcome: outcome.kind,
+                    category: failureCategory(finalized.cause),
+                  }),
+                );
+              }
+              return;
+            }
+            current = finalized.value;
+            yield* disableFinishedOnce(current, definition).pipe(
+              Effect.catchCause((cause) =>
+                Cause.hasInterruptsOnly(cause)
+                  ? Effect.void
+                  : Effect.logError("Finished schedule could not be disabled").pipe(
+                      Effect.annotateLogs({
+                        phase: "disable-after-completion",
+                        outcome: outcome.kind,
+                        category: failureCategory(cause),
+                      }),
+                    ),
+              ),
+            );
+          }),
+        ),
+        Effect.catchCause((cause) =>
+          Cause.hasInterrupts(cause) ? Effect.failCause(cause) : Effect.void,
+        ),
       );
-      if (captured.success.outcome !== "completed") {
-        yield* fail("omp", `OMP run ${captured.success.outcome}`);
-        return;
-      }
-      failureStage = "publish";
-      const delivery = yield* host.deliver(target.chatId, text).pipe(Effect.result);
-      if (Result.isFailure(delivery)) {
-        yield* fail("publish", delivery.failure.message);
-        return;
-      }
-      yield* complete({ kind: "completed", finalAssistantText: text });
-    }).pipe(
-      Effect.catch((error) =>
-        finishFallback(current, {
-          kind: "failed",
-          stage: failureStage,
-          message: error.message,
-        }).pipe(Effect.asVoid),
-      ),
-    );
-  });
+    },
+    (effect, _host, run) =>
+      effect.pipe(Effect.annotateLogs({ ...runAnnotations(run), operation: "execute" })),
+  );
 
   const claim = Effect.fn("Schedules.claim")(function* (
     view: Schedule.ReadyScheduleView,
@@ -544,6 +666,9 @@ const capture = Effect.fn("Schedules.capture")(function* (
       state: { kind: "claimed" },
     };
     yield* publishRun(storage, run, view.definition, view.source, yield* transactionId());
+    yield* Effect.logInfo("Scheduled run claimed").pipe(
+      Effect.annotateLogs({ ...runAnnotations(run), operation: "claim", phase: "claimed" }),
+    );
     return run;
   });
 
@@ -558,10 +683,16 @@ const capture = Effect.fn("Schedules.capture")(function* (
           finishFallback(run, { kind: "interrupted", phase: "schedule-cycle" }).pipe(
             Effect.asVoid,
             Effect.catchCause((cause) =>
-              Effect.logError("Failed to finish an interrupted schedule claim", {
-                runId: run.id,
-                cause: Cause.pretty(cause),
-              }),
+              Cause.hasInterruptsOnly(cause)
+                ? Effect.void
+                : Effect.logError("Failed to finish an interrupted schedule claim").pipe(
+                    Effect.annotateLogs({
+                      ...runAnnotations(run),
+                      operation: "scan",
+                      phase: "claim-cleanup",
+                      category: failureCategory(cause),
+                    }),
+                  ),
             ),
           ),
         { discard: true },
@@ -573,6 +704,26 @@ const capture = Effect.fn("Schedules.capture")(function* (
         Effect.gen(function* () {
           const now = yield* Clock.currentTimeMillis;
           const schedules = yield* scanSchedules(storage);
+          const invalid = new Set<Schedule.ScheduleId>();
+          for (const loaded of schedules) {
+            const view = invalidExternalView(loaded);
+            if (view.kind !== "invalid") continue;
+            invalid.add(view.id);
+            if (!invalidDefinitions.has(view.id)) {
+              yield* Effect.logWarning("Invalid schedule definition excluded from execution").pipe(
+                Effect.annotateLogs({
+                  component: "schedule",
+                  operation: "scan",
+                  phase: "definition",
+                  scheduleId: view.id,
+                  state: view.state,
+                  category: view.state === "conflicted" ? "conflict" : "invalid",
+                }),
+              );
+            }
+          }
+          invalidDefinitions.clear();
+          for (const id of invalid) invalidDefinitions.add(id);
           const pending: Array<{
             readonly run: Schedule.ScheduleRunLifecycle;
             readonly definition: Schedule.ScheduleDefinition;
@@ -627,17 +778,19 @@ const capture = Effect.fn("Schedules.capture")(function* (
             scheduledFor: item.run.source.scheduledFor,
             observedAt: yield* Clock.currentTimeMillis,
           });
+          yield* Effect.logInfo("Scheduled run finished").pipe(
+            Effect.annotateLogs({
+              ...runAnnotations(terminal),
+              operation: "scan",
+              phase: "missed",
+              outcome: "missed",
+            }),
+          );
           yield* disableFinishedOnce(terminal, item.definition);
           owned.delete(item.run);
         } else {
           yield* Effect.uninterruptible(
             executeRun(host, item.run, item.definition, item.source).pipe(
-              Effect.onInterrupt(() =>
-                finishFallback(item.run, {
-                  kind: "interrupted",
-                  phase: "scheduler-scope",
-                }).pipe(Effect.asVoid),
-              ),
               Effect.forkScoped({ startImmediately: true }),
               Effect.tap(() => Effect.sync(() => owned.delete(item.run))),
               Effect.asVoid,
@@ -656,6 +809,16 @@ const capture = Effect.fn("Schedules.capture")(function* (
         run.state.kind === "finished"
           ? run
           : yield* finish(run, { kind: "interrupted", phase: run.state.kind });
+      if (run.state.kind !== "finished") {
+        yield* Effect.logInfo("Interrupted scheduled run reconciled").pipe(
+          Effect.annotateLogs({
+            ...runAnnotations(run),
+            operation: "reconcile",
+            phase: run.state.kind,
+            outcome: "interrupted",
+          }),
+        );
+      }
       yield* disableFinishedOnce(terminal, definition);
     }
   });
@@ -668,13 +831,40 @@ const capture = Effect.fn("Schedules.capture")(function* (
     yield* initialize;
     yield* reconcile();
     const cycle = scheduleCycle(host).pipe(
-      Effect.catch((error) =>
-        Effect.logError("Schedule scan failed", { message: error.message, kind: error.kind }),
+      Effect.catchCause((cause) =>
+        Cause.hasInterruptsOnly(cause)
+          ? Effect.failCause(cause)
+          : Effect.logError("Schedule scan failed").pipe(
+              Effect.annotateLogs({
+                component: "schedule",
+                operation: "scan",
+                phase: "cycle",
+                category: failureCategory(cause),
+              }),
+              Effect.andThen(Cause.hasInterrupts(cause) ? Effect.interrupt : Effect.void),
+            ),
       ),
     );
     yield* cycle;
+    yield* Effect.logInfo("Scheduler started").pipe(
+      Effect.annotateLogs({ component: "schedule", operation: "start" }),
+    );
     const wait = Effect.race(Queue.take(wake), Effect.sleep(RESCAN_INTERVAL));
     yield* Effect.forever(wait.pipe(Effect.andThen(cycle))).pipe(
+      Effect.onExit((exit) =>
+        Exit.isFailure(exit) && !Cause.hasInterruptsOnly(exit.cause)
+          ? Effect.logError("Schedule scan loop stopped unexpectedly").pipe(
+              Effect.annotateLogs({
+                component: "schedule",
+                operation: "scan",
+                phase: "loop",
+                category: failureCategory(exit.cause),
+              }),
+            )
+          : Effect.logDebug("Schedule scan loop stopped").pipe(
+              Effect.annotateLogs({ component: "schedule", operation: "scan", phase: "loop" }),
+            ),
+      ),
       Effect.forkScoped({ startImmediately: true }),
     );
   });
