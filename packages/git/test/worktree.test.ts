@@ -1,13 +1,19 @@
+import { createServer, type Socket } from "node:net";
 import * as BunServices from "@effect/platform-bun/BunServices";
 import { assert, describe, it } from "@effect/vitest";
 import * as Chat from "@pico/contract/chat-model";
 import { GitError, PersistenceError, WorkspaceBindingInvalid } from "@pico/contract/errors";
 import { AbsolutePath } from "@pico/contract/path";
 import { BRANCH_ID_SUFFIX_LENGTH, make } from "@pico/git/worktree";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
+import * as Schedule from "effect/Schedule";
+import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 import * as ChildProcess from "effect/unstable/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
 
@@ -80,6 +86,109 @@ const makeRemote = Effect.fn("GitWorktreeTest.makeRemote")(function* (
   ]);
   return remoteCwd;
 });
+
+const makeHangingTransport = Effect.fn("GitWorktreeTest.makeHangingTransport")(function* (
+  identity: AbsolutePath,
+) {
+  const ready = yield* Deferred.make<number, unknown>();
+  const sockets = new Set<Socket>();
+  let helperPid: number | undefined;
+  const decodeHandshake = Schema.decodeUnknownSync(
+    Schema.fromJsonString(
+      Schema.Struct({
+        identity: Schema.Literal(identity),
+        pid: Schema.Int.check(Schema.isGreaterThan(1)),
+      }),
+    ),
+  );
+  const server = createServer((socket) => {
+    if (closing !== undefined) {
+      socket.destroy();
+      return;
+    }
+    sockets.add(socket);
+    socket.once("close", () => sockets.delete(socket));
+    socket.on("error", (error) => Deferred.doneUnsafe(ready, Effect.fail(error)));
+    socket.setEncoding("utf8");
+    let message = "";
+    const onData = (chunk: string) => {
+      message += chunk;
+      const newline = message.indexOf("\n");
+      if (newline === -1) return;
+      socket.off("data", onData);
+      try {
+        helperPid = decodeHandshake(message.slice(0, newline)).pid;
+        Deferred.doneUnsafe(ready, Effect.succeed(helperPid));
+      } catch (error) {
+        Deferred.doneUnsafe(ready, Effect.fail(error));
+      }
+    };
+    socket.on("data", onData);
+  });
+  let closing: Promise<void> | undefined;
+  const close = Effect.promise(
+    () =>
+      (closing ??= new Promise<void>((resolve) => {
+        server.close(() => resolve());
+        for (const socket of sockets) socket.destroy();
+      })),
+  ).pipe(
+    Effect.andThen(
+      Effect.suspend(() =>
+        helperPid === undefined ? Effect.void : awaitHelperExit(helperPid, identity),
+      ),
+    ),
+    Effect.orDie,
+  );
+  yield* Effect.addFinalizer(() => close);
+  yield* Effect.tryPromise(
+    () =>
+      new Promise<void>((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(0, "127.0.0.1", () => {
+          server.off("error", reject);
+          resolve();
+        });
+      }),
+  );
+  const address = server.address();
+  if (address === null || typeof address === "string") {
+    return yield* Effect.die(new Error("Transport control listener has no TCP port"));
+  }
+  const fixture = Bun.fileURLToPath(new URL("./hanging-transport.fixture.ts", import.meta.url));
+  const command = [process.execPath, fixture, String(address.port), identity]
+    .map((argument) => argument.replaceAll("%", "%%").replaceAll(" ", "% "))
+    .join(" ");
+  return { endpoint: `ext::${command}`, ready: Deferred.await(ready), close };
+});
+
+const helperIsRunning = Effect.fn("GitWorktreeTest.helperIsRunning")(function* (
+  pid: number,
+  identity: AbsolutePath,
+) {
+  const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+  const handle = yield* spawner.spawn(
+    ChildProcess.make("ps", ["-ww", "-p", String(pid), "-o", "stat=", "-o", "args="]),
+  );
+  const output = yield* handle.stdout.pipe(
+    Stream.decodeText(),
+    Stream.runFold(
+      () => "",
+      (output, chunk) => output + chunk,
+    ),
+  );
+  const exitCode = yield* handle.exitCode;
+  if (exitCode === 1 && output.trim() === "") return false;
+  assert.strictEqual(exitCode, 0, output);
+  return !output.trimStart().startsWith("Z") && output.includes(identity);
+}, Effect.scoped);
+
+const awaitHelperExit = (pid: number, identity: AbsolutePath) =>
+  helperIsRunning(pid, identity).pipe(
+    Effect.repeat({ while: (running) => running, schedule: Schedule.spaced("10 millis") }),
+    Effect.timeout("2 seconds"),
+    TestClock.withLive,
+  );
 
 const settings = { branch: "main", prefix: "chat/" };
 
@@ -554,6 +663,39 @@ describe("GitWorktree.renameChatBranch", () => {
       assert.strictEqual((yield* git(cwd, ["branch", "--show-current"])).trim(), source);
       assert.strictEqual(yield* git(cwd, ["rev-parse", "HEAD"]), head);
       assert.strictEqual(yield* git(remoteCwd, ["show-ref"]), remoteRefs);
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
+
+  it.effect("times out a hanging remote and kills its TERM-resistant transport helper", () =>
+    Effect.gen(function* () {
+      const path = yield* Path.Path;
+      const { repositoryCwd, worktreesDir } = yield* makeRepository();
+      const worktree = yield* make(worktreesDir);
+      const id = chatId(47);
+      const cwd = AbsolutePath.make(path.join(worktreesDir, id));
+      const source = `chat/${id}`;
+      yield* worktree.create(options(id, repositoryCwd), () => Effect.void);
+      const head = yield* git(cwd, ["rev-parse", "HEAD"]);
+      const transport = yield* makeHangingTransport(repositoryCwd);
+      yield* git(repositoryCwd, ["config", "protocol.ext.allow", "always"]);
+      yield* git(repositoryCwd, ["remote", "add", "hanging", transport.endpoint]);
+      const rename = yield* worktree
+        .renameChatBranch(renameOptions(id, cwd, "timeout-topic"))
+        .pipe(Effect.flip, Effect.forkScoped);
+
+      yield* Effect.gen(function* () {
+        const pid = yield* transport.ready.pipe(Effect.timeout("5 seconds"), TestClock.withLive);
+        assert.isTrue(yield* helperIsRunning(pid, repositoryCwd));
+
+        yield* TestClock.adjust("10 seconds");
+        assert.instanceOf(
+          yield* Fiber.join(rename).pipe(Effect.timeout("2 seconds"), TestClock.withLive),
+          GitError,
+        );
+        yield* awaitHelperExit(pid, repositoryCwd);
+        assert.strictEqual((yield* git(cwd, ["branch", "--show-current"])).trim(), source);
+        assert.strictEqual(yield* git(cwd, ["rev-parse", "HEAD"]), head);
+      }).pipe(Effect.ensuring(transport.close));
     }).pipe(Effect.provide(BunServices.layer)),
   );
 
