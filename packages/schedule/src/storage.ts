@@ -459,16 +459,19 @@ const inspectSourceTree = Effect.fn("Schedules.inspectSourceTree")(function* (
       if (name === "." || name === ".." || storage.path.basename(name) !== name) {
         return yield* invalid(`Invalid source entry name: ${name}`);
       }
-      if (relativeDirectory === "" && name === "meta.json") {
-        if (owned) continue;
-        return yield* invalid(
-          "meta.json is reserved for Pico metadata; remove it from sourceDirectory",
-        );
-      }
-      if (relativeDirectory === "" && name === "definition.json") {
-        return yield* invalid(
-          "definition.json is reserved for run metadata; rename the source asset",
-        );
+      if (relativeDirectory === "") {
+        if (owned && name === "meta.json") continue;
+        const rootName = name.toLowerCase();
+        if (rootName === "meta.json") {
+          return yield* invalid(
+            "meta.json is reserved for Pico metadata; remove it from sourceDirectory",
+          );
+        }
+        if (rootName === "definition.json") {
+          return yield* invalid(
+            "definition.json is reserved for run metadata; rename the source asset",
+          );
+        }
       }
       const relative = storage.path.join(relativeDirectory, name);
       const asset = storage.path.join(directory, relative);

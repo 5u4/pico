@@ -26,6 +26,7 @@ import {
   appendArtifactString,
   bootstrap,
   loadSchedule,
+  loadSourceTree,
   moveDefinition,
   publishDefinition,
   publishRun,
@@ -320,12 +321,19 @@ describe("Schedules", () => {
         const script = 'import { content } from "./lib/helper.js";process.stdout.write(content);';
         const helper = 'export const content = "original";';
         const asset = new Uint8Array([0, 255, 128, 10]);
+        const nestedMetadata = {
+          "lib/meta.json": '{"helper":1}',
+          "lib/definition.json": '{"helper":2}',
+          "assets/Meta.json": '{"helper":3}',
+          "assets/Definition.json": '{"helper":4}',
+        };
         const sourceDirectory = yield* prepareSource(
           {
             "script.js": script,
             "prompt.md": "Run the update.",
             "lib/helper.js": helper,
             "assets/data.bin": asset,
+            ...nestedMetadata,
           },
           ["cache/empty"],
         );
@@ -375,6 +383,12 @@ describe("Schedules", () => {
           yield* fileSystem.readDirectory(path.join(directory, "cache/empty")),
           [],
         );
+        for (const [name, contents] of Object.entries(nestedMetadata)) {
+          assert.strictEqual(
+            yield* fileSystem.readFileString(path.join(directory, name)),
+            contents,
+          );
+        }
 
         const enabled = yield* schedules.update(caller, created.id, { enabled: true });
         assert.strictEqual(enabled.kind, "ready");
@@ -1337,6 +1351,50 @@ describe("Schedules", () => {
       }).pipe(Effect.provide(platformLayer), Effect.scoped),
   );
 
+  it.effect.each(["Meta.json", "Definition.json"])(
+    "rejects authored %s before publishing metadata",
+    (name) =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-source-reserved-" });
+        const schedules = yield* open(AbsolutePath.make(path.join(root, "schedules")));
+        const error = yield* schedules
+          .create(caller, {
+            name: "reserved source",
+            enabled: false,
+            target: { kind: "current-chat" },
+            trigger: { kind: "once", at: 1_000 },
+            sourceDirectory: yield* prepareSource({ "prompt.md": "valid", [name]: "{}" }),
+          })
+          .pipe(Effect.flip);
+        assert.strictEqual(error.kind, "invalid");
+        assert.deepStrictEqual(yield* schedules.list(caller), []);
+      }).pipe(Effect.provide(platformLayer), Effect.scoped),
+  );
+
+  it.effect("rejects mixed-case metadata rather than skipping it during owned source capture", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const crypto = yield* Crypto.Crypto;
+      const path = yield* Path.Path;
+      const directory = yield* prepareSource({ "prompt.md": "valid", "Meta.json": "{}" });
+      const storage: Storage = {
+        fileSystem,
+        path,
+        schedulesDir: directory,
+        temporaryId: () =>
+          crypto.randomUUIDv7.pipe(
+            Effect.mapError(
+              (error) => new Schedule.ScheduleError({ kind: "io", message: error.message }),
+            ),
+          ),
+      };
+      const error = yield* loadSourceTree(storage, directory, true).pipe(Effect.flip);
+      assert.strictEqual(error.kind, "invalid");
+    }).pipe(Effect.provide(platformLayer), Effect.scoped),
+  );
+
   it.effect(
     "rejects dangling helper links and reserved snapshot names added to owned sources",
     () =>
@@ -1375,13 +1433,14 @@ describe("Schedules", () => {
           created.definition,
         );
         yield* fileSystem.remove(dangling);
-        yield* fileSystem.writeFileString(
-          path.join(created.sourceDirectory, "definition.json"),
-          "{}",
-        );
-        assert.strictEqual((yield* schedules.list(caller))[0]?.kind, "invalid");
-        yield* fileSystem.remove(path.join(created.sourceDirectory, "definition.json"));
-        assert.strictEqual((yield* schedules.get(caller, created.id)).kind, "ready");
+        for (const name of ["definition.json", "Definition.json"]) {
+          const asset = path.join(created.sourceDirectory, name);
+          yield* fileSystem.writeFileString(asset, "{}", { flag: "wx" });
+          assert.strictEqual((yield* schedules.get(caller, created.id)).kind, "invalid");
+          assert.strictEqual((yield* schedules.list(caller))[0]?.kind, "invalid");
+          yield* fileSystem.remove(asset);
+          assert.strictEqual((yield* schedules.get(caller, created.id)).kind, "ready");
+        }
       }).pipe(Effect.provide(platformLayer), Effect.scoped),
   );
 

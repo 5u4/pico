@@ -23,7 +23,7 @@ Write the source files in a directory, then pass its absolute path as `sourceDir
 
 At least one root entrypoint, `script.js` or `prompt.md`, must exist. Every entrypoint present must contain non-whitespace text. Helpers, binary assets, nested directories, and empty directories are allowed. Symlinks and special files are rejected anywhere in the tree.
 
-Do not author root `meta.json` or `definition.json`. Pico owns `meta.json` and reserves `definition.json` for run snapshot metadata.
+Do not author root `meta.json` or `definition.json`, including case variants such as `Meta.json` and `Definition.json`. Pico owns the exact root `meta.json` and reserves `definition.json` case-insensitively for run snapshot metadata. These names are allowed inside nested directories.
 
 Creation copies the complete supported source tree into Pico's managed directory. Later edits to the original directory do not affect that owned copy. Put every helper and asset the script needs inside the source directory. Pico does not crawl imports or copy dependencies from outside it.
 
