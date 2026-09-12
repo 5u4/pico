@@ -317,16 +317,31 @@ const makeFactory = (
         mode: "print",
         reportSendError: (action, error) => {
           runLog(
-            Effect.logError("OMP extension send failed", {
-              chatId: chat.id,
-              action,
-              error: error.message,
-              stack: error.stack,
-            }),
+            Effect.logError("OMP extension send failed").pipe(
+              Effect.annotateLogs({
+                component: "omp",
+                operation: "extension-send",
+                chatId: chat.id,
+                workspaceId: chat.workspaceId,
+                action,
+                error: error.message,
+                stack: error.stack,
+              }),
+            ),
           );
         },
         reportRuntimeError: (error) => {
-          runLog(Effect.logError("OMP extension runtime failed", { chatId: chat.id, ...error }));
+          runLog(
+            Effect.logError("OMP extension runtime failed").pipe(
+              Effect.annotateLogs({
+                component: "omp",
+                operation: "extension-runtime",
+                chatId: chat.id,
+                workspaceId: chat.workspaceId,
+                ...error,
+              }),
+            ),
+          );
         },
       }),
     ).pipe(
