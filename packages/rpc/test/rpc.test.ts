@@ -56,7 +56,8 @@ describe("RPC", () => {
       const filters: Array<EventFilter> = [];
 
       const application = Application.of({
-        createWorkspace: () => Effect.die("unexpected workspace creation"),
+        createWorkspace: () => Effect.die("unexpected explicit workspace creation"),
+        getOrCreateWorkspaceByBinding: () => Effect.die("unexpected workspace creation"),
         bindWorkspace: () => Effect.die("unexpected workspace binding"),
         createChat: () => Effect.die("unexpected chat creation"),
         findWorkspaceByPlatformId: () => Effect.die("unexpected workspace lookup"),

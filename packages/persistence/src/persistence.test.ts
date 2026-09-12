@@ -58,6 +58,82 @@ const worktreeWorkspace: Workspace.Workspace = {
 };
 
 describe("Persistence.layer", () => {
+  it.effect(
+    "concurrent binding creation keeps one identity and never overwrites its configuration",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const temporaryDirectory = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "pico-persistence-binding-",
+        });
+        const storeFile = AbsolutePath.make(path.join(temporaryDirectory, "store.db"));
+        const binding = Workspace.WorkspaceBinding.make({
+          platform: "discord",
+          externalId: "concurrent-channel",
+        });
+        const firstCandidate = { ...regularWorkspace, binding };
+        const secondCandidate = {
+          ...worktreeWorkspace,
+          binding,
+          defaultCwd: cwdB,
+        };
+
+        const configured = yield* Effect.gen(function* () {
+          const workspaces = yield* WorkspaceRepository;
+          const [first, second] = yield* Effect.all(
+            [
+              workspaces.getOrCreateByBinding(firstCandidate),
+              workspaces.getOrCreateByBinding(secondCandidate),
+            ],
+            { concurrency: "unbounded" },
+          );
+          assert.deepStrictEqual(first, second);
+          const winner = first.id === firstCandidate.id ? firstCandidate : secondCandidate;
+          const loser = first.id === firstCandidate.id ? secondCandidate : firstCandidate;
+          assert.deepStrictEqual(first, winner);
+          assert.deepStrictEqual(
+            Option.getOrThrow(yield* workspaces.findByBinding(binding)),
+            winner,
+          );
+          assert.isTrue(Option.isNone(yield* workspaces.findById(loser.id)));
+
+          const changed = yield* workspaces.replaceConfiguration(first.id, {
+            defaultCwd: cwdB,
+            worktree: { branch: "release", prefix: "bound/" },
+          });
+          assert.deepStrictEqual(
+            yield* workspaces.getOrCreateByBinding({
+              ...loser,
+              name: "must not rename",
+              createdAt: 999,
+              defaultCwd: cwdA,
+              worktree: null,
+            }),
+            changed,
+          );
+          assert.instanceOf(
+            yield* Effect.flip(
+              workspaces.getOrCreateByBinding({
+                ...winner,
+                binding: { platform: "discord", externalId: "different-channel" },
+              }),
+            ),
+            PersistenceError,
+          );
+          return changed;
+        }).pipe(Effect.provide(layer(storeFile)), Effect.scoped);
+
+        yield* Effect.gen(function* () {
+          const workspaces = yield* WorkspaceRepository;
+          assert.deepStrictEqual(
+            Option.getOrThrow(yield* workspaces.findByBinding(binding)),
+            configured,
+          );
+        }).pipe(Effect.provide(layer(storeFile)), Effect.scoped);
+      }).pipe(Effect.provide(platformLayer)),
+  );
+
   it.effect("persists workspace and chat metadata with foreign keys and identities", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;

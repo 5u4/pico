@@ -56,8 +56,13 @@
 - a chat in discord is a thread
 - when creating the chat, write workspace.default_cwd to chat.cwd
   - when workspace.default_cwd is changed, chat.cwd remains the same
-  - changing workspace.default_cwd only affect later new chats; not the old chats
+  - each new chat uses the complete workspace configuration read during creation, even if a bind finishes before chat creation completes
   - resumt chat use chat.cwd, not workspace.default_cwd
+  - parent-channel messages do not wait for pending bind validation or another thread's first send
+  - concurrent messages and bind share one workspace identity; messages never replace existing configuration
+  - a successful bind applies its requested configuration, including when a message created the workspace first
+  - binds in the same channel serialize validation, configuration updates, and awaited replies
+  - thread input and commands remain serialized; chat publication and the opening prompt hold that same thread lock
 - a workspace can be a regular workspace (worktree_* = null) or a worktree workspace (worktree_* != null)
   - regular workspace new chats with workspace.default_cwd
   - worktree workspace new chats with new worktree from worktree_branch, creating `{worktree_prefix}/{chat.id}` to `{picoHome}/worktrees/{chat.id}`
