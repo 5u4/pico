@@ -7,7 +7,7 @@ import * as BunPath from "@effect/platform-bun/BunPath";
 import * as OmpSessionLoader from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import { BranchNaming } from "@pico/contract/branch-naming";
 import * as Chat from "@pico/contract/chat-model";
-import { ChatPlatformResolver } from "@pico/contract/chat-platform-resolver";
+import { ChatSessionContext } from "@pico/contract/chat-session-context";
 import { AbsolutePath } from "@pico/contract/path";
 import * as Schedule from "@pico/contract/schedule";
 import { WorkspaceId } from "@pico/contract/workspace-model";
@@ -59,16 +59,17 @@ const schedules = Schedule.Schedules.of({
   create: unusedSchedule,
   list: unusedSchedule,
   get: unusedSchedule,
-  update: unusedSchedule,
+  replace: unusedSchedule,
   setEnabled: unusedSchedule,
   remove: unusedSchedule,
+  start: unusedSchedule,
 });
 const platform = Layer.mergeAll(
   BunCrypto.layer,
   BunFileSystem.layer,
   BunPath.layer,
-  Layer.succeed(ChatPlatformResolver, {
-    resolve: () => Effect.succeed({ chat, platform: null }),
+  Layer.succeed(ChatSessionContext, {
+    resolve: () => Effect.succeed({ chat, platform: null, appendSystemPrompt: "" }),
   }),
   Layer.succeed(BranchNaming, {
     handle: () => {
