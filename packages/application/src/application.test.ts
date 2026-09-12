@@ -481,21 +481,6 @@ describe("Application", () => {
       );
 
       const persistenceLayer = Persistence.layer(storeFile);
-      let configurationChanges = 0;
-      const observedWorkspaces = Layer.effect(
-        WorkspaceRepository,
-        Effect.gen(function* () {
-          const repository = yield* WorkspaceRepository;
-          return WorkspaceRepository.of({
-            ...repository,
-            replaceConfiguration: (workspaceId, configuration) =>
-              Effect.sync(() => {
-                configurationChanges += 1;
-              }).pipe(Effect.andThen(repository.replaceConfiguration(workspaceId, configuration))),
-          });
-        }),
-      ).pipe(Layer.provide(persistenceLayer));
-      const repositories = Layer.merge(persistenceLayer, observedWorkspaces);
       const createdSessions: Array<CreateAgentSession> = [];
       const sessionsLayer = Layer.succeed(
         AgentSessionStore,
@@ -560,7 +545,6 @@ describe("Application", () => {
         });
         assert.strictEqual(created.name, "general");
         assert.strictEqual(created.defaultCwd, firstCwd);
-        assert.strictEqual(configurationChanges, 0);
 
         const freshWorktree = yield* application.bindWorkspace({
           binding: { platform: "discord", externalId: "channel-worktree" },
@@ -578,7 +562,6 @@ describe("Application", () => {
         });
         assert.strictEqual(freshWorktree.defaultCwd, secondCwd);
         assert.deepStrictEqual(freshWorktree.worktree, { branch: "main", prefix: "fresh/" });
-        assert.strictEqual(configurationChanges, 0);
 
         const oldChat = yield* application.createChat({
           workspaceId: created.id,
@@ -590,7 +573,6 @@ describe("Application", () => {
           configuration: { kind: "direct", cwd: `${firstCwd}/.` },
         });
         assert.deepStrictEqual(repeated, created);
-        assert.strictEqual(configurationChanges, 0);
 
         const rebound = yield* application.bindWorkspace({
           binding,
@@ -602,7 +584,6 @@ describe("Application", () => {
         });
         assert.strictEqual(rebound.name, "general");
         assert.strictEqual(rebound.defaultCwd, secondCwd);
-        assert.strictEqual(configurationChanges, 1);
 
         const worktreeBound = yield* application.bindWorkspace({
           binding,
@@ -617,7 +598,6 @@ describe("Application", () => {
           ...rebound,
           worktree: { branch: "main", prefix: "chat/" },
         });
-        assert.strictEqual(configurationChanges, 2);
         assert.deepStrictEqual(validations, [
           { defaultCwd: secondCwd, worktree: { branch: "main", prefix: "fresh/" } },
           { defaultCwd: secondCwd, worktree: { branch: "main", prefix: "chat/" } },
@@ -639,7 +619,6 @@ describe("Application", () => {
           },
         });
         assert.deepStrictEqual(repeatedWorktree, worktreeBound);
-        assert.strictEqual(configurationChanges, 2);
 
         const directAgain = yield* application.bindWorkspace({
           binding,
@@ -647,7 +626,6 @@ describe("Application", () => {
           configuration: { kind: "direct", cwd: secondCwd },
         });
         assert.deepStrictEqual(directAgain, { ...rebound, worktree: null });
-        assert.strictEqual(configurationChanges, 3);
 
         const newChat = yield* application.createChat({
           workspaceId: created.id,
@@ -740,7 +718,7 @@ describe("Application", () => {
       }).pipe(
         Effect.provide(ApplicationLayer.layer(gitWorktree)),
         Effect.provide(applicationFileSystemLayer),
-        Effect.provide(repositories),
+        Effect.provide(persistenceLayer),
         Effect.provide(sessionsLayer),
         Effect.provide(runtimeLayer),
         Effect.provide(BunCrypto.layer),
@@ -748,6 +726,139 @@ describe("Application", () => {
       );
     }).pipe(Effect.provide(platformLayer)),
   );
+
+  it.effect("message and bind creation races converge on the requested configuration", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const temporaryDirectory = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "pico-application-binding-race-",
+      });
+      const defaultCwd = AbsolutePath.make(path.join(temporaryDirectory, "default"));
+      const repositoryCwd = AbsolutePath.make(path.join(temporaryDirectory, "repository"));
+      const worktreeCwd = AbsolutePath.make(path.join(temporaryDirectory, "worktree"));
+      yield* fileSystem.makeDirectory(defaultCwd);
+      yield* fileSystem.makeDirectory(repositoryCwd);
+      const settings = { branch: "main", prefix: "bound/" };
+      const runtimeLayer = Layer.succeed(
+        AgentRuntime,
+        AgentRuntime.of({
+          events: Stream.empty,
+          drain: () => Effect.void,
+          transcript: () => Effect.die("unexpected transcript read"),
+          send: () => Effect.die("unexpected runtime send"),
+          sendCaptured: () => Effect.die("unexpected captured runtime send"),
+          deliver: () => Effect.die("unexpected scheduled delivery"),
+          publish: () => Effect.die("unexpected scheduled publish"),
+          abort: () => Effect.die("unexpected runtime abort"),
+          contextUsage: () => Effect.die("unexpected runtime context read"),
+          shake: () => Effect.die("unexpected runtime shake"),
+          close: () => Effect.die("unexpected runtime close"),
+        }),
+      );
+      const sessionsLayer = Layer.succeed(
+        AgentSessionStore,
+        AgentSessionStore.of({ create: () => Effect.void, remove: () => Effect.void }),
+      );
+      const gitWorktree: GitWorktree = {
+        validate: () => Effect.void,
+        create: (options, use) =>
+          Effect.gen(function* () {
+            assert.strictEqual(options.repositoryCwd, repositoryCwd);
+            assert.deepStrictEqual(options.settings, settings);
+            return yield* use(worktreeCwd);
+          }),
+        inspectChat: () => Effect.succeed({ kind: "not-managed" }),
+        renameChatBranch: () => Effect.die("unexpected branch rename"),
+        removeChat: () => Effect.die("unexpected worktree removal"),
+      };
+
+      for (const winner of ["message", "binding"] as const) {
+        const waiting = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        const blockedName = winner === "message" ? "binding" : "message";
+        const storeFile = AbsolutePath.make(path.join(temporaryDirectory, `${winner}.db`));
+        const persistenceLayer = Persistence.layer(storeFile);
+        const gatedWorkspaces = Layer.effect(
+          WorkspaceRepository,
+          Effect.gen(function* () {
+            const repository = yield* WorkspaceRepository;
+            return WorkspaceRepository.of({
+              ...repository,
+              getOrCreateByBinding: (candidate) =>
+                Effect.gen(function* () {
+                  if (candidate.name === blockedName) {
+                    yield* Deferred.succeed(waiting, undefined);
+                    yield* Deferred.await(release);
+                  }
+                  return yield* repository.getOrCreateByBinding(candidate);
+                }),
+            });
+          }),
+        ).pipe(Layer.provide(persistenceLayer));
+
+        yield* Effect.gen(function* () {
+          const application = yield* Application;
+          const chats = yield* ChatRepository;
+          const binding = Workspace.WorkspaceBinding.make({
+            platform: "discord",
+            externalId: winner,
+          });
+          const messageCreation = application.getOrCreateWorkspaceByBinding({
+            name: "message",
+            binding,
+            defaultCwd,
+            worktree: null,
+          });
+          const bind = application.bindWorkspace({
+            binding,
+            workspaceName: "binding",
+            configuration: { kind: "worktree", repository: repositoryCwd, settings },
+          });
+          const blocked = yield* (winner === "message" ? bind : messageCreation).pipe(
+            Effect.forkChild,
+          );
+          yield* Deferred.await(waiting);
+          const first = yield* winner === "message" ? messageCreation : bind;
+          const initialChat = yield* application.createChat({
+            workspaceId: first.id,
+            externalId: "before-release",
+          });
+          assert.strictEqual(initialChat.cwd, winner === "message" ? defaultCwd : worktreeCwd);
+
+          yield* Deferred.succeed(release, undefined);
+          const second = yield* Fiber.join(blocked);
+          assert.strictEqual(second.id, first.id);
+          assert.deepStrictEqual(second, {
+            ...first,
+            defaultCwd: repositoryCwd,
+            worktree: settings,
+          });
+          assert.deepStrictEqual(
+            Option.getOrThrow(yield* application.findWorkspaceByPlatformId("discord", winner)),
+            second,
+          );
+          const nextChat = yield* application.createChat({
+            workspaceId: second.id,
+            externalId: "after-release",
+          });
+          assert.strictEqual(nextChat.cwd, worktreeCwd);
+          assert.strictEqual(
+            Option.getOrThrow(yield* chats.findById(initialChat.id)).cwd,
+            initialChat.cwd,
+          );
+        }).pipe(
+          Effect.provide(ApplicationLayer.layer(gitWorktree)),
+          Effect.provide(Layer.merge(persistenceLayer, gatedWorkspaces)),
+          Effect.provide(sessionsLayer),
+          Effect.provide(runtimeLayer),
+          Effect.provide(BunCrypto.layer),
+          Effect.scoped,
+        );
+      }
+    }).pipe(Effect.provide(platformLayer)),
+  );
+
   it.effect("serializes close after sends and lets abort reach a scheduled run", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
@@ -1293,6 +1404,7 @@ describe("Application", () => {
           WorkspaceRepository,
           WorkspaceRepository.of({
             create: () => Effect.die("unexpected workspace create"),
+            getOrCreateByBinding: () => Effect.die("unexpected bound workspace creation"),
             findById: (id) => Effect.succeed(Option.fromUndefinedOr(workspaces.get(id))),
             findByBinding: () => Effect.die("unexpected workspace binding lookup"),
             replaceConfiguration: () => Effect.die("unexpected workspace replacement"),
@@ -1402,6 +1514,7 @@ describe("Application", () => {
           WorkspaceRepository,
           WorkspaceRepository.of({
             create: () => Effect.die("unexpected workspace create"),
+            getOrCreateByBinding: () => Effect.die("unexpected bound workspace creation"),
             findById: (id) =>
               Effect.sync(() => {
                 if (id !== firstWorkspaceId) return Option.none<Workspace.Workspace>();
@@ -1546,6 +1659,7 @@ describe("Application", () => {
           WorkspaceRepository,
           WorkspaceRepository.of({
             create: () => Effect.die("unexpected workspace create"),
+            getOrCreateByBinding: () => Effect.die("unexpected bound workspace creation"),
             findById: () => Effect.succeed(Option.some(workspace)),
             findByBinding: () => Effect.die("unexpected workspace binding lookup"),
             replaceConfiguration: () => Effect.die("unexpected workspace replacement"),

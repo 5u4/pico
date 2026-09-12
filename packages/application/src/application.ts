@@ -218,6 +218,17 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
     Effect.mapError(failure("Failed to create workspace")),
   );
 
+  const getOrCreateWorkspaceByBinding = Effect.fn("Application.getOrCreateWorkspaceByBinding")(
+    function* (
+      input: Omit<CreateWorkspace, "binding"> & { readonly binding: Workspace.WorkspaceBinding },
+    ) {
+      const id = Workspace.WorkspaceId.make(yield* crypto.randomUUIDv7);
+      const createdAt = yield* Clock.currentTimeMillis;
+      return yield* workspaces.getOrCreateByBinding({ ...input, id, createdAt });
+    },
+    Effect.mapError(failure("Failed to get or create workspace")),
+  );
+
   type WorkspacePathInvalidReason = Extract<
     WorkspaceBindingInvalid["issue"],
     { readonly field: "cwd" }
@@ -292,29 +303,23 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
 
   const bindWorkspace = Effect.fn("Application.bindWorkspace")(function* (input: BindWorkspace) {
     const configuration = yield* resolveConfiguration(input.configuration);
-    const existing = yield* workspaces
-      .findByBinding(input.binding)
-      .pipe(Effect.mapError(failure("Failed to bind workspace")));
-
-    if (Option.isNone(existing)) {
-      return yield* createWorkspace({
-        name: input.workspaceName,
-        binding: input.binding,
-        ...configuration,
-      });
-    }
+    const existing = yield* getOrCreateWorkspaceByBinding({
+      name: input.workspaceName,
+      binding: input.binding,
+      ...configuration,
+    });
     if (
-      existing.value.defaultCwd === configuration.defaultCwd &&
-      ((existing.value.worktree === null && configuration.worktree === null) ||
-        (existing.value.worktree !== null &&
+      existing.defaultCwd === configuration.defaultCwd &&
+      ((existing.worktree === null && configuration.worktree === null) ||
+        (existing.worktree !== null &&
           configuration.worktree !== null &&
-          existing.value.worktree.branch === configuration.worktree.branch &&
-          existing.value.worktree.prefix === configuration.worktree.prefix))
+          existing.worktree.branch === configuration.worktree.branch &&
+          existing.worktree.prefix === configuration.worktree.prefix))
     ) {
-      return existing.value;
+      return existing;
     }
     return yield* workspaces
-      .replaceConfiguration(existing.value.id, configuration)
+      .replaceConfiguration(existing.id, configuration)
       .pipe(Effect.mapError(failure("Failed to bind workspace")));
   });
 
@@ -608,6 +613,7 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
 
   const application = Application.of({
     createWorkspace,
+    getOrCreateWorkspaceByBinding,
     bindWorkspace,
     createChat,
     findWorkspaceByPlatformId,

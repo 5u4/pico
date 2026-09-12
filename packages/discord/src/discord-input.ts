@@ -350,13 +350,30 @@ export const install = Effect.fn("DiscordInput.install")(function* <
   const workspaceIds = new Map<bigint, Workspace.WorkspaceId>();
   const chatIds = new Map<bigint, Chat.ChatId>();
   const threadIds = new Map<Chat.ChatId, bigint>();
-  const channelLocks = new Map<bigint, Semaphore.Semaphore>();
+  const inputLocks = new Map<
+    bigint,
+    { readonly semaphore: Semaphore.Semaphore; knownThread: boolean }
+  >();
+  const bindLocks = new Map<bigint, Semaphore.Semaphore>();
   const closeConfirmations = new Map<string, CloseConfirmation>();
   const allowedMentions = { parse: [], repliedUser: false } satisfies {
     parse: [];
     repliedUser: false;
   };
   const formatNumber = new Intl.NumberFormat("en-US").format;
+
+  const inputLock = (channelId: bigint) => {
+    const existing = inputLocks.get(channelId);
+    if (existing !== undefined) return existing;
+    const entry = { semaphore: Semaphore.makeUnsafe(1), knownThread: false };
+    inputLocks.set(channelId, entry);
+    return entry;
+  };
+  const threadLock = (threadId: bigint) => {
+    const entry = inputLock(threadId);
+    entry.knownThread = true;
+    return entry.semaphore;
+  };
 
   const cacheChat = (threadId: bigint, chatId: Chat.ChatId) => {
     const previousChatId = chatIds.get(threadId);
@@ -414,6 +431,7 @@ export const install = Effect.fn("DiscordInput.install")(function* <
     if (channel.guildId !== guildId || !isThread(channel.type) || channel.parentId === undefined) {
       return Option.none<CommandThread>();
     }
+    inputLock(channel.id).knownThread = true;
     return Option.some({ guildId, parentId: channel.parentId, threadId: channel.id });
   });
 
@@ -450,15 +468,10 @@ export const install = Effect.fn("DiscordInput.install")(function* <
       );
   });
 
-  const handleMessage = Effect.fn("Discord.handleMessage")(function* (message: Message) {
-    if (
-      message.guildId === undefined ||
-      !allowedGuildIds.has(message.guildId.toString()) ||
-      message.webhookId !== undefined ||
-      message.author.id === bot.id
-    ) {
-      return;
-    }
+  const processMessage = Effect.fn("Discord.processMessage")(function* (
+    message: Message,
+    knownChannel?: DiscordChannel,
+  ) {
     const sourceAttachments = message.attachments ?? [];
     if (message.content.trim().length === 0 && sourceAttachments.length === 0) {
       yield* promiseBoundary("Failed to reject empty Discord message", () =>
@@ -489,9 +502,11 @@ export const install = Effect.fn("DiscordInput.install")(function* <
       return;
     }
 
-    const channel = yield* promiseBoundary("Failed to resolve Discord channel", () =>
-      bot.helpers.getChannel(message.channelId),
-    );
+    const channel =
+      knownChannel ??
+      (yield* promiseBoundary("Failed to resolve Discord channel", () =>
+        bot.helpers.getChannel(message.channelId),
+      ));
 
     if (isThread(channel.type)) {
       if (channel.parentId === undefined) return;
@@ -516,7 +531,7 @@ export const install = Effect.fn("DiscordInput.install")(function* <
     if (Option.isSome(maybeWorkspaceId)) {
       workspaceId = maybeWorkspaceId.value;
     } else {
-      const workspace = yield* application.createWorkspace({
+      const workspace = yield* application.getOrCreateWorkspaceByBinding({
         name: channel.name ?? `Discord channel ${channel.id}`,
         binding: { platform: "discord", externalId: channel.id.toString() },
         defaultCwd: config.defaultCwd,
@@ -534,12 +549,48 @@ export const install = Effect.fn("DiscordInput.install")(function* <
         autoArchiveDuration: 1_440,
       }),
     );
-    const chat = yield* application.createChat({
-      workspaceId,
-      externalId: thread.id.toString(),
-    });
-    cacheChat(thread.id, chat.id);
-    yield* sendMessageToChat(chat.id, prompt, message.channelId);
+    yield* threadLock(thread.id).withPermit(
+      Effect.gen(function* () {
+        const chat = yield* application.createChat({
+          workspaceId,
+          externalId: thread.id.toString(),
+        });
+        cacheChat(thread.id, chat.id);
+        yield* sendMessageToChat(chat.id, prompt, message.channelId);
+      }),
+    );
+  });
+
+  const handleMessage = Effect.fn("Discord.handleMessage")(function* (message: Message) {
+    if (
+      message.guildId === undefined ||
+      !allowedGuildIds.has(message.guildId.toString()) ||
+      message.webhookId !== undefined ||
+      message.author.id === bot.id
+    ) {
+      return;
+    }
+    if (inputLocks.get(message.channelId)?.knownThread === true || chatIds.has(message.channelId)) {
+      yield* threadLock(message.channelId).withPermit(processMessage(message));
+      return;
+    }
+    const entry = inputLock(message.channelId);
+    const parentChannel = yield* entry.semaphore.withPermit(
+      Effect.gen(function* () {
+        const channel = yield* promiseBoundary("Failed to resolve Discord channel", () =>
+          bot.helpers.getChannel(message.channelId),
+        );
+        if (isThread(channel.type)) {
+          entry.knownThread = true;
+          yield* processMessage(message, channel);
+          return undefined;
+        }
+        return channel;
+      }),
+    );
+    if (parentChannel !== undefined) {
+      yield* processMessage(message, parentChannel);
+    }
   });
 
   type WorkspacePathIssue = Extract<
@@ -903,16 +954,10 @@ export const install = Effect.fn("DiscordInput.install")(function* <
   });
 
   bot.events.messageCreate = (message) => {
-    const lock = channelLocks.get(message.channelId) ?? Semaphore.makeUnsafe(1);
-    channelLocks.set(message.channelId, lock);
     run(
-      lock
-        .withPermit(handleMessage(message))
-        .pipe(
-          Effect.catchCause((cause) =>
-            Effect.logError("Discord input failed", Cause.pretty(cause)),
-          ),
-        ),
+      handleMessage(message).pipe(
+        Effect.catchCause((cause) => Effect.logError("Discord input failed", Cause.pretty(cause))),
+      ),
     );
   };
 
@@ -964,9 +1009,16 @@ export const install = Effect.fn("DiscordInput.install")(function* <
           run(effect);
           return;
         }
-        const lock = channelLocks.get(channelId) ?? Semaphore.makeUnsafe(1);
-        channelLocks.set(channelId, lock);
-        run(lock.withPermit(effect));
+        if (closeNonce === undefined && name === "bind") {
+          let semaphore = bindLocks.get(channelId);
+          if (semaphore === undefined) {
+            semaphore = Semaphore.makeUnsafe(1);
+            bindLocks.set(channelId, semaphore);
+          }
+          run(semaphore.withPermit(effect));
+          return;
+        }
+        run(inputLock(channelId).semaphore.withPermit(effect));
       },
       (cause: unknown) => {
         run(

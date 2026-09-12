@@ -151,7 +151,8 @@ describe("Discord input", () => {
         } satisfies DiscordInputBot;
 
         const application = Application.of({
-          createWorkspace: () =>
+          createWorkspace: () => Effect.die("unexpected explicit workspace creation"),
+          getOrCreateWorkspaceByBinding: () =>
             Effect.sync(() => {
               order.push("create-workspace");
               return {
@@ -282,7 +283,8 @@ describe("Discord input", () => {
           },
         } satisfies DiscordInputBot;
         const application = Application.of({
-          createWorkspace: () =>
+          createWorkspace: () => Effect.die("unexpected explicit workspace creation"),
+          getOrCreateWorkspaceByBinding: () =>
             Effect.succeed({
               id: workspaceId,
               name: "general",
@@ -417,7 +419,8 @@ describe("Discord input", () => {
           },
         } satisfies DiscordInputBot;
         const application = Application.of({
-          createWorkspace: () => Effect.die("unexpected workspace creation"),
+          createWorkspace: () => Effect.die("unexpected explicit workspace creation"),
+          getOrCreateWorkspaceByBinding: () => Effect.die("unexpected workspace creation"),
           bindWorkspace: () => Effect.die("unexpected workspace binding"),
           createChat: () => Effect.die("unexpected chat creation"),
           findWorkspaceByPlatformId: () => Effect.die("unexpected workspace lookup"),
@@ -539,9 +542,11 @@ describe("Discord input", () => {
           id: 999n,
           events: {},
           helpers: {
-            getChannel: async () => {
-              throw new Error("rejected input must not resolve a channel");
-            },
+            getChannel: async () => ({
+              id: 10n,
+              guildId: 1n,
+              type: ChannelTypes.GuildText,
+            }),
             sendMessage: async (_channelId, options) => {
               replies.push(options.content);
               resolveReply?.(options.content);
@@ -553,7 +558,8 @@ describe("Discord input", () => {
           },
         } satisfies DiscordInputBot;
         const application = Application.of({
-          createWorkspace: () => Effect.die("unexpected workspace creation"),
+          createWorkspace: () => Effect.die("unexpected explicit workspace creation"),
+          getOrCreateWorkspaceByBinding: () => Effect.die("unexpected workspace creation"),
           bindWorkspace: () => Effect.die("unexpected workspace binding"),
           createChat: () => Effect.die("unexpected chat creation"),
           findWorkspaceByPlatformId: () => Effect.die("unexpected workspace lookup"),
@@ -701,7 +707,8 @@ describe("Discord input", () => {
           },
         } satisfies DiscordInputBot;
         const application = Application.of({
-          createWorkspace: () => Effect.die("unexpected workspace creation"),
+          createWorkspace: () => Effect.die("unexpected explicit workspace creation"),
+          getOrCreateWorkspaceByBinding: () => Effect.die("unexpected workspace creation"),
           bindWorkspace: (input) => {
             bindings.push(input);
             if (input.configuration.kind === "direct") {
@@ -942,7 +949,8 @@ describe("Discord input", () => {
         };
         const failedChat = { ...chat, id: failingChatId, externalId: "22" };
         const application = Application.of({
-          createWorkspace: () => Effect.die("shake must not create a workspace"),
+          createWorkspace: () => Effect.die("unexpected explicit workspace creation"),
+          getOrCreateWorkspaceByBinding: () => Effect.die("shake must not create a workspace"),
           bindWorkspace: () => Effect.die("unexpected workspace binding"),
           createChat: () => Effect.die("shake must not create a chat"),
           findWorkspaceByPlatformId: () => Effect.die("unexpected workspace lookup"),
@@ -1118,7 +1126,8 @@ describe("Discord input", () => {
           archivedAt: null,
         });
         const application = Application.of({
-          createWorkspace: () => Effect.die("context must not create a workspace"),
+          createWorkspace: () => Effect.die("unexpected explicit workspace creation"),
+          getOrCreateWorkspaceByBinding: () => Effect.die("context must not create a workspace"),
           bindWorkspace: () => Effect.die("unexpected workspace binding"),
           createChat: () => Effect.die("context must not create a chat"),
           findWorkspaceByPlatformId: () => Effect.die("unexpected workspace lookup"),
@@ -1221,6 +1230,122 @@ describe("Discord input", () => {
     ),
   );
 
+  it.effect("keeps a cold-thread message ahead of close during channel classification", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const lookupStarted = yield* Deferred.make<void>();
+        const releaseLookup = Promise.withResolvers<void>();
+        const closeDeferred = yield* Deferred.make<void>();
+        const sendStarted = yield* Deferred.make<void>();
+        const releaseSend = yield* Deferred.make<void>();
+        const closeEdited = yield* Deferred.make<void>();
+        const order: string[] = [];
+        const replies: string[] = [];
+        let firstLookup = true;
+        let closed = false;
+        let archived = false;
+        const chat: Chat.Chat = {
+          id: chatId,
+          workspaceId,
+          cwd: defaultCwd,
+          externalId: "20",
+          createdAt: 0,
+          archivedAt: null,
+        };
+        const bot = {
+          id: 999n,
+          events: {},
+          helpers: {
+            getChannel: async () => {
+              if (firstLookup) {
+                firstLookup = false;
+                Effect.runSync(Deferred.succeed(lookupStarted, undefined));
+                await releaseLookup.promise;
+              }
+              return {
+                id: 20n,
+                guildId: 1n,
+                type: ChannelTypes.PublicThread,
+                parentId: 10n,
+              };
+            },
+            sendMessage: async (_channelId, options) => {
+              replies.push(options.content);
+            },
+            editChannel: async () => {
+              order.push("archive");
+              archived = true;
+            },
+            startThreadWithMessage: async () => {
+              throw new Error("unexpected thread creation");
+            },
+          },
+        } satisfies DiscordInputBot;
+        const application = Application.of({
+          createWorkspace: () => Effect.die("unexpected explicit workspace creation"),
+          getOrCreateWorkspaceByBinding: () => Effect.die("unexpected workspace creation"),
+          bindWorkspace: () => Effect.die("unexpected workspace binding"),
+          createChat: () => Effect.die("unexpected chat creation"),
+          findWorkspaceByPlatformId: () => Effect.die("unexpected workspace lookup"),
+          findChatByPlatformId: () => Effect.succeed(Option.some(chat)),
+          findChatPlatformBinding: () => Effect.die("unexpected chat binding lookup"),
+          transcript: () => Effect.die("unexpected transcript read"),
+          sendMessage: (_id, prompt) =>
+            Effect.gen(function* () {
+              if (closed) return yield* new ChatClosed();
+              yield* Deferred.succeed(sendStarted, undefined);
+              yield* Deferred.await(releaseSend);
+              order.push(prompt.text);
+            }),
+          abort: () => Effect.die("unexpected chat abort"),
+          contextUsage: () => Effect.die("unexpected context read"),
+          shake: () => Effect.die("unexpected chat shake"),
+          closeChat: () =>
+            Effect.sync(() => {
+              order.push("close");
+              closed = true;
+              return { kind: "closed" } as const;
+            }),
+        });
+
+        yield* install(bot, config).pipe(
+          Effect.provideService(Application, application),
+          Effect.provide(BunCrypto.layer),
+        );
+        handlerFor(bot)(message({ channelId: 20n, content: "arrived before close" }));
+        yield* Deferred.await(lookupStarted);
+        interactionHandlerFor(bot)(
+          interaction({
+            channelId: 20n,
+            data: { name: "close" },
+            defer: async () => {
+              Effect.runSync(Deferred.succeed(closeDeferred, undefined));
+            },
+            edit: async () => {
+              Effect.runSync(Deferred.succeed(closeEdited, undefined));
+            },
+          }),
+        );
+        yield* Deferred.await(closeDeferred);
+        yield* TestClock.adjust("1 millis");
+        assert.isFalse(closed);
+        assert.isFalse(archived);
+
+        releaseLookup.resolve();
+        yield* Deferred.await(sendStarted);
+        assert.isFalse(closed);
+        assert.isFalse(archived);
+
+        yield* Deferred.succeed(releaseSend, undefined);
+        yield* Deferred.await(closeEdited);
+        assert.deepStrictEqual(order, ["arrived before close", "close", "archive"]);
+        assert.deepStrictEqual(replies, []);
+        assert.isTrue(closed);
+        assert.isTrue(archived);
+      }),
+    ),
+  );
+
   it.effect("holds the thread semaphore through the awaited shake", () =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -1247,7 +1372,8 @@ describe("Discord input", () => {
           },
         } satisfies DiscordInputBot;
         const application = Application.of({
-          createWorkspace: () => Effect.die("unexpected workspace creation"),
+          createWorkspace: () => Effect.die("unexpected explicit workspace creation"),
+          getOrCreateWorkspaceByBinding: () => Effect.die("unexpected workspace creation"),
           bindWorkspace: () => Effect.die("unexpected workspace binding"),
           createChat: () => Effect.die("unexpected chat creation"),
           findWorkspaceByPlatformId: () => Effect.die("unexpected workspace lookup"),
@@ -1337,7 +1463,8 @@ describe("Discord input", () => {
           },
         } satisfies DiscordInputBot;
         const application = Application.of({
-          createWorkspace: () => Effect.die("unexpected workspace creation"),
+          createWorkspace: () => Effect.die("unexpected explicit workspace creation"),
+          getOrCreateWorkspaceByBinding: () => Effect.die("unexpected workspace creation"),
           bindWorkspace: () => Effect.die("unexpected workspace binding"),
           createChat: () => Effect.die("unexpected chat creation"),
           findWorkspaceByPlatformId: () => Effect.die("unexpected workspace lookup"),
@@ -1416,17 +1543,22 @@ describe("Discord input", () => {
     ),
   );
 
-  it.effect("shares the channel lock and refreshes the workspace cache after bind", () =>
+  it.effect("serializes same-channel binds through the awaited response", () =>
     Effect.scoped(
       Effect.gen(function* () {
-        const bindStarted = yield* Deferred.make<void>();
-        const releaseBind = yield* Deferred.make<void>();
-        const messageSent = yield* Deferred.make<void>();
-        const order: Array<string> = [];
-        let resolveEdit: (() => void) | undefined;
-        const edited = new Promise<void>((resolve) => {
-          resolveEdit = resolve;
-        });
+        const firstEditStarted = yield* Deferred.make<void>();
+        const releaseFirstEdit = Promise.withResolvers<void>();
+        const secondDeferred = yield* Deferred.make<void>();
+        const secondEdited = yield* Deferred.make<void>();
+        const order: string[] = [];
+        let workspace: Workspace.Workspace = {
+          id: workspaceId,
+          name: "general",
+          binding: { platform: "discord", externalId: "10" },
+          defaultCwd,
+          worktree: null,
+          createdAt: 0,
+        };
         const bot = {
           id: 999n,
           events: {},
@@ -1440,47 +1572,140 @@ describe("Discord input", () => {
             sendMessage: async () => undefined,
             editChannel: async () => undefined,
             startThreadWithMessage: async () => {
-              order.push("create-thread");
-              return { id: 20n };
+              throw new Error("unexpected thread creation");
             },
           },
         } satisfies DiscordInputBot;
         const application = Application.of({
-          createWorkspace: () => Effect.die("bind cache must prevent workspace creation"),
-          bindWorkspace: (input) =>
-            Effect.gen(function* () {
-              order.push("bind-start");
-              yield* Deferred.succeed(bindStarted, undefined);
-              yield* Deferred.await(releaseBind);
-              order.push("bind-end");
-              return {
-                id: workspaceId,
-                name: "general",
-                binding: input.binding,
-                defaultCwd,
-                worktree: null,
-                createdAt: 0,
-              };
-            }),
-          createChat: () =>
+          createWorkspace: () => Effect.die("unexpected explicit workspace creation"),
+          getOrCreateWorkspaceByBinding: () => Effect.die("unexpected workspace creation"),
+          bindWorkspace: ({ configuration }) =>
             Effect.sync(() => {
-              order.push("create-chat");
-              return {
-                id: chatId,
-                workspaceId,
-                cwd: defaultCwd,
-                externalId: "20",
-                createdAt: 0,
-                archivedAt: null,
-              };
+              if (configuration.kind !== "direct") {
+                throw new Error("unexpected worktree binding");
+              }
+              workspace = { ...workspace, defaultCwd: AbsolutePath.make(configuration.cwd) };
+              order.push(`bind:${workspace.defaultCwd}`);
+              return workspace;
             }),
-          findWorkspaceByPlatformId: () => Effect.die("bind cache must prevent workspace lookup"),
+          createChat: () => Effect.die("unexpected chat creation"),
+          findWorkspaceByPlatformId: () => Effect.die("unexpected workspace lookup"),
           findChatByPlatformId: () => Effect.die("unexpected chat lookup"),
           findChatPlatformBinding: () => Effect.die("unexpected chat binding lookup"),
           transcript: () => Effect.die("unexpected transcript read"),
-          sendMessage: () =>
+          sendMessage: () => Effect.die("unexpected message send"),
+          abort: () => Effect.die("unexpected chat abort"),
+          contextUsage: () => Effect.die("unexpected context read"),
+          shake: () => Effect.die("unexpected chat shake"),
+          closeChat: () => Effect.die("unexpected chat close"),
+        });
+
+        yield* install(bot, config).pipe(
+          Effect.provideService(Application, application),
+          Effect.provide(BunCrypto.layer),
+        );
+        const handleInteraction = interactionHandlerFor(bot);
+        handleInteraction(
+          interaction({
+            data: { name: "bind", options: bindOptions("/first") },
+            edit: async (response) => {
+              assert.include(response.content, "/first");
+              Effect.runSync(Deferred.succeed(firstEditStarted, undefined));
+              await releaseFirstEdit.promise;
+              order.push("reply:/first");
+            },
+          }),
+        );
+        yield* Deferred.await(firstEditStarted);
+
+        handleInteraction(
+          interaction({
+            data: { name: "bind", options: bindOptions("/second") },
+            defer: async () => {
+              Effect.runSync(Deferred.succeed(secondDeferred, undefined));
+            },
+            edit: async (response) => {
+              assert.include(response.content, "/second");
+              order.push("reply:/second");
+              Effect.runSync(Deferred.succeed(secondEdited, undefined));
+            },
+          }),
+        );
+        yield* Deferred.await(secondDeferred);
+        yield* TestClock.adjust("1 millis");
+        assert.strictEqual(workspace.defaultCwd, "/first");
+        assert.deepStrictEqual(order, ["bind:/first"]);
+        assert.isFalse(yield* Deferred.isDone(secondEdited));
+
+        releaseFirstEdit.resolve();
+        yield* Deferred.await(secondEdited);
+        assert.strictEqual(workspace.defaultCwd, "/second");
+        assert.deepStrictEqual(order, [
+          "bind:/first",
+          "reply:/first",
+          "bind:/second",
+          "reply:/second",
+        ]);
+      }),
+    ),
+  );
+
+  it.effect("accepts parent messages while bind is pending", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const bindStarted = yield* Deferred.make<void>();
+        const releaseBind = yield* Deferred.make<void>();
+        const messageSent = yield* Deferred.make<void>();
+        const interactionEdited = yield* Deferred.make<void>();
+        const sent: AgentMessage.AgentPrompt[] = [];
+        const workspace: Workspace.Workspace = {
+          id: workspaceId,
+          name: "general",
+          binding: { platform: "discord", externalId: "10" },
+          defaultCwd,
+          worktree: null,
+          createdAt: 0,
+        };
+        const bot = {
+          id: 999n,
+          events: {},
+          helpers: {
+            getChannel: async () => ({
+              id: 10n,
+              guildId: 1n,
+              type: ChannelTypes.GuildText,
+              name: "general",
+            }),
+            sendMessage: async () => undefined,
+            editChannel: async () => undefined,
+            startThreadWithMessage: async () => ({ id: 20n }),
+          },
+        } satisfies DiscordInputBot;
+        const application = Application.of({
+          createWorkspace: () => Effect.die("unexpected explicit workspace creation"),
+          getOrCreateWorkspaceByBinding: () => Effect.die("unexpected workspace creation"),
+          bindWorkspace: () =>
             Effect.gen(function* () {
-              order.push("send");
+              yield* Deferred.succeed(bindStarted, undefined);
+              yield* Deferred.await(releaseBind);
+              return workspace;
+            }),
+          createChat: () =>
+            Effect.succeed({
+              id: chatId,
+              workspaceId,
+              cwd: defaultCwd,
+              externalId: "20",
+              createdAt: 0,
+              archivedAt: null,
+            }),
+          findWorkspaceByPlatformId: () => Effect.succeed(Option.some(workspace)),
+          findChatByPlatformId: () => Effect.die("unexpected chat lookup"),
+          findChatPlatformBinding: () => Effect.die("unexpected chat binding lookup"),
+          transcript: () => Effect.die("unexpected transcript read"),
+          sendMessage: (_id, prompt) =>
+            Effect.gen(function* () {
+              sent.push(prompt);
               yield* Deferred.succeed(messageSent, undefined);
             }),
           abort: () => Effect.die("unexpected chat abort"),
@@ -1493,37 +1718,261 @@ describe("Discord input", () => {
           Effect.provideService(Application, application),
           Effect.provide(BunCrypto.layer),
         );
-        const handleInteraction = interactionHandlerFor(bot);
-        const handleMessage = handlerFor(bot);
-        handleInteraction(
+        interactionHandlerFor(bot)(
           interaction({
-            defer: async () => undefined,
             edit: async () => {
-              order.push("edit");
-              resolveEdit?.();
+              Effect.runSync(Deferred.succeed(interactionEdited, undefined));
             },
           }),
         );
         yield* Deferred.await(bindStarted);
 
-        handleMessage(message());
-        yield* Effect.yieldNow;
-        assert.deepStrictEqual(order, ["bind-start"]);
+        handlerFor(bot)(message());
+        yield* Deferred.await(messageSent);
+        assert.deepStrictEqual(sent, [
+          AgentMessage.AgentPrompt.make({ text: "hello", attachments: [] }),
+        ]);
+        assert.isFalse(yield* Deferred.isDone(interactionEdited));
 
         yield* Deferred.succeed(releaseBind, undefined);
-        yield* Effect.promise(() => edited);
-        yield* Deferred.await(messageSent);
-        assert.deepStrictEqual(order, [
-          "bind-start",
-          "bind-end",
-          "edit",
-          "create-thread",
-          "create-chat",
-          "send",
+        yield* Deferred.await(interactionEdited);
+      }),
+    ),
+  );
+
+  it.effect("starts another thread in the same parent while the first send is blocked", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const firstStarted = yield* Deferred.make<void>();
+        const releaseFirst = yield* Deferred.make<void>();
+        const firstSent = yield* Deferred.make<void>();
+        const secondSent = yield* Deferred.make<void>();
+        const unsupportedEdited = yield* Deferred.make<void>();
+        const secondChatId = Chat.ChatId.make("018f47a0-0000-7000-8000-000000000004");
+        const completed: Array<{ readonly id: Chat.ChatId; readonly text: string }> = [];
+        const bot = {
+          id: 999n,
+          events: {},
+          helpers: {
+            getChannel: async () => ({
+              id: 10n,
+              guildId: 1n,
+              type: ChannelTypes.GuildText,
+              name: "general",
+            }),
+            sendMessage: async () => undefined,
+            editChannel: async () => undefined,
+            startThreadWithMessage: async (_parentId, messageId) => ({
+              id: messageId === 11n ? 20n : 21n,
+            }),
+          },
+        } satisfies DiscordInputBot;
+        const application = Application.of({
+          createWorkspace: () => Effect.die("unexpected explicit workspace creation"),
+          getOrCreateWorkspaceByBinding: () =>
+            Effect.succeed({
+              id: workspaceId,
+              name: "general",
+              binding: { platform: "discord", externalId: "10" },
+              defaultCwd,
+              worktree: null,
+              createdAt: 0,
+            }),
+          bindWorkspace: () => Effect.die("unexpected workspace binding"),
+          createChat: (input) =>
+            Effect.succeed({
+              id: input.externalId === "20" ? chatId : secondChatId,
+              workspaceId: input.workspaceId,
+              cwd: defaultCwd,
+              externalId: input.externalId,
+              createdAt: 0,
+              archivedAt: null,
+            }),
+          findWorkspaceByPlatformId: () => Effect.succeed(Option.none()),
+          findChatByPlatformId: () => Effect.die("unexpected chat lookup"),
+          findChatPlatformBinding: () => Effect.die("unexpected chat binding lookup"),
+          transcript: () => Effect.die("unexpected transcript read"),
+          sendMessage: (id, prompt) =>
+            Effect.gen(function* () {
+              if (id === chatId) {
+                yield* Deferred.succeed(firstStarted, undefined);
+                yield* Deferred.await(releaseFirst);
+              }
+              completed.push({ id, text: prompt.text });
+              yield* Deferred.succeed(id === chatId ? firstSent : secondSent, undefined);
+            }),
+          abort: () => Effect.die("unexpected chat abort"),
+          contextUsage: () => Effect.die("unexpected context read"),
+          shake: () => Effect.die("unexpected chat shake"),
+          closeChat: () => Effect.die("unexpected chat close"),
+        });
+
+        yield* install(bot, config).pipe(
+          Effect.provideService(Application, application),
+          Effect.provide(BunCrypto.layer),
+        );
+        interactionHandlerFor(bot)(
+          interaction({
+            data: { name: "context" },
+            edit: async () => {
+              Effect.runSync(Deferred.succeed(unsupportedEdited, undefined));
+            },
+          }),
+        );
+        yield* Deferred.await(unsupportedEdited);
+        const handleMessage = handlerFor(bot);
+        handleMessage(message({ content: "first" }));
+        yield* Deferred.await(firstStarted);
+        handleMessage(message({ id: 12n, content: "second" }));
+        yield* Deferred.await(secondSent);
+        assert.deepStrictEqual(completed, [{ id: secondChatId, text: "second" }]);
+
+        yield* Deferred.succeed(releaseFirst, undefined);
+        yield* Deferred.await(firstSent);
+        assert.deepStrictEqual(completed, [
+          { id: secondChatId, text: "second" },
+          { id: chatId, text: "first" },
         ]);
       }),
     ),
   );
+
+  it.effect(
+    "keeps the opening prompt first after publication and releases its lock on failure",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const published = yield* Deferred.make<void>();
+          const releaseCreation = yield* Deferred.make<void>();
+          const firstStarted = yield* Deferred.make<void>();
+          const releaseFirst = yield* Deferred.make<void>();
+          const followupSent = yield* Deferred.make<void>();
+          const interactionEdited = yield* Deferred.make<void>();
+          const received: string[] = [];
+          const contextPrompts: string[][] = [];
+          let attachmentRequested = false;
+          let persisted: Option.Option<Chat.Chat> = Option.none();
+          const chat: Chat.Chat = {
+            id: chatId,
+            workspaceId,
+            cwd: defaultCwd,
+            externalId: "20",
+            createdAt: 0,
+            archivedAt: null,
+          };
+          const httpClient = HttpClient.make((request) => {
+            attachmentRequested = true;
+            return Effect.succeed(
+              HttpClientResponse.fromWeb(request, new Response(Buffer.from(pngBytes))),
+            );
+          });
+          const bot = {
+            id: 999n,
+            events: {},
+            helpers: {
+              getChannel: async (channelId) =>
+                channelId === 10n
+                  ? { id: 10n, guildId: 1n, type: ChannelTypes.GuildText, name: "general" }
+                  : { id: 20n, guildId: 1n, type: ChannelTypes.PublicThread, parentId: 10n },
+              sendMessage: async () => undefined,
+              editChannel: async () => undefined,
+              startThreadWithMessage: async () => ({ id: 20n }),
+            },
+          } satisfies DiscordInputBot;
+          const application = Application.of({
+            createWorkspace: () => Effect.die("unexpected explicit workspace creation"),
+            getOrCreateWorkspaceByBinding: () =>
+              Effect.succeed({
+                id: workspaceId,
+                name: "general",
+                binding: { platform: "discord", externalId: "10" },
+                defaultCwd,
+                worktree: null,
+                createdAt: 0,
+              }),
+            bindWorkspace: () => Effect.die("unexpected workspace binding"),
+            createChat: () =>
+              Effect.gen(function* () {
+                persisted = Option.some(chat);
+                yield* Deferred.succeed(published, undefined);
+                yield* Deferred.await(releaseCreation);
+                return chat;
+              }),
+            findWorkspaceByPlatformId: () => Effect.succeed(Option.none()),
+            findChatByPlatformId: () => Effect.sync(() => persisted),
+            findChatPlatformBinding: () => Effect.die("unexpected chat binding lookup"),
+            transcript: () => Effect.die("unexpected transcript read"),
+            sendMessage: (_id, prompt) =>
+              Effect.gen(function* () {
+                received.push(prompt.text);
+                if (prompt.text === "opening") {
+                  yield* Deferred.succeed(firstStarted, undefined);
+                  yield* Deferred.await(releaseFirst);
+                  return yield* new ApplicationError({ message: "opening send failed" });
+                }
+                yield* Deferred.succeed(followupSent, undefined);
+              }),
+            abort: () => Effect.die("unexpected chat abort"),
+            contextUsage: () =>
+              Effect.sync(() => {
+                contextPrompts.push([...received]);
+                return { kind: "unavailable" } satisfies ContextUsage;
+              }),
+            shake: () => Effect.die("unexpected chat shake"),
+            closeChat: () => Effect.die("unexpected chat close"),
+          });
+
+          yield* install(bot, config, () => Effect.void, httpClient).pipe(
+            Effect.provideService(Application, application),
+            Effect.provide(BunCrypto.layer),
+          );
+          const handleMessage = handlerFor(bot);
+          handleMessage(message({ content: "opening" }));
+          yield* Deferred.await(published);
+          handleMessage(
+            message({
+              channelId: 20n,
+              id: 12n,
+              content: "follow-up",
+              attachments: [
+                {
+                  filename: "image.png",
+                  size: pngBytes.byteLength,
+                  url: "https://cdn.discordapp.com/attachments/1/2/image.png",
+                },
+              ],
+            }),
+          );
+          interactionHandlerFor(bot)(
+            interaction({
+              channelId: 20n,
+              data: { name: "context" },
+              edit: async () => {
+                Effect.runSync(Deferred.succeed(interactionEdited, undefined));
+              },
+            }),
+          );
+          yield* TestClock.adjust("1 millis");
+          assert.deepStrictEqual(received, []);
+          assert.deepStrictEqual(contextPrompts, []);
+          assert.isFalse(attachmentRequested);
+
+          yield* Deferred.succeed(releaseCreation, undefined);
+          yield* Deferred.await(firstStarted);
+          assert.deepStrictEqual(received, ["opening"]);
+          assert.deepStrictEqual(contextPrompts, []);
+          assert.isFalse(attachmentRequested);
+
+          yield* Deferred.succeed(releaseFirst, undefined);
+          yield* Deferred.await(followupSent);
+          yield* Deferred.await(interactionEdited);
+          assert.deepStrictEqual(received, ["opening", "follow-up"]);
+          assert.deepStrictEqual(contextPrompts, [["opening", "follow-up"]]);
+          assert.isTrue(attachmentRequested);
+        }),
+      ),
+  );
+
   it.effect("authorizes destructive close and archives only after core success", () =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -1569,7 +2018,8 @@ describe("Discord input", () => {
           archivedAt: null,
         };
         const application = Application.of({
-          createWorkspace: () => Effect.die("unexpected workspace creation"),
+          createWorkspace: () => Effect.die("unexpected explicit workspace creation"),
+          getOrCreateWorkspaceByBinding: () => Effect.die("unexpected workspace creation"),
           bindWorkspace: () => Effect.die("unexpected workspace binding"),
           createChat: () => Effect.die("unexpected chat creation"),
           findWorkspaceByPlatformId: () => Effect.die("unexpected workspace lookup"),

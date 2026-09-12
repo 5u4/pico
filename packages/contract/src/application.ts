@@ -63,6 +63,11 @@ export class Application extends Context.Service<
       input: CreateWorkspace,
     ) => Effect.Effect<Workspace, ApplicationError>;
 
+    /** Platform adapters call this when lazily creating a workspace for incoming input. */
+    readonly getOrCreateWorkspaceByBinding: (
+      input: Omit<CreateWorkspace, "binding"> & { readonly binding: WorkspaceBinding },
+    ) => Effect.Effect<Workspace, ApplicationError>;
+
     readonly bindWorkspace: (
       input: BindWorkspace,
     ) => Effect.Effect<Workspace, ApplicationError | GitError | WorkspaceBindingInvalid>;
