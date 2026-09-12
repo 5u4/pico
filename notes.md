@@ -61,6 +61,7 @@
 - a workspace can be a regular workspace (worktree_* = null) or a worktree workspace (worktree_* != null)
   - regular workspace new chats with workspace.default_cwd
   - worktree workspace new chats with new worktree from worktree_branch, creating `{worktree_prefix}/{chat.id}` to `{picoHome}/worktrees/{chat.id}`
+  - new worktree branches do not inherit upstream tracking. This keeps remote bases such as `origin/main` from blocking first-exchange naming. Explicit upstream configuration or published branch state still prevents automatic renaming.
 - MVP make happy path work; errors no need to be so specific
   - I mean we can define very generic boundary errors that contains just a `message: string` which can be used for the errors; until we need to pattern match and handle some specific errors, we split it out from the generic error
 - errors should be grouped by boundary and mostly defined in contract unless the error would not go out the boundary

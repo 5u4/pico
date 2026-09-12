@@ -410,6 +410,7 @@ const acquire = Effect.fn("GitWorktree.create.acquire")(function* (
   yield* runGit(spawner, worktree.repositoryCwd, "create worktree", [
     "worktree",
     "add",
+    "--no-track",
     "-b",
     worktree.branch,
     "--",

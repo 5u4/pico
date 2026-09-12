@@ -270,6 +270,36 @@ describe("GitWorktree.renameChatBranch", () => {
     }).pipe(Effect.provide(BunServices.layer)),
   );
 
+  it.effect("renames an unpublished worktree branch created from origin/main", () =>
+    Effect.gen(function* () {
+      const path = yield* Path.Path;
+      const { repositoryCwd, worktreesDir } = yield* makeRepository();
+      yield* git(repositoryCwd, ["remote", "add", "origin", repositoryCwd]);
+      yield* git(repositoryCwd, ["fetch", "origin", "main"]);
+      yield* git(repositoryCwd, ["config", "branch.autoSetupMerge", "true"]);
+      const worktree = yield* make(worktreesDir);
+      const id = chatId(33);
+      const cwd = AbsolutePath.make(path.join(worktreesDir, id));
+      yield* worktree.create(
+        {
+          chatId: id,
+          repositoryCwd,
+          settings: { ...settings, branch: "origin/main" },
+        },
+        () => Effect.void,
+      );
+
+      assert.deepStrictEqual(
+        yield* worktree.renameChatBranch(renameOptions(id, cwd, "remote-base-topic")),
+        { kind: "renamed" },
+      );
+      assert.strictEqual(
+        (yield* git(cwd, ["branch", "--show-current"])).trim(),
+        renamedBranch(id, "remote-base-topic"),
+      );
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
+
   it.effect("preserves user-renamed and detached worktrees", () =>
     Effect.gen(function* () {
       const path = yield* Path.Path;
