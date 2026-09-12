@@ -40,12 +40,19 @@
   - ~/.pico/worktrees/* # the worktrees
   - ~/.pico/logs/* # the logs
 - ~/.pico/schedules/{enabled,disabled}/{schedule-id}/meta.json # metadata without source flags
-  - script.js and prompt.md are the only source files; at least one must exist as a direct regular file, and no extra definition files are allowed
+  - author a directory and pass its absolute path as sourceDirectory to schedule_create; creation copies the complete supported source tree into the managed directory
+  - later edits to the original directory do not affect the owned copy; dependencies outside the source tree are not copied or crawled
+  - at least one root entrypoint, script.js or prompt.md, must exist; every entrypoint present must contain non-whitespace text
+  - helpers, binary assets, nested directories, and empty directories are supported; symlinks and special files anywhere in the tree are rejected
+  - root meta.json belongs to Pico; root definition.json is reserved for run snapshot metadata
+  - schedule_get returns the current sourceDirectory, not source text; edit the owned files with ordinary filesystem tools
+  - schedule_update accepts partial name, enabled, target, trigger, and scriptTimeoutMs changes; omitted metadata and all source bytes are preserved
   - scriptTimeoutMs is optional and only affects script.js
   - scripts emit one strict JSON decision: { agent: boolean, content?: non-empty string }
 - ~/.pico/schedules/runs/{schedule-id}/{run-id}/run.json # run lifecycle
-- schedule state comes only from the parent `enabled` or `disabled` directory
-- schedule runs copy their exact metadata and source files before execution
+- schedule state comes only from the parent `enabled` or `disabled` directory; changing enabled moves the directory, so call schedule_get again before editing files
+- changes to name, target, trigger, or scriptTimeoutMs create a new metadata revision; enabled-only changes preserve it
+- schedule runs copy their exact metadata and complete source tree before execution; future immutable snapshots retain helper files and directories, and source edits never change existing snapshots
 - schedule definitions and runs never use sqlite
 - each workspace can only belong to one platform (native | discord | ...)
 - platform = null means it's native -> created through the native pico app, not from the other chat apps

@@ -5,7 +5,7 @@ description: Pico reminders, scheduled tasks, and schedule scripts.
 
 # Pico schedules
 
-Use the `schedule_*` tools. Supply `script` and `prompt` as source text.
+Use the `schedule_*` tools for schedule metadata. Author `script.js`, `prompt.md`, and any supporting files with ordinary filesystem tools.
 
 ## Choose what runs
 
@@ -17,11 +17,37 @@ Schedules belong to the current workspace. `current-chat` reuses this conversati
 
 For one-time triggers, `at` is Unix epoch milliseconds. Cron uses five fields and an explicit IANA time zone or `UTC`. Use the user's intended zone. Ask only if it is unknown. Pico must be running, and checks roughly every 30 seconds rather than at an exact instant.
 
-Before replacing a schedule, read it with `schedule_get` and retain the sources and custom timeout you want to keep. Updates replace them rather than merge them. Use `schedule_set_enabled` to pause or resume without replacing sources.
+## Create a schedule
+
+Write the source files in a directory, then pass its absolute path as `sourceDirectory` to `schedule_create`. Supply `name`, `enabled`, `target`, and `trigger`, plus `scriptTimeoutMs` if needed.
+
+At least one root entrypoint, `script.js` or `prompt.md`, must exist. Every entrypoint present must contain valid UTF-8 text with at least one non-whitespace character. Helpers, binary assets, nested directories, and empty directories are allowed. Symlinks and special files are rejected anywhere in the tree.
+
+Do not author root `meta.json` or `definition.json`, including case variants such as `Meta.json` and `Definition.json`. Pico owns the exact root `meta.json` and reserves `definition.json` case-insensitively for run snapshot metadata. These names are allowed inside nested directories.
+
+Creation copies the complete supported source tree into Pico's managed directory. Later edits to the original directory do not affect that owned copy. Put every helper and asset the script needs inside the source directory. Pico does not crawl imports or copy dependencies from outside it.
+
+Creation and run capture copy files sequentially into private staging before publishing the complete snapshot. Helpers and assets do not accumulate in a whole-tree memory buffer. Entrypoints still require memory for text validation, and the agent receives the complete prompt.
+
+Interrupting creation or run capture during copying waits for the active file copy to settle before removing staging. Pico does not start another copy, but one large file can still delay shutdown.
+
+## Edit or pause a schedule
+
+Read the schedule with `schedule_get`. The result contains the current `sourceDirectory`, not source text. Edit files in that directory with ordinary filesystem tools. Future immutable run snapshots include the edited entrypoints, helpers, assets, and directories. Existing snapshots do not change.
+
+Invalid schedules also report `sourceDirectory` when their directory is known, so you can repair missing entrypoints, blank prompts, or unsupported files in place. A conflicted schedule has `sourceDirectory: null` because it exists in both state directories.
+
+Use `schedule_update` for metadata. Supply only the fields you want to change: `name`, `enabled`, `target`, `trigger`, or `scriptTimeoutMs`. Omitted fields keep their values, including a custom timeout. Set `scriptTimeoutMs` to `null` to remove the override and use the default timeout. Metadata updates preserve all source bytes.
+
+You can repair an invalid cron expression and resume in one update by supplying both `trigger` and `enabled: true`. Pico validates the resulting metadata and still rejects enabling a schedule with invalid source files.
+
+Set `enabled` to `false` to pause or `true` to resume. This moves the directory between `disabled/<id>` and `enabled/<id>`. Call `schedule_get` again after a state change before editing files, rather than reusing the old path.
+
+Changing `name`, `target`, `trigger`, or `scriptTimeoutMs` creates a new metadata revision. Changing only `enabled` preserves the revision.
 
 ## Write script.js
 
-Write a standalone Bun JavaScript program. Pico runs a snapshot with the target chat's working directory as `process.cwd()`. Relative data paths use that directory, but relative imports use the script snapshot's directory.
+Write a Bun JavaScript program. Pico runs a snapshot with the target chat's working directory as `process.cwd()`. Relative data paths use that directory, but relative imports use the script snapshot's directory.
 
 When needed, read run context with `JSON.parse(await Bun.stdin.text())`. It contains:
 
@@ -40,11 +66,13 @@ Write one JSON object to stdout and exit successfully. Send logs to stderr with 
 | `{"agent":true}` | Send `prompt.md` to the agent. Requires a prompt. |
 | `{"agent":true,"content":"Review these changes."}` | Send content to the agent, followed by two newlines and `prompt.md` if present. |
 
+Pico captures the prompt from the completed snapshot before starting the script. A script that edits its snapshot's `prompt.md` does not change that run's agent input.
+
 The default script timeout is 60 seconds. `scriptTimeoutMs` controls only the script, not the agent. A nonzero exit, timeout, invalid decision, or stdout larger than 256 KiB fails the run. Failures are recorded in run history, not automatically posted to the chat.
 
 ### Review only when the working tree has changes
 
-Use this script with the prompt `Review the working-tree status above and inspect relevant diffs. Summarize risks without modifying files.` It checks the current state on each run, not changes since the previous run.
+Save this script as `script.js`. In `prompt.md`, write `Review the working-tree status above and inspect relevant diffs. Summarize risks without modifying files.` The script checks the current state on each run, not changes since the previous run.
 
 ```js
 const result = Bun.spawnSync(["git", "status", "--short"], {

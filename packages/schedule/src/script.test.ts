@@ -37,6 +37,18 @@ const decodeFailedDecision = Schema.decodeUnknownSync(
   Schema.fromJsonString(Schema.Struct({ kind: Schema.Literal("failed"), message: Schema.String })),
 );
 
+const prepareSource = Effect.fn("Schedules.test.prepareSource")(function* (
+  files: Readonly<Record<string, string>>,
+) {
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const directory = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-script-source-" });
+  for (const [name, contents] of Object.entries(files)) {
+    yield* fileSystem.writeFileString(path.join(directory, name), contents);
+  }
+  return directory;
+});
+
 const awaitExists = Effect.fn("Schedules.test.awaitExists")(function* (
   fileSystem: FileSystem.FileSystem,
   path: string,
@@ -93,11 +105,11 @@ describe("schedule script runner", () => {
         storage,
         run,
         definition,
-        {
-          script: 'process.stdout.write(JSON.stringify({agent:false})+" trailing")',
-          prompt: null,
-        },
+        yield* prepareSource({
+          "script.js": 'process.stdout.write(JSON.stringify({agent:false})+" trailing")',
+        }),
         "018f47a0-0000-7000-8000-000000000010",
+        Effect.void,
       );
       const target: Schedule.ResolvedScheduleRunTarget = { chatId, workspaceId, cwd };
       const readFailedDecision = (id: Schedule.ScheduleRunId) =>
@@ -127,8 +139,9 @@ describe("schedule script runner", () => {
         storage,
         artifactFailureRun,
         definition,
-        { script: 'process.stdout.write("private invalid decision")', prompt: null },
+        yield* prepareSource({ "script.js": 'process.stdout.write("private invalid decision")' }),
         "018f47a0-0000-7000-8000-000000000025",
+        Effect.void,
       );
       const failureLogs: Array<{
         readonly level: Logger.Options<unknown>["logLevel"];
@@ -191,8 +204,9 @@ describe("schedule script runner", () => {
         storage,
         failedRun,
         definition,
-        { script: "process.exit(2)", prompt: null },
+        yield* prepareSource({ "script.js": "process.exit(2)" }),
         "018f47a0-0000-7000-8000-000000000012",
+        Effect.void,
       );
       const executionError = yield* runScript(storage, process.execPath, failedRun, target).pipe(
         Effect.flip,
@@ -211,8 +225,9 @@ describe("schedule script runner", () => {
         storage,
         signalRun,
         definition,
-        { script: 'process.kill(process.pid,"SIGTERM")', prompt: null },
+        yield* prepareSource({ "script.js": 'process.kill(process.pid,"SIGTERM")' }),
         "018f47a0-0000-7000-8000-000000000014",
+        Effect.void,
       );
       const signalError = yield* runScript(storage, process.execPath, signalRun, target).pipe(
         Effect.flip,
@@ -231,11 +246,11 @@ describe("schedule script runner", () => {
         storage,
         timeoutRun,
         definition,
-        {
-          script: 'process.on("SIGTERM",()=>{});setInterval(()=>{},1000)',
-          prompt: null,
-        },
+        yield* prepareSource({
+          "script.js": 'process.on("SIGTERM",()=>{});setInterval(()=>{},1000)',
+        }),
         "018f47a0-0000-7000-8000-000000000016",
+        Effect.void,
       );
       const timeoutError = yield* runScript(storage, process.execPath, timeoutRun, target, 10).pipe(
         Effect.flip,
@@ -254,19 +269,19 @@ describe("schedule script runner", () => {
         storage,
         inheritedPipeRun,
         definition,
-        {
-          script: `
-const descendant = Bun.spawn({
-  cmd: [process.execPath, "-e", "await Bun.sleep(2000)"],
-  stdout: "inherit",
-  stderr: "inherit",
-});
-descendant.unref();
-process.stdout.write(JSON.stringify({ agent: false }));
-`,
-          prompt: null,
-        },
+        yield* prepareSource({
+          "script.js": `
+              const descendant = Bun.spawn({
+        cmd: [process.execPath, "-e", "await Bun.sleep(2000)"],
+        stdout: "inherit",
+        stderr: "inherit",
+              });
+              descendant.unref();
+              process.stdout.write(JSON.stringify({ agent: false }));
+              `,
+        }),
         "018f47a0-0000-7000-8000-000000000017",
+        Effect.void,
       );
       const inheritedPipe = yield* runScript(
         storage,
@@ -297,19 +312,19 @@ process.stdout.write(JSON.stringify({ agent: false }));
         storage,
         incompletePipeRun,
         definition,
-        {
-          script: `
-const descendant = Bun.spawn({
-  cmd: [process.execPath, "-e", "await Bun.sleep(2000)"],
-  stdout: "inherit",
-  stderr: "inherit",
-});
-descendant.unref();
-process.stdout.write("{");
-`,
-          prompt: null,
-        },
+        yield* prepareSource({
+          "script.js": `
+              const descendant = Bun.spawn({
+        cmd: [process.execPath, "-e", "await Bun.sleep(2000)"],
+        stdout: "inherit",
+        stderr: "inherit",
+              });
+              descendant.unref();
+              process.stdout.write("{");
+              `,
+        }),
         "018f47a0-0000-7000-8000-0000000000175",
+        Effect.void,
       );
       const incompletePipeError = yield* runScript(
         storage,
@@ -341,8 +356,9 @@ process.stdout.write("{");
         storage,
         spawnRun,
         definition,
-        { script: "process.exit(0)", prompt: null },
+        yield* prepareSource({ "script.js": "process.exit(0)" }),
         "018f47a0-0000-7000-8000-000000000018",
+        Effect.void,
       );
       const spawnError = yield* runScript(
         storage,
@@ -372,8 +388,9 @@ process.stdout.write("{");
         storage,
         oversizedRun,
         definition,
-        { script: 'process.stdout.write("x".repeat(256*1024+1))', prompt: null },
+        yield* prepareSource({ "script.js": 'process.stdout.write("x".repeat(256*1024+1))' }),
         "018f47a0-0000-7000-8000-000000000020",
+        Effect.void,
       );
       const oversizedError = yield* runScript(storage, process.execPath, oversizedRun, target).pipe(
         Effect.flip,
@@ -390,11 +407,11 @@ process.stdout.write("{");
         storage,
         invalidVariantRun,
         definition,
-        {
-          script: 'process.stdout.write(JSON.stringify({agent:false,kind:"unknown"}))',
-          prompt: null,
-        },
+        yield* prepareSource({
+          "script.js": 'process.stdout.write(JSON.stringify({agent:false,kind:"unknown"}))',
+        }),
         "018f47a0-0000-7000-8000-000000000022",
+        Effect.void,
       );
       const invalidVariantError = yield* runScript(
         storage,
@@ -414,8 +431,9 @@ process.stdout.write("{");
         storage,
         emptyOutputRun,
         definition,
-        { script: "", prompt: null },
+        yield* prepareSource({ "script.js": "void 0;" }),
         "018f47a0-0000-7000-8000-000000000023",
+        Effect.void,
       );
       const emptyOutputError = yield* runScript(
         storage,
@@ -438,24 +456,24 @@ process.stdout.write("{");
         storage,
         interruptedRun,
         definition,
-        {
-          script: `
-const descendant = Bun.spawn({
-  cmd: [process.execPath, "-e", "await Bun.sleep(2000)"],
-  stdout: "inherit",
-  stderr: "inherit",
-});
-descendant.unref();
-process.on("SIGTERM", async () => {
-  await Bun.write(${JSON.stringify(childStopped)}, "stopped");
-  process.exit(0);
-});
-await Bun.write(${JSON.stringify(childReady)}, "ready");
-setInterval(() => {}, 1000);
-`,
-          prompt: null,
-        },
+        yield* prepareSource({
+          "script.js": `
+              const descendant = Bun.spawn({
+        cmd: [process.execPath, "-e", "await Bun.sleep(2000)"],
+        stdout: "inherit",
+        stderr: "inherit",
+              });
+              descendant.unref();
+              process.on("SIGTERM", async () => {
+        await Bun.write(${JSON.stringify(childStopped)}, "stopped");
+        process.exit(0);
+              });
+              await Bun.write(${JSON.stringify(childReady)}, "ready");
+              setInterval(() => {}, 1000);
+              `,
+        }),
         "018f47a0-0000-7000-8000-000000000024",
+        Effect.void,
       );
       const interrupted = yield* runScript(storage, process.execPath, interruptedRun, target).pipe(
         Effect.forkChild,

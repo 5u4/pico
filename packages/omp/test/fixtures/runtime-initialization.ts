@@ -59,8 +59,7 @@ const schedules = Schedule.Schedules.of({
   create: unusedSchedule,
   list: unusedSchedule,
   get: unusedSchedule,
-  replace: unusedSchedule,
-  setEnabled: unusedSchedule,
+  update: unusedSchedule,
   remove: unusedSchedule,
   start: unusedSchedule,
 });

@@ -22,7 +22,6 @@ describe("schedule extension", () => {
       "schedule_list",
       "schedule_get",
       "schedule_update",
-      "schedule_set_enabled",
       "schedule_delete",
     ]);
   });
