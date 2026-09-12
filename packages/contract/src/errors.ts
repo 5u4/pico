@@ -6,6 +6,7 @@ export class ConfigError extends Schema.TaggedError<ConfigError>()("ConfigError"
 
 export class ApplicationError extends Schema.TaggedError<ApplicationError>()("ApplicationError", {
   message: Schema.String,
+  reason: Schema.Literals(["not-found", "conflict", "invalid-state", "operation"]),
 }) {}
 
 export class ChatClosed extends Schema.TaggedError<ChatClosed>()("ChatClosed", {}) {}

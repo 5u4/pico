@@ -2,7 +2,9 @@
 import * as BunServices from "@effect/platform-bun/BunServices";
 import { PicoRoot } from "@pico/contract/config";
 import * as Daemon from "@pico/daemon";
+import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Argument from "effect/unstable/cli/Argument";
@@ -43,18 +45,41 @@ const root = Argument.string("root").pipe(
   Argument.mapEffect(parseRoot),
 );
 
-const start = Command.make("start", { root }).pipe(
-  Command.withHandler(({ root }) =>
-    Effect.scoped(Daemon.open(root).pipe(Effect.andThen(awaitShutdown))),
-  ),
-  Command.withDescription("Start the daemon in the foreground"),
-);
+const main = Effect.gen(function* () {
+  let daemonExit: Effect.Success<ReturnType<typeof Daemon.run>> = Exit.void;
+  const start = Command.make("start", { root }).pipe(
+    Command.withHandler(({ root }) =>
+      Daemon.run(root, awaitShutdown).pipe(
+        Effect.tap((exit) =>
+          Effect.sync(() => {
+            daemonExit = exit;
+          }),
+        ),
+        Effect.asVoid,
+      ),
+    ),
+    Command.withDescription("Start the daemon in the foreground"),
+  );
+  const pico = Command.make("pico").pipe(
+    Command.withDescription("Run pico"),
+    Command.withSubcommands([start]),
+  );
+  const commandExit = yield* Command.run(pico, { version }).pipe(
+    Effect.provide(BunServices.layer),
+    Effect.exit,
+  );
+  if (
+    Exit.isFailure(commandExit) &&
+    commandExit.cause.reasons.some(
+      (reason) =>
+        reason._tag === "Die" || (reason._tag === "Fail" && !CliError.isCliError(reason.error)),
+    )
+  ) {
+    yield* Effect.logError("pico.cli.failed", Cause.die(new Error("CLI execution failed"))).pipe(
+      Effect.annotateLogs({ component: "cli", operation: "command", outcome: "failure" }),
+    );
+  }
+  return yield* Exit.asVoidAll([daemonExit, commandExit]);
+});
 
-const pico = Command.make("pico").pipe(
-  Command.withDescription("Run pico"),
-  Command.withSubcommands([start]),
-);
-
-const main = Command.run(pico, { version }).pipe(Effect.provide(BunServices.layer));
-
-runMain(main);
+runMain(main, { disableErrorReporting: true });

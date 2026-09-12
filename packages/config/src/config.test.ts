@@ -82,16 +82,21 @@ describe("PicoConfig.load", () => {
           assert.isTrue(Option.isNone((yield* load(paths)).discord));
 
           yield* fileSystem.writeFileString(paths.configFile, config('["guild-1"]', "relative"));
-          assert.instanceOf(yield* load(paths).pipe(Effect.flip), ConfigError);
+          const invalidCwd = yield* load(paths).pipe(Effect.flip);
+          assert.instanceOf(invalidCwd, ConfigError);
+          assert.include(invalidCwd.message, "discord.default_cwd");
 
           yield* fileSystem.writeFileString(paths.configFile, "[discord]\nallowed_guild = 1\n");
           assert.instanceOf(yield* load(paths).pipe(Effect.flip), ConfigError);
 
           yield* fileSystem.writeFileString(
             paths.configFile,
-            `${config('["guild-1"]', defaultCwd)}show_tool_calls = "yes"\n`,
+            `${config('["guild-1"]', defaultCwd)}show_tool_calls = "private-config-value"\n`,
           );
-          assert.instanceOf(yield* load(paths).pipe(Effect.flip), ConfigError);
+          const invalidType = yield* load(paths).pipe(Effect.flip);
+          assert.instanceOf(invalidType, ConfigError);
+          assert.include(invalidType.message, "discord.show_tool_calls");
+          assert.notInclude(invalidType.message, "private-config-value");
           yield* fileSystem.writeFileString(
             paths.configFile,
             `${config('["guild-1"]', defaultCwd)}show_thinking = 1\n`,
@@ -104,8 +109,14 @@ describe("PicoConfig.load", () => {
           );
           assert.instanceOf(yield* load(paths).pipe(Effect.flip), ConfigError);
 
-          yield* fileSystem.writeFileString(paths.configFile, "discord = [\n");
-          assert.instanceOf(yield* load(paths).pipe(Effect.flip), ConfigError);
+          yield* fileSystem.writeFileString(
+            paths.configFile,
+            'secret = "private-config-value"\ndiscord = [\n',
+          );
+          const invalidSyntax = yield* load(paths).pipe(Effect.flip);
+          assert.instanceOf(invalidSyntax, ConfigError);
+          assert.include(invalidSyntax.message, "TOML");
+          assert.notInclude(invalidSyntax.message, "private-config-value");
         }),
       );
     }).pipe(Effect.provide(platformLayer)),

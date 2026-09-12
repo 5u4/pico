@@ -1,6 +1,14 @@
 import { writeSync } from "node:fs";
+import * as BunServices from "@effect/platform-bun/BunServices";
 import { postmortem } from "@oh-my-pi/pi-utils";
+import { PicoRoot } from "@pico/contract/config";
+import { ConfigError } from "@pico/contract/errors";
+import * as Daemon from "@pico/daemon";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
+import * as FileSystem from "effect/FileSystem";
+import * as PlatformError from "effect/PlatformError";
 import * as Runtime from "effect/Runtime";
 import { awaitShutdown, runMain } from "../src/runtime.ts";
 
@@ -28,6 +36,70 @@ const listenersBefore = listenerCounts();
 
 const effect = (() => {
   switch (mode) {
+    case "daemon-external-interruption":
+      return Effect.gen(function* () {
+        const root = process.argv[3];
+        if (root === undefined) return yield* Effect.die("Missing fixture root");
+        const started = yield* Deferred.make<void>();
+        const daemon = yield* Daemon.run(
+          PicoRoot.make(root),
+          Effect.addFinalizer(() =>
+            Effect.die(new ConfigError({ message: "Fixture cleanup failed" })),
+          ).pipe(
+            Effect.andThen(Deferred.succeed(started, undefined)),
+            Effect.andThen(Effect.never),
+          ),
+        ).pipe(Effect.forkChild);
+        yield* Deferred.await(started);
+        yield* Fiber.interrupt(daemon);
+        return yield* yield* Fiber.await(daemon);
+      }).pipe(Effect.scoped, Effect.provide(BunServices.layer));
+    case "daemon-finalizer-failure":
+    case "daemon-mixed-interruption":
+    case "daemon-root-release-failure":
+    case "daemon-startup-interruption":
+      return Effect.gen(function* () {
+        const root = process.argv[3];
+        if (root === undefined) return yield* Effect.die("Missing fixture root");
+        const fileSystem = yield* FileSystem.FileSystem;
+        const lifetime =
+          mode === "daemon-root-release-failure" || mode === "daemon-startup-interruption"
+            ? Effect.void
+            : Effect.addFinalizer(() =>
+                Effect.die(new ConfigError({ message: "Fixture cleanup failed" })),
+              ).pipe(
+                Effect.andThen(
+                  mode === "daemon-mixed-interruption" ? Effect.interrupt : Effect.void,
+                ),
+              );
+        const exit = yield* Daemon.run(PicoRoot.make(root), lifetime).pipe(
+          Effect.provideService(FileSystem.FileSystem, {
+            ...fileSystem,
+            exists: (path) =>
+              mode === "daemon-startup-interruption" && path.endsWith("/config.toml")
+                ? Effect.interrupt
+                : fileSystem.exists(path),
+            remove: (path, options) =>
+              mode === "daemon-root-release-failure" && path.endsWith("/.pico.lock")
+                ? Effect.fail(
+                    PlatformError.systemError({
+                      _tag: "PermissionDenied",
+                      module: "FileSystem",
+                      method: "remove",
+                      description: "private-filesystem-detail",
+                    }),
+                  )
+                : fileSystem.remove(path, options),
+          }),
+        );
+        return yield* exit;
+      }).pipe(Effect.provide(BunServices.layer));
+    case "reusable-failure":
+      return Effect.gen(function* () {
+        const root = process.argv[3];
+        if (root === undefined) return yield* Effect.die("Missing fixture root");
+        yield* Daemon.open(PicoRoot.make(root));
+      }).pipe(Effect.scoped, Effect.provide(BunServices.layer));
     case "immediate":
       return Effect.void;
     case "startup-signal":
@@ -65,7 +137,7 @@ if (mode === "guarded-hanging") {
   Reflect.set(process, "reallyExit", guardedExit);
 }
 
-runMain(effect);
+runMain(effect, { disableErrorReporting: mode?.startsWith("daemon-") === true });
 if (mode === "immediate") {
   const listenersAfter = listenerCounts();
   const listenersClean =

@@ -1,9 +1,10 @@
 import type { AgentEventEnvelope } from "@pico/contract/agent-event";
 import { AgentRuntime } from "@pico/contract/agent-runtime";
 import { type EventFilter, type EventRoute, EventRouter } from "@pico/contract/event-router";
-import type * as Cause from "effect/Cause";
+import * as Cause from "effect/Cause";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as MutableRef from "effect/MutableRef";
 import * as Queue from "effect/Queue";
@@ -26,19 +27,35 @@ interface RouteState {
 const make = Effect.fn("EventRouter.make")(function* () {
   const runtime = yield* AgentRuntime;
   const routes = yield* Ref.make<ReadonlyArray<RouteState>>([]);
+  let dispatching: AgentEventEnvelope | undefined;
 
   const dispatch = Effect.fn("EventRouter.dispatch")(function* (envelope: AgentEventEnvelope) {
     const activeRoutes = yield* Ref.get(routes);
+    dispatching = envelope;
 
     for (const route of activeRoutes) {
       if (MutableRef.get(route.filter)(envelope)) {
         yield* Queue.offer(route.output, { kind: "event", envelope });
       }
     }
+    dispatching = undefined;
   });
 
   yield* runtime.events.pipe(
     Stream.runForEach(dispatch),
+    Effect.onExit((exit) => {
+      if (Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause)) return Effect.void;
+      return Effect.logError("Event router pump stopped unexpectedly").pipe(
+        Effect.annotateLogs({
+          component: "event-router",
+          operation: "pump",
+          phase: dispatching === undefined ? "upstream" : "dispatch",
+          chatId: dispatching?.chatId,
+          eventType: dispatching?.event.type,
+          failureKind: Exit.isSuccess(exit) ? "unexpected-end" : "defect",
+        }),
+      );
+    }),
     Effect.forkScoped({ startImmediately: true }),
   );
 

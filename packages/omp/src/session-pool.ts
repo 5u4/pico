@@ -23,6 +23,7 @@ import * as RcMap from "effect/RcMap";
 import * as Result from "effect/Result";
 import type * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
+import { agentError } from "./agent-error.ts";
 
 type OmpAssistantMessage = Extract<
   Extract<AgentSessionEvent, { readonly type: "message_end" }>["message"],
@@ -94,11 +95,26 @@ interface ClosedLifecycle {
 
 type LiveLifecycle = OpenLifecycle | ClosingLifecycle | ClosedLifecycle;
 type CaptureHandler = (event: AgentEvent.AgentEvent) => Effect.Effect<void>;
+interface ActiveCapture {
+  readonly runId: ScheduleRunId;
+  readonly onEvent: CaptureHandler;
+}
+type RunOutcome = Extract<AgentEvent.AgentEvent, { readonly type: "run-finished" }>["outcome"];
+interface OrdinaryRun {
+  phase:
+    | { readonly type: "sending"; outcome: RunOutcome | undefined }
+    | { readonly type: "accepted" | "rejected" | "finished" };
+}
 type SessionItem =
-  | { readonly kind: "event"; readonly event: AgentEvent.AgentEvent }
+  | {
+      readonly kind: "event";
+      readonly event: AgentEvent.AgentEvent;
+      readonly ordinaryRun: OrdinaryRun | null;
+    }
   | { readonly kind: "barrier"; readonly completed: Deferred.Deferred<void> };
 
 interface LiveEntry {
+  readonly chatId: Chat.ChatId;
   readonly session: SessionHandle;
   readonly sendPrompt: (prompt: AgentMessage.AgentPrompt) => Promise<void>;
   readonly shake: (mode: ShakeMode) => Promise<ShakeResult>;
@@ -107,7 +123,8 @@ interface LiveEntry {
   readonly events: Queue.Queue<SessionItem, Cause.Done>;
   readonly forwarder: Fiber.Fiber<void>;
   readonly lifecycle: MutableRef.MutableRef<LiveLifecycle>;
-  readonly capture: MutableRef.MutableRef<CaptureHandler | null>;
+  readonly capture: MutableRef.MutableRef<ActiveCapture | null>;
+  readonly ordinaryRun: MutableRef.MutableRef<OrdinaryRun | null>;
 }
 
 interface MakeOptions {
@@ -124,13 +141,43 @@ type OutputItem =
 const boundary = <A>(message: string, evaluate: () => Promise<A>) =>
   Effect.tryPromise({
     try: evaluate,
-    catch: () => new AgentError({ message }),
-  });
+    catch: (cause) => cause,
+  }).pipe(
+    Effect.catch((cause) =>
+      cause instanceof Error && cause.name === "AbortError"
+        ? Effect.interrupt
+        : Effect.fail(agentError(message, cause)),
+    ),
+  );
 
-const attemptCleanup = <A, E, R>(message: string, effect: Effect.Effect<A, E, R>) =>
+const attemptCleanup = <A, E, R>(
+  chatId: Chat.ChatId,
+  phase: string,
+  effect: Effect.Effect<A, E, R>,
+) =>
   effect.pipe(
     Effect.asVoid,
-    Effect.catchCause((cause) => Effect.logError(message, Cause.pretty(cause))),
+    Effect.catchCause((cause) =>
+      Cause.hasInterruptsOnly(cause)
+        ? Effect.interrupt
+        : Effect.logError("OMP cleanup failed").pipe(
+            Effect.annotateLogs({
+              component: "omp",
+              operation: "cleanup",
+              chatId,
+              phase,
+              failureKind: Cause.hasDies(cause) ? "defect" : "operation",
+            }),
+          ),
+    ),
+  );
+
+const finishOrdinaryRun = (chatId: Chat.ChatId, outcome: RunOutcome) =>
+  (outcome === "failed"
+    ? Effect.logError("OMP run failed")
+    : Effect.logDebug("OMP run finished")
+  ).pipe(
+    Effect.annotateLogs({ component: "omp", operation: "run", chatId, outcome, mode: "ordinary" }),
   );
 
 const drainSessionEvents = Effect.fn("SessionPool.drainSessionEvents")(function* (
@@ -147,87 +194,116 @@ const closeEntry = Effect.fn("SessionPool.closeEntry")(function* (entry: LiveEnt
   if (lifecycle.type === "closed") return;
 
   let firstFailure: AgentError | undefined;
-  const capture = (effect: Effect.Effect<void, AgentError>) =>
+  const capture = (phase: string, effect: Effect.Effect<void, AgentError>) =>
     effect.pipe(
-      Effect.catch((error) =>
-        Effect.sync(() => {
-          firstFailure ??= error;
-        }),
-      ),
+      Effect.catch((error) => {
+        if (firstFailure !== undefined) {
+          return attemptCleanup(entry.chatId, phase, Effect.fail(error));
+        }
+        firstFailure = error;
+        return Effect.void;
+      }),
     );
 
   if (lifecycle.type === "open") {
     MutableRef.set(entry.lifecycle, { type: "closing" });
     yield* capture(
+      "begin-dispose",
       Effect.try({
         try: () => entry.session.beginDispose(),
-        catch: () => new AgentError({ message: "Failed to begin OMP session disposal" }),
+        catch: (cause) => agentError("Failed to begin OMP session disposal", cause),
       }).pipe(Effect.asVoid),
     );
     yield* capture(
+      "unsubscribe",
       Effect.try({
         try: lifecycle.unsubscribe,
-        catch: () => new AgentError({ message: "Failed to unsubscribe from OMP session events" }),
+        catch: (cause) => agentError("Failed to unsubscribe from OMP session events", cause),
       }).pipe(Effect.asVoid),
     );
     yield* capture(
+      "end-queue",
       Effect.try({
         try: () => Queue.endUnsafe(entry.events),
-        catch: () => new AgentError({ message: "Failed to end OMP session event queue" }),
+        catch: (cause) => agentError("Failed to end OMP session event queue", cause),
       }).pipe(Effect.asVoid),
     );
-    yield* capture(
-      Fiber.join(entry.forwarder).pipe(
-        Effect.asVoid,
-        Effect.catchCause(() =>
-          Effect.fail(new AgentError({ message: "Failed to drain OMP session events" })),
-        ),
-      ),
-    );
+    yield* Fiber.await(entry.forwarder);
   }
 
-  let disposed = false;
   yield* capture(
-    boundary("Failed to dispose OMP session", () => entry.session.dispose()).pipe(
-      Effect.tap(() =>
-        Effect.sync(() => {
-          disposed = true;
-        }),
-      ),
-    ),
+    "dispose",
+    boundary("Failed to dispose OMP session", () => entry.session.dispose()),
   );
-  if (disposed) MutableRef.set(entry.lifecycle, { type: "closed" });
+  MutableRef.set(entry.lifecycle, { type: "closed" });
+  yield* Effect.logDebug("OMP session closed").pipe(
+    Effect.annotateLogs({
+      component: "omp",
+      operation: "session-close",
+      chatId: entry.chatId,
+      outcome: firstFailure === undefined ? "completed" : "failed",
+    }),
+  );
   if (firstFailure !== undefined) return yield* firstFailure;
 }, Effect.uninterruptible);
 
 const releaseEntry = (entry: LiveEntry) =>
-  attemptCleanup("Failed to close OMP session", closeEntry(entry));
+  attemptCleanup(entry.chatId, "release", closeEntry(entry));
 
 const acquireEntry = Effect.fn("SessionPool.acquireEntry")(function* (
   factory: SessionFactory,
   output: Queue.Queue<OutputItem, Cause.Done>,
   chatId: Chat.ChatId,
 ) {
-  const capture = MutableRef.make<CaptureHandler | null>(null);
+  const capture = MutableRef.make<ActiveCapture | null>(null);
+  const ordinaryRun = MutableRef.make<OrdinaryRun | null>(null);
   const events = yield* Queue.unbounded<SessionItem, Cause.Done>();
   const opened = yield* factory.open(chatId, (event) => {
-    Queue.offerUnsafe(events, { kind: "event", event });
+    Queue.offerUnsafe(events, { kind: "event", event, ordinaryRun: MutableRef.get(ordinaryRun) });
   });
   const forwarder = yield* Stream.fromQueue(events).pipe(
-    Stream.runForEach((item) => {
-      if (item.kind === "barrier") return Deferred.succeed(item.completed, undefined);
-      const handler = MutableRef.get(capture);
-      return handler === null || item.event.type === "title-changed"
-        ? Queue.offer(output, { kind: "event", envelope: { chatId, event: item.event } }).pipe(
-            Effect.asVoid,
-          )
-        : handler(item.event);
-    }),
+    Stream.runForEach((item) =>
+      Effect.gen(function* () {
+        if (item.kind === "barrier") return yield* Deferred.succeed(item.completed, undefined);
+        const handler = MutableRef.get(capture);
+        if (handler !== null && item.event.type !== "title-changed") {
+          yield* handler.onEvent(item.event);
+          return;
+        }
+        if (handler === null && item.event.type === "run-finished") {
+          const run = item.ordinaryRun;
+          if (run?.phase.type === "sending") run.phase.outcome = item.event.outcome;
+          else if (run?.phase.type === "accepted") {
+            run.phase = { type: "finished" };
+            if (MutableRef.get(ordinaryRun) === run) MutableRef.set(ordinaryRun, null);
+            yield* finishOrdinaryRun(chatId, item.event.outcome);
+          }
+        }
+        yield* Queue.offer(output, { kind: "event", envelope: { chatId, event: item.event } });
+      }),
+    ),
     Effect.asVoid,
+    Effect.tapCause((cause) =>
+      Cause.hasInterruptsOnly(cause)
+        ? Effect.void
+        : Effect.logError("OMP session event forwarder stopped unexpectedly").pipe(
+            Effect.annotateLogs({
+              component: "omp",
+              operation: "event-forwarder",
+              chatId,
+              runId: MutableRef.get(capture)?.runId,
+              failureKind: "defect",
+            }),
+          ),
+    ),
     Effect.forkDetach,
   );
 
+  yield* Effect.logDebug("OMP session opened").pipe(
+    Effect.annotateLogs({ component: "omp", operation: "session-open", chatId }),
+  );
   return {
+    chatId,
     session: opened.session,
     sendPrompt: opened.sendPrompt,
     shake: opened.shake,
@@ -240,6 +316,7 @@ const acquireEntry = Effect.fn("SessionPool.acquireEntry")(function* (
       unsubscribe: opened.unsubscribe,
     }),
     capture,
+    ordinaryRun,
   } satisfies LiveEntry;
 }, Effect.uninterruptible);
 
@@ -300,8 +377,48 @@ export const makeSessionPool = Effect.fn("SessionPool.make")(function* (
     yield* Effect.scoped(
       Effect.gen(function* () {
         const entry = yield* retain(sessions, chatId);
-        yield* boundary("Failed to send OMP prompt", () => entry.sendPrompt(prompt));
-        yield* drainSessionEvents(entry);
+        const run: OrdinaryRun = { phase: { type: "sending", outcome: undefined } };
+        MutableRef.set(entry.ordinaryRun, run);
+        yield* Effect.logDebug("OMP run started").pipe(
+          Effect.annotateLogs({
+            component: "omp",
+            operation: "run",
+            chatId,
+            mode: "ordinary",
+            attachmentCount: prompt.attachments.length,
+          }),
+        );
+        yield* Effect.gen(function* () {
+          yield* boundary("Failed to send OMP prompt", () => entry.sendPrompt(prompt));
+          yield* drainSessionEvents(entry);
+          if (run.phase.type !== "sending") return;
+          const outcome = run.phase.outcome;
+          if (outcome === undefined) {
+            run.phase = { type: "accepted" };
+          } else {
+            run.phase = { type: "finished" };
+            if (MutableRef.get(entry.ordinaryRun) === run) MutableRef.set(entry.ordinaryRun, null);
+            yield* finishOrdinaryRun(chatId, outcome);
+          }
+        }).pipe(
+          Effect.onExit((exit) => {
+            if (Exit.isFailure(exit)) {
+              run.phase = { type: "rejected" };
+              if (MutableRef.get(entry.ordinaryRun) === run)
+                MutableRef.set(entry.ordinaryRun, null);
+              return Effect.logDebug("OMP prompt ended before accepting a run").pipe(
+                Effect.annotateLogs({
+                  component: "omp",
+                  operation: "run",
+                  chatId,
+                  mode: "ordinary",
+                  outcome: Cause.hasInterruptsOnly(exit.cause) ? "interrupted" : "rejected",
+                }),
+              );
+            }
+            return Effect.void;
+          }),
+        );
       }),
     );
   });
@@ -344,7 +461,16 @@ export const makeSessionPool = Effect.fn("SessionPool.make")(function* (
               });
             }
           });
-        MutableRef.set(entry.capture, handler);
+        MutableRef.set(entry.capture, { runId, onEvent: handler });
+        yield* Effect.logDebug("Captured OMP run started").pipe(
+          Effect.annotateLogs({
+            component: "omp",
+            operation: "run",
+            chatId,
+            runId,
+            mode: "captured",
+          }),
+        );
         return yield* Effect.uninterruptibleMask((restore) =>
           Effect.gen(function* () {
             const terminalFailure = Deferred.await(terminal).pipe(
@@ -365,20 +491,47 @@ export const makeSessionPool = Effect.fn("SessionPool.make")(function* (
             ).pipe(Effect.exit);
             if (Exit.isFailure(completed)) {
               yield* attemptCleanup(
-                "Failed to abort captured OMP run",
+                chatId,
+                "capture-abort",
                 boundary("Failed to abort captured OMP run", () =>
                   entry.session.abort({
-                    goalReason: "internal",
-                    reason: "Scheduled run capture failed",
+                    goalReason: Cause.hasInterruptsOnly(completed.cause)
+                      ? "interrupted"
+                      : "internal",
+                    reason: Cause.hasInterruptsOnly(completed.cause)
+                      ? "Scheduled run interrupted"
+                      : "Scheduled run capture failed",
                   }),
                 ),
+              ).pipe(Effect.annotateLogs({ runId }), Effect.exit);
+              yield* attemptCleanup(chatId, "capture-drain", drainSessionEvents(entry)).pipe(
+                Effect.annotateLogs({ runId }),
+                Effect.exit,
               );
-              const drained = yield* drainSessionEvents(entry).pipe(Effect.result);
               MutableRef.set(entry.capture, null);
-              if (Result.isFailure(drained)) return yield* drained.failure;
+              yield* Effect.logDebug("Captured OMP run stopped").pipe(
+                Effect.annotateLogs({
+                  component: "omp",
+                  operation: "run",
+                  chatId,
+                  runId,
+                  mode: "captured",
+                  outcome: Cause.hasInterruptsOnly(completed.cause) ? "interrupted" : "rejected",
+                }),
+              );
               return yield* completed;
             }
             MutableRef.set(entry.capture, null);
+            yield* Effect.logDebug("Captured OMP run finished").pipe(
+              Effect.annotateLogs({
+                component: "omp",
+                operation: "run",
+                chatId,
+                runId,
+                mode: "captured",
+                outcome: completed.value.outcome,
+              }),
+            );
             return yield* completed;
           }),
         );
@@ -479,7 +632,7 @@ export const makeSessionPool = Effect.fn("SessionPool.make")(function* (
         const entry = yield* retain(sessions, chatId);
         return yield* Effect.try({
           try: entry.contextUsage,
-          catch: () => new AgentError({ message: "Failed to read OMP context" }),
+          catch: (cause) => agentError("Failed to read OMP context", cause),
         });
       }),
     );

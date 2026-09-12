@@ -1,6 +1,5 @@
 import * as Chat from "@pico/contract/chat-model";
 import { ChatRepository } from "@pico/contract/chat-repository";
-import { PersistenceError } from "@pico/contract/errors";
 import * as Workspace from "@pico/contract/workspace-model";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -8,7 +7,7 @@ import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as SqlSchema from "effect/unstable/sql/SqlSchema";
 
-const failure = (message: string) => () => new PersistenceError({ message });
+import { failure } from "./error.ts";
 
 const ExternalChat = Schema.Struct({
   workspaceId: Workspace.WorkspaceId,
@@ -98,28 +97,28 @@ const make = Effect.fn("ChatRepository.make")(function* () {
     function* (chat: Chat.NewChat) {
       return yield* insert(chat);
     },
-    Effect.mapError(failure("Failed to create chat")),
+    Effect.mapError(failure("chat.create")),
   );
 
   const archive = Effect.fn("ChatRepository.archive")(
     function* (id: Chat.ChatId, archivedAt: number) {
       return yield* updateArchive({ id, archivedAt });
     },
-    Effect.mapError(failure("Failed to archive chat")),
+    Effect.mapError(failure("chat.archive")),
   );
 
   const findById = Effect.fn("ChatRepository.findById")(
     function* (id: Chat.ChatId) {
       return yield* selectById(id);
     },
-    Effect.mapError(failure("Failed to find chat")),
+    Effect.mapError(failure("chat.findById")),
   );
 
   const findByExternalId = Effect.fn("ChatRepository.findByExternalId")(
     function* (workspaceId: Workspace.WorkspaceId, externalId: string) {
       return yield* selectByExternalId({ workspaceId, externalId });
     },
-    Effect.mapError(failure("Failed to find chat")),
+    Effect.mapError(failure("chat.findByExternalId")),
   );
 
   return ChatRepository.of({ create, archive, findById, findByExternalId });

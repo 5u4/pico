@@ -9,12 +9,14 @@ import type { ContextUsage, ShakeMode, ShakeResult } from "@pico/contract/agent-
 import * as Chat from "@pico/contract/chat-model";
 import { AgentError } from "@pico/contract/errors";
 import * as Schedule from "@pico/contract/schedule";
+import * as Cause from "effect/Cause";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
 import * as Path from "effect/Path";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
@@ -423,7 +425,9 @@ describe("AgentRuntime", () => {
               },
               sendPrompt: () => {
                 sends += 1;
-                return Promise.reject(new Error("sender rejected"));
+                return Promise.reject(
+                  Object.assign(new Error("private provider response"), { code: "EACCES" }),
+                );
               },
               shake: (mode) => {
                 shakenModes.push(mode);
@@ -478,18 +482,17 @@ describe("AgentRuntime", () => {
         throwContext = true;
         const contextFailure = yield* pool.contextUsage(chatId).pipe(Effect.flip);
         assert.instanceOf(contextFailure, AgentError);
-        assert.strictEqual(contextFailure.message, "Failed to read OMP context");
         assert.strictEqual(acquisitions, 1);
         assert.strictEqual(sends, 0);
         assert.strictEqual(contextReads, 3);
 
         const sendFailure = yield* pool.send(chatId, prompt("reject")).pipe(Effect.flip);
         assert.instanceOf(sendFailure, AgentError);
-        assert.strictEqual(sendFailure.message, "Failed to send OMP prompt");
+        assert.include(sendFailure.message, "EACCES");
+        assert.notInclude(sendFailure.message, "private provider response");
 
         const shakeFailure = yield* pool.shake(chatId, "thinking").pipe(Effect.flip);
         assert.instanceOf(shakeFailure, AgentError);
-        assert.strictEqual(shakeFailure.message, "Failed to shake OMP session");
         assert.strictEqual(acquisitions, 1);
         assert.strictEqual(sends, 1);
         assert.deepStrictEqual(shakenModes, ["images", "thinking"]);
@@ -546,86 +549,71 @@ describe("AgentRuntime", () => {
     ),
   );
 
-  it.effect("surfaces a disposal failure without retrying the terminal session", () =>
-    Effect.scoped(
-      Effect.gen(function* () {
+  it.effect("keeps close failures primary and reports independent cleanup only once", () => {
+    const records: Array<ReturnType<typeof Logger.formatStructured.log>> = [];
+    return Effect.gen(function* () {
+      for (const unsubscribeFails of [false, true]) {
+        records.length = 0;
         let disposeCalls = 0;
         let disposal: Promise<void> | undefined;
-        const pool = yield* makeSessionPool({
-          factory: {
-            open: () =>
-              Effect.succeed({
-                session: {
-                  settleInFlightMessagePersistence: () => Promise.resolve(),
-                  abort: () => Promise.resolve(),
-                  beginDispose: () => {},
-                  dispose: () => {
-                    disposeCalls += 1;
-                    disposal ??= Promise.reject(new Error("dispose failed"));
-                    return disposal;
-                  },
-                },
-                sendPrompt: () => Promise.resolve(),
-                shake: async (mode) => shakeResult(mode),
-                appendAssistantMessage: () => Promise.resolve(),
-                contextUsage: () => ({ kind: "unavailable" }),
-                unsubscribe: () => {},
-              }),
-          },
-          loadTranscript: () => Effect.succeed([]),
-        });
-
-        yield* pool.send(chatId, prompt("open"));
-        const first = yield* pool.close(chatId).pipe(Effect.flip);
-        const second = yield* pool.close(chatId).pipe(Effect.flip);
-        assert.instanceOf(first, AgentError);
-        assert.strictEqual(first.message, "Failed to dispose OMP session");
-        assert.strictEqual(second, first);
+        const lifecycle: string[] = [];
+        const disposeFailure = new AgentError({ message: "Disposal failed" });
+        const unsubscribeFailure = new AgentError({ message: "Subscription cleanup failed" });
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const pool = yield* makeSessionPool({
+              factory: {
+                open: () =>
+                  Effect.succeed({
+                    session: {
+                      settleInFlightMessagePersistence: () => Promise.resolve(),
+                      abort: () => Promise.resolve(),
+                      beginDispose: () => {
+                        lifecycle.push("begin-dispose");
+                      },
+                      dispose: () => {
+                        disposeCalls += 1;
+                        lifecycle.push("dispose");
+                        disposal ??= Promise.reject(disposeFailure);
+                        return disposal;
+                      },
+                    },
+                    sendPrompt: () => Promise.resolve(),
+                    shake: async (mode) => shakeResult(mode),
+                    appendAssistantMessage: () => Promise.resolve(),
+                    contextUsage: () => ({ kind: "unavailable" }),
+                    unsubscribe: () => {
+                      lifecycle.push("unsubscribe");
+                      if (unsubscribeFails) throw unsubscribeFailure;
+                    },
+                  }),
+              },
+              loadTranscript: () => Effect.succeed([]),
+            });
+            yield* pool.send(chatId, prompt("private prompt"));
+            const first = yield* pool.close(chatId).pipe(Effect.flip);
+            const second = yield* pool.close(chatId).pipe(Effect.flip);
+            assert.strictEqual(first, unsubscribeFails ? unsubscribeFailure : disposeFailure);
+            assert.strictEqual(second, first);
+          }),
+        );
         assert.strictEqual(disposeCalls, 1);
-      }),
-    ),
-  );
-
-  it.effect("continues teardown after an unsubscribe failure", () =>
-    Effect.scoped(
-      Effect.gen(function* () {
-        const lifecycle: Array<string> = [];
-        const pool = yield* makeSessionPool({
-          factory: {
-            open: () =>
-              Effect.succeed({
-                session: {
-                  settleInFlightMessagePersistence: () => Promise.resolve(),
-                  abort: () => Promise.resolve(),
-                  beginDispose: () => {
-                    lifecycle.push("begin-dispose");
-                  },
-                  dispose: () => {
-                    lifecycle.push("dispose");
-                    return Promise.reject(new Error("dispose failed"));
-                  },
-                },
-                sendPrompt: () => Promise.resolve(),
-                shake: async (mode) => shakeResult(mode),
-                appendAssistantMessage: () => Promise.resolve(),
-                contextUsage: () => ({ kind: "unavailable" }),
-                unsubscribe: () => {
-                  lifecycle.push("unsubscribe");
-                  throw new Error("unsubscribe failed");
-                },
-              }),
-          },
-          loadTranscript: () => Effect.succeed([]),
-        });
-
-        yield* pool.send(chatId, prompt("open"));
-        const error = yield* pool.close(chatId).pipe(Effect.flip);
-        assert.instanceOf(error, AgentError);
-        assert.strictEqual(error.message, "Failed to unsubscribe from OMP session events");
         assert.deepStrictEqual(lifecycle, ["begin-dispose", "unsubscribe", "dispose"]);
-      }),
-    ),
-  );
+        const errors = records.filter((record) => record.level === "ERROR");
+        assert.strictEqual(errors.length, unsubscribeFails ? 1 : 0);
+        if (unsubscribeFails) {
+          assert.strictEqual(errors[0]?.annotations.phase, "dispose");
+          assert.strictEqual(errors[0]?.annotations.chatId, chatId);
+        }
+      }
+    }).pipe(
+      Effect.provide(
+        Logger.layer([
+          Logger.make((options) => records.push(Logger.formatStructured.log(options))),
+        ]),
+      ),
+    );
+  });
 
   it.effect("does not wait when its output queue is already closed", () =>
     Effect.gen(function* () {
@@ -837,11 +825,13 @@ describe("AgentRuntime", () => {
       }),
     ),
   );
-  it.effect("aborts a pending prompt when its capture sink fails and preserves the session", () =>
-    Effect.scoped(
+  it.effect("preserves capture sink failure when abort cleanup also fails", () => {
+    const records: Array<ReturnType<typeof Logger.formatStructured.log>> = [];
+    return Effect.scoped(
       Effect.gen(function* () {
         const abortCalled = yield* Deferred.make<void>();
         let sends = 0;
+        const primaryFailure = new AgentError({ message: "Artifact sink failed" });
         let resolvePendingPrompt: (() => void) | undefined;
         const pool = yield* makeSessionPool({
           factory: {
@@ -853,7 +843,7 @@ describe("AgentRuntime", () => {
                     resolvePendingPrompt?.();
                     emit({ type: "run-finished", outcome: "aborted" });
                     Effect.runSync(Deferred.succeed(abortCalled, undefined));
-                    return Promise.resolve();
+                    return Promise.reject(new Error("private abort failure"));
                   },
                   beginDispose: () => {},
                   dispose: () => Promise.resolve(),
@@ -900,7 +890,7 @@ describe("AgentRuntime", () => {
             Effect.gen(function* () {
               capturedTypes.push(event.type);
               if (capturedTypes.length === 1) {
-                return yield* new AgentError({ message: "artifact sink failed" });
+                return yield* primaryFailure;
               }
             }),
           )
@@ -908,7 +898,13 @@ describe("AgentRuntime", () => {
 
         yield* Deferred.await(abortCalled);
         const sinkFailure = yield* Fiber.join(failedCapture);
-        assert.strictEqual(sinkFailure.message, "artifact sink failed");
+        assert.strictEqual(sinkFailure, primaryFailure);
+        const errors = records.filter((record) => record.level === "ERROR");
+        assert.strictEqual(errors.length, 1);
+        assert.strictEqual(errors[0]?.annotations.chatId, chatId);
+        assert.strictEqual(errors[0]?.annotations.runId, runId);
+        assert.strictEqual(errors[0]?.annotations.phase, "capture-abort");
+        assert.notInclude(JSON.stringify(errors), "private abort failure");
         assert.deepStrictEqual(capturedTypes, ["run-started", "run-finished"]);
 
         const recovered = yield* pool.sendCaptured(
@@ -922,11 +918,19 @@ describe("AgentRuntime", () => {
         yield* pool.drain();
         assert.deepStrictEqual(forwarded, ["title-changed"]);
       }),
-    ),
-  );
+    ).pipe(
+      Effect.provide(
+        Logger.layer([
+          Logger.make((options) => records.push(Logger.formatStructured.log(options))),
+        ]),
+      ),
+    );
+  });
 
-  it.effect("drains interrupted capture events before restoring ordinary forwarding", () =>
-    Effect.scoped(
+  it.effect("drains interrupted capture without reporting cancellation as a failure", () => {
+    const records: Array<ReturnType<typeof Logger.formatStructured.log>> = [];
+    let abortGoalReason: string | undefined;
+    return Effect.scoped(
       Effect.gen(function* () {
         const runStarted = yield* Deferred.make<void>();
         let sends = 0;
@@ -936,7 +940,8 @@ describe("AgentRuntime", () => {
               Effect.succeed({
                 session: {
                   settleInFlightMessagePersistence: () => Promise.resolve(),
-                  abort: () => {
+                  abort: (options) => {
+                    abortGoalReason = options?.goalReason;
                     emit({ type: "title-changed", title: "captured-after-abort" });
                     emit({ type: "run-finished", outcome: "aborted" });
                     return Promise.resolve();
@@ -981,10 +986,232 @@ describe("AgentRuntime", () => {
           .pipe(Effect.forkChild);
         yield* Deferred.await(runStarted);
         yield* Fiber.interrupt(capture);
+        const interrupted = yield* Fiber.await(capture);
+        assert.isTrue(Exit.isFailure(interrupted) && Cause.hasInterruptsOnly(interrupted.cause));
+        assert.strictEqual(abortGoalReason, "interrupted");
         yield* pool.send(chatId, prompt("ordinary"));
         yield* pool.drain();
         assert.deepStrictEqual(forwarded, ["title-changed", "title-changed"]);
+        assert.deepStrictEqual(
+          records.filter((record) => record.level === "ERROR"),
+          [],
+        );
       }),
-    ),
+    ).pipe(
+      Effect.provide(
+        Logger.layer([
+          Logger.make((options) => records.push(Logger.formatStructured.log(options))),
+        ]),
+      ),
+    );
+  });
+  it.effect(
+    "assigns ordinary terminal failures to one owner and leaves captures to the scheduler",
+    () => {
+      const records: Array<ReturnType<typeof Logger.formatStructured.log>> = [];
+      return Effect.scoped(
+        Effect.gen(function* () {
+          const rejected = new AgentError({ message: "Prompt dispatch rejected" });
+          let emitLater: ((event: AgentEvent.AgentEvent) => void) | undefined;
+          const pool = yield* makeSessionPool({
+            factory: {
+              open: (_id, emit) =>
+                Effect.succeed({
+                  session: {
+                    settleInFlightMessagePersistence: () => Promise.resolve(),
+                    abort: () => Promise.resolve(),
+                    beginDispose: () => {},
+                    dispose: () => Promise.resolve(),
+                  },
+                  sendPrompt: (value) => {
+                    emit({ type: "run-started" });
+                    emit({
+                      type: "message-settled",
+                      message: {
+                        role: "assistant",
+                        status: "failed",
+                        stopReason: "error",
+                        message: "private provider payload",
+                        content: [],
+                        model: "private model",
+                        timestamp: 1,
+                      },
+                    });
+                    if (value.text === "queued-terminal") {
+                      return new Promise<void>((resolve) => {
+                        queueMicrotask(() => {
+                          resolve();
+                          queueMicrotask(() => emit({ type: "run-finished", outcome: "failed" }));
+                        });
+                      });
+                    }
+                    if (value.text === "late") {
+                      emitLater = emit;
+                      return Promise.resolve();
+                    }
+                    emit({
+                      type: "run-finished",
+                      outcome: value.text === "abort" ? "aborted" : "failed",
+                    });
+                    if (value.text === "reject") return Promise.reject(rejected);
+                    if (value.text === "abort-reject")
+                      return Promise.reject(new DOMException("private abort", "AbortError"));
+                    return Promise.resolve();
+                  },
+                  shake: async (mode) => shakeResult(mode),
+                  appendAssistantMessage: () => Promise.resolve(),
+                  contextUsage: () => ({ kind: "unavailable" }),
+                  unsubscribe: () => {},
+                }),
+            },
+            loadTranscript: () => Effect.succeed([]),
+          });
+          yield* pool.send(chatId, prompt("resolved"));
+          assert.strictEqual(records.filter((record) => record.level === "ERROR").length, 1);
+          assert.strictEqual(
+            yield* pool.send(chatId, prompt("reject")).pipe(Effect.flip),
+            rejected,
+          );
+          yield* pool.send(chatId, prompt("abort"));
+          const interrupted = yield* pool.send(chatId, prompt("abort-reject")).pipe(Effect.exit);
+          assert.isTrue(Exit.isFailure(interrupted) && Cause.hasInterruptsOnly(interrupted.cause));
+          const captured = yield* pool.sendCaptured(
+            chatId,
+            Schedule.ScheduleRunId.make("scheduled-1000-018f47a0-0000-7000-8000-000000000003"),
+            prompt("captured"),
+            () => Effect.void,
+          );
+          assert.strictEqual(captured.outcome, "failed");
+          assert.strictEqual(records.filter((record) => record.level === "ERROR").length, 1);
+          yield* pool.send(chatId, prompt("queued-terminal"));
+          yield* pool.send(chatId, prompt("late"));
+          emitLater?.({ type: "run-finished", outcome: "failed" });
+          yield* pool.close(chatId);
+          const errors = records.filter((record) => record.level === "ERROR");
+          assert.strictEqual(errors.length, 3);
+          assert.isTrue(
+            errors.every(
+              (record) =>
+                record.annotations.chatId === chatId && record.annotations.operation === "run",
+            ),
+          );
+          assert.notInclude(JSON.stringify(records), "private");
+        }),
+      ).pipe(
+        Effect.provide(
+          Logger.layer([
+            Logger.make((options) => records.push(Logger.formatStructured.log(options))),
+          ]),
+        ),
+      );
+    },
   );
+  it.effect("preserves capture failure when cleanup finds a closed event queue", () => {
+    const records: Array<ReturnType<typeof Logger.formatStructured.log>> = [];
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const runEffect = Effect.runPromiseWith(yield* Effect.context<never>());
+        let closeSession: () => Promise<void> = () => Promise.resolve();
+        const primary = new AgentError({ message: "Capture persistence failed" });
+        const pool = yield* makeSessionPool({
+          factory: {
+            open: (_id, emit) =>
+              Effect.succeed({
+                session: {
+                  settleInFlightMessagePersistence: () => Promise.resolve(),
+                  abort: () => closeSession(),
+                  beginDispose: () => {},
+                  dispose: () => Promise.resolve(),
+                },
+                sendPrompt: async () => {
+                  emit({ type: "run-started" });
+                },
+                shake: async (mode) => shakeResult(mode),
+                appendAssistantMessage: () => Promise.resolve(),
+                contextUsage: () => ({ kind: "unavailable" }),
+                unsubscribe: () => {},
+              }),
+          },
+          loadTranscript: () => Effect.succeed([]),
+        });
+        closeSession = () => runEffect(pool.close(chatId));
+        const runId = Schedule.ScheduleRunId.make(
+          "scheduled-1000-018f47a0-0000-7000-8000-000000000003",
+        );
+        const failure = yield* pool
+          .sendCaptured(chatId, runId, prompt("private capture"), () => Effect.fail(primary))
+          .pipe(Effect.flip);
+        assert.strictEqual(failure, primary);
+        const errors = records.filter((record) => record.level === "ERROR");
+        assert.strictEqual(errors.length, 1);
+        assert.strictEqual(errors[0]?.annotations.phase, "capture-drain");
+        assert.strictEqual(errors[0]?.annotations.runId, runId);
+      }),
+    ).pipe(
+      Effect.provide(
+        Logger.layer([
+          Logger.make((options) => records.push(Logger.formatStructured.log(options))),
+        ]),
+      ),
+    );
+  });
+
+  it.effect("reports a dead session forwarder once without replaying it during release", () => {
+    const records: Array<ReturnType<typeof Logger.formatStructured.log>> = [];
+    const reported = Promise.withResolvers<void>();
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const pool = yield* makeSessionPool({
+          factory: {
+            open: (_id, emit) =>
+              Effect.succeed({
+                session: {
+                  settleInFlightMessagePersistence: () => Promise.resolve(),
+                  abort: () => Promise.resolve(),
+                  beginDispose: () => {},
+                  dispose: () => Promise.resolve(),
+                },
+                sendPrompt: async () => {
+                  emit({ type: "run-started" });
+                },
+                shake: async (mode) => shakeResult(mode),
+                appendAssistantMessage: () => Promise.resolve(),
+                contextUsage: () => ({ kind: "unavailable" }),
+                unsubscribe: () => {},
+              }),
+          },
+          loadTranscript: () => Effect.succeed([]),
+        });
+        const capture = yield* pool
+          .sendCaptured(
+            chatId,
+            Schedule.ScheduleRunId.make("scheduled-1000-018f47a0-0000-7000-8000-000000000003"),
+            prompt("private capture"),
+            () => Effect.die(new Error("private sink defect")),
+          )
+          .pipe(Effect.forkChild);
+        yield* Effect.promise(() => reported.promise);
+        yield* pool.close(chatId);
+        yield* Fiber.interrupt(capture);
+        const interrupted = yield* Fiber.await(capture);
+        assert.isTrue(Exit.isFailure(interrupted) && Cause.hasInterruptsOnly(interrupted.cause));
+        const forwarderErrors = records.filter(
+          (record) => record.annotations.operation === "event-forwarder",
+        );
+        assert.strictEqual(forwarderErrors.length, 1);
+        assert.strictEqual(forwarderErrors[0]?.annotations.chatId, chatId);
+        assert.notInclude(JSON.stringify(records), "private");
+      }),
+    ).pipe(
+      Effect.provide(
+        Logger.layer([
+          Logger.make((options) => {
+            const record = Logger.formatStructured.log(options);
+            records.push(record);
+            if (record.annotations.operation === "event-forwarder") reported.resolve();
+          }),
+        ]),
+      ),
+    );
+  });
 });

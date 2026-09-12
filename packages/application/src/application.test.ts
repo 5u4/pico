@@ -31,11 +31,13 @@ import type {
   RenameChatBranchResult,
 } from "@pico/contract/worktree";
 import * as Persistence from "@pico/persistence/layer";
+import * as Cause from "effect/Cause";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
@@ -56,12 +58,15 @@ const runtimeTranscript: AgentMessage.AgentTranscript = [
   },
 ];
 
-const assertApplicationError = (error: ApplicationError | ChatClosed, message: string) => {
+const assertApplicationError = (
+  error: ApplicationError | ChatClosed,
+  reason: ApplicationError["reason"],
+) => {
   if (!(error instanceof ApplicationError)) {
     assert.fail(`Expected ApplicationError, received ${error._tag}`);
     return;
   }
-  assert.strictEqual(error.message, message);
+  assert.strictEqual(error.reason, reason);
 };
 
 describe("Application", () => {
@@ -302,7 +307,7 @@ describe("Application", () => {
         assert.deepStrictEqual(transcriptChatIds, [discordChat.id]);
         assertApplicationError(
           yield* application.transcript(missingChatId).pipe(Effect.flip),
-          "Failed to read transcript",
+          "operation",
         );
         assert.deepStrictEqual(transcriptChatIds, [discordChat.id, missingChatId]);
 
@@ -327,14 +332,14 @@ describe("Application", () => {
         const sendError = yield* application
           .sendMessage(discordChat.id, textPrompt("retry"))
           .pipe(Effect.flip);
-        assert.instanceOf(sendError, ApplicationError);
+        assertApplicationError(sendError, "operation");
         assert.include(sendError.message, sendFailure.message);
         sendFailure = null;
         yield* application.abort(discordChat.id);
         assert.deepStrictEqual(abortedChatIds, [discordChat.id]);
         assertApplicationError(
           yield* application.abort(missingChatId).pipe(Effect.flip),
-          "Chat not found",
+          "not-found",
         );
         assert.deepStrictEqual(abortedChatIds, [discordChat.id]);
         assert.deepStrictEqual(yield* application.contextUsage(discordChat.id), {
@@ -350,7 +355,7 @@ describe("Application", () => {
         assert.deepStrictEqual(contextChatIds, [discordChat.id]);
         assertApplicationError(
           yield* application.contextUsage(missingChatId).pipe(Effect.flip),
-          "Chat not found",
+          "not-found",
         );
         assert.deepStrictEqual(contextChatIds, [discordChat.id]);
         assert.deepStrictEqual(yield* application.shake(discordChat.id, "images"), {
@@ -361,7 +366,7 @@ describe("Application", () => {
         assert.deepStrictEqual(shakeInputs, [{ chatId: discordChat.id, mode: "images" }]);
         assertApplicationError(
           yield* application.shake(missingChatId, "elide").pipe(Effect.flip),
-          "Chat not found",
+          "not-found",
         );
         assert.deepStrictEqual(shakeInputs, [{ chatId: discordChat.id, mode: "images" }]);
 
@@ -369,7 +374,7 @@ describe("Application", () => {
           yield* application
             .createChat({ workspaceId: missingWorkspaceId, externalId: null })
             .pipe(Effect.flip),
-          "Failed to create chat",
+          "not-found",
         );
         const firstScheduledId = Chat.ChatId.make("018f47a0-0000-7000-8000-000000000010");
         const secondScheduledId = Chat.ChatId.make("018f47a0-0000-7000-8000-000000000011");
@@ -424,7 +429,7 @@ describe("Application", () => {
           yield* application
             .createChat({ workspaceId: regularWorkspace.id, externalId: "missing-cwd" })
             .pipe(Effect.flip),
-          "Failed to create chat",
+          "invalid-state",
         );
         assert.isTrue(
           Option.isNone(yield* chats.findByExternalId(regularWorkspace.id, "missing-cwd")),
@@ -997,19 +1002,19 @@ describe("Application", () => {
         const missingChatId = Chat.ChatId.make("018f47a0-0000-7000-8000-000000000099");
         assertApplicationError(
           yield* application.sendMessage(missingChatId, textPrompt("missing")).pipe(Effect.flip),
-          "Chat not found",
+          "not-found",
         );
         assertApplicationError(
           yield* application.contextUsage(missingChatId).pipe(Effect.flip),
-          "Chat not found",
+          "not-found",
         );
         assertApplicationError(
           yield* application.shake(missingChatId, "elide").pipe(Effect.flip),
-          "Chat not found",
+          "not-found",
         );
         assertApplicationError(
           yield* application.abort(missingChatId).pipe(Effect.flip),
-          "Chat not found",
+          "not-found",
         );
 
         yield* TestClock.setTime(4_000);
@@ -1142,12 +1147,11 @@ describe("Application", () => {
         runtimeFails = true;
         removalResult = "removed";
         const removalsBeforeFailure = order.filter((entry) => entry.startsWith("remove")).length;
-        assertApplicationError(
-          yield* application
-            .closeChat(failedChat.id, { allowDirtyWorktree: true })
-            .pipe(Effect.flip),
-          "Failed to close chat runtime",
-        );
+        const closeError = yield* application
+          .closeChat(failedChat.id, { allowDirtyWorktree: true })
+          .pipe(Effect.flip);
+        assertApplicationError(closeError, "operation");
+        assert.include(closeError.message, "dispose failed");
         assert.isNotNull(Option.getOrThrow(yield* chats.findById(failedChat.id)).archivedAt);
         assert.strictEqual(
           order.filter((entry) => entry.startsWith("remove")).length,
@@ -1181,14 +1185,19 @@ describe("Application", () => {
       yield* fileSystem.makeDirectory(sessionsDir);
 
       const persistenceLayer = Persistence.layer(storeFile);
+      const insertionFailure = new PersistenceError({ message: "database insert rejected" });
+      const logs: Array<ReturnType<typeof Logger.formatStructured.log>> = [];
+      const logger = Logger.make((options) => {
+        logs.push(Logger.formatStructured.log(options));
+      });
+      let removalFails = false;
       const failingChats = Layer.effect(
         ChatRepository,
         Effect.gen(function* () {
           const chats = yield* ChatRepository;
           return ChatRepository.of({
             ...chats,
-            create: () =>
-              Effect.fail(new PersistenceError({ message: "database insert rejected" })),
+            create: () => Effect.fail(insertionFailure),
           });
         }),
       ).pipe(Layer.provide(persistenceLayer));
@@ -1208,9 +1217,11 @@ describe("Application", () => {
               ),
             ),
           remove: (chatId) =>
-            fileSystem
-              .remove(path.join(sessionsDir, `${chatId}.jsonl`), { force: true })
-              .pipe(Effect.orDie),
+            removalFails
+              ? Effect.fail(new AgentError({ message: "private cleanup details" }))
+              : fileSystem
+                  .remove(path.join(sessionsDir, `${chatId}.jsonl`), { force: true })
+                  .pipe(Effect.orDie),
         }),
       );
       const runtimeLayer = Layer.succeed(
@@ -1264,7 +1275,8 @@ describe("Application", () => {
         const directError = yield* application
           .createChat({ workspaceId: direct.id, externalId: null })
           .pipe(Effect.flip);
-        assertApplicationError(directError, "Failed to create chat");
+        assertApplicationError(directError, "operation");
+        assert.include(directError.message, insertionFailure.message);
         const directSessionId = createdSessionIds[0];
         if (directSessionId === undefined) {
           return yield* Effect.die("Direct session was not created");
@@ -1283,7 +1295,7 @@ describe("Application", () => {
         const worktreeError = yield* application
           .createChat({ workspaceId: worktree.id, externalId: null })
           .pipe(Effect.flip);
-        assertApplicationError(worktreeError, "Failed to create chat");
+        assertApplicationError(worktreeError, "operation");
         const worktreeSessionId = createdSessionIds[1];
         if (worktreeSessionId === undefined) {
           return yield* Effect.die("Worktree session was not created");
@@ -1294,12 +1306,41 @@ describe("Application", () => {
         assert.isFalse(yield* fileSystem.exists(worktreeCwd));
         assert.isFalse(yield* fileSystem.exists(branchMarker));
         assert.isTrue(Option.isNone(yield* chats.findById(worktreeSessionId)));
+
+        removalFails = true;
+        const rollbackError = yield* application
+          .createChat({ workspaceId: worktree.id, externalId: null })
+          .pipe(Effect.flip);
+        assertApplicationError(rollbackError, "operation");
+        assert.include(rollbackError.message, insertionFailure.message);
+        assert.notInclude(rollbackError.message, "private cleanup details");
+        const retainedSessionId = createdSessionIds[2];
+        if (retainedSessionId === undefined) {
+          return yield* Effect.die("Rollback session was not created");
+        }
+        assert.isTrue(
+          yield* fileSystem.exists(path.join(sessionsDir, `${retainedSessionId}.jsonl`)),
+        );
+        assert.isFalse(yield* fileSystem.exists(worktreeCwd));
+        assert.isFalse(yield* fileSystem.exists(branchMarker));
+        assert.isTrue(Option.isNone(yield* chats.findById(retainedSessionId)));
+        const errors = logs.filter((entry) => entry.level === "ERROR");
+        assert.strictEqual(errors.length, 1);
+        assert.deepInclude(errors[0]?.annotations, {
+          component: "application",
+          operation: "create-chat",
+          phase: "session-rollback",
+          chatId: retainedSessionId,
+          workspaceId: worktree.id,
+        });
+        assert.notInclude(JSON.stringify(logs), "private cleanup details");
       }).pipe(
         Effect.provide(ApplicationLayer.layer(gitWorktree)),
         Effect.provide(repositories),
         Effect.provide(sessionsLayer),
         Effect.provide(runtimeLayer),
         Effect.provide(BunCrypto.layer),
+        Effect.provide(Logger.layer([logger])),
         Effect.scoped,
       );
     }).pipe(Effect.provide(platformLayer)),
@@ -1637,6 +1678,13 @@ describe("Application", () => {
         createdAt: 1,
       };
       const repositoryFailureObserved = Promise.withResolvers<void>();
+      const logs: Array<ReturnType<typeof Logger.formatStructured.log>> = [];
+      const failuresLogged = Promise.withResolvers<void>();
+      const logger = Logger.make((options) => {
+        if (options.logLevel !== "Error") return;
+        logs.push(Logger.formatStructured.log(options));
+        if (logs.length === 4) failuresLogged.resolve();
+      });
       let repositoryFails = true;
       const repositories = Layer.merge(
         Layer.succeed(
@@ -1648,7 +1696,11 @@ describe("Application", () => {
               repositoryFails
                 ? Effect.sync(() => repositoryFailureObserved.resolve()).pipe(
                     Effect.andThen(
-                      Effect.fail(new PersistenceError({ message: "repository failed" })),
+                      Effect.fail(
+                        new PersistenceError({
+                          message: "chat.findById: ConnectionError, SQLite code 14",
+                        }),
+                      ),
                     ),
                   )
                 : Effect.succeed(Option.some(chat)),
@@ -1679,7 +1731,19 @@ describe("Application", () => {
             renameAttempts += 1;
             if (gitFails) {
               yield* Deferred.succeed(gitFailureObserved, undefined);
-              return yield* new GitError({ message: "rename failed" });
+              return yield* Effect.failCause(
+                Cause.combine(
+                  Cause.fail(
+                    new GitError({
+                      message: "Failed to rename chat branch: Git exited with code 128",
+                    }),
+                  ),
+                  Cause.combine(
+                    Cause.die(new Error("private defect token=secret")),
+                    Cause.interrupt(),
+                  ),
+                ),
+              );
             }
             yield* Deferred.succeed(renamed, undefined);
             return { kind: "renamed" } satisfies RenameChatBranchResult;
@@ -1698,10 +1762,17 @@ describe("Application", () => {
           chatId: namingChatId,
           generateTopic: () => {
             modelFailureObserved.resolve();
-            return Promise.reject(new Error("model failed"));
+            return Promise.reject(new Error("private model token=secret"));
           },
         });
         yield* Effect.promise(() => modelFailureObserved.promise);
+
+        handler({
+          chatId: namingChatId,
+          generateTopic: async () => {
+            throw new AgentError({ message: "Generate branch topic: HTTP 429" });
+          },
+        });
 
         handler({ chatId: namingChatId, generateTopic: async () => "git-failure" });
         yield* Deferred.await(gitFailureObserved);
@@ -1710,7 +1781,48 @@ describe("Application", () => {
         handler({ chatId: namingChatId, generateTopic: async () => "final-success" });
         yield* Deferred.await(renamed);
         assert.strictEqual(renameAttempts, 2);
-      }).pipe(Effect.provide(repositories), Effect.scoped);
+        yield* Effect.promise(() => failuresLogged.promise);
+
+        const pendingGeneration = Promise.withResolvers<string | null>();
+        const generationStarted = Promise.withResolvers<void>();
+        handler({
+          chatId: namingChatId,
+          generateTopic: () => {
+            generationStarted.resolve();
+            return pendingGeneration.promise;
+          },
+        });
+        yield* Effect.promise(() => generationStarted.promise);
+      }).pipe(Effect.provide(repositories), Effect.scoped, Effect.provide(Logger.layer([logger])));
+      assert.strictEqual(renameAttempts, 2);
+      assert.strictEqual(logs.length, 4);
+      assert.deepStrictEqual(logs.map((entry) => entry.annotations.phase).sort(), [
+        "eligibility",
+        "generation",
+        "generation",
+        "rename",
+      ]);
+      for (const entry of logs) {
+        assert.deepInclude(entry.annotations, {
+          component: "application",
+          operation: "branch-naming",
+          chatId: namingChatId,
+        });
+        if (entry.annotations.phase !== "eligibility") {
+          assert.strictEqual(entry.annotations.workspaceId, workspaceId);
+        }
+      }
+      const output = JSON.stringify(logs);
+      assert.include(output, "chat.findById: ConnectionError, SQLite code 14");
+      assert.include(output, "Failed to rename chat branch: Git exited with code 128");
+      assert.include(output, "Generate branch topic: HTTP 429");
+      assert.notInclude(output, "private model token=secret");
+      assert.notInclude(output, "private defect token=secret");
+      assert.strictEqual(
+        logs.find((entry) => entry.annotations.phase === "rename")?.annotations.reason,
+        "defect",
+      );
+      assert.notInclude(output, "git-failure");
     }),
   );
 });

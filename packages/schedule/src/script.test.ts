@@ -11,7 +11,10 @@ import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
 import * as Path from "effect/Path";
+import * as PlatformError from "effect/PlatformError";
+import * as References from "effect/References";
 import * as Schema from "effect/Schema";
 import { runScript, ScriptRunError } from "./script.ts";
 import { bootstrap, publishRun, runDirectory, type Storage } from "./storage.ts";
@@ -114,6 +117,70 @@ describe("schedule script runner", () => {
       assert.isFalse(result.stdout.truncated);
       assert.strictEqual(result.timeoutMillis, Schedule.DEFAULT_SCRIPT_TIMEOUT_MS);
       assert.strictEqual((yield* readFailedDecision(runId)).kind, "failed");
+
+      const artifactFailureRun: Schedule.ScheduleRunLifecycle = {
+        ...run,
+        id: Schedule.ScheduleRunId.make("scheduled-1500-018f47a0-0000-7000-8000-000000000004"),
+        source: { kind: "scheduled", scheduledFor: 1_500 },
+      };
+      yield* publishRun(
+        storage,
+        artifactFailureRun,
+        definition,
+        { script: 'process.stdout.write("private invalid decision")', prompt: null },
+        "018f47a0-0000-7000-8000-000000000025",
+      );
+      const failureLogs: Array<{
+        readonly level: Logger.Options<unknown>["logLevel"];
+        readonly annotations: Readonly<Record<string, unknown>>;
+        readonly message: unknown;
+      }> = [];
+      const primaryError = yield* runScript(
+        {
+          ...storage,
+          fileSystem: FileSystem.FileSystem.of({
+            ...fileSystem,
+            writeFile: (file, data, options) =>
+              path.basename(file).startsWith(".decision.json-")
+                ? Effect.fail(
+                    new PlatformError.PlatformError(
+                      new PlatformError.SystemError({
+                        _tag: "PermissionDenied",
+                        module: "FileSystem",
+                        method: "writeFile",
+                        pathOrDescriptor: file,
+                      }),
+                    ),
+                  )
+                : fileSystem.writeFile(file, data, options),
+          }),
+        },
+        process.execPath,
+        artifactFailureRun,
+        target,
+      ).pipe(
+        Effect.flip,
+        Effect.provide(
+          Logger.layer([
+            Logger.make((options) => {
+              failureLogs.push({
+                level: options.logLevel,
+                annotations: { ...options.fiber.getRef(References.CurrentLogAnnotations) },
+                message: options.message,
+              });
+            }),
+          ]),
+        ),
+      );
+      assert.instanceOf(primaryError, ScriptRunError);
+      if (!(primaryError instanceof ScriptRunError)) return;
+      assert.strictEqual(primaryError.stage, "protocol");
+      assert.strictEqual(failureLogs.length, 1);
+      assert.strictEqual(failureLogs[0]?.level, "Error");
+      assert.strictEqual(failureLogs[0]?.annotations.phase, "failure-artifact");
+      assert.strictEqual(failureLogs[0]?.annotations.runId, artifactFailureRun.id);
+      assert.notInclude(JSON.stringify(failureLogs), "private");
+      assert.notInclude(primaryError.message, "private");
 
       const failedRun: Schedule.ScheduleRunLifecycle = {
         ...run,
@@ -279,12 +346,22 @@ process.stdout.write("{");
       );
       const spawnError = yield* runScript(
         storage,
-        path.join(root, "missing-executable"),
+        path.join(root, "private-missing-executable"),
         spawnRun,
         target,
       ).pipe(Effect.flip);
       assert.instanceOf(spawnError, ScriptRunError);
-      assert.strictEqual((yield* readFailedDecision(spawnRun.id)).kind, "failed");
+      if (!(spawnError instanceof ScriptRunError)) return;
+      const spawnDecision = yield* readFailedDecision(spawnRun.id);
+      assert.strictEqual(spawnDecision.kind, "failed");
+      const spawnResult = yield* fileSystem.readFileString(
+        path.join(runDirectory(storage, scheduleId, spawnRun.id), "script", "result.json"),
+      );
+      for (const diagnostic of [spawnError.message, spawnDecision.message, spawnResult]) {
+        assert.include(diagnostic, "ENOENT");
+        assert.notInclude(diagnostic, root);
+        assert.notInclude(diagnostic, "private-missing-executable");
+      }
 
       const oversizedRun: Schedule.ScheduleRunLifecycle = {
         ...run,

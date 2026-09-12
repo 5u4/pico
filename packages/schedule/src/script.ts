@@ -39,12 +39,62 @@ const scriptError = (message: string) => new ScriptRunError({ stage: "script", m
 
 const protocolError = (message: string) => new ScriptRunError({ stage: "protocol", message });
 
+const nativeScriptError = (message: string, cause: unknown) => {
+  if (typeof cause === "object" && cause !== null && "code" in cause) {
+    switch (cause.code) {
+      case "ENOENT":
+      case "EACCES":
+      case "EPERM":
+      case "EPIPE":
+      case "EIO":
+      case "EBADF":
+      case "EAGAIN":
+      case "ENOMEM":
+      case "EMFILE":
+      case "ENFILE":
+      case "E2BIG":
+      case "ENOEXEC":
+      case "ENOTDIR":
+      case "EISDIR":
+      case "EINVAL":
+      case "ETXTBSY":
+        return scriptError(`${message} (${cause.code})`);
+    }
+  }
+  return scriptError(message);
+};
+
+const recordFailureArtifact = Effect.fn("Schedules.recordScriptFailureArtifact")(function* (
+  storage: Storage,
+  run: Schedule.ScheduleRunLifecycle,
+  artifact: string,
+  content: string,
+) {
+  yield* writeArtifactString(storage, run, artifact, content).pipe(
+    Effect.catchCause((cause) =>
+      Cause.hasInterruptsOnly(cause)
+        ? Effect.failCause(cause)
+        : Effect.logError("Failed to record schedule script failure artifact").pipe(
+            Effect.annotateLogs({
+              component: "schedule",
+              operation: "script",
+              scheduleId: run.scheduleId,
+              runId: run.id,
+              phase: "failure-artifact",
+              artifact,
+              category: cause.reasons.some(Cause.isDieReason) ? "defect" : "io",
+            }),
+          ),
+    ),
+  );
+});
+
 const failWithDecision = Effect.fn("Schedules.failScriptRun")(function* (
   storage: Storage,
   run: Schedule.ScheduleRunLifecycle,
   error: ScriptRunError,
 ) {
-  yield* writeArtifactString(
+  yield* recordFailureArtifact(
     storage,
     run,
     "decision.json",
@@ -59,6 +109,7 @@ const captureStream = (stream: ReadableStream<Uint8Array>): StreamCapture => {
   let retained = 0;
   let totalBytes = 0;
   let cancelled = false;
+  let settled = false;
   let cancellation: Promise<void> | undefined;
   const result = (async () => {
     try {
@@ -77,6 +128,7 @@ const captureStream = (stream: ReadableStream<Uint8Array>): StreamCapture => {
     } catch (cause) {
       if (!cancelled) throw cause;
     } finally {
+      settled = true;
       reader.releaseLock();
     }
     const bytes = new Uint8Array(retained);
@@ -91,9 +143,9 @@ const captureStream = (stream: ReadableStream<Uint8Array>): StreamCapture => {
     result,
     cancel: () => {
       cancelled = true;
-      cancellation ??= Promise.resolve()
-        .then(() => reader.cancel())
-        .catch(() => undefined);
+      cancellation ??= Promise.resolve().then(() => {
+        if (!settled) return reader.cancel();
+      });
       return cancellation;
     },
   };
@@ -131,210 +183,243 @@ const stdinDocument = (
   },
 });
 
-export const runScript = Effect.fn("Schedules.runScript")(function* (
-  storage: Storage,
-  executable: string,
-  run: Schedule.ScheduleRunLifecycle,
-  target: Schedule.ResolvedScheduleRunTarget,
-  timeoutMillis = Schedule.DEFAULT_SCRIPT_TIMEOUT_MS,
-): Effect.fn.Return<ScriptRun, Schedule.ScheduleError | ScriptRunError> {
-  const scriptPath = storage.path.join(
-    runDirectory(storage, run.scheduleId, run.id),
-    "input",
-    "script.js",
-  );
-  const stdin = JSON.stringify(stdinDocument(run, target));
-  yield* ensureRunAsset(storage, run, "input/script.js");
-  yield* writeArtifactString(storage, run, "script/stdin.json", stdin);
-  yield* Effect.all(
-    [
-      writeArtifact(storage, run, "script/stdout.bin", new Uint8Array()),
-      writeArtifact(storage, run, "script/stderr.bin", new Uint8Array()),
-      writeArtifactString(
-        storage,
-        run,
-        "script/result.json",
-        JSON.stringify({ kind: "started", timeoutMillis }),
-      ),
-    ],
-    { concurrency: "unbounded", discard: true },
-  );
-
-  const attempted = yield* Effect.acquireUseRelease(
-    Effect.try({
-      try: () =>
-        Bun.spawn({
-          cmd: [executable, scriptPath],
-          cwd: target.cwd,
-          env: curatedEnvironment(run, target),
-          stdin: "pipe",
-          stdout: "pipe",
-          stderr: "pipe",
-        }),
-      catch: (cause) =>
-        scriptError(
-          cause instanceof Error
-            ? `Failed to run schedule script: ${cause.message}`
-            : "Failed to run schedule script",
+export const runScript = Effect.fn("Schedules.runScript")(
+  function* (
+    storage: Storage,
+    executable: string,
+    run: Schedule.ScheduleRunLifecycle,
+    target: Schedule.ResolvedScheduleRunTarget,
+    timeoutMillis = Schedule.DEFAULT_SCRIPT_TIMEOUT_MS,
+  ): Effect.fn.Return<ScriptRun, Schedule.ScheduleError | ScriptRunError> {
+    const scriptPath = storage.path.join(
+      runDirectory(storage, run.scheduleId, run.id),
+      "input",
+      "script.js",
+    );
+    const stdin = JSON.stringify(stdinDocument(run, target));
+    yield* ensureRunAsset(storage, run, "input/script.js");
+    yield* writeArtifactString(storage, run, "script/stdin.json", stdin);
+    yield* Effect.all(
+      [
+        writeArtifact(storage, run, "script/stdout.bin", new Uint8Array()),
+        writeArtifact(storage, run, "script/stderr.bin", new Uint8Array()),
+        writeArtifactString(
+          storage,
+          run,
+          "script/result.json",
+          JSON.stringify({ kind: "started", timeoutMillis }),
         ),
-    }),
-    (child) =>
-      Effect.tryPromise({
-        try: async (signal) => {
-          let timedOut = false;
-          let forceKill: ReturnType<typeof setTimeout> | undefined;
-          const stdoutCapture = captureStream(child.stdout);
-          const stderrCapture = captureStream(child.stderr);
-          const cancelCaptures = () =>
-            Promise.all([stdoutCapture.cancel(), stderrCapture.cancel()]).then(() => undefined);
-          const exited = child.exited.finally(cancelCaptures);
-          const terminate = () => {
-            if (child.exitCode === null) child.kill("SIGTERM");
+      ],
+      { concurrency: "unbounded", discard: true },
+    );
+
+    const attempted = yield* Effect.acquireUseRelease(
+      Effect.try({
+        try: () => {
+          const child = Bun.spawn({
+            cmd: [executable, scriptPath],
+            cwd: target.cwd,
+            env: curatedEnvironment(run, target),
+            stdin: "pipe",
+            stdout: "pipe",
+            stderr: "pipe",
+          });
+          return {
+            child,
+            stdoutCapture: captureStream(child.stdout),
+            stderrCapture: captureStream(child.stderr),
           };
-          const onAbort = () => {
-            terminate();
-            void cancelCaptures();
-          };
-          signal.addEventListener("abort", onAbort, { once: true });
-          if (signal.aborted) onAbort();
-          const timeout = setTimeout(() => {
-            if (child.exitCode === null) {
-              timedOut = true;
-              child.kill("SIGTERM");
-              forceKill = setTimeout(() => {
-                if (child.exitCode === null) child.kill("SIGKILL");
-              }, 1_000);
-            }
-            void cancelCaptures();
-          }, timeoutMillis);
-          try {
-            child.stdin.write(stdin);
-            child.stdin.end();
-            const [stdout, stderr, exitCode] = await Promise.all([
-              stdoutCapture.result,
-              stderrCapture.result,
-              exited,
-            ]);
-            return {
-              stdout,
-              stderr,
-              exitCode,
-              signalCode: child.signalCode,
-              timedOut,
-            };
-          } finally {
-            signal.removeEventListener("abort", onAbort);
-            clearTimeout(timeout);
-            clearTimeout(forceKill);
-            void cancelCaptures();
-          }
         },
-        catch: (cause) =>
-          scriptError(
-            cause instanceof Error
-              ? `Failed to run schedule script: ${cause.message}`
-              : "Failed to run schedule script",
-          ),
+        catch: (cause) => nativeScriptError("Failed to spawn schedule script", cause),
       }),
-    (child) =>
-      Effect.promise(async () => {
-        if (child.exitCode !== null) return;
-        child.kill("SIGTERM");
-        const forceKill = setTimeout(() => child.kill("SIGKILL"), 1_000);
-        await child.exited.finally(() => clearTimeout(forceKill));
-      }).pipe(
-        Effect.catchCause((cause) =>
-          Effect.logError("Failed to stop interrupted schedule script", Cause.pretty(cause)),
+      ({ child, stdoutCapture, stderrCapture }) =>
+        Effect.tryPromise({
+          try: async (signal) => {
+            let timedOut = false;
+            let forceKill: ReturnType<typeof setTimeout> | undefined;
+            const cancelCaptures = () =>
+              Promise.all([stdoutCapture.cancel(), stderrCapture.cancel()])
+                .then(() => undefined)
+                .catch(() => undefined);
+            const exited = child.exited.finally(cancelCaptures);
+            const terminate = () => {
+              if (child.exitCode === null) child.kill("SIGTERM");
+            };
+            const onAbort = () => {
+              terminate();
+              void cancelCaptures();
+            };
+            signal.addEventListener("abort", onAbort, { once: true });
+            if (signal.aborted) onAbort();
+            const timeout = setTimeout(() => {
+              if (child.exitCode === null) {
+                timedOut = true;
+                child.kill("SIGTERM");
+                forceKill = setTimeout(() => {
+                  if (child.exitCode === null) child.kill("SIGKILL");
+                }, 1_000);
+              }
+              void cancelCaptures();
+            }, timeoutMillis);
+            try {
+              child.stdin.write(stdin);
+              child.stdin.end();
+              const [stdout, stderr, exitCode] = await Promise.all([
+                stdoutCapture.result,
+                stderrCapture.result,
+                exited,
+              ]);
+              return {
+                stdout,
+                stderr,
+                exitCode,
+                signalCode: child.signalCode,
+                timedOut,
+              };
+            } finally {
+              signal.removeEventListener("abort", onAbort);
+              clearTimeout(timeout);
+              clearTimeout(forceKill);
+              void cancelCaptures();
+            }
+          },
+          catch: (cause) => nativeScriptError("Failed to capture schedule script execution", cause),
+        }),
+      ({ child, stdoutCapture, stderrCapture }) =>
+        Effect.promise(async () => {
+          if (child.exitCode !== null) return;
+          child.kill("SIGTERM");
+          const forceKill = setTimeout(() => child.kill("SIGKILL"), 1_000);
+          await child.exited.finally(() => clearTimeout(forceKill));
+        }).pipe(
+          Effect.catchCause((cause) =>
+            Cause.hasInterruptsOnly(cause)
+              ? Effect.void
+              : Effect.logError("Failed to stop interrupted schedule script").pipe(
+                  Effect.annotateLogs({ phase: "child-stop", category: "operation" }),
+                ),
+          ),
+          Effect.andThen(
+            Effect.forEach(
+              [
+                { stream: "stdout", capture: stdoutCapture },
+                { stream: "stderr", capture: stderrCapture },
+              ],
+              ({ stream, capture }) =>
+                Effect.tryPromise({
+                  try: capture.cancel,
+                  catch: () => scriptError("Failed to cancel schedule script output reader"),
+                }).pipe(
+                  Effect.catchCause((cause) =>
+                    Cause.hasInterruptsOnly(cause)
+                      ? Effect.void
+                      : Effect.logError("Failed to cancel schedule script output reader").pipe(
+                          Effect.annotateLogs({ phase: "reader-cleanup", stream }),
+                        ),
+                  ),
+                ),
+              { discard: true },
+            ),
+          ),
         ),
-      ),
-  ).pipe(Effect.result);
-  if (Result.isFailure(attempted)) {
-    yield* writeArtifactString(
-      storage,
-      run,
-      "script/result.json",
-      JSON.stringify({ kind: "failed", message: attempted.failure.message, timeoutMillis }),
-    );
-    return yield* failWithDecision(storage, run, attempted.failure);
-  }
-  const processResult = attempted.success;
-
-  yield* Effect.all(
-    [
-      writeArtifact(storage, run, "script/stdout.bin", processResult.stdout.bytes),
-      writeArtifact(storage, run, "script/stderr.bin", processResult.stderr.bytes),
-      writeArtifactString(
+    ).pipe(Effect.result);
+    if (Result.isFailure(attempted)) {
+      yield* recordFailureArtifact(
         storage,
         run,
         "script/result.json",
-        JSON.stringify({
-          timeoutMillis,
-          exitCode: processResult.exitCode,
-          signalCode: processResult.signalCode,
-          timedOut: processResult.timedOut,
-          stdout: {
-            totalBytes: processResult.stdout.totalBytes,
-            truncated: processResult.stdout.truncated,
-          },
-          stderr: {
-            totalBytes: processResult.stderr.totalBytes,
-            truncated: processResult.stderr.truncated,
-          },
-        }),
-      ),
-    ],
-    { concurrency: "unbounded", discard: true },
-  );
+        JSON.stringify({ kind: "failed", message: attempted.failure.message, timeoutMillis }),
+      );
+      return yield* failWithDecision(storage, run, attempted.failure);
+    }
+    const processResult = attempted.success;
+    const processFailure = processResult.timedOut
+      ? scriptError(`Schedule script timed out after ${timeoutMillis} milliseconds`)
+      : processResult.signalCode !== null
+        ? scriptError(`Schedule script terminated by signal ${processResult.signalCode}`)
+        : processResult.exitCode !== 0
+          ? scriptError(`Schedule script exited with status ${processResult.exitCode}`)
+          : processResult.stdout.truncated
+            ? protocolError("Schedule script stdout exceeded 256 KiB")
+            : undefined;
+    const decoded =
+      processFailure === undefined
+        ? yield* Effect.try({
+            try: () =>
+              decodeDecision(
+                new TextDecoder("utf-8", { fatal: true }).decode(processResult.stdout.bytes),
+              ),
+            catch: () => protocolError("Schedule script returned an invalid decision"),
+          }).pipe(Effect.result)
+        : Result.fail(processFailure);
 
-  if (processResult.timedOut) {
-    return yield* failWithDecision(
-      storage,
-      run,
-      scriptError(`Schedule script timed out after ${timeoutMillis} milliseconds`),
+    yield* Effect.all(
+      [
+        writeArtifact(storage, run, "script/stdout.bin", processResult.stdout.bytes),
+        writeArtifact(storage, run, "script/stderr.bin", processResult.stderr.bytes),
+        writeArtifactString(
+          storage,
+          run,
+          "script/result.json",
+          JSON.stringify({
+            timeoutMillis,
+            exitCode: processResult.exitCode,
+            signalCode: processResult.signalCode,
+            timedOut: processResult.timedOut,
+            stdout: {
+              totalBytes: processResult.stdout.totalBytes,
+              truncated: processResult.stdout.truncated,
+            },
+            stderr: {
+              totalBytes: processResult.stderr.totalBytes,
+              truncated: processResult.stderr.truncated,
+            },
+          }),
+        ),
+      ],
+      { concurrency: "unbounded", discard: true },
+    ).pipe(
+      Effect.catchCause((cause) => {
+        if (Result.isSuccess(decoded) || Cause.hasInterruptsOnly(cause)) {
+          return Effect.failCause(cause);
+        }
+        return Effect.logError("Failed to record schedule script result artifacts").pipe(
+          Effect.annotateLogs({
+            phase: "failure-artifact",
+            category: cause.reasons.some(Cause.isDieReason) ? "defect" : "io",
+          }),
+        );
+      }),
     );
-  }
-  if (processResult.signalCode !== null) {
-    return yield* failWithDecision(
-      storage,
-      run,
-      scriptError(`Schedule script terminated by signal ${processResult.signalCode}`),
-    );
-  }
-  if (processResult.exitCode !== 0) {
-    return yield* failWithDecision(
-      storage,
-      run,
-      scriptError(`Schedule script exited with status ${processResult.exitCode}`),
-    );
-  }
-  if (processResult.stdout.truncated) {
-    return yield* failWithDecision(
-      storage,
-      run,
-      protocolError("Schedule script stdout exceeded 256 KiB"),
-    );
-  }
-
-  const decoded = yield* Effect.try({
-    try: () =>
-      decodeDecision(new TextDecoder("utf-8", { fatal: true }).decode(processResult.stdout.bytes)),
-    catch: (cause) =>
-      protocolError(
-        cause instanceof Error
-          ? `Schedule script returned an invalid decision: ${cause.message}`
-          : "Schedule script returned an invalid decision",
-      ),
-  }).pipe(Effect.result);
-  if (Result.isFailure(decoded)) {
-    return yield* failWithDecision(storage, run, decoded.failure);
-  }
-  const decision = decoded.success;
-  yield* writeArtifactString(storage, run, "decision.json", JSON.stringify(decision));
-  return {
-    decision,
-    stdout: processResult.stdout,
-    stderr: processResult.stderr,
-    exitCode: processResult.exitCode,
-    timeoutMillis,
-  };
-});
+    if (Result.isFailure(decoded)) {
+      return yield* failWithDecision(storage, run, decoded.failure);
+    }
+    const decision = decoded.success;
+    yield* writeArtifactString(storage, run, "decision.json", JSON.stringify(decision));
+    return {
+      decision,
+      stdout: processResult.stdout,
+      stderr: processResult.stderr,
+      exitCode: processResult.exitCode,
+      timeoutMillis,
+    };
+  },
+  (
+    effect,
+    _storage,
+    _executable,
+    run,
+    target,
+    _timeoutMillis = Schedule.DEFAULT_SCRIPT_TIMEOUT_MS,
+  ) =>
+    effect.pipe(
+      Effect.annotateLogs({
+        component: "schedule",
+        operation: "script",
+        scheduleId: run.scheduleId,
+        runId: run.id,
+        chatId: target.chatId,
+        workspaceId: target.workspaceId,
+      }),
+    ),
+);

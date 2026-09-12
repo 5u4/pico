@@ -2,15 +2,14 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { AgentSessionStore, type CreateAgentSession } from "@pico/contract/agent-session-store";
 import { AgentError } from "@pico/contract/errors";
 import type { AbsolutePath } from "@pico/contract/path";
+import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 
-const agentError = (message: string, cause: unknown) =>
-  new AgentError({
-    message: cause instanceof Error ? `${message}: ${cause.message}` : message,
-  });
+import { agentError } from "./agent-error.ts";
 
 export const make = Effect.fn("AgentSessionStore.make")(function* (sessionsDir: AbsolutePath) {
   const fileSystem = yield* FileSystem.FileSystem;
@@ -52,18 +51,48 @@ export const make = Effect.fn("AgentSessionStore.make")(function* (sessionsDir: 
               try: () => manager.ensureOnDisk(),
               catch: (cause) => agentError("Failed to persist OMP session", cause),
             }),
-          (manager) =>
+          (manager, exit) =>
             Effect.tryPromise({
               try: () => manager.close(),
               catch: (cause) => agentError("Failed to close OMP session", cause),
-            }),
+            }).pipe(
+              Effect.catchCause((cause) =>
+                Exit.isSuccess(exit)
+                  ? Effect.failCause(cause)
+                  : Effect.logError("Failed to close OMP journal after persistence failure").pipe(
+                      Effect.annotateLogs({
+                        component: "omp",
+                        operation: "journal-cleanup",
+                        chatId: input.chatId,
+                        phase: "close",
+                        failureKind: Cause.hasDies(cause) ? "defect" : "operation",
+                      }),
+                    ),
+              ),
+            ),
         );
       }).pipe(
         Effect.mapError((error) =>
           error instanceof AgentError ? error : agentError("Failed to create OMP session", error),
         ),
-        Effect.tapError(() =>
-          reserved ? removeSessionFiles(input.chatId).pipe(Effect.ignore) : Effect.void,
+        Effect.tapCause(() =>
+          reserved
+            ? removeSessionFiles(input.chatId).pipe(
+                Effect.catchCause((cause) =>
+                  Cause.hasInterruptsOnly(cause)
+                    ? Effect.interrupt
+                    : Effect.logError("Failed to remove OMP journal after creation failure").pipe(
+                        Effect.annotateLogs({
+                          component: "omp",
+                          operation: "journal-cleanup",
+                          chatId: input.chatId,
+                          phase: "create-rollback",
+                          failureKind: Cause.hasDies(cause) ? "defect" : "operation",
+                        }),
+                      ),
+                ),
+              )
+            : Effect.void,
         ),
       ),
     );

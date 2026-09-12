@@ -3,8 +3,8 @@ import type { AgentEventEnvelope } from "@pico/contract/agent-event";
 import type * as Chat from "@pico/contract/chat-model";
 import { EventRouter } from "@pico/contract/event-router";
 import { type CreateApplicationCommand, createBot, GatewayIntents, MessageFlags } from "discordeno";
-import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
+import * as FiberSet from "effect/FiberSet";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Redacted from "effect/Redacted";
@@ -13,10 +13,14 @@ import * as Stream from "effect/Stream";
 import * as FetchHttpClient from "effect/unstable/http/FetchHttpClient";
 import * as HttpClient from "effect/unstable/http/HttpClient";
 import * as DiscordCommand from "./discord-command.ts";
+import { DiscordError, discordError, promiseBoundary, reportFailure } from "./discord-error.ts";
 import * as DiscordInput from "./discord-input.ts";
 import * as DiscordOutput from "./discord-output.ts";
 
+export { DiscordError };
+
 export interface DiscordStartupBot {
+  readonly id?: bigint;
   readonly helpers: {
     readonly upsertGlobalApplicationCommands: (
       commands: Array<CreateApplicationCommand>,
@@ -31,8 +35,10 @@ export interface DiscordStartupBot {
 }
 
 const stopBot = (bot: DiscordStartupBot) =>
-  DiscordInput.promiseBoundary("Failed to stop Discord bot", () => bot.shutdown()).pipe(
-    Effect.catch((error) => Effect.logError("Discord shutdown failed", error.message)),
+  promiseBoundary("stop-bot", () => bot.shutdown()).pipe(
+    Effect.andThen(Effect.logInfo("Discord bot stopped")),
+    Effect.catchCause((cause) => reportFailure("stop-bot", cause)),
+    Effect.annotateLogs({ component: "discord", operation: "stop-bot", botId: bot.id?.toString() }),
   );
 
 export const openBot = Effect.fn("Discord.openBot")(function* (
@@ -41,33 +47,54 @@ export const openBot = Effect.fn("Discord.openBot")(function* (
   joinedGuildIds: ReadonlySet<string>,
 ) {
   const acquire = Effect.gen(function* () {
-    yield* DiscordInput.promiseBoundary("Failed to start Discord bot", () => bot.start());
+    yield* Effect.logDebug("Starting Discord bot").pipe(
+      Effect.annotateLogs({
+        component: "discord",
+        operation: "start-bot",
+        botId: bot.id?.toString(),
+      }),
+    );
+    yield* promiseBoundary("start-bot", () => bot.start());
     const allowedGuildIdSet = new Set(config.allowedGuildIds);
     const allowedGuildIds = Array.from(allowedGuildIdSet);
     const missingGuildIds = allowedGuildIds.filter((guildId) => !joinedGuildIds.has(guildId));
     if (missingGuildIds.length > 0) {
       return yield* Effect.fail(
-        DiscordInput.discordError(
-          `Discord bot is not a member of allowed guild(s): ${missingGuildIds.join(", ")}`,
-          undefined,
-        ),
+        new DiscordError({
+          operation: "validate-guild-membership",
+          message: `Discord bot is not a member of allowed guild(s): ${missingGuildIds.join(", ")}`,
+        }),
       );
     }
 
-    yield* DiscordInput.promiseBoundary("Failed to clear global Discord commands", () =>
+    yield* promiseBoundary("clear-global-commands", () =>
       bot.helpers.upsertGlobalApplicationCommands([]),
     );
     yield* Effect.forEach(allowedGuildIds, (guildId) =>
-      DiscordInput.promiseBoundary("Failed to register Discord commands", () =>
-        bot.helpers.upsertGuildApplicationCommands(guildId, DiscordCommand.applicationCommands),
+      promiseBoundary(
+        "register-guild-commands",
+        () =>
+          bot.helpers.upsertGuildApplicationCommands(guildId, DiscordCommand.applicationCommands),
+        guildId,
       ),
     );
     yield* Effect.forEach(
       Array.from(joinedGuildIds).filter((guildId) => !allowedGuildIdSet.has(guildId)),
       (guildId) =>
-        DiscordInput.promiseBoundary("Failed to clear disallowed guild Discord commands", () =>
-          bot.helpers.upsertGuildApplicationCommands(guildId, []),
+        promiseBoundary(
+          "clear-guild-commands",
+          () => bot.helpers.upsertGuildApplicationCommands(guildId, []),
+          guildId,
         ),
+    );
+    yield* Effect.logInfo("Discord bot ready").pipe(
+      Effect.annotateLogs({
+        component: "discord",
+        operation: "start-bot",
+        botId: bot.id?.toString(),
+        configuredGuildCount: allowedGuildIds.length,
+        joinedGuildCount: joinedGuildIds.size,
+      }),
     );
     return bot;
   }).pipe(Effect.tapError(() => stopBot(bot)));
@@ -83,19 +110,81 @@ export const pumpOutput = Effect.fn("Discord.pumpOutput")(function* (
   const route = yield* eventRouter.open(() => true);
   yield* route.events.pipe(
     Stream.runForEach((envelope) =>
-      resolveThreadId(envelope.chatId).pipe(
-        Effect.flatMap(
-          Option.match({
-            onNone: () => Effect.void,
-            onSome: (threadId) => dispatch(threadId, envelope),
+      Effect.scoped(
+        Effect.gen(function* () {
+          yield* Effect.annotateLogsScoped({ phase: "resolve-thread" });
+          const thread = yield* resolveThreadId(envelope.chatId);
+          if (Option.isNone(thread)) return;
+          yield* Effect.annotateLogsScoped({
+            phase: "deliver-event",
+            threadId: thread.value.toString(),
+          });
+          yield* dispatch(thread.value, envelope);
+        }).pipe(
+          Effect.catchCause((cause) => reportFailure("deliver-event", cause)),
+          Effect.annotateLogs({
+            component: "discord",
+            chatId: envelope.chatId,
+            eventType: envelope.event.type,
           }),
         ),
-        Effect.catchCause((cause) => Effect.logError("Discord output failed", Cause.pretty(cause))),
       ),
     ),
+    Effect.catchCause((cause) => reportFailure("output-pump", cause)),
     Effect.forkScoped({ startImmediately: true }),
   );
 });
+
+export const sdkLoggerFactory =
+  (run: (effect: Effect.Effect<void>) => unknown) => (name: "REST" | "GATEWAY" | "BOT") => {
+    const discard = () => {};
+    const report = (level: "warning" | "error", message: unknown) => {
+      if (name !== "GATEWAY") return;
+      const connection =
+        typeof message === "string"
+          ? /^\[Shard\] There was an error connecting Shard #(\d+)\.$/.exec(message)
+          : null;
+      const category = connection !== null ? "connection" : "sdk-gateway";
+      run(
+        (level === "warning"
+          ? Effect.logWarning("Discord gateway degraded")
+          : Effect.logError("Discord gateway failed")
+        ).pipe(
+          Effect.annotateLogs({
+            component: "discord",
+            operation: "gateway",
+            category,
+            ...(connection?.[1] === undefined ? {} : { shardId: connection[1] }),
+          }),
+        ),
+      );
+    };
+    return {
+      debug: discard,
+      info: (message: unknown) => {
+        if (name !== "GATEWAY" || typeof message !== "string") return;
+        const disconnected =
+          /^\[Shard\] Shard #(\d+) closed with code (\d+)\. Attempting to resume\.\.\.$/.exec(
+            message,
+          );
+        if (disconnected === null) return;
+        run(
+          Effect.logWarning("Discord gateway reconnecting").pipe(
+            Effect.annotateLogs({
+              component: "discord",
+              operation: "gateway",
+              eventType: "disconnected",
+              shardId: disconnected[1],
+              closeCode: Number(disconnected[2]),
+            }),
+          ),
+        );
+      },
+      warn: (message: unknown) => report("warning", message),
+      error: (message: unknown) => report("error", message),
+      fatal: (message: unknown) => report("error", message),
+    };
+  };
 
 const start = Effect.fn("Discord.start")(function* (
   config: DiscordConfig,
@@ -103,12 +192,37 @@ const start = Effect.fn("Discord.start")(function* (
 ) {
   const eventRouter = yield* EventRouter;
   const httpClient = yield* HttpClient.HttpClient;
+  const run = yield* FiberSet.makeRuntime();
+  const gatewayEvent = (event: string, shardId: number, resumable?: boolean) => {
+    run(
+      Effect.logInfo("Discord gateway lifecycle").pipe(
+        Effect.annotateLogs({
+          component: "discord",
+          operation: "gateway",
+          eventType: event,
+          shardId,
+          ...(resumable === undefined ? {} : { resumable }),
+        }),
+      ),
+    );
+  };
   const allowedMentions = { parse: [], repliedUser: false };
 
   const bot = yield* Effect.try({
     try: () =>
       createBot({
         token: Redacted.value(config.token),
+        loggerFactory: sdkLoggerFactory(run),
+        gateway: {
+          events: {
+            connecting: (shard) => gatewayEvent("connecting", shard.id),
+            connected: (shard) => gatewayEvent("connected", shard.id),
+            requestedReconnect: (shard) => gatewayEvent("reconnect-requested", shard.id),
+            resumed: (shard) => gatewayEvent("resumed", shard.id),
+            invalidSession: (shard, resumable) =>
+              gatewayEvent("invalid-session", shard.id, resumable),
+          },
+        },
         intents:
           GatewayIntents.Guilds | GatewayIntents.GuildMessages | GatewayIntents.MessageContent,
         desiredProperties: {
@@ -149,7 +263,7 @@ const start = Effect.fn("Discord.start")(function* (
           },
         },
       }),
-    catch: (cause) => DiscordInput.discordError("Failed to create Discord bot", cause),
+    catch: (cause) => discordError("create-bot", cause),
   });
   const joinedGuildIds = new Set<string>();
   bot.events.ready = ({ guilds, user }) => {
@@ -169,7 +283,7 @@ const start = Effect.fn("Discord.start")(function* (
   const dispatch = DiscordOutput.make(
     {
       send: (threadId, message) =>
-        DiscordInput.promiseBoundary("Failed to send Discord message", () =>
+        promiseBoundary("send-message", () =>
           bot.helpers.sendMessage(threadId, {
             content: message.content,
             allowedMentions,
@@ -177,17 +291,15 @@ const start = Effect.fn("Discord.start")(function* (
           }),
         ).pipe(Effect.map((sent) => sent.id)),
       edit: (threadId, messageId, content) =>
-        DiscordInput.promiseBoundary("Failed to edit Discord message", () =>
+        promiseBoundary("edit-message", () =>
           bot.helpers.editMessage(threadId, messageId, { content, allowedMentions }),
         ).pipe(Effect.asVoid),
       renameThread: (threadId, title) =>
-        DiscordInput.promiseBoundary("Failed to rename Discord thread", () =>
+        promiseBoundary("rename-thread", () =>
           bot.helpers.editChannel(threadId, { name: title }),
         ).pipe(Effect.asVoid),
       triggerTyping: (threadId) =>
-        DiscordInput.promiseBoundary("Failed to trigger Discord typing indicator", () =>
-          bot.helpers.triggerTypingIndicator(threadId),
-        ),
+        promiseBoundary("trigger-typing", () => bot.helpers.triggerTypingIndicator(threadId)),
     },
     scope,
     { showToolCalls: config.showToolCalls, showThinking: config.showThinking },

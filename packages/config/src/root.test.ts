@@ -42,6 +42,7 @@ describe("ConfigRoot.open", () => {
 
           const conflict = yield* Effect.scoped(open(root)).pipe(Effect.flip);
           assert.instanceOf(conflict, ConfigError);
+          assert.include(conflict.message, ".pico.lock");
 
           return paths;
         }),

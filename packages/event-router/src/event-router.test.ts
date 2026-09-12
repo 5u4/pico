@@ -8,6 +8,7 @@ import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
 import * as Queue from "effect/Queue";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
@@ -148,6 +149,71 @@ describe("EventRouter", () => {
       yield* Queue.offer(source, afterRouterRelease);
       assert.strictEqual(yield* Queue.size(source), 1);
       assert.deepStrictEqual(yield* Queue.take(source), afterRouterRelease);
+    }),
+  );
+  it.effect("reports a failed pump once and keeps scope shutdown quiet", () =>
+    Effect.gen(function* () {
+      for (const failureAt of ["filter", "upstream", "shutdown"] as const) {
+        const records: Array<ReturnType<typeof Logger.formatStructured.log>> = [];
+        const reported = Promise.withResolvers<void>();
+        const logger = Logger.layer([
+          Logger.make((options) => {
+            const record = Logger.formatStructured.log(options);
+            records.push(record);
+            if (record.level === "ERROR") reported.resolve();
+          }),
+        ]);
+        const source = yield* Queue.unbounded<AgentEventEnvelope>();
+        const runtimeLayer = Layer.succeed(
+          AgentRuntime,
+          AgentRuntime.of({
+            events: Stream.fromQueue(source).pipe(
+              Stream.mapEffect((item) =>
+                failureAt === "upstream"
+                  ? Effect.die(new Error("private upstream payload"))
+                  : Effect.succeed(item),
+              ),
+            ),
+            drain: () => Effect.void,
+            transcript: () => Effect.die("unused"),
+            send: () => Effect.die("unused"),
+            sendCaptured: () => Effect.die("unused"),
+            deliver: () => Effect.die("unused"),
+            publish: () => Effect.die("unused"),
+            abort: () => Effect.die("unused"),
+            contextUsage: () => Effect.die("unused"),
+            shake: () => Effect.die("unused"),
+            close: () => Effect.void,
+          }),
+        );
+        yield* Effect.gen(function* () {
+          const routerScope = yield* Scope.make();
+          const routeScope = yield* Scope.make();
+          const context = yield* Layer.build(layer.pipe(Layer.provide(runtimeLayer))).pipe(
+            Scope.provide(routerScope),
+          );
+          const router = Context.get(context, EventRouter);
+          yield* router
+            .open(() => {
+              if (failureAt === "filter") throw new Error("private filter payload");
+              return true;
+            })
+            .pipe(Scope.provide(routeScope));
+          if (failureAt !== "shutdown") {
+            yield* Queue.offer(source, envelope(firstChatId, "private event payload"));
+            yield* Effect.promise(() => reported.promise);
+          }
+          yield* Scope.close(routeScope, Exit.void);
+          yield* Scope.close(routerScope, Exit.void);
+          const errors = records.filter((record) => record.level === "ERROR");
+          assert.strictEqual(errors.length, failureAt === "shutdown" ? 0 : 1);
+          if (failureAt === "filter") {
+            assert.strictEqual(errors[0]?.annotations.chatId, firstChatId);
+            assert.strictEqual(errors[0]?.annotations.eventType, "notice");
+          }
+          assert.notInclude(JSON.stringify(records), "private");
+        }).pipe(Effect.provide(logger));
+      }
     }),
   );
 });

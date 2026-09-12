@@ -1,5 +1,6 @@
 import { LoggingError } from "@pico/contract/errors";
 import type { AbsolutePath } from "@pico/contract/path";
+import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -17,7 +18,7 @@ interface DailyLogEntry {
 const dailyLogName = /^pico-\d{4}-\d{2}-\d{2}\.log$/;
 
 const loggingError = (error: PlatformError.PlatformError) =>
-  new LoggingError({ message: error.message });
+  new LoggingError({ message: `Log filesystem operation failed (${error.reason._tag})` });
 
 const isNotSymlink = (error: PlatformError.PlatformError) => {
   const cause = "cause" in error.reason ? error.reason.cause : undefined;
@@ -67,6 +68,19 @@ const prune = Effect.fn("Logging.prune")(function* (
     }
   }
 });
+
+const consoleLoggers = new Set([Logger.consolePretty()]);
+
+const reportSinkFailure = (
+  error: PlatformError.PlatformError,
+  operation: "append" | "prune",
+  day: string,
+) =>
+  Effect.logError("pico.logging.failed", Cause.fail(loggingError(error))).pipe(
+    Effect.annotateLogs({ component: "logging", operation, day }),
+    Effect.provideService(Logger.CurrentLoggers, consoleLoggers),
+    Effect.provideService(Logger.LogToStderr, true),
+  );
 
 export const make = Effect.fn("Logging.make")(function* (logsDir: AbsolutePath) {
   const fileSystem = yield* FileSystem.FileSystem;
@@ -118,7 +132,7 @@ export const make = Effect.fn("Logging.make")(function* (logsDir: AbsolutePath) 
             flag: "a",
             mode: 0o600,
           })
-          .pipe(Effect.ignore),
+          .pipe(Effect.catch((error) => reportSinkFailure(error, "append", day))),
       { discard: true },
     );
 
@@ -126,8 +140,14 @@ export const make = Effect.fn("Logging.make")(function* (logsDir: AbsolutePath) 
       return;
     }
 
-    lastPrunedDay = latest.day;
-    yield* prune(fileSystem, path, logsDir, latest.retainedFrom).pipe(Effect.ignore);
+    yield* prune(fileSystem, path, logsDir, latest.retainedFrom).pipe(
+      Effect.tap(
+        Effect.sync(() => {
+          lastPrunedDay = latest.day;
+        }),
+      ),
+      Effect.catch((error) => reportSinkFailure(error, "prune", latest.day)),
+    );
   });
 
   return yield* Logger.batched(dailyLogger, { window: "1 second", flush });

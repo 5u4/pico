@@ -1,11 +1,35 @@
-import { mkdir, mkdtemp, rm, symlink } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { clearTimeout, setTimeout } from "node:timers";
 import { assert, describe, it } from "@effect/vitest";
+import * as Schema from "effect/Schema";
 
 const fixturePath = Bun.fileURLToPath(new URL("./runtime.fixture.ts", import.meta.url));
+const mainPath = Bun.fileURLToPath(new URL("../src/main.ts", import.meta.url));
 const cliDirectory = Bun.fileURLToPath(new URL("../", import.meta.url));
+
+const decodeLog = Schema.decodeUnknownSync(
+  Schema.fromJsonString(
+    Schema.Struct({
+      level: Schema.String,
+      cause: Schema.optionalKey(Schema.String),
+      annotations: Schema.Record(Schema.String, Schema.Unknown),
+    }),
+  ),
+);
+
+const readLogs = async (root: string) => {
+  const directory = join(root, "logs");
+  const files = (await readdir(directory)).filter((file) =>
+    /^pico-\d{4}-\d{2}-\d{2}\.log$/.test(file),
+  );
+  const contents = await Promise.all(files.map((file) => readFile(join(directory, file), "utf8")));
+  return contents.flatMap((content) => content.trim().split("\n").filter(Boolean).map(decodeLog));
+};
+
+const consoleErrors = (result: { readonly stdout: string; readonly stderr: string }) =>
+  `${result.stdout}\n${result.stderr}`.match(/^\[[^\r\n]*\] ERROR \(#\d+\)/gm)?.length ?? 0;
 
 const pump = async (
   stream: ReadableStream<Uint8Array>,
@@ -188,6 +212,7 @@ describe("CLI foreground shutdown", () => {
 
       assert.strictEqual(result.exitCode, 23, result.stderr);
       assert.include(`${result.stdout}${result.stderr}`, "fixture failure");
+      assert.strictEqual(consoleErrors(result), 1);
     } finally {
       await terminate(spawned);
     }
@@ -268,6 +293,22 @@ describe("CLI foreground shutdown", () => {
           const exitCode = await withTimeout(child.exited, 10_000, "linked pico exit");
           assert.strictEqual(exitCode, 130, transcript);
           assert.isFalse(await Bun.file(lockFile).exists(), transcript);
+          assert.include(transcript, "pico: stopping on SIGINT");
+          assert.notInclude(transcript, "forcing exit");
+          assert.strictEqual(consoleErrors({ stdout: transcript, stderr: "" }), 0);
+          const logs = await readLogs(root);
+          assert.deepStrictEqual(
+            logs.filter((entry) => entry.level === "ERROR"),
+            [],
+          );
+          assert.strictEqual(
+            logs.find((entry) => entry.annotations.phase === "ready")?.annotations.operation,
+            "run",
+          );
+          for (const entry of logs) {
+            assert.notProperty(entry.annotations, "root");
+            assert.notInclude(JSON.stringify(entry.annotations), root);
+          }
         } finally {
           if (child.exitCode === null) child.kill("SIGKILL");
           await withTimeout(child.exited, 2_000, "linked pico cleanup");
@@ -278,4 +319,131 @@ describe("CLI foreground shutdown", () => {
     },
     45_000,
   );
+
+  it("reports logger acquisition failure to console and releases the root", async () => {
+    const temporaryDirectory = await mkdtemp(join(tmpdir(), "pico-cli-logger-"));
+    const root = join(temporaryDirectory, "root");
+    await mkdir(root);
+    await writeFile(join(root, "logs"), "");
+    const spawned = spawnChild(mainPath, ["start", root]);
+    try {
+      const result = await finish(spawned, 15_000);
+      assert.notStrictEqual(result.exitCode, 0);
+      assert.strictEqual(consoleErrors(result), 1);
+      assert.isFalse(await Bun.file(join(root, ".pico.lock")).exists());
+    } finally {
+      await terminate(spawned);
+      await rm(temporaryDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it("leaves reusable daemon failure reporting to its caller", async () => {
+    const temporaryDirectory = await mkdtemp(join(tmpdir(), "pico-cli-reusable-"));
+    const root = join(temporaryDirectory, "root");
+    await mkdir(join(root, "store.db"), { recursive: true });
+    const spawned = spawnChild(fixturePath, ["reusable-failure", root]);
+    try {
+      const result = await finish(spawned, 15_000);
+      assert.notStrictEqual(result.exitCode, 0);
+      assert.strictEqual(consoleErrors(result), 1);
+      assert.deepStrictEqual(
+        (await readLogs(root)).filter((entry) => entry.level === "ERROR"),
+        [],
+      );
+      assert.isFalse(await Bun.file(join(root, ".pico.lock")).exists());
+    } finally {
+      await terminate(spawned);
+      await rm(temporaryDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it("flushes the actual CLI startup failure before releasing its logger", async () => {
+    const temporaryDirectory = await mkdtemp(join(tmpdir(), "pico-cli-startup-"));
+    const root = join(temporaryDirectory, "root");
+    await mkdir(join(root, "store.db"), { recursive: true });
+    const spawned = spawnChild(mainPath, ["start", root]);
+    try {
+      const result = await finish(spawned, 15_000);
+      const logs = await readLogs(root);
+      const failures = logs.filter((entry) => entry.level === "ERROR");
+      assert.notStrictEqual(result.exitCode, 0);
+      assert.strictEqual(consoleErrors(result), 1);
+      assert.strictEqual(failures.length, 1);
+      assert.strictEqual(failures[0]?.annotations.operation, "run");
+      assert.strictEqual(failures[0]?.annotations.phase, "startup");
+      assert.include(failures[0]?.cause ?? "", "PersistenceError");
+      for (const entry of logs) {
+        assert.notProperty(entry.annotations, "root");
+        assert.notInclude(JSON.stringify(entry.annotations), root);
+      }
+      assert.isFalse(await Bun.file(join(root, ".pico.lock")).exists());
+    } finally {
+      await terminate(spawned);
+      await rm(temporaryDirectory, { recursive: true, force: true });
+    }
+  });
+
+  for (const mode of [
+    "daemon-finalizer-failure",
+    "daemon-mixed-interruption",
+    "daemon-external-interruption",
+    "daemon-root-release-failure",
+  ]) {
+    it(`reports ${mode} once after resource finalization`, async () => {
+      const temporaryDirectory = await mkdtemp(join(tmpdir(), "pico-cli-finalizer-"));
+      const root = join(temporaryDirectory, "root");
+      const spawned = spawnChild(fixturePath, [mode, root]);
+      try {
+        const result = await finish(spawned, 15_000);
+        const failures = (await readLogs(root)).filter((entry) => entry.level === "ERROR");
+        assert.notStrictEqual(result.exitCode, 0);
+        assert.strictEqual(consoleErrors(result), 1);
+        assert.strictEqual(failures.length, 1);
+        assert.include(failures[0]?.cause ?? "", "ConfigError");
+        assert.notInclude(JSON.stringify(failures), "private-filesystem-detail");
+        assert.strictEqual(
+          await Bun.file(join(root, ".pico.lock")).exists(),
+          mode === "daemon-root-release-failure",
+        );
+      } finally {
+        await terminate(spawned);
+        await rm(temporaryDirectory, { recursive: true, force: true });
+      }
+    });
+  }
+
+  it("cleans the root without an error record when startup is interrupted", async () => {
+    const temporaryDirectory = await mkdtemp(join(tmpdir(), "pico-cli-interrupt-"));
+    const root = join(temporaryDirectory, "root");
+    const spawned = spawnChild(fixturePath, ["daemon-startup-interruption", root]);
+    try {
+      const result = await finish(spawned, 15_000);
+      assert.notStrictEqual(result.exitCode, 0);
+      assert.strictEqual(consoleErrors(result), 0);
+      assert.deepStrictEqual(
+        (await readLogs(root)).filter((entry) => entry.level === "ERROR"),
+        [],
+      );
+      assert.isFalse(await Bun.file(join(root, ".pico.lock")).exists());
+    } finally {
+      await terminate(spawned);
+      await rm(temporaryDirectory, { recursive: true, force: true });
+    }
+  });
+
+  for (const { args, code } of [
+    { args: ["--help"], code: 0 },
+    { args: ["start", "relative"], code: 1 },
+  ]) {
+    it(`preserves CLI rendering and exit code for ${args.join(" ")}`, async () => {
+      const spawned = spawnChild(mainPath, args);
+      try {
+        const result = await finish(spawned, 15_000);
+        assert.strictEqual(result.exitCode, code);
+        assert.strictEqual(consoleErrors(result), 0);
+      } finally {
+        await terminate(spawned);
+      }
+    });
+  }
 });

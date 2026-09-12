@@ -188,6 +188,22 @@ merely restates the service contract.
   mutable handles private. Control flow must make ownership transfer, replacement identity,
   rollback, and release order visible.
 
+## Logging and errors
+
+- The terminal consumer owns the failure log. Repository, Git, OMP, and application operations
+  refine and propagate errors; RPC handlers, Discord callbacks, and background workers report them.
+  A consumed cleanup failure is independent of the primary failure and gets its own diagnostic.
+- Use `Effect.annotateLogs` for operation, phase, and stable resource IDs. Keep routine reads,
+  event chunks, empty scans, expected domain rejections, and pure interruption out of error logs.
+  A mixed interruption and cleanup failure still needs a diagnostic.
+- Keep safe failure categories and numeric SDK status codes. Never log prompts, credentials,
+  config values, SQL parameters, attachment bodies, or arbitrary SDK payloads.
+- `ApplicationError.reason` distinguishes expected rejection from operational failure without
+  parsing message text. Add narrower errors when a consumer needs a different decision.
+- The CLI uses `Daemon.run` to report after resource cleanup and before logger cleanup. Its returned
+  `Exit` is already reported. Embedders using `Daemon.open` own the propagated failure instead.
+- File append and retention failures report only to stderr, never back through the failed file sink.
+
 ## Taste
 
 - Complexity belongs at the adapter boundary. Orchestration stays pure; UI stays dumb.

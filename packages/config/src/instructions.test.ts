@@ -69,7 +69,7 @@ describe("Instructions reader", () => {
     }).pipe(Effect.provide(platformLayer)),
   );
 
-  it.effect("reports non-missing read failures with their path and filesystem cause", () =>
+  it.effect("reports non-missing read failures without exposing filesystem details", () =>
     Effect.gen(function* () {
       const { fileSystem, path, root, read } = yield* fixture;
       const target = path.join(root, "agents", "instructions.md");
@@ -77,8 +77,8 @@ describe("Instructions reader", () => {
       const cause = yield* fileSystem.readFileString(target).pipe(Effect.flip);
       const error = yield* read({ kind: "global" }).pipe(Effect.flip);
       assert.instanceOf(error, ConfigError);
-      assert.include(error.message, target);
-      assert.include(error.message, cause.message);
+      assert.notInclude(error.message, target);
+      assert.include(error.message, cause.reason._tag);
     }).pipe(Effect.provide(platformLayer)),
   );
 

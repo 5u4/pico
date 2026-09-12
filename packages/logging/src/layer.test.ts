@@ -3,10 +3,12 @@ import * as BunPath from "@effect/platform-bun/BunPath";
 import { assert, describe, it } from "@effect/vitest";
 import { AbsolutePath } from "@pico/contract/path";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
 import * as TestClock from "effect/testing/TestClock";
 import * as TestConsole from "effect/testing/TestConsole";
@@ -90,5 +92,89 @@ describe("Logging.layer", () => {
         assert.strictEqual((yield* fileSystem.stat(matchingDirectory)).type, "Directory");
         assert.strictEqual(yield* fileSystem.readLink(matchingSymlink), symlinkTarget);
       }).pipe(Effect.provide(platformLayer)),
+  );
+
+  it.effect("reports a failed file append once outside the failed sink", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const picoRoot = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-logging-" });
+      const logsDir = AbsolutePath.make(path.join(picoRoot, "logs"));
+      yield* TestClock.setTime(beforeMidnight);
+      const blockedFile = path.join(logsDir, "pico-2026-03-31.log");
+
+      yield* Effect.gen(function* () {
+        yield* fileSystem.makeDirectory(blockedFile);
+        yield* Effect.logInfo("append-probe");
+      }).pipe(Effect.provide(layer(logsDir)), Effect.scoped);
+
+      const errors = (yield* TestConsole.errorLines).map(String).join("\n");
+      assert.strictEqual(errors.match(/pico\.logging\.failed/g)?.length, 1);
+      assert.include(errors, "append");
+      assert.strictEqual((yield* fileSystem.stat(blockedFile)).type, "Directory");
+      assert.notInclude(
+        (yield* TestConsole.logLines).map(String).join("\n"),
+        "pico.logging.failed",
+      );
+    }).pipe(Effect.provide(platformLayer)),
+  );
+
+  it.effect("retries failed retention on the next same-day flush without losing log batches", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const picoRoot = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-logging-" });
+      const logsDir = AbsolutePath.make(path.join(picoRoot, "logs"));
+      const expired = path.join(logsDir, "pico-2026-03-01.log");
+      const pruneAttempted = yield* Deferred.make<void>();
+      let retentionBlocked = true;
+      yield* TestClock.setTime(beforeMidnight);
+
+      yield* Effect.gen(function* () {
+        yield* fileSystem.writeFileString(expired, "retained evidence");
+        yield* TestClock.setTime(afterMidnight);
+        yield* Effect.logInfo("retention-probe");
+        yield* TestClock.adjust("1 second");
+        yield* Deferred.await(pruneAttempted);
+        assert.strictEqual(yield* fileSystem.readFileString(expired), "retained evidence");
+        retentionBlocked = false;
+        yield* Effect.logInfo("retention-recovered");
+      }).pipe(
+        Effect.provide(layer(logsDir)),
+        Effect.provideService(FileSystem.FileSystem, {
+          ...fileSystem,
+          remove: (file, options) =>
+            file === expired && retentionBlocked
+              ? Deferred.succeed(pruneAttempted, undefined).pipe(
+                  Effect.andThen(
+                    Effect.fail(
+                      PlatformError.systemError({
+                        _tag: "PermissionDenied",
+                        module: "FileSystem",
+                        method: "remove",
+                        description: "private-retention-detail",
+                      }),
+                    ),
+                  ),
+                )
+              : fileSystem.remove(file, options),
+        }),
+        Effect.scoped,
+      );
+
+      const errors = (yield* TestConsole.errorLines).map(String).join("\n");
+      assert.strictEqual(errors.match(/pico\.logging\.failed/g)?.length, 1);
+      assert.include(errors, "prune");
+      assert.notInclude(errors, "private-retention-detail");
+      assert.isFalse(yield* fileSystem.exists(expired));
+      const entries = (yield* fileSystem.readFileString(path.join(logsDir, "pico-2026-04-01.log")))
+        .trimEnd()
+        .split("\n")
+        .map((line) => decodeLogEntry(line));
+      assert.deepStrictEqual(
+        entries.map((entry) => entry.message),
+        ["retention-probe", "retention-recovered"],
+      );
+    }).pipe(Effect.provide(platformLayer)),
   );
 });
