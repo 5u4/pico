@@ -1,6 +1,6 @@
 import type { PicoRoot } from "@pico/contract/config";
 import { ConfigError } from "@pico/contract/errors";
-import type { IdentityReader, IdentityScope } from "@pico/contract/identity";
+import type { InstructionsReader, InstructionsScope } from "@pico/contract/instructions";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
@@ -9,20 +9,24 @@ import * as Schema from "effect/Schema";
 const DiscordId = Schema.String.check(Schema.isPattern(/^[0-9]+$/), Schema.isTrimmed());
 const decodeDiscordId = Schema.decodeUnknownEffect(DiscordId);
 
-// Daemon captures the identity reader before composing session context.
-export const make = Effect.fn("Identity.make")(function* (root: PicoRoot) {
+// Daemon captures the instructions reader before composing session context.
+export const make = Effect.fn("Instructions.make")(function* (root: PicoRoot) {
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const agentsDir = path.join(root, "agents");
 
-  const read: IdentityReader = Effect.fn("Identity.read")(function* (scope: IdentityScope) {
-    const sources = [{ path: path.join(agentsDir, "identity.md"), heading: "Global identity" }];
+  const read: InstructionsReader = Effect.fn("Instructions.read")(function* (
+    scope: InstructionsScope,
+  ) {
+    const sources = [
+      { path: path.join(agentsDir, "instructions.md"), heading: "Global instructions" },
+    ];
     if (scope.kind === "discord") {
       const channelId = yield* decodeDiscordId(scope.channelId).pipe(
         Effect.mapError(
           (cause) =>
             new ConfigError({
-              message: `Invalid Discord channel ID for identity ${JSON.stringify(scope.channelId)}: ${cause.message}`,
+              message: `Invalid Discord channel ID for instructions ${JSON.stringify(scope.channelId)}: ${cause.message}`,
             }),
         ),
       );
@@ -31,18 +35,18 @@ export const make = Effect.fn("Identity.make")(function* (root: PicoRoot) {
           Effect.mapError(
             (cause) =>
               new ConfigError({
-                message: `Invalid Discord bot ID for identity ${JSON.stringify(scope.botId)}: ${cause.message}`,
+                message: `Invalid Discord bot ID for instructions ${JSON.stringify(scope.botId)}: ${cause.message}`,
               }),
           ),
         );
         sources.push({
-          path: path.join(agentsDir, "discord", "bots", botId, "identity.md"),
-          heading: "Discord bot identity",
+          path: path.join(agentsDir, "discord", "bots", botId, "instructions.md"),
+          heading: "Discord bot instructions",
         });
       }
       sources.push({
-        path: path.join(agentsDir, "discord", "channels", channelId, "identity.md"),
-        heading: "Discord channel identity",
+        path: path.join(agentsDir, "discord", "channels", channelId, "instructions.md"),
+        heading: "Discord channel instructions",
       });
     }
 
@@ -53,7 +57,7 @@ export const make = Effect.fn("Identity.make")(function* (root: PicoRoot) {
             ? Effect.succeed("")
             : Effect.fail(
                 new ConfigError({
-                  message: `Failed to read identity file ${sourcePath}: ${cause.message}`,
+                  message: `Failed to read instructions file ${sourcePath}: ${cause.message}`,
                 }),
               ),
         ),

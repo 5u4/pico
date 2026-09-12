@@ -1,19 +1,19 @@
 ---
-name: pico-identity
+name: pico-instructions
 description: Configure persistent Pico instructions.
 ---
 
 # Pico instructions
 
-Use `identity.md` for persistent instructions about language, workflows, tools, or response format.
+Use `instructions.md` for persistent instructions about language, workflows, tools, or response format.
 
 Use the running Pico's root directory, which defaults to `~/.pico`.
 
 | Scope | File under `<picoRoot>` |
 | --- | --- |
-| Global | `agents/identity.md` |
-| Discord bot | `agents/discord/bots/{botId}/identity.md` |
-| Discord channel | `agents/discord/channels/{channelId}/identity.md` |
+| Global | `agents/instructions.md` |
+| Discord bot | `agents/discord/bots/{botId}/instructions.md` |
+| Discord channel | `agents/discord/channels/{channelId}/instructions.md` |
 
 Use the parent Discord channel ID, not a thread ID.
 

@@ -5,7 +5,7 @@
   "exports": {
     "./root": "./src/root.ts",
     "./config": "./src/config.ts",
-    "./identity": "./src/identity.ts"
+    "./instructions": "./src/instructions.ts"
   },
   "dependencies": {
     "@pico/contract": "workspace:*",

@@ -2,7 +2,7 @@ import type * as Chat from "@pico/contract/chat-model";
 import { ChatRepository } from "@pico/contract/chat-repository";
 import { ChatSessionContext } from "@pico/contract/chat-session-context";
 import { AgentError } from "@pico/contract/errors";
-import type { IdentityReader, IdentityScope } from "@pico/contract/identity";
+import type { InstructionsReader, InstructionsScope } from "@pico/contract/instructions";
 import type * as Workspace from "@pico/contract/workspace-model";
 import { WorkspaceRepository } from "@pico/contract/workspace-repository";
 import * as Effect from "effect/Effect";
@@ -10,7 +10,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 
 interface Options {
-  readonly identity: IdentityReader;
+  readonly instructions: InstructionsReader;
   readonly discordBotId: Effect.Effect<string, AgentError> | null;
 }
 
@@ -31,13 +31,13 @@ const platformPrompts = {
   web: "You are pico, a personal agent assistant. You are chatting with the user through Pico Web.",
 } satisfies Record<Workspace.WorkspacePlatform | "web", string>;
 
-const identityGuidance =
-  "Apply the following identity conventions from general to specific. More-specific conventions take precedence, but do not override higher-level safety requirements.";
+const instructionsGuidance =
+  "Apply the following instructions from general to specific. More-specific instructions take precedence, but do not override higher-level safety requirements.";
 
 const resolve = Effect.fn("ChatSessionContext.resolve")(function* (
   chats: ChatRepository["Service"],
   workspaces: WorkspaceRepository["Service"],
-  { identity, discordBotId }: Options,
+  { instructions, discordBotId }: Options,
   chatId: Chat.ChatId,
 ) {
   const maybeChat = yield* chats
@@ -57,7 +57,7 @@ const resolve = Effect.fn("ChatSessionContext.resolve")(function* (
 
   const binding = maybeWorkspace.value.binding;
   const platform = binding?.platform ?? null;
-  const scope: IdentityScope =
+  const scope: InstructionsScope =
     binding === null
       ? { kind: "global" }
       : {
@@ -65,7 +65,7 @@ const resolve = Effect.fn("ChatSessionContext.resolve")(function* (
           botId: discordBotId === null ? null : yield* discordBotId,
           channelId: binding.externalId,
         };
-  const identityText = yield* identity(scope).pipe(
+  const instructionsText = yield* instructions(scope).pipe(
     Effect.mapError((cause) => new AgentError({ message: cause.message })),
   );
   const platformPrompt = platformPrompts[platform ?? "web"];
@@ -74,9 +74,9 @@ const resolve = Effect.fn("ChatSessionContext.resolve")(function* (
     chat,
     platform,
     appendSystemPrompt:
-      identityText.length === 0
+      instructionsText.length === 0
         ? platformPrompt
-        : `${platformPrompt}\n\n${identityGuidance}\n\n${identityText}`,
+        : `${platformPrompt}\n\n${instructionsGuidance}\n\n${instructionsText}`,
   };
 });
 

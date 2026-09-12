@@ -1,7 +1,7 @@
 import * as ApplicationLayer from "@pico/application/layer";
 import * as SessionContext from "@pico/application/session-context";
 import * as Config from "@pico/config/config";
-import * as Identity from "@pico/config/identity";
+import * as Instructions from "@pico/config/instructions";
 import * as ConfigRoot from "@pico/config/root";
 import type { PicoPaths, PicoRoot } from "@pico/contract/config";
 import { AgentError } from "@pico/contract/errors";
@@ -36,7 +36,7 @@ const daemonLayer = (paths: PicoPaths, config: Config.PicoConfig) =>
     Effect.gen(function* () {
       const gitWorktree = yield* GitWorktree.make(paths.worktreesDir);
       const schedules = yield* ScheduleLayer.open(paths.schedulesDir);
-      const identity = yield* Identity.make(paths.root);
+      const instructions = yield* Instructions.make(paths.root);
       const discord = Option.isSome(config.discord)
         ? { config: config.discord.value, authenticated: yield* Deferred.make<string>() }
         : null;
@@ -58,7 +58,7 @@ const daemonLayer = (paths: PicoPaths, config: Config.PicoConfig) =>
         Layer.provide(persistence),
       );
       const chatSessionContext = SessionContext.layer({
-        identity,
+        instructions,
         discordBotId,
       }).pipe(Layer.provide(persistence));
       const application = ApplicationLayer.layer(gitWorktree).pipe(

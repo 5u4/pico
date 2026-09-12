@@ -1,7 +1,7 @@
 import type * as Effect from "effect/Effect";
 import type { ConfigError } from "./errors.ts";
 
-export type IdentityScope =
+export type InstructionsScope =
   | { readonly kind: "global" }
   | {
       readonly kind: "discord";
@@ -9,4 +9,4 @@ export type IdentityScope =
       readonly channelId: string;
     };
 
-export type IdentityReader = (scope: IdentityScope) => Effect.Effect<string, ConfigError>;
+export type InstructionsReader = (scope: InstructionsScope) => Effect.Effect<string, ConfigError>;

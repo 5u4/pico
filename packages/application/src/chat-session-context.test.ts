@@ -1,7 +1,7 @@
 import * as BunFileSystem from "@effect/platform-bun/BunFileSystem";
 import * as BunPath from "@effect/platform-bun/BunPath";
 import { assert, describe, it } from "@effect/vitest";
-import * as Identity from "@pico/config/identity";
+import * as Instructions from "@pico/config/instructions";
 import * as Chat from "@pico/contract/chat-model";
 import { ChatRepository } from "@pico/contract/chat-repository";
 import { ChatSessionContext } from "@pico/contract/chat-session-context";
@@ -58,7 +58,7 @@ const fixture = Effect.gen(function* () {
   const root = PicoRoot.make(
     yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-session-context-" }),
   );
-  const identity = yield* Identity.make(root);
+  const instructions = yield* Instructions.make(root);
   const put = Effect.fn("ChatSessionContextTest.put")(function* (relative: string, source: string) {
     const target = path.join(root, "agents", relative);
     yield* fileSystem.makeDirectory(path.dirname(target), { recursive: true });
@@ -66,7 +66,7 @@ const fixture = Effect.gen(function* () {
     return target;
   });
   return {
-    identity,
+    instructions,
     put,
     fileSystem,
     path,
@@ -102,27 +102,27 @@ const resolve = Effect.fn("ChatSessionContextTest.resolve")(function* (
   chats: Layer.Layer<ChatRepository>,
   workspaces: Layer.Layer<WorkspaceRepository>,
 ) {
-  const { identity } = yield* fixture;
+  const { instructions } = yield* fixture;
   return yield* Effect.gen(function* () {
     return yield* (yield* ChatSessionContext).resolve(id);
   }).pipe(
-    Effect.provide(SessionContext.layer({ identity, discordBotId: null })),
+    Effect.provide(SessionContext.layer({ instructions, discordBotId: null })),
     Effect.provide(Layer.merge(chats, workspaces)),
   );
 });
 
 describe("ChatSessionContext", () => {
   it.effect(
-    "uses persisted parent-channel identity for direct and threadless scheduled chats",
+    "uses persisted parent-channel instructions for direct and threadless scheduled chats",
     () =>
       Effect.gen(function* () {
-        const { identity, put, repositories } = yield* fixture;
-        yield* put("identity.md", "GLOBAL_CONVENTION");
-        yield* put("discord/bots/123/identity.md", "BOT_CONVENTION");
-        yield* put("discord/channels/456/identity.md", "CHANNEL_CONVENTION");
-        yield* put("discord/channels/789/identity.md", "WRONG_THREAD_CONVENTION");
+        const { instructions, put, repositories } = yield* fixture;
+        yield* put("instructions.md", "GLOBAL_CONVENTION");
+        yield* put("discord/bots/123/instructions.md", "BOT_CONVENTION");
+        yield* put("discord/channels/456/instructions.md", "CHANNEL_CONVENTION");
+        yield* put("discord/channels/789/instructions.md", "WRONG_THREAD_CONVENTION");
         const context = SessionContext.layer({
-          identity,
+          instructions,
           discordBotId: Effect.succeed("123"),
         }).pipe(Layer.provideMerge(repositories));
 
@@ -152,7 +152,7 @@ describe("ChatSessionContext", () => {
             direct.appendSystemPrompt.indexOf("CHANNEL_CONVENTION"),
           );
 
-          yield* put("discord/channels/456/identity.md", "UPDATED_CHANNEL_CONVENTION");
+          yield* put("discord/channels/456/instructions.md", "UPDATED_CHANNEL_CONVENTION");
           assert.include(
             (yield* resolver.resolve(chatId)).appendSystemPrompt,
             "UPDATED_CHANNEL_CONVENTION",
@@ -165,10 +165,10 @@ describe("ChatSessionContext", () => {
     "builds before authentication, keeps global independent, and resolves Discord after READY",
     () =>
       Effect.gen(function* () {
-        const { identity, put, repositories } = yield* fixture;
-        yield* put("identity.md", "GLOBAL_ONLY");
-        yield* put("discord/bots/123/identity.md", "AUTHENTICATED_BOT");
-        yield* put("discord/channels/456/identity.md", "CHANNEL_ONLY");
+        const { instructions, put, repositories } = yield* fixture;
+        yield* put("instructions.md", "GLOBAL_ONLY");
+        yield* put("discord/bots/123/instructions.md", "AUTHENTICATED_BOT");
+        yield* put("discord/channels/456/instructions.md", "CHANNEL_ONLY");
         const authenticated = yield* Deferred.make<string>();
         const discordBotId = Effect.gen(function* () {
           const ready = yield* Deferred.poll(authenticated);
@@ -177,7 +177,7 @@ describe("ChatSessionContext", () => {
           }
           return yield* ready.value;
         });
-        const context = SessionContext.layer({ identity, discordBotId }).pipe(
+        const context = SessionContext.layer({ instructions, discordBotId }).pipe(
           Layer.provideMerge(repositories),
         );
         yield* Effect.gen(function* () {
@@ -209,11 +209,11 @@ describe("ChatSessionContext", () => {
 
   it.effect("loads global and channel when Discord is disabled and retains read diagnostics", () =>
     Effect.gen(function* () {
-      const { identity, put, repositories, fileSystem, path, root } = yield* fixture;
-      yield* put("identity.md", "GLOBAL_WITHOUT_BOT");
-      yield* put("discord/bots/123/identity.md", "UNAVAILABLE_BOT");
-      const channelFile = yield* put("discord/channels/456/identity.md", "BOUND_CHANNEL");
-      const context = SessionContext.layer({ identity, discordBotId: null }).pipe(
+      const { instructions, put, repositories, fileSystem, path, root } = yield* fixture;
+      yield* put("instructions.md", "GLOBAL_WITHOUT_BOT");
+      yield* put("discord/bots/123/instructions.md", "UNAVAILABLE_BOT");
+      const channelFile = yield* put("discord/channels/456/instructions.md", "BOUND_CHANNEL");
+      const context = SessionContext.layer({ instructions, discordBotId: null }).pipe(
         Layer.provideMerge(repositories),
       );
       yield* Effect.gen(function* () {
@@ -236,7 +236,7 @@ describe("ChatSessionContext", () => {
         assert.instanceOf(error, AgentError);
         assert.include(
           error.message,
-          path.join(root, "agents", "discord", "channels", "456", "identity.md"),
+          path.join(root, "agents", "discord", "channels", "456", "instructions.md"),
         );
         assert.include(error.message, cause.message);
       }).pipe(Effect.provide(context));
