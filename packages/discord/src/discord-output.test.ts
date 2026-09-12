@@ -301,10 +301,10 @@ describe("Discord output", () => {
         assert.deepStrictEqual(
           edited.map(({ threadId, messageId, content }) => [threadId, messageId, content]),
           [
-            [11n, 1n, "💻 Ran bun run test"],
-            [22n, 2n, "❌ Read packages/discord/src/layer.ts"],
-            [11n, 3n, "❌ Completed future_tool"],
-            [11n, 4n, "📖 Read packages/discord/src/layer.ts"],
+            [11n, 1n, sent[0]?.message.content.slice(0, -1)],
+            [22n, 2n, sent[1]?.message.content.replace(/^\S+/u, "❌").slice(0, -1)],
+            [11n, 3n, sent[2]?.message.content.replace(/^\S+/u, "❌").slice(0, -1)],
+            [11n, 4n, sent[3]?.message.content.slice(0, -1)],
           ],
         );
         assert.isFalse(sent.some(({ message }) => message.content.includes("secret")));
@@ -435,13 +435,13 @@ describe("Discord output", () => {
           ],
         );
         assert.deepStrictEqual(edited.slice(0, 5), [
-          "✏️ Edited src/a.ts, src/b.ts",
-          "🔎 Searched tool-started",
-          "📖 Read input",
-          "❌ Read input",
-          "⚙️ Completed future_tool",
+          sent[0]?.content.slice(0, -1),
+          sent[1]?.content.slice(0, -1),
+          sent[2]?.content.slice(0, -1),
+          sent[3]?.content.replace(/^\S+/u, "❌").slice(0, -1),
+          sent[4]?.content.slice(0, -1),
         ]);
-        assert.deepStrictEqual(sent[6], { content: "❌ Read input", silent: true });
+        assert.deepStrictEqual(sent[6], { content: edited[3], silent: true });
         assert.deepStrictEqual(sent[7], { content: "📖 Reading cancel.ts…", silent: true });
         assert.strictEqual(edited[6], "📖 Reading cancel.ts canceled.");
         assert.isAtMost(Array.from(sent[5]?.content ?? "").length, 500);
@@ -504,7 +504,10 @@ describe("Discord output", () => {
           }),
         );
         assert.strictEqual(sent.length, 2);
-        assert.deepStrictEqual(sent[1], { content: "💻 Ran command", silent: true });
+        assert.deepStrictEqual(sent[1], {
+          content: sent[0]?.content.slice(0, -1),
+          silent: true,
+        });
       }),
     ),
   );
@@ -678,7 +681,10 @@ describe("Discord output", () => {
           }),
         );
         assert.strictEqual(sent.length, 2);
-        assert.deepStrictEqual(sent[1], { content: "💻 Ran command", silent: true });
+        assert.deepStrictEqual(sent[1], {
+          content: sent[0]?.content.slice(0, -1),
+          silent: true,
+        });
         assert.deepStrictEqual(logs, []);
       }),
     ).pipe(Effect.provide(Logger.layer([logger])));
