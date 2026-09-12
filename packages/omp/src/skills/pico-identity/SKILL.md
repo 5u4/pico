@@ -1,11 +1,11 @@
 ---
 name: pico-identity
-description: Configure Pico identity, response style, and instructions globally or for a Discord bot or channel.
+description: Configure Pico identity.
 ---
 
 # Pico identity
 
-Edit `identity.md` in the scope the user wants. Use the running daemon's pico root, which defaults to `~/.pico`. Do not assume the chat's working directory is the pico root.
+Use the running Pico's root directory, which defaults to `~/.pico`.
 
 | Scope | File under `<picoRoot>` |
 | --- | --- |
@@ -13,10 +13,12 @@ Edit `identity.md` in the scope the user wants. Use the running daemon's pico ro
 | Discord bot | `agents/discord/bots/{botId}/identity.md` |
 | Discord channel | `agents/discord/channels/{channelId}/identity.md` |
 
-Use actual Discord IDs. `channelId` is the parent channel, not a thread. Channel instructions apply to every bot in that channel.
+Use the parent Discord channel ID, not a thread ID.
 
-Read the existing file before editing, preserve unrelated instructions, and create parent directories when needed. Write plain Markdown describing the desired identity, responsibilities, language, or response style.
+Read the existing file, preserve unrelated instructions, and create parent directories if needed. Write plain Markdown, for example:
 
-Pico appends global, bot, then channel content. More-specific conventions take precedence. Missing or blank files are skipped; an empty file does not clear inherited instructions. Native workspaces use only the global file.
+```markdown
+Your name is Pico. Reply in Chinese. Keep answers concise.
+```
 
-Changes apply when a live session next opens, not on the next message in an existing session. Tell the user this after editing. Do not restart the daemon unless asked.
+After editing, tell the user that changes take effect when a session next opens. Existing sessions keep their current identity. Do not restart Pico unless asked.
