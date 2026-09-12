@@ -59,6 +59,7 @@ const workspaceLayer = (findById: WorkspaceRepository["Service"]["findById"]) =>
     WorkspaceRepository,
     WorkspaceRepository.of({
       create: () => Effect.die("unexpected workspace create"),
+      getOrCreateByBinding: () => Effect.die("unexpected bound workspace creation"),
       findById,
       findByBinding: () => Effect.die("unexpected workspace binding lookup"),
       replaceConfiguration: () => Effect.die("unexpected workspace replacement"),

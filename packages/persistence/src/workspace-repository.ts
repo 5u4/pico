@@ -21,6 +21,11 @@ const WorkspaceRow = Schema.Struct({
 });
 type WorkspaceRow = typeof WorkspaceRow.Type;
 
+const BoundWorkspace = Schema.Struct({
+  ...Workspace.Workspace.fields,
+  binding: Workspace.WorkspaceBinding,
+});
+
 const ReplaceConfiguration = Schema.Struct({
   id: Workspace.WorkspaceId,
   configuration: Workspace.WorkspaceConfiguration,
@@ -97,6 +102,32 @@ const make = Effect.fn("WorkspaceRepository.make")(function* () {
     `,
   });
 
+  const insertByBinding = SqlSchema.void({
+    Request: BoundWorkspace,
+    execute: (workspace) => sql`
+      INSERT INTO workspaces (
+        id,
+        name,
+        platform,
+        external_id,
+        default_cwd,
+        worktree_branch,
+        worktree_prefix,
+        created_at
+      ) VALUES (
+        ${workspace.id},
+        ${workspace.name},
+        ${workspace.binding.platform},
+        ${workspace.binding.externalId},
+        ${workspace.defaultCwd},
+        ${workspace.worktree?.branch ?? null},
+        ${workspace.worktree?.prefix ?? null},
+        ${workspace.createdAt}
+      )
+      ON CONFLICT(platform, external_id) DO NOTHING
+    `,
+  });
+
   const selectById = SqlSchema.findOneOption({
     Request: Workspace.WorkspaceId,
     Result: WorkspaceRow,
@@ -115,10 +146,10 @@ const make = Effect.fn("WorkspaceRepository.make")(function* () {
     `,
   });
 
-  const selectByBinding = SqlSchema.findOneOption({
+  const bindingQuery = {
     Request: Workspace.WorkspaceBinding,
     Result: WorkspaceRow,
-    execute: ({ platform, externalId }) => sql`
+    execute: ({ platform, externalId }: Workspace.WorkspaceBinding) => sql`
       SELECT
         id,
         name,
@@ -131,7 +162,9 @@ const make = Effect.fn("WorkspaceRepository.make")(function* () {
       FROM workspaces
       WHERE platform = ${platform} AND external_id = ${externalId}
     `,
-  });
+  };
+  const selectByBinding = SqlSchema.findOneOption(bindingQuery);
+  const requireByBinding = SqlSchema.findOne(bindingQuery);
 
   const replaceStoredConfiguration = SqlSchema.findOne({
     Request: ReplaceConfiguration,
@@ -160,6 +193,15 @@ const make = Effect.fn("WorkspaceRepository.make")(function* () {
       return yield* decodeWorkspace(yield* insert(workspace));
     },
     Effect.mapError(failure("Failed to create workspace")),
+  );
+
+  const getOrCreateByBinding = Effect.fn("WorkspaceRepository.getOrCreateByBinding")(
+    function* (workspace: typeof BoundWorkspace.Type) {
+      yield* insertByBinding(workspace);
+      return yield* decodeWorkspace(yield* requireByBinding(workspace.binding));
+    },
+    sql.withTransaction,
+    Effect.mapError(failure("Failed to get or create workspace")),
   );
 
   const findById = Effect.fn("WorkspaceRepository.findById")(
@@ -191,7 +233,13 @@ const make = Effect.fn("WorkspaceRepository.make")(function* () {
     Effect.mapError(failure("Failed to replace workspace configuration")),
   );
 
-  return WorkspaceRepository.of({ create, findById, findByBinding, replaceConfiguration });
+  return WorkspaceRepository.of({
+    create,
+    getOrCreateByBinding,
+    findById,
+    findByBinding,
+    replaceConfiguration,
+  });
 });
 
 export const layer = Layer.effect(WorkspaceRepository, make());
