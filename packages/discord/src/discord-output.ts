@@ -65,48 +65,46 @@ interface ToolPresentation {
 
 interface ToolDefinition {
   readonly emoji: string;
-  readonly started: string;
-  readonly completed: string;
+  readonly action: string;
   readonly fallback: string;
   readonly targets: ReadonlyArray<string>;
 }
 
 const defineTool = (
   emoji: string,
-  started: string,
-  completed: string,
+  action: string,
   fallback: string,
   ...targets: ReadonlyArray<string>
-): ToolDefinition => ({ emoji, started, completed, fallback, targets });
+): ToolDefinition => ({ emoji, action, fallback, targets });
 
 const toolDefinitions: Readonly<Record<string, ToolDefinition>> = {
-  read: defineTool("📖", "Reading", "Read", "input", "path", "url"),
-  write: defineTool("✏️", "Writing", "Wrote", "output", "path"),
-  edit: defineTool("✏️", "Editing", "Edited", "source", "path"),
-  ast_edit: defineTool("✏️", "Editing", "Edited", "source", "paths", "path"),
-  bash: defineTool("💻", "Running", "Ran", "command", "command", "i"),
-  eval: defineTool("💻", "Evaluating", "Evaluated", "code", "title", "i", "language"),
-  grep: defineTool("🔎", "Searching", "Searched", "source", "pattern", "path", "i"),
-  glob: defineTool("🔎", "Finding", "Found", "files", "path", "i"),
-  ast_grep: defineTool("🔎", "Searching syntax in", "Searched syntax in", "source", "path", "pat"),
-  lsp: defineTool("🧭", "Inspecting", "Inspected", "code", "file", "action", "symbol"),
-  web_search: defineTool("🌐", "Searching the web for", "Searched the web for", "query", "query"),
-  browser: defineTool("🌐", "Browsing", "Browsed", "page", "url", "action", "name"),
-  inspect_image: defineTool("🖼️", "Inspecting", "Inspected", "image", "path", "url"),
-  github: defineTool("🐙", "Using GitHub for", "Used GitHub for", "repository", "repo", "op", "pr"),
-  task: defineTool("🧭", "Delegating", "Delegated", "work", "i", "name"),
-  hub: defineTool("🧭", "Coordinating", "Coordinated", "agents", "op", "to", "name"),
-  todo: defineTool("🧭", "Updating", "Updated", "tasks", "task", "phase", "op"),
-  memory_edit: defineTool("🧠", "Updating memory", "Updated memory", "context", "path", "i"),
-  retain: defineTool("🧠", "Retaining", "Retained", "memory", "content", "i"),
-  recall: defineTool("🧠", "Recalling", "Recalled", "memory", "query", "i"),
-  reflect: defineTool("🧠", "Reflecting on", "Reflected on", "memory", "query", "i"),
-  learn: defineTool("🧠", "Learning", "Learned", "lesson", "name", "i"),
-  manage_skill: defineTool("🧠", "Managing skill", "Managed skill", "skill", "name", "action"),
-  checkpoint: defineTool("🗂️", "Checkpointing", "Checkpointed", "context", "goal"),
-  rewind: defineTool("🗂️", "Rewinding", "Rewound", "context", "report"),
-  computer: defineTool("🖥️", "Controlling", "Controlled", "computer", "action", "app"),
-  security_scan: defineTool("🔒", "Scanning", "Scanned", "security", "path", "i"),
+  read: defineTool("📖", "Reading", "input", "path", "url"),
+  write: defineTool("✏️", "Writing", "output", "path"),
+  edit: defineTool("✏️", "Editing", "source", "path"),
+  ast_edit: defineTool("✏️", "Editing", "source", "paths", "path"),
+  bash: defineTool("💻", "Running", "command", "command", "i"),
+  eval: defineTool("💻", "Evaluating", "code", "title", "i", "language"),
+  grep: defineTool("🔎", "Searching", "source", "pattern", "path", "i"),
+  glob: defineTool("🔎", "Finding", "files", "path", "i"),
+  ast_grep: defineTool("🔎", "Searching syntax in", "source", "path", "pat"),
+  lsp: defineTool("🧭", "Inspecting", "code", "file", "action", "symbol"),
+  web_search: defineTool("🌐", "Searching the web for", "query", "query"),
+  browser: defineTool("🌐", "Browsing", "page", "url", "action", "name"),
+  inspect_image: defineTool("🖼️", "Inspecting", "image", "path", "url"),
+  github: defineTool("🐙", "Using GitHub for", "repository", "repo", "op", "pr"),
+  task: defineTool("🧭", "Delegating", "work", "i", "name"),
+  hub: defineTool("🧭", "Coordinating", "agents", "op", "to", "name"),
+  todo: defineTool("🧭", "Updating", "tasks", "task", "phase", "op"),
+  memory_edit: defineTool("🧠", "Updating memory", "context", "path", "i"),
+  retain: defineTool("🧠", "Retaining", "memory", "content", "i"),
+  recall: defineTool("🧠", "Recalling", "memory", "query", "i"),
+  reflect: defineTool("🧠", "Reflecting on", "memory", "query", "i"),
+  learn: defineTool("🧠", "Learning", "lesson", "name", "i"),
+  manage_skill: defineTool("🧠", "Managing skill", "skill", "name", "action"),
+  checkpoint: defineTool("🗂️", "Checkpointing", "context", "goal"),
+  rewind: defineTool("🗂️", "Rewinding", "context", "report"),
+  computer: defineTool("🖥️", "Controlling", "computer", "action", "app"),
+  security_scan: defineTool("🔒", "Scanning", "security", "path", "i"),
 };
 
 const ToolArguments = Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown));
@@ -152,25 +150,25 @@ const toolPresentation = (
     const safeName = toolName(name);
     return {
       started: toolStartedMessage("⚙️", safeName),
-      succeeded: toolMessage(`⚙️ Completed ${safeName}`, "⚙️ Completed tool"),
-      failed: toolMessage(`❌ Completed ${safeName}`, "❌ Completed tool"),
+      succeeded: toolMessage(`⚙️ ${safeName}`, "⚙️ tool"),
+      failed: toolMessage(`❌ ${safeName}`, "❌ tool"),
       canceled: toolMessage(`⚙️ ${safeName} canceled.`, "⚙️ Tool canceled."),
     };
   }
   const target = toolTarget(arguments_, definition);
   return {
-    started: toolStartedMessage(definition.emoji, `${definition.started} ${target}`),
+    started: toolStartedMessage(definition.emoji, `${definition.action} ${target}`),
     succeeded: toolMessage(
-      `${definition.emoji} ${definition.completed} ${target}`,
-      `${definition.emoji} ${definition.completed} ${definition.fallback}`,
+      `${definition.emoji} ${definition.action} ${target}`,
+      `${definition.emoji} ${definition.action} ${definition.fallback}`,
     ),
     failed: toolMessage(
-      `❌ ${definition.completed} ${target}`,
-      `❌ ${definition.completed} ${definition.fallback}`,
+      `❌ ${definition.action} ${target}`,
+      `❌ ${definition.action} ${definition.fallback}`,
     ),
     canceled: toolMessage(
-      `${definition.emoji} ${definition.started} ${target} canceled.`,
-      `${definition.emoji} ${definition.started} ${definition.fallback} canceled.`,
+      `${definition.emoji} ${definition.action} ${target} canceled.`,
+      `${definition.emoji} ${definition.action} ${definition.fallback} canceled.`,
     ),
   };
 };
