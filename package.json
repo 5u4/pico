@@ -34,10 +34,10 @@
     }
   },
   "scripts": {
-    "prepare": "lefthook install",
-    "fmt": "biome check --write",
-    "lint": "biome check",
-    "typecheck": "tsc --build --noEmit tsconfig.json packages/*/tsconfig.json",
+    "prepare": "bun --bun run lefthook install",
+    "fmt": "bun --bun run biome check --write",
+    "lint": "bun --bun run biome check",
+    "typecheck": "bun --bun run tsc --build --noEmit tsconfig.json packages/*/tsconfig.json",
     "test": "bun run typecheck && bun --bun x vitest run",
     "smoke": "bun --env-file=.env.smoke node_modules/vitest/vitest.mjs run --config vitest.smoke.config.ts",
     "vendor:effect": "bun scripts/vendor-effect.ts",

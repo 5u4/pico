@@ -4,9 +4,7 @@
 
 ## Install
 
-Install [Git](https://git-scm.com/downloads), [Node.js LTS](https://nodejs.org/en/download),
-and [Bun](https://bun.sh/docs/installation) 1.3.14 or newer.
-Node.js is needed by the Git hook installer during `bun install`; pico itself runs on Bun.
+Install [Git](https://git-scm.com/downloads) and [Bun](https://bun.sh/docs/installation) 1.3.14 or newer.
 
 In a macOS or Linux terminal:
 
