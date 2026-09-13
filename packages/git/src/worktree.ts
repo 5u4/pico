@@ -38,7 +38,7 @@ interface GitResult {
   readonly output: string;
 }
 
-interface RenameLock {
+interface RepositoryLock {
   readonly semaphore: Semaphore.Semaphore;
   users: number;
 }
@@ -386,7 +386,7 @@ const renameChatBranch = Effect.fn("GitWorktree.renameChatBranch")(function* (
   fileSystem: FileSystem.FileSystem,
   path: Path.Path,
   spawner: Spawner,
-  renameLocks: Map<AbsolutePath, RenameLock>,
+  renameLocks: Map<AbsolutePath, RepositoryLock>,
   worktreesDir: AbsolutePath,
   options: RenameChatBranchOptions,
 ): Effect.fn.Return<RenameChatBranchResult, GitError> {
@@ -398,81 +398,64 @@ const renameChatBranch = Effect.fn("GitWorktree.renameChatBranch")(function* (
     return { kind: "skipped", reason: "already-absent" };
   }
   const commonDir = inspection.commonDir;
-  return yield* Effect.acquireUseRelease(
-    Effect.sync(() => {
-      const existing = renameLocks.get(commonDir);
-      if (existing !== undefined) {
-        existing.users += 1;
-        return existing;
+  return yield* withRepositoryLock(
+    renameLocks,
+    commonDir,
+    Effect.gen(function* (): Effect.fn.Return<RenameChatBranchResult, GitError> {
+      const target = `${options.prefix}${options.topic}-${options.chatId.slice(-BRANCH_ID_SUFFIX_LENGTH)}`;
+      const source = `${options.prefix}${options.chatId}`;
+      if (
+        !(yield* runGitExit(spawner, options.cwd, "validate worktree branch", [
+          "check-ref-format",
+          "--branch",
+          target,
+        ]))
+      ) {
+        return { kind: "skipped", reason: "invalid-target" };
       }
-      const created: RenameLock = { semaphore: Semaphore.makeUnsafe(1), users: 1 };
-      renameLocks.set(commonDir, created);
-      return created;
+
+      const head = yield* symbolicHead(spawner, options.cwd);
+      if (head.kind === "detached") return { kind: "skipped", reason: "detached" };
+      if (head.branch === target) return { kind: "already-renamed" };
+      if (head.branch !== source) return { kind: "skipped", reason: "branch-changed" };
+      if (yield* hasRemoteState(spawner, options.cwd, source, target)) {
+        return { kind: "skipped", reason: "remote-state" };
+      }
+      const targetExists = yield* localBranchExists(spawner, options.cwd, target);
+      const currentHead = yield* symbolicHead(spawner, options.cwd);
+      if (currentHead.kind === "detached") return { kind: "skipped", reason: "detached" };
+      if (currentHead.branch === target) return { kind: "already-renamed" };
+      if (currentHead.branch !== source) return { kind: "skipped", reason: "branch-changed" };
+      if (targetExists) {
+        return { kind: "skipped", reason: "target-exists" };
+      }
+
+      const { exitCode } = yield* runGitResult(spawner, options.cwd, "rename worktree branch", [
+        "branch",
+        "-m",
+        "--",
+        source,
+        target,
+      ]);
+      if (exitCode === 0) return { kind: "renamed" };
+
+      const afterFailure = yield* symbolicHead(spawner, options.cwd).pipe(
+        Effect.mapError((error) =>
+          gitError(
+            "rename worktree branch",
+            `Git exited with code ${exitCode}; reinspection failed: ${error.message}`,
+          ),
+        ),
+      );
+      if (afterFailure.kind === "detached") return { kind: "skipped", reason: "detached" };
+      if (afterFailure.branch === target) {
+        return { kind: "already-renamed" };
+      }
+      if (afterFailure.branch !== source) {
+        return { kind: "skipped", reason: "branch-changed" };
+      }
+      return yield* gitError("rename worktree branch", `Git exited with code ${exitCode}`);
     }),
-    (entry) =>
-      entry.semaphore.withPermit(
-        Effect.gen(function* (): Effect.fn.Return<RenameChatBranchResult, GitError> {
-          const target = `${options.prefix}${options.topic}-${options.chatId.slice(-BRANCH_ID_SUFFIX_LENGTH)}`;
-          const source = `${options.prefix}${options.chatId}`;
-          if (
-            !(yield* runGitExit(spawner, options.cwd, "validate worktree branch", [
-              "check-ref-format",
-              "--branch",
-              target,
-            ]))
-          ) {
-            return { kind: "skipped", reason: "invalid-target" };
-          }
-
-          const head = yield* symbolicHead(spawner, options.cwd);
-          if (head.kind === "detached") return { kind: "skipped", reason: "detached" };
-          if (head.branch === target) return { kind: "already-renamed" };
-          if (head.branch !== source) return { kind: "skipped", reason: "branch-changed" };
-          if (yield* hasRemoteState(spawner, options.cwd, source, target)) {
-            return { kind: "skipped", reason: "remote-state" };
-          }
-          const targetExists = yield* localBranchExists(spawner, options.cwd, target);
-          const currentHead = yield* symbolicHead(spawner, options.cwd);
-          if (currentHead.kind === "detached") return { kind: "skipped", reason: "detached" };
-          if (currentHead.branch === target) return { kind: "already-renamed" };
-          if (currentHead.branch !== source) return { kind: "skipped", reason: "branch-changed" };
-          if (targetExists) {
-            return { kind: "skipped", reason: "target-exists" };
-          }
-
-          const { exitCode } = yield* runGitResult(spawner, options.cwd, "rename worktree branch", [
-            "branch",
-            "-m",
-            "--",
-            source,
-            target,
-          ]);
-          if (exitCode === 0) return { kind: "renamed" };
-
-          const afterFailure = yield* symbolicHead(spawner, options.cwd).pipe(
-            Effect.mapError((error) =>
-              gitError(
-                "rename worktree branch",
-                `Git exited with code ${exitCode}; reinspection failed: ${error.message}`,
-              ),
-            ),
-          );
-          if (afterFailure.kind === "detached") return { kind: "skipped", reason: "detached" };
-          if (afterFailure.branch === target) {
-            return { kind: "already-renamed" };
-          }
-          if (afterFailure.branch !== source) {
-            return { kind: "skipped", reason: "branch-changed" };
-          }
-          return yield* gitError("rename worktree branch", `Git exited with code ${exitCode}`);
-        }),
-      ),
-    (entry) =>
-      Effect.sync(() => {
-        entry.users -= 1;
-        if (entry.users === 0 && renameLocks.get(commonDir) === entry)
-          renameLocks.delete(commonDir);
-      }),
   );
 });
 
@@ -530,12 +513,178 @@ const removeChat = Effect.fn("GitWorktree.removeChat")(function* (
   return yield* gitError("remove worktree", `Git exited with code ${exitCode}`);
 });
 
+const withRepositoryLock = <A, E, R>(
+  locks: Map<AbsolutePath, RepositoryLock>,
+  commonDir: AbsolutePath,
+  effect: Effect.Effect<A, E, R>,
+): Effect.Effect<A, E, R> =>
+  Effect.acquireUseRelease(
+    Effect.sync(() => {
+      const existing = locks.get(commonDir);
+      if (existing !== undefined) {
+        existing.users += 1;
+        return existing;
+      }
+      const created: RepositoryLock = { semaphore: Semaphore.makeUnsafe(1), users: 1 };
+      locks.set(commonDir, created);
+      return created;
+    }),
+    (entry) => entry.semaphore.withPermit(effect),
+    (entry) =>
+      Effect.sync(() => {
+        entry.users -= 1;
+        if (entry.users === 0 && locks.get(commonDir) === entry) locks.delete(commonDir);
+      }),
+  );
+
+const matchRefspec = (pattern: string, ref: string): string | undefined => {
+  const wildcard = pattern.indexOf("*");
+  if (wildcard === -1) return pattern === ref ? "" : undefined;
+  const prefix = pattern.slice(0, wildcard);
+  const suffix = pattern.slice(wildcard + 1);
+  if (
+    ref.length < prefix.length + suffix.length ||
+    !ref.startsWith(prefix) ||
+    !ref.endsWith(suffix)
+  ) {
+    return undefined;
+  }
+  return ref.slice(prefix.length, ref.length - suffix.length);
+};
+
+const fetchOwnership = (
+  refspecs: ReadonlyArray<string>,
+  ref: string,
+): "owner" | "not-owner" | "unknown" => {
+  const exclusions = refspecs
+    .filter((refspec) => refspec.startsWith("^"))
+    .map((refspec) => (refspec === "^@" ? "HEAD" : refspec.slice(1)));
+  let unresolved = false;
+  for (const refspec of refspecs) {
+    if (refspec.startsWith("^")) continue;
+    const separator = refspec.indexOf(":");
+    if (separator === -1) continue;
+    const destination = refspec.slice(separator + 1);
+    const fullDestination =
+      !destination.includes("*") && destination.startsWith("remotes/")
+        ? `refs/${destination}`
+        : destination;
+    const matched = matchRefspec(fullDestination, ref);
+    if (matched === undefined) continue;
+    const configuredSource = refspec
+      .slice(refspec.startsWith("+") ? 1 : 0, separator)
+      .replace("*", () => matched);
+    const source = configuredSource === "" || configuredSource === "@" ? "HEAD" : configuredSource;
+    // Abbreviated sources need remote refs to resolve before exclusions can be checked.
+    if (exclusions.length > 0 && source !== "HEAD" && !source.startsWith("refs/")) {
+      unresolved = true;
+      continue;
+    }
+    if (!exclusions.some((exclusion) => matchRefspec(exclusion, source) !== undefined)) {
+      return "owner";
+    }
+  }
+  return unresolved ? "unknown" : "not-owner";
+};
+
+const prepareBase = Effect.fn("GitWorktree.create.prepareBase")(function* (
+  fileSystem: FileSystem.FileSystem,
+  spawner: Spawner,
+  fetchLocks: Map<AbsolutePath, RepositoryLock>,
+  repositoryCwd: AbsolutePath,
+  base: string,
+) {
+  // Git otherwise omits the resolved ref when a local branch shadows a remote-tracking ref.
+  const resolved = yield* runGitResult(spawner, repositoryCwd, "resolve worktree base", [
+    "-c",
+    "core.warnAmbiguousRefs=false",
+    "rev-parse",
+    "--verify",
+    "--symbolic-full-name",
+    "--end-of-options",
+    base,
+  ]);
+  if (resolved.exitCode !== 0) {
+    return yield* gitError("resolve worktree base", `Git exited with code ${resolved.exitCode}`);
+  }
+  const ref = resolved.output.trim();
+  if (!ref.startsWith("refs/remotes/")) return ref || base;
+
+  const remotes = yield* runGitResult(spawner, repositoryCwd, "inspect remotes", ["remote"]);
+  if (remotes.exitCode !== 0) {
+    return yield* gitError("inspect remotes", `Git exited with code ${remotes.exitCode}`);
+  }
+  let remote: string | undefined;
+  for (const name of remotes.output.trim().split("\n")) {
+    if (name.length === 0) continue;
+    const configured = yield* runGitResult(spawner, repositoryCwd, "inspect fetch refspecs", [
+      "config",
+      "--null",
+      "--get-all",
+      `remote.${name}.fetch`,
+    ]);
+    if (configured.exitCode === 1) continue;
+    if (configured.exitCode !== 0) {
+      return yield* gitError(
+        "inspect fetch refspecs",
+        `Git exited with code ${configured.exitCode}`,
+      );
+    }
+    const ownership = fetchOwnership(configured.output.split("\0"), ref);
+    if (ownership === "unknown") {
+      return yield* gitError("fetch worktree base", "fetch source cannot be resolved locally");
+    }
+    if (ownership === "not-owner") continue;
+    if (remote !== undefined) {
+      return yield* gitError(
+        "fetch worktree base",
+        "remote-tracking branch has multiple fetch remotes",
+      );
+    }
+    remote = name;
+  }
+  if (remote === undefined) {
+    return yield* gitError("fetch worktree base", "remote-tracking branch has no fetch remote");
+  }
+  const identity = yield* runGitResult(spawner, repositoryCwd, "inspect fetch repository", [
+    "rev-parse",
+    "--path-format=absolute",
+    "--git-common-dir",
+  ]);
+  if (identity.exitCode !== 0) {
+    return yield* gitError("inspect fetch repository", `Git exited with code ${identity.exitCode}`);
+  }
+  const commonDir = AbsolutePath.make(
+    yield* fileSystem
+      .realPath(identity.output.trim())
+      .pipe(
+        Effect.mapError((error) => platformFailure("inspect fetch repository", "real path", error)),
+      ),
+  );
+  const fetched = yield* withRepositoryLock(
+    fetchLocks,
+    commonDir,
+    runGitResult(
+      spawner,
+      repositoryCwd,
+      "fetch worktree base",
+      ["fetch", "--", remote],
+      remoteCommandOptions,
+    ),
+  );
+  if (fetched.exitCode !== 0) {
+    return yield* gitError("fetch worktree base", `Git exited with code ${fetched.exitCode}`);
+  }
+  return ref;
+});
+
 const acquire = Effect.fn("GitWorktree.create.acquire")(function* (
   fileSystem: FileSystem.FileSystem,
   path: Path.Path,
   spawner: Spawner,
   worktreesDir: AbsolutePath,
   options: CreateWorktreeOptions,
+  base: string,
 ) {
   const cwd = AbsolutePath.make(path.join(worktreesDir, options.chatId));
   const worktree: CreatedWorktree = {
@@ -557,7 +706,7 @@ const acquire = Effect.fn("GitWorktree.create.acquire")(function* (
     worktree.branch,
     "--",
     worktree.cwd,
-    options.settings.branch,
+    base,
   ]);
   yield* Effect.logDebug("Worktree acquired").pipe(
     Effect.annotateLogs({
@@ -640,14 +789,22 @@ export const make = Effect.fn("GitWorktree.make")(function* (
   const path = yield* Path.Path;
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   // Linked worktrees share branch configuration and Git's temporary rename reflog.
-  const renameLocks = new Map<AbsolutePath, RenameLock>();
+  const renameLocks = new Map<AbsolutePath, RepositoryLock>();
+  const fetchLocks = new Map<AbsolutePath, RepositoryLock>();
 
   const create: CreateWorktree = Effect.fn("GitWorktree.create")(function* <A, E>(
     options: CreateWorktreeOptions,
     use: (cwd: AbsolutePath) => Effect.Effect<A, E>,
   ): Effect.fn.Return<A, GitError | E> {
+    const base = yield* prepareBase(
+      fileSystem,
+      spawner,
+      fetchLocks,
+      options.repositoryCwd,
+      options.settings.branch,
+    );
     return yield* Effect.acquireUseRelease(
-      acquire(fileSystem, path, spawner, worktreesDir, options),
+      acquire(fileSystem, path, spawner, worktreesDir, options, base),
       (worktree) => use(worktree.cwd),
       (worktree, exit) =>
         Exit.isFailure(exit)
