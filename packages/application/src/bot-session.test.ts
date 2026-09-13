@@ -33,6 +33,11 @@ import { BOT_JOURNAL_MAX_BYTES, BOT_SESSION_IDLE_MS, layer } from "./application
 
 const platform = Layer.mergeAll(BunCrypto.layer, BunFileSystem.layer, BunPath.layer);
 const prompt = (text: string) => AgentPrompt.make({ text, attachments: [] });
+const publicationEntry = (content: string) =>
+  `${JSON.stringify({
+    type: "message",
+    message: { role: "assistant", content: [{ type: "text", text: content }] },
+  })}\n`;
 const git: GitWorktree = {
   validate: () => Effect.die("bot must not use git"),
   create: () => Effect.die("bot must not create a worktree"),
@@ -57,9 +62,10 @@ const fixture = (
   options: {
     readonly afterCutover?: Effect.Effect<void>;
     readonly afterCreatePhysical?: Effect.Effect<void>;
+    readonly afterPublish?: Effect.Effect<void>;
   } = {},
 ) => {
-  const { afterCutover, afterCreatePhysical } = options;
+  const { afterCutover, afterCreatePhysical, afterPublish } = options;
   const basePersistence = Persistence.layer(AbsolutePath.make(`${root}/store.db`));
   const persistence =
     afterCutover === undefined
@@ -94,6 +100,7 @@ const fixture = (
     AgentRuntime,
     Effect.gen(function* () {
       const bots = yield* BotSessions;
+      const fs = yield* FileSystem.FileSystem;
       const sendTurn: AgentRuntime["Service"]["sendTurn"] = (chatId, input, onEvent) =>
         Effect.gen(function* () {
           const found = yield* bots.findByChat(chatId).pipe(Effect.orDie);
@@ -127,7 +134,15 @@ const fixture = (
                 "Continue the current task in work/task.txt. Keep the chosen filename and finish the pending edit.",
               ),
         deliver: () => Effect.void,
-        publish: () => Effect.void,
+        publish: (chatId, content) =>
+          Effect.gen(function* () {
+            const found = yield* bots.findByChat(chatId).pipe(Effect.orDie);
+            if (Option.isNone(found)) return yield* Effect.die("missing bot");
+            yield* fs
+              .writeFileString(found.value.journal.file, publicationEntry(content), { flag: "a" })
+              .pipe(Effect.mapError((cause) => new AgentError({ message: cause.message })));
+            if (afterPublish !== undefined) yield* afterPublish;
+          }),
         close: () => Effect.die("bot must not archive its conversation"),
         abort: () => Effect.void,
         contextUsage: () => Effect.succeed({ kind: "unavailable" }),
@@ -177,6 +192,24 @@ const rowCounts = Effect.fn("BotTest.rowCounts")(function* (root: string) {
       .get(),
   );
 }, Effect.scoped);
+
+const fillBotJournal = Effect.fn("BotTest.fillJournal")(function* (botRoot: AbsolutePath) {
+  const fs = yield* FileSystem.FileSystem;
+  const host = yield* Schedule.ScheduleRunHostService;
+  const bot = yield* currentBot(botRoot);
+  const content = "x".repeat(128 * 1024);
+  const entryBytes = Buffer.byteLength(publicationEntry(content));
+  const overhead = Buffer.byteLength(publicationEntry(""));
+  let remaining = BOT_JOURNAL_MAX_BYTES - Number((yield* fs.stat(bot.journal.file)).size);
+  while (remaining > entryBytes + overhead) {
+    yield* host.publish(bot.chatId, content);
+    remaining -= entryBytes;
+  }
+  yield* host.publish(bot.chatId, "x".repeat(remaining - overhead));
+  assert.strictEqual(Number((yield* fs.stat(bot.journal.file)).size), BOT_JOURNAL_MAX_BYTES);
+  assert.strictEqual((yield* currentBot(botRoot)).journal.id, bot.journal.id);
+  return yield* currentBot(botRoot);
+});
 
 const retainedFiles = Effect.fn("BotTest.retainedFiles")(function* (botRoot: AbsolutePath) {
   const fs = yield* FileSystem.FileSystem;
@@ -547,5 +580,291 @@ describe("bot session continuity", () => {
         assert.strictEqual(model.opened[1]?.bot.botRoot, botRoot);
       }).pipe(Effect.provide(fixture(root, model)));
     }).pipe(Effect.provide(platform)),
+  );
+});
+
+describe("bot script publications", () => {
+  it.effect(
+    "completes a fresh journal across restarts and rotates before its first model turn",
+    () =>
+      Effect.gen(function* () {
+        const { root, botRoot, fs } = yield* setup();
+        const model = boundary();
+        const first = yield* Effect.scoped(
+          Effect.gen(function* () {
+            const app = yield* Application;
+            const host = yield* Schedule.ScheduleRunHostService;
+            const chat = yield* app.getOrCreateBotChat({ botRoot, platform: null });
+            const fresh = yield* currentBot(botRoot);
+            const header = yield* fs.readFileString(fresh.journal.file);
+            yield* host.publish(chat.id, "first script");
+            const completed = yield* currentBot(botRoot);
+            assert.strictEqual(completed.turn.kind, "completed");
+            assert.strictEqual(
+              yield* fs.readFileString(completed.journal.file),
+              header + publicationEntry("first script"),
+            );
+            return completed;
+          }).pipe(Effect.provide(fixture(root, model))),
+        );
+        const full = yield* Effect.scoped(
+          Effect.gen(function* () {
+            assert.deepStrictEqual(yield* currentBot(botRoot), first);
+            return yield* fillBotJournal(botRoot);
+          }).pipe(Effect.provide(fixture(root, model))),
+        );
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const app = yield* Application;
+            assert.deepStrictEqual(yield* currentBot(botRoot), full);
+            yield* app.sendBotMessage(full.chatId, prompt("first model turn"), () => Effect.void);
+            const active = yield* currentBot(botRoot);
+            assert.notStrictEqual(active.journal.id, full.journal.id);
+            assert.strictEqual(
+              Number((yield* fs.stat(full.journal.file)).size),
+              BOT_JOURNAL_MAX_BYTES,
+            );
+            assert.strictEqual(model.opened[0]?.bot.journal.id, active.journal.id);
+            assert.include(model.opened[0]?.handoff ?? "", "pending edit");
+          }).pipe(Effect.provide(fixture(root, model))),
+        );
+      }).pipe(Effect.provide(platform)),
+  );
+
+  it.effect(
+    "rotates repeated script-only publications by size and refreshes their idle boundary",
+    () =>
+      Effect.gen(function* () {
+        const { root, botRoot, fs } = yield* setup();
+        const model = boundary();
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const app = yield* Application;
+            const chat = yield* app.getOrCreateBotChat({ botRoot, platform: null });
+            yield* app.sendBotMessage(chat.id, prompt("last model turn"), () => Effect.void);
+          }).pipe(Effect.provide(fixture(root, model))),
+        );
+        for (const content of ["first rotation", "second rotation"]) {
+          const full = yield* Effect.scoped(
+            fillBotJournal(botRoot).pipe(Effect.provide(fixture(root, model))),
+          );
+          yield* Effect.scoped(
+            Effect.gen(function* () {
+              const host = yield* Schedule.ScheduleRunHostService;
+              assert.deepStrictEqual(yield* currentBot(botRoot), full);
+              yield* host.publish(full.chatId, content);
+              const active = yield* currentBot(botRoot);
+              assert.notStrictEqual(active.journal.id, full.journal.id);
+              assert.strictEqual(active.turn.kind, "completed");
+              assert.strictEqual(
+                Number((yield* fs.stat(full.journal.file)).size),
+                BOT_JOURNAL_MAX_BYTES,
+              );
+              const journal = yield* fs.readFileString(active.journal.file);
+              assert.isTrue(journal.endsWith(publicationEntry(content)));
+              assert.strictEqual(journal.split(publicationEntry(content)).length, 2);
+            }).pipe(Effect.provide(fixture(root, model))),
+          );
+        }
+        yield* Effect.gen(function* () {
+          const host = yield* Schedule.ScheduleRunHostService;
+          const recent = yield* currentBot(botRoot);
+          yield* TestClock.adjust(BOT_SESSION_IDLE_MS - 1);
+          yield* host.publish(recent.chatId, "still active");
+          assert.strictEqual((yield* currentBot(botRoot)).journal.id, recent.journal.id);
+          yield* TestClock.adjust(1);
+          yield* host.publish(recent.chatId, "new idle boundary");
+          assert.strictEqual((yield* currentBot(botRoot)).journal.id, recent.journal.id);
+          yield* TestClock.adjust(BOT_SESSION_IDLE_MS);
+          yield* host.publish(recent.chatId, "idle rotation");
+          assert.notStrictEqual((yield* currentBot(botRoot)).journal.id, recent.journal.id);
+          assert.deepStrictEqual(
+            model.opened.map((entry) => entry.text),
+            ["last model turn"],
+          );
+        }).pipe(Effect.provide(fixture(root, model)));
+      }).pipe(Effect.provide(platform)),
+  );
+
+  for (const state of ["fresh", "completed", "pending"]) {
+    it.effect(`retains a ${state} journal after failed publication and later script writes`, () =>
+      Effect.gen(function* () {
+        const { root, botRoot, fs } = yield* setup();
+        const model = boundary();
+        yield* Effect.gen(function* () {
+          const app = yield* Application;
+          const host = yield* Schedule.ScheduleRunHostService;
+          const chat = yield* app.getOrCreateBotChat({ botRoot, platform: null });
+          if (state === "completed") {
+            yield* app.sendBotMessage(chat.id, prompt("completed"), () => Effect.void);
+          } else if (state === "pending") {
+            model.outcome = "failed";
+            yield* app
+              .sendBotMessage(chat.id, prompt("failed"), () => Effect.void)
+              .pipe(Effect.flip);
+            yield* fillBotJournal(botRoot);
+            yield* TestClock.adjust(BOT_SESSION_IDLE_MS);
+          }
+          const source = yield* currentBot(botRoot);
+          const retained = `${source.journal.file}.retained`;
+          const before = yield* fs.readFileString(source.journal.file);
+          yield* fs.rename(source.journal.file, retained);
+          yield* fs.makeDirectory(source.journal.file);
+          const error = yield* host
+            .publish(chat.id, "cannot append to a directory")
+            .pipe(Effect.flip);
+          assert.strictEqual(error._tag, "ScheduleHostError");
+          const pending = yield* currentBot(botRoot);
+          assert.deepStrictEqual(pending, { ...source, turn: { kind: "pending" } });
+          assert.strictEqual(yield* fs.readFileString(retained), before);
+          yield* fs.remove(source.journal.file, { recursive: true });
+          yield* fs.rename(retained, source.journal.file);
+          yield* host.publish(chat.id, "later script");
+          assert.deepStrictEqual(yield* currentBot(botRoot), pending);
+          assert.strictEqual(
+            yield* fs.readFileString(source.journal.file),
+            before + publicationEntry("later script"),
+          );
+        }).pipe(Effect.provide(fixture(root, model)));
+      }).pipe(Effect.provide(platform)),
+    );
+  }
+
+  it.effect("rejects publication without changing the completed journal when handoff fails", () =>
+    Effect.gen(function* () {
+      const { root, botRoot, fs } = yield* setup();
+      const model = boundary();
+      yield* Effect.gen(function* () {
+        const app = yield* Application;
+        const host = yield* Schedule.ScheduleRunHostService;
+        const chat = yield* app.getOrCreateBotChat({ botRoot, platform: null });
+        yield* host.publish(chat.id, "durable script");
+        const source = yield* currentBot(botRoot);
+        const before = yield* fs.readFileString(source.journal.file);
+        yield* TestClock.adjust(BOT_SESSION_IDLE_MS);
+        model.handoffFailure = true;
+        const error = yield* host.publish(chat.id, "not admitted").pipe(Effect.flip);
+        assert.include(error.message, "handoff model unavailable");
+        assert.deepStrictEqual(yield* currentBot(botRoot), source);
+        assert.strictEqual(yield* fs.readFileString(source.journal.file), before);
+        model.handoffFailure = false;
+        yield* host.publish(chat.id, "retry");
+        const active = yield* currentBot(botRoot);
+        assert.notStrictEqual(active.journal.id, source.journal.id);
+        assert.strictEqual(active.turn.kind, "completed");
+        assert.strictEqual(yield* fs.readFileString(source.journal.file), before);
+        assert.isTrue(
+          (yield* fs.readFileString(active.journal.file)).endsWith(publicationEntry("retry")),
+        );
+      }).pipe(Effect.provide(fixture(root, model)));
+    }).pipe(Effect.provide(platform)),
+  );
+
+  it.effect(
+    "retains a publication interrupted after append and does not complete it on restart",
+    () =>
+      Effect.gen(function* () {
+        const { root, botRoot, fs } = yield* setup();
+        const model = boundary();
+        const appended = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        const afterPublish = Deferred.succeed(appended, undefined).pipe(
+          Effect.andThen(Deferred.await(release)),
+        );
+        const interrupted = yield* Effect.scoped(
+          Effect.gen(function* () {
+            const app = yield* Application;
+            const host = yield* Schedule.ScheduleRunHostService;
+            const chat = yield* app.getOrCreateBotChat({ botRoot, platform: null });
+            yield* app.sendBotMessage(chat.id, prompt("completed"), () => Effect.void);
+            const source = yield* currentBot(botRoot);
+            const before = yield* fs.readFileString(source.journal.file);
+            const publication = yield* host
+              .publish(chat.id, "interrupted script")
+              .pipe(Effect.forkChild);
+            yield* Deferred.await(appended);
+            const pending = yield* currentBot(botRoot);
+            assert.deepStrictEqual(pending, { ...source, turn: { kind: "pending" } });
+            assert.strictEqual(
+              yield* fs.readFileString(source.journal.file),
+              before + publicationEntry("interrupted script"),
+            );
+            yield* Fiber.interrupt(publication);
+            const exit = yield* Fiber.await(publication);
+            assert.isTrue(Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause));
+            assert.deepStrictEqual(yield* currentBot(botRoot), pending);
+            return pending;
+          }).pipe(Effect.provide(fixture(root, model, { afterPublish }))),
+        );
+        yield* Effect.gen(function* () {
+          const host = yield* Schedule.ScheduleRunHostService;
+          assert.deepStrictEqual(yield* currentBot(botRoot), interrupted);
+          const before = yield* fs.readFileString(interrupted.journal.file);
+          yield* TestClock.adjust(BOT_SESSION_IDLE_MS);
+          yield* host.publish(interrupted.chatId, "after restart");
+          assert.deepStrictEqual(yield* currentBot(botRoot), interrupted);
+          assert.strictEqual(
+            yield* fs.readFileString(interrupted.journal.file),
+            before + publicationEntry("after restart"),
+          );
+        }).pipe(Effect.provide(fixture(root, model)));
+      }).pipe(Effect.provide(platform)),
+  );
+
+  it.effect(
+    "waits for the bot reply sink and prepares the completed state after taking its lock",
+    () =>
+      Effect.gen(function* () {
+        const { root, botRoot, fs } = yield* setup();
+        const model = boundary();
+        yield* Effect.gen(function* () {
+          const app = yield* Application;
+          const host = yield* Schedule.ScheduleRunHostService;
+          const chat = yield* app.getOrCreateBotChat({ botRoot, platform: "discord" });
+          const target = yield* host.prepare({
+            kind: "workspace-chat",
+            ownerWorkspaceId: chat.workspaceId,
+            chatId: ChatId.make("018f47a0-0000-7000-8000-000000000090"),
+          });
+          model.outcome = "failed";
+          yield* app
+            .sendBotMessage(chat.id, prompt("partial"), () => Effect.void)
+            .pipe(Effect.flip);
+          const source = yield* fillBotJournal(botRoot);
+          const blocked = yield* Deferred.make<void>();
+          const release = yield* Deferred.make<void>();
+          model.outcome = "completed";
+          const turn = yield* app
+            .sendBotMessage(chat.id, prompt("finish partial"), (event) =>
+              event.type === "text-delta"
+                ? Deferred.succeed(blocked, undefined).pipe(Effect.andThen(Deferred.await(release)))
+                : Effect.void,
+            )
+            .pipe(Effect.forkChild);
+          yield* Deferred.await(blocked);
+          const publication = yield* host
+            .publish(target.chatId, "queued script")
+            .pipe(Effect.forkChild);
+          yield* Effect.yieldNow;
+          assert.deepStrictEqual(yield* currentBot(botRoot), source);
+          assert.strictEqual(
+            Number((yield* fs.stat(source.journal.file)).size),
+            BOT_JOURNAL_MAX_BYTES,
+          );
+          yield* Deferred.succeed(release, undefined);
+          yield* Fiber.join(turn);
+          yield* Fiber.join(publication);
+          const active = yield* currentBot(botRoot);
+          assert.notStrictEqual(active.journal.id, source.journal.id);
+          assert.strictEqual(active.turn.kind, "completed");
+          assert.strictEqual(
+            Number((yield* fs.stat(source.journal.file)).size),
+            BOT_JOURNAL_MAX_BYTES,
+          );
+          const journal = yield* fs.readFileString(active.journal.file);
+          assert.isTrue(journal.endsWith(publicationEntry("queued script")));
+          assert.strictEqual(journal.split(publicationEntry("queued script")).length, 2);
+        }).pipe(Effect.provide(fixture(root, model)));
+      }).pipe(Effect.provide(platform)),
   );
 });

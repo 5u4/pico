@@ -427,7 +427,9 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
     ).pipe(Effect.mapError(failure("Failed to open bot conversation")));
   });
 
-  const prepareBotTurn = Effect.fn("Application.prepareBotTurn")(function* (source: BotSession) {
+  const prepareBotSession = Effect.fn("Application.prepareBotSession")(function* (
+    source: BotSession,
+  ) {
     if (source.turn.kind !== "completed") return source;
     const now = yield* Clock.currentTimeMillis;
     const info = yield* fileSystem.stat(source.journal.file);
@@ -475,7 +477,7 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
     replyTarget?: ReplyTarget,
   ) {
     yield* ensureChatOpen(source.chatId, "Failed to send bot message");
-    const active = yield* prepareBotTurn(source);
+    const active = yield* prepareBotSession(source);
     yield* bots.setTurn(active.chatId, active.journal.id, { kind: "pending" });
     const result = yield* runId === undefined
       ? runtime.sendTurn(active.chatId, prompt, onEvent, replyTarget)
@@ -885,10 +887,23 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
       chatId,
       Effect.gen(function* () {
         yield* ensureChatOpen(chatId, "Failed to publish scheduled result");
-        yield* runtime
-          .publish(chatId, content)
-          .pipe(Effect.mapError(failure("Failed to publish scheduled result")));
+        const bot = yield* bots.findByChat(chatId);
+        const active = Option.isSome(bot) ? yield* prepareBotSession(bot.value) : undefined;
+        if (active !== undefined && active.turn.kind !== "pending") {
+          yield* bots.setTurn(active.chatId, active.journal.id, { kind: "pending" });
+        }
+        yield* runtime.publish(chatId, content);
+        if (active !== undefined && active.turn.kind !== "pending") {
+          yield* bots.setTurn(active.chatId, active.journal.id, {
+            kind: "completed",
+            at: yield* Clock.currentTimeMillis,
+          });
+        }
       }),
+    ).pipe(
+      Effect.mapError((cause) =>
+        cause instanceof ChatClosed ? cause : failure("Failed to publish scheduled result")(cause),
+      ),
     );
   });
 
