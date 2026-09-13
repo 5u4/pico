@@ -86,6 +86,7 @@
   - `/btw` uses OMP's `runEphemeralTurn` on the current session. It does not run tools, steer the main task, or append either side-question message to OMP history.
   - Discord keeps the question and answer publicly in the thread under `/btw · @requester`. This Discord history does not become context for later main or side questions.
   - side requests retain the native session until cancellation settles. Closing cancels side requests before disposing the session and waits for their public replies before archiving the thread.
+  - after core close succeeds, Discord stops admitting `/btw` requests before draining output. Previously admitted replies stay public; later requests receive a private closed-chat response without starting a side turn.
   - side replies have a ten-minute deadline to leave time before Discord's fifteen-minute interaction token expiry. A timeout reply does not wait for slow provider cancellation.
 - a workspace can be a regular workspace (worktree_* = null) or a worktree workspace (worktree_* != null)
   - regular workspace new chats with workspace.default_cwd

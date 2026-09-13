@@ -368,6 +368,7 @@ export const install = Effect.fn("DiscordInput.install")(function* <
     {
       readonly semaphore: Semaphore.Semaphore;
       readonly btwReplies: Set<Deferred.Deferred<void>>;
+      acceptingBtw: boolean;
       knownThread: boolean;
     }
   >();
@@ -385,6 +386,7 @@ export const install = Effect.fn("DiscordInput.install")(function* <
     const entry = {
       semaphore: Semaphore.makeUnsafe(1),
       btwReplies: new Set<Deferred.Deferred<void>>(),
+      acceptingBtw: true,
       knownThread: false,
     };
     inputLocks.set(channelId, entry);
@@ -881,9 +883,11 @@ export const install = Effect.fn("DiscordInput.install")(function* <
   });
 
   const archiveThread = Effect.fnUntraced(function* (threadId: bigint) {
+    const entry = inputLock(threadId);
+    entry.acceptingBtw = false;
     yield* Effect.annotateLogsScoped({ phase: "drain-output" });
     yield* drainOutput();
-    for (const finished of inputLock(threadId).btwReplies) {
+    for (const finished of entry.btwReplies) {
       yield* Deferred.await(finished);
     }
     yield* Effect.annotateLogsScoped({ phase: "archive-thread" });
@@ -1148,11 +1152,33 @@ export const install = Effect.fn("DiscordInput.install")(function* <
 
     const response = Effect.scoped(
       Effect.gen(function* () {
+        const channelId = interaction.channelId;
+        const btwClosed =
+          name === "btw" && channelId !== undefined
+            ? (yield* Effect.acquireRelease(
+                Effect.sync(() => {
+                  const entry = inputLock(channelId);
+                  if (!entry.acceptingBtw) return undefined;
+                  const finished = Deferred.makeUnsafe<void>();
+                  entry.btwReplies.add(finished);
+                  return { replies: entry.btwReplies, finished };
+                }),
+                (registration) =>
+                  Effect.sync(() => {
+                    if (registration === undefined) return;
+                    registration.replies.delete(registration.finished);
+                    Deferred.doneUnsafe(registration.finished, Effect.void);
+                  }),
+              )) === undefined
+            : false;
         yield* Effect.annotateLogsScoped({ phase: "defer" });
         yield* promiseBoundary("defer-interaction", () =>
-          closeNonce === undefined ? interaction.defer(name !== "btw") : interaction.deferEdit(),
+          closeNonce === undefined
+            ? interaction.defer(name !== "btw" || btwClosed)
+            : interaction.deferEdit(),
         );
         yield* Effect.annotateLogsScoped({ phase: "request" });
+        if (btwClosed) return yield* editInteraction(interaction, closedMessage);
         const command =
           closeNonce === undefined
             ? DiscordCommand.parse(name, interaction.data?.options)
@@ -1174,7 +1200,6 @@ export const install = Effect.fn("DiscordInput.install")(function* <
               ? undefined
               : handleInteraction(interaction, command);
         if (effect === undefined) return;
-        const channelId = interaction.channelId;
         if (channelId === undefined || command?.kind === "abort" || name === "btw") {
           yield* effect;
           return;
@@ -1201,25 +1226,7 @@ export const install = Effect.fn("DiscordInput.install")(function* <
         }),
       ),
     );
-    const channelId = interaction.channelId;
-    run(
-      name === "btw" && channelId !== undefined
-        ? Effect.acquireUseRelease(
-            Effect.sync(() => {
-              const replies = inputLock(channelId).btwReplies;
-              const finished = Deferred.makeUnsafe<void>();
-              replies.add(finished);
-              return { replies, finished };
-            }),
-            () => response,
-            ({ replies, finished }) =>
-              Effect.sync(() => {
-                replies.delete(finished);
-                Deferred.doneUnsafe(finished, Effect.void);
-              }),
-          )
-        : response,
-    );
+    run(response);
   };
 
   return resolveThreadId;

@@ -424,6 +424,89 @@ describe("Discord input", () => {
     ),
   );
 
+  it.effect("rejects late side questions privately while thread archival is in flight", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const archiveStarted = yield* Deferred.make<void>();
+        const sideDeferred = yield* Deferred.make<void>();
+        const sideReplied = yield* Deferred.make<string>();
+        const closeReplied = yield* Deferred.make<void>();
+        const releaseArchive = Promise.withResolvers<void>();
+        const releaseDefer = Promise.withResolvers<void>();
+        const deferrals: boolean[] = [];
+        const publicFollowups: string[] = [];
+        let asked = 0;
+        const bot = yield* installBtwInput({
+          askBtw: () =>
+            Effect.sync(() => {
+              asked += 1;
+              return "Unexpected answer.";
+            }),
+          closeChat: () => Effect.succeed({ kind: "closed" }),
+          editChannel: async () => {
+            Effect.runSync(Deferred.succeed(archiveStarted, undefined));
+            await releaseArchive.promise;
+          },
+        });
+        yield* Effect.gen(function* () {
+          interactionHandlerFor(bot)(
+            interaction({
+              channelId: 20n,
+              data: { name: "close" },
+              edit: async () => {
+                Effect.runSync(Deferred.succeed(closeReplied, undefined));
+              },
+            }),
+          );
+          yield* Deferred.await(archiveStarted);
+          interactionHandlerFor(bot)(
+            interaction({
+              channelId: 20n,
+              data: {
+                name: "btw",
+                options: [
+                  {
+                    name: "question",
+                    type: ApplicationCommandOptionTypes.String,
+                    value: "Explain this",
+                  },
+                ],
+              },
+              defer: async (isPrivate) => {
+                deferrals.push(isPrivate === true);
+                Effect.runSync(Deferred.succeed(sideDeferred, undefined));
+                await releaseDefer.promise;
+              },
+              edit: async (response) => {
+                Effect.runSync(Deferred.succeed(sideReplied, response.content ?? ""));
+              },
+              respond: async (response) => {
+                publicFollowups.push(response.content ?? "");
+              },
+            }),
+          );
+          yield* Deferred.await(sideDeferred);
+          releaseArchive.resolve();
+          yield* Deferred.await(closeReplied);
+          releaseDefer.resolve();
+          const reply = yield* Deferred.await(sideReplied);
+          assert.deepStrictEqual(deferrals, [true]);
+          assert.strictEqual(asked, 0);
+          assert.include(reply, "closed");
+          assert.notInclude(reply, "/btw");
+          assert.deepStrictEqual(publicFollowups, []);
+        }).pipe(
+          Effect.ensuring(
+            Effect.sync(() => {
+              releaseArchive.resolve();
+              releaseDefer.resolve();
+            }),
+          ),
+        );
+      }),
+    ),
+  );
+
   it.effect(
     "terminates cancelled, timed out, and failed side replies without losing the question",
     () =>
