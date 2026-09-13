@@ -85,6 +85,44 @@ describe("schedule contract", () => {
     assert.throws(() => decodeUpdate({ enabled: null }));
   });
 
+  it("validates explicit Pico target IDs for creation and retargeting", () => {
+    for (const target of [
+      { kind: "chat", chatId },
+      { kind: "workspace", workspaceId },
+    ] satisfies ReadonlyArray<Schedule.ScheduleTargetInput>) {
+      assert.deepStrictEqual(decodeUpdate({ target }).target, target);
+      assert.deepStrictEqual(
+        decodeCreate({
+          name: "explicit target",
+          enabled: false,
+          sourceDirectory,
+          trigger: { kind: "once", at: 1_000 },
+          target,
+        }).target,
+        target,
+      );
+    }
+    for (const target of [
+      { kind: "chat", chatId: "123456789012345678" },
+      { kind: "workspace", workspaceId: "018f47a0-0000-4000-8000-000000000003" },
+      { kind: "chat", workspaceId },
+      { kind: "workspace", chatId },
+      { kind: "current-chat", chatId },
+      { kind: "chat", chatId, workspaceId },
+    ]) {
+      assert.throws(() => decodeUpdate({ target }));
+      assert.throws(() =>
+        decodeCreate({
+          name: "invalid target",
+          enabled: false,
+          sourceDirectory,
+          trigger: { kind: "once", at: 1_000 },
+          target,
+        }),
+      );
+    }
+  });
+
   it("clears timeout overrides only through updates", () => {
     assert.deepStrictEqual(decodeUpdate({ scriptTimeoutMs: null }), { scriptTimeoutMs: null });
     assert.throws(() => decodeDefinition({ ...definition, scriptTimeoutMs: null }));

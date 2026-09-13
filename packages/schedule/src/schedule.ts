@@ -45,15 +45,23 @@ const MISSED_GRACE_MILLIS = 2 * 60 * 60 * 1_000;
 const scheduleError = (kind: Schedule.ScheduleError["kind"], message: string) =>
   new Schedule.ScheduleError({ kind, message });
 
-const targetFromInput = (
+const selectTarget = (
   caller: Schedule.ScheduleCaller,
   input: Schedule.ScheduleTargetInput,
-): Schedule.ScheduleTarget => {
+): Pick<Schedule.ScheduleDefinition, "target" | "replyTarget"> => {
   switch (input.kind) {
     case "current-chat":
-      return { kind: "chat", chatId: caller.chatId };
     case "current-workspace":
-      return { kind: "workspace", workspaceId: caller.workspaceId };
+      return {
+        target:
+          input.kind === "current-chat"
+            ? { kind: "chat", chatId: caller.chatId }
+            : { kind: "workspace", workspaceId: caller.workspaceId },
+        ...(caller.replyTarget === undefined ? {} : { replyTarget: caller.replyTarget }),
+      };
+    case "chat":
+    case "workspace":
+      return { target: input };
     default: {
       const exhaustive: never = input;
       return exhaustive;
@@ -70,19 +78,9 @@ const validateTrigger = (trigger: Schedule.ScheduleTrigger): string | undefined 
   return Result.isFailure(parsed) ? parsed.failure.message : undefined;
 };
 
-const validateDefinition = (definition: Schedule.ScheduleDefinition): string | undefined => {
-  if (
-    definition.target.kind === "workspace" &&
-    definition.target.workspaceId !== definition.ownerWorkspaceId
-  ) {
-    return "Workspace schedule targets must match the owner workspace";
-  }
-  return validateTrigger(definition.trigger);
-};
-
 const invalidExternalView = (loaded: LoadedSchedule): Schedule.ScheduleView => {
   if (loaded.view.kind !== "ready") return loaded.view;
-  const error = validateDefinition(loaded.view.definition);
+  const error = validateTrigger(loaded.view.definition.trigger);
   return error === undefined
     ? loaded.view
     : {
@@ -130,8 +128,8 @@ const runAnnotations = (run: Schedule.ScheduleRunLifecycle) => ({
   scheduleId: run.scheduleId,
   runId: run.id,
   definitionRevision: run.definitionRevision,
-  chatId: run.plannedTarget.chatId,
-  workspaceId: run.plannedTarget.ownerWorkspaceId,
+  plannedChatId: run.plannedTarget.chatId,
+  ownerWorkspaceId: run.plannedTarget.ownerWorkspaceId,
 });
 
 const failureCategory = (cause: Cause.Cause<unknown>) => {
@@ -194,9 +192,8 @@ const capture = Effect.fn("Schedules.capture")(function* (
           ownerWorkspaceId: caller.workspaceId,
           createdByChatId: caller.chatId,
           createdAt,
-          target: targetFromInput(caller, input.target),
+          ...selectTarget(caller, input.target),
           trigger: input.trigger,
-          ...(caller.replyTarget === undefined ? {} : { replyTarget: caller.replyTarget }),
           ...(input.scriptTimeoutMs === undefined
             ? {}
             : { scriptTimeoutMs: input.scriptTimeoutMs }),
@@ -268,18 +265,21 @@ const capture = Effect.fn("Schedules.capture")(function* (
           if (loaded.view.kind !== "ready") {
             return yield* scheduleError("invalid", "Invalid schedules cannot be updated");
           }
+          const { target, replyTarget, ...metadata } = loaded.view.definition;
+          const selection =
+            input.target === undefined
+              ? { target, ...(replyTarget === undefined ? {} : { replyTarget }) }
+              : selectTarget(caller, input.target);
           const definition = {
-            ...loaded.view.definition,
+            ...metadata,
+            ...selection,
             revision: Schedule.ScheduleRevision.make(yield* transactionId()),
             ...(input.name === undefined ? {} : { name: input.name }),
-            ...(input.target === undefined
-              ? {}
-              : { target: targetFromInput(caller, input.target) }),
             ...(input.trigger === undefined ? {} : { trigger: input.trigger }),
             ...(input.scriptTimeoutMs == null ? {} : { scriptTimeoutMs: input.scriptTimeoutMs }),
           } satisfies Schedule.ScheduleDefinition;
           if (input.scriptTimeoutMs === null) delete definition.scriptTimeoutMs;
-          const definitionError = validateDefinition(definition);
+          const definitionError = validateTrigger(definition.trigger);
           if (definitionError !== undefined) {
             return yield* scheduleError("invalid", definitionError);
           }
@@ -397,7 +397,11 @@ const capture = Effect.fn("Schedules.capture")(function* (
 
       yield* Effect.logInfo("Scheduled run started");
       yield* Effect.gen(function* () {
-        const targetResult = yield* host.prepare(run.plannedTarget).pipe(Effect.result);
+        const destination: Schedule.ScheduleRunDestination =
+          definition.target.kind === "chat"
+            ? definition.target
+            : { ...definition.target, newChatId: run.plannedTarget.chatId };
+        const targetResult = yield* host.prepare(destination).pipe(Effect.result);
         if (Result.isFailure(targetResult)) {
           yield* fail("target", targetResult.failure.message);
           return;
@@ -759,7 +763,7 @@ const capture = Effect.fn("Schedules.capture")(function* (
           }> = [];
           for (const loaded of schedules) {
             if (loaded.view.kind !== "ready" || loaded.view.state !== "enabled") continue;
-            if (validateDefinition(loaded.view.definition) !== undefined) continue;
+            if (validateTrigger(loaded.view.definition.trigger) !== undefined) continue;
             const view = loaded.view;
             const existing = yield* readRuns(storage, view.id);
             if (existing.some((run) => run.state.kind !== "finished")) continue;

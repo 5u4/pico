@@ -1,8 +1,8 @@
 import type { ExtensionFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
-import { AbsolutePath } from "@pico/contract/path";
 import * as Schedule from "@pico/contract/schedule";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
 
 interface Options {
   readonly caller: () => Schedule.ScheduleCaller;
@@ -22,6 +22,13 @@ interface OperationContext {
   readonly scheduleId?: Schedule.ScheduleId;
   readonly runEffect: typeof Effect.runPromise;
 }
+
+const decodeCreate = Schema.decodeUnknownSync(Schedule.CreateSchedule, {
+  onExcessProperty: "error",
+});
+const decodeUpdate = Schema.decodeUnknownSync(Schedule.UpdateSchedule, {
+  onExcessProperty: "error",
+});
 
 const textContent = (text: string): { readonly type: "text"; readonly text: string } => ({
   type: "text",
@@ -91,13 +98,18 @@ export const make =
         ...(id === undefined ? {} : { scheduleId: Schedule.ScheduleId.make(id) }),
       });
     };
-    const scheduleId = Type.String({
+    const uuidV7 = Type.String({
       pattern:
         "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-7[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$",
     });
     const target = Type.Union([
       Type.Object({ kind: Type.Literal("current-chat") }, { additionalProperties: false }),
       Type.Object({ kind: Type.Literal("current-workspace") }, { additionalProperties: false }),
+      Type.Object({ kind: Type.Literal("chat"), chatId: uuidV7 }, { additionalProperties: false }),
+      Type.Object(
+        { kind: Type.Literal("workspace"), workspaceId: uuidV7 },
+        { additionalProperties: false },
+      ),
     ]);
     const trigger = Type.Union([
       Type.Object(
@@ -138,12 +150,7 @@ export const make =
         { additionalProperties: false },
       ),
       execute: (_toolCallId, params) =>
-        execute("create", (caller) =>
-          schedules.create(caller, {
-            ...params,
-            sourceDirectory: AbsolutePath.make(params.sourceDirectory),
-          }),
-        ),
+        execute("create", (caller) => schedules.create(caller, decodeCreate(params))),
     });
 
     api.registerTool({
@@ -162,7 +169,7 @@ export const make =
       description:
         "Get schedule metadata and the current editable sourceDirectory. Read and edit source files with filesystem tools.",
       approval: "read",
-      parameters: Type.Object({ scheduleId }, { additionalProperties: false }),
+      parameters: Type.Object({ scheduleId: uuidV7 }, { additionalProperties: false }),
       execute: (_toolCallId, params) =>
         execute(
           "get",
@@ -179,7 +186,7 @@ export const make =
       approval: "write",
       parameters: Type.Object(
         {
-          scheduleId,
+          scheduleId: uuidV7,
           name: Type.Optional(Type.String({ minLength: 1 })),
           enabled: Type.Optional(Type.Boolean()),
           target: Type.Optional(target),
@@ -192,7 +199,7 @@ export const make =
         const { scheduleId: id, ...input } = params;
         return execute(
           "update",
-          (caller) => schedules.update(caller, Schedule.ScheduleId.make(id), input),
+          (caller) => schedules.update(caller, Schedule.ScheduleId.make(id), decodeUpdate(input)),
           id,
         );
       },
@@ -204,7 +211,7 @@ export const make =
       description:
         "Delete an enabled or disabled schedule definition while retaining its immutable run history.",
       approval: "write",
-      parameters: Type.Object({ scheduleId }, { additionalProperties: false }),
+      parameters: Type.Object({ scheduleId: uuidV7 }, { additionalProperties: false }),
       execute: (_toolCallId, params) => {
         const id = Schedule.ScheduleId.make(params.scheduleId);
         return execute(

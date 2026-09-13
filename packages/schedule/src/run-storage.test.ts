@@ -116,8 +116,7 @@ describe("run storage", () => {
       let scheduleId: Schedule.ScheduleId | undefined;
       const schedules = yield* make(schedulesDir);
       const host: Schedule.ScheduleRunHost = {
-        prepare: (target) =>
-          Effect.succeed({ chatId: target.chatId, workspaceId: target.ownerWorkspaceId, cwd }),
+        prepare: () => Effect.succeed({ chatId, workspaceId, cwd }),
         deliver: () => Effect.void,
         publish: () => Effect.void,
         runPrompt: (_target, runId, _prompt, onEvent) =>

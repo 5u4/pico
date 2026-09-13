@@ -528,7 +528,7 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
       .findByWorkspace(workspaceId)
       .pipe(Effect.mapError(failure("Failed to resolve scheduled bot conversation")));
     if (Option.isSome(bot)) {
-      return yield* resolveScheduledChat(workspaceId, bot.value.chatId);
+      return yield* resolveScheduledChat(bot.value.chatId);
     }
     const existing = yield* chats
       .findById(chatId)
@@ -540,6 +540,7 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
           message: "Scheduled chat identity belongs to another workspace",
         });
       }
+      if (existing.value.archivedAt !== null) return yield* new ChatClosed();
       return existing.value;
     }
     return yield* createChatWithId(
@@ -550,16 +551,9 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
   });
 
   const resolveScheduledChat = Effect.fn("Application.resolveScheduledChat")(function* (
-    ownerWorkspaceId: Workspace.WorkspaceId,
     chatId: Chat.ChatId,
   ) {
     const chat = yield* findChat(chatId);
-    if (chat.workspaceId !== ownerWorkspaceId) {
-      return yield* new ApplicationError({
-        reason: "conflict",
-        message: "Scheduled chat does not belong to its owner workspace",
-      });
-    }
     if (chat.archivedAt !== null) return yield* new ChatClosed();
     return chat;
   });
@@ -963,8 +957,8 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
   const scheduleHost = Schedule.ScheduleRunHostService.of({
     prepare: (target) => {
       switch (target.kind) {
-        case "existing-chat":
-          return resolveScheduledChat(target.ownerWorkspaceId, target.chatId).pipe(
+        case "chat":
+          return resolveScheduledChat(target.chatId).pipe(
             Effect.map((chat) => ({
               chatId: chat.id,
               workspaceId: chat.workspaceId,
@@ -972,8 +966,8 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
             })),
             Effect.mapError(scheduleHostError),
           );
-        case "workspace-chat":
-          return createScheduledChat(target.ownerWorkspaceId, target.chatId).pipe(
+        case "workspace":
+          return createScheduledChat(target.workspaceId, target.newChatId).pipe(
             Effect.map((chat) => ({
               chatId: chat.id,
               workspaceId: chat.workspaceId,

@@ -13,9 +13,26 @@ Use the `schedule_*` tools for schedule metadata. Author `script.js`, `prompt.md
 - Use a script alone for a fixed reminder or deterministic result.
 - Use a script with a prompt when a cheap check can decide whether the agent has work to do.
 
-Schedules belong to the current workspace. `current-chat` reuses this conversation. `current-workspace` creates a new chat for each run, even when the script then skips.
-
 For one-time triggers, `at` is Unix epoch milliseconds. Cron uses five fields and an explicit IANA time zone or `UTC`. Use the user's intended zone. Ask only if it is unknown. Pico must be running, and checks roughly every 30 seconds rather than at an exact instant.
+
+## Choose the target
+
+Schedules stay owned and managed by the workspace that created them. Supply one `target` object:
+
+| Target | Execution destination |
+| --- | --- |
+| `{ kind: "current-chat" }` | The calling chat. |
+| `{ kind: "current-workspace" }` | The calling workspace. |
+| `{ kind: "chat", chatId }` | The selected existing chat. |
+| `{ kind: "workspace", workspaceId }` | The selected workspace. |
+
+Use Pico UUIDv7 IDs for `chatId` and `workspaceId`, not Discord IDs. Scripts and the agent use the destination chat's workspace and working directory, not the owner's context.
+
+Workspace targets create a new local chat per run, even if the script skips. Bot workspaces reuse their shared bot chat. Selecting a UUID does not create an external recipient or a Discord thread.
+
+On creation or an update that supplies `target`, convenience selectors save that operation's caller reply, or clear it when absent. Explicit selectors clear saved caller replies, even when the ID matches the current context. Updates that omit `target` preserve the saved reply.
+
+Claimed runs retain their frozen destination and reply. Missing workspaces and missing or archived chats fail before execution, without a fallback.
 
 ## Create a schedule
 
