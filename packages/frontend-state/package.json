@@ -1,0 +1,17 @@
+{
+  "name": "@pico/frontend-state",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./client": "./src/client.ts"
+  },
+  "dependencies": {
+    "@pico/contract": "workspace:*",
+    "@pico/rpc": "workspace:*",
+    "effect": "catalog:"
+  },
+  "devDependencies": {
+    "@effect/platform-node": "catalog:",
+    "@effect/vitest": "catalog:"
+  }
+}
