@@ -17,6 +17,7 @@
   - instructions files load in order: `<picoRoot>/agents/instructions.md`, `agents/discord/bots/{botId}/instructions.md`, then `agents/discord/channels/{channelId}/instructions.md`
   - `channelId` is the owning workspace's parent Discord channel, never the chat's thread ID; scheduled chats and native clients use that same ownership
   - native workspaces load only the global file; channel instructions are shared across bots
+  - bot-mode sessions load the global file followed by `<botRoot>/instructions.md`, never a sender or guild-channel file
   - the single configured bot's identity comes from authenticated Discord READY; configured but not ready fails session opening, while disabled Discord skips only the bot file
   - missing and blank instructions files are ignored; other read failures include the path and cause
   - all layers append; empty files do not clear inherited content; more-specific instructions take precedence as model guidance, not authorization
@@ -58,9 +59,12 @@
 - schedule state comes only from the parent `enabled` or `disabled` directory; changing enabled moves the directory, so call schedule_get again before editing files
 - changes to name, target, trigger, or scriptTimeoutMs create a new metadata revision; enabled-only changes preserve it
 - schedule runs copy their exact metadata and complete source tree before execution; future immutable snapshots retain helper files and directories, and source edits never change existing snapshots
+- schedules created during a bot DM turn retain that turn's platform, channel, and message destination in metadata and run snapshots; later DMs, metadata updates, and restarts do not change it
+- scheduled prompts and script-only publications send to that stored destination and finish only after delivery succeeds; unavailable destinations fail the run rather than falling back to another sender
+- current-workspace schedules in a bot workspace reuse its logical bot chat, turn queue, physical journal, memory settings, and rotation policy; regular workspaces still create a separate scheduled chat
 - schedule definitions and runs never use sqlite
 - each workspace can only belong to one platform (native | discord | ...)
-- platform = null means it's native -> created through the native pico app, not from the other chat apps
+- an absent workspace platform binding means there is no foreign channel; native workspaces and shared bot workspaces both use this shape
 - db workspace schema
   - id: bun uuidv7 primary
   - name: workspace name; not null
@@ -77,8 +81,8 @@
   - external_id: nullable, the discord or other chat app id
   - created_at: ms integer; not null
   - archived_at: ms integer; nullable
-- a workspace in discord is a channel
-- a chat in discord is a thread
+- a guild workspace in Discord is a channel
+- a guild chat in Discord is a thread; DMs use the shared bot chat instead
 - when creating the chat, write workspace.default_cwd to chat.cwd
   - when workspace.default_cwd is changed, chat.cwd remains the same
   - each new chat uses the complete workspace configuration read during creation, even if a bind finishes before chat creation completes
@@ -133,6 +137,17 @@
 - logging - 30d retention, 1d rotation, write to file and console
 - config.toml controls configs
 - daemon always serve web; when config.toml configures discord + secret loads, serve discord as well
+  - a nonblank `secrets/discord_bot_token` enables Discord when the `[discord]` section is present; `allowed_guild = []` enables DMs only, not guild messages
+  - guild messages still require a listed guild; `default_cwd` remains a required absolute path for new guild workspaces
+  - the gateway subscribes to direct messages; every non-bot sender intentionally shares one bot conversation and memory, with no owner restriction or per-user partition; own messages, other bots, and webhooks are ignored
+  - one DM queue preserves arrival order through attachment downloads, chat creation, and the complete reply; each reply targets the triggering message and channel, and guild/thread commands are unsupported in DMs
+  - Discord resolves `<picoRoot>/agents/discord/bots/<botId>` as `botRoot`; application and OMP bot lifecycle code use that path without Discord-specific path rules
+  - `<botRoot>/work` is the durable working directory and is never cleared on rotation; `<botRoot>/sessions` contains physical journals, `<botRoot>/omp` owns OMP local memory, and `<botRoot>/handoffs/<source-session-id>.md` bridges generations
+  - one logical bot chat keeps a persisted pointer to the active physical session across restart; its workspace and chat have no Discord channel/thread binding
+  - the starting rotation policy is 8 MiB of journal data or 12 hours idle, checked before the next turn after a completed turn; these are initial policy values, not measured cutoffs
+  - pending, failed, or aborted turns keep their current generation until a successful turn; a handoff failure leaves the prior active session in place and replies with an error
+  - rotation saves a short semantic handoff before switching the durable pointer; it does not fork the full transcript, remove old journals, or bound total disk retention
+  - OMP compaction stays enabled; its local memory scanner is asynchronous and has a minimum idle age, so the new session explicitly reads the relevant handoff while memory extraction catches up
 - phases
   - spike critical parts, define packages
   - write critical packages

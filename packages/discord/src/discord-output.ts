@@ -1,6 +1,8 @@
 import type { AgentEventEnvelope } from "@pico/contract/agent-event";
 import type * as AgentMessage from "@pico/contract/agent-message";
 import type * as Chat from "@pico/contract/chat-model";
+import { AgentError } from "@pico/contract/errors";
+import { ReplyDelivery, type ReplyTarget } from "@pico/contract/reply-target";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -19,12 +21,17 @@ const TYPING_INTERVAL = "8 seconds";
 export interface RenderedMessage {
   readonly content: string;
   readonly silent: boolean;
+  readonly replyTo?: bigint;
 }
 
 export interface DiscordOutputPolicy {
   readonly showToolCalls: boolean;
   readonly showThinking: boolean;
 }
+
+type DiscordOutputDestination =
+  | { readonly kind: "thread" }
+  | { readonly kind: "direct-message"; readonly messageId: bigint };
 
 export interface DiscordOutputClient {
   readonly send: (threadId: bigint, message: RenderedMessage) => Effect.Effect<bigint, unknown>;
@@ -36,6 +43,23 @@ export interface DiscordOutputClient {
   readonly renameThread: (threadId: bigint, title: string) => Effect.Effect<void, unknown>;
   readonly triggerTyping: (threadId: bigint) => Effect.Effect<void, unknown>;
 }
+
+const Snowflake = Schema.BigIntFromString.check(
+  Schema.isBetweenBigInt({ minimum: 1n, maximum: 18_446_744_073_709_551_615n }),
+);
+const decodeReplyTarget = Schema.decodeUnknownEffect(
+  Schema.Struct({
+    platform: Schema.Literal("discord"),
+    conversationId: Snowflake,
+    messageId: Snowflake,
+  }),
+);
+
+// Discord startup exposes scheduled delivery without retaining a live conversation destination.
+export const makeReplyDelivery = (client: Pick<DiscordOutputClient, "send">) =>
+  ReplyDelivery.of({
+    send: (chatId, target, content) => Effect.scoped(sendReply(client, chatId, target, content)),
+  });
 
 interface ToolState {
   readonly presentation: ToolPresentation;
@@ -213,6 +237,39 @@ export const renderAssistant = (
   return rendered;
 };
 
+const sendReply = Effect.fn("Discord.replyDelivery.send")(function* (
+  client: Pick<DiscordOutputClient, "send">,
+  chatId: Chat.ChatId,
+  target: ReplyTarget,
+  content: string,
+) {
+  const destination = yield* decodeReplyTarget(target).pipe(
+    Effect.mapError(() => new AgentError({ message: "Invalid Discord reply destination" })),
+  );
+  yield* Effect.annotateLogsScoped({
+    component: "discord",
+    operation: "send-scheduled-reply",
+    chatId,
+    channelId: destination.conversationId.toString(),
+    messageId: destination.messageId.toString(),
+  });
+  for (const message of textMessages(content, false)) {
+    yield* client
+      .send(destination.conversationId, {
+        ...message,
+        replyTo: destination.messageId,
+      })
+      .pipe(
+        Effect.mapError((error) => {
+          const failure = discordError("send-scheduled-reply", error);
+          return new AgentError({
+            message: `Discord scheduled reply delivery failed${failure.status === undefined ? "" : `: HTTP ${failure.status}`}${failure.discordCode === undefined ? "" : `, code ${failure.discordCode}`}`,
+          });
+        }),
+      );
+  }
+});
+
 const interruptTyping = Effect.fn("Discord.output.interruptTyping")(function* (state: RunState) {
   const typing = state.typing;
   state.typing = undefined;
@@ -223,8 +280,16 @@ export const make = (
   client: DiscordOutputClient,
   scope: Scope.Scope,
   policy: DiscordOutputPolicy,
+  destination: DiscordOutputDestination = { kind: "thread" },
 ) => {
   const states = new Map<Chat.ChatId, RunState>();
+  const send = (channelId: bigint, message: RenderedMessage) =>
+    client.send(
+      channelId,
+      destination.kind === "direct-message"
+        ? { ...message, replyTo: destination.messageId }
+        : message,
+    );
 
   const stateFor = (chatId: Chat.ChatId) => {
     const current = states.get(chatId);
@@ -268,13 +333,13 @@ export const make = (
     content: string,
   ) {
     if (messageId === undefined) {
-      yield* client.send(threadId, { content, silent: SILENT });
+      yield* send(threadId, { content, silent: SILENT });
       return;
     }
     yield* client.edit(threadId, messageId, content).pipe(
       Effect.catch((error) => {
         const edit = discordError("edit-message", error);
-        return client.send(threadId, { content, silent: SILENT }).pipe(
+        return send(threadId, { content, silent: SILENT }).pipe(
           Effect.mapError((failure) => {
             const delivery = discordError("send-message", failure);
             return new DiscordError({
@@ -357,6 +422,7 @@ export const make = (
         case "notice":
           return;
         case "title-changed":
+          if (destination.kind === "direct-message") return;
           yield* client
             .renameThread(threadId, event.title)
             .pipe(Effect.catchCause((cause) => reportFailure("rename-thread", cause, "warning")));
@@ -370,7 +436,7 @@ export const make = (
           );
           const tool: ToolState = { presentation, messageId: undefined };
           state.tools.set(event.toolCallId, tool);
-          tool.messageId = yield* client.send(threadId, {
+          tool.messageId = yield* send(threadId, {
             content: presentation.started,
             silent: SILENT,
           });
@@ -387,7 +453,7 @@ export const make = (
           if (terminal) state.terminalClaimed = true;
           const messages = renderAssistant(event.message, policy.showThinking);
           for (const [chunkIndex, message] of messages.entries()) {
-            yield* client.send(threadId, message).pipe(
+            yield* send(threadId, message).pipe(
               Effect.mapError(
                 (error) =>
                   new DiscordError({
@@ -405,7 +471,7 @@ export const make = (
           yield* flushTools(threadId, state);
           if (event.outcome === "completed" || state.terminalClaimed) return;
           state.terminalClaimed = true;
-          yield* client.send(threadId, {
+          yield* send(threadId, {
             content: event.outcome === "aborted" ? ABORTED_MESSAGE : FAILED_MESSAGE,
             silent: false,
           });

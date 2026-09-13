@@ -72,6 +72,7 @@ describe("session pool publication", () => {
                     manager.releaseRetainedEntries();
                   },
                 },
+                createHandoff: () => Promise.reject(new Error("unexpected handoff")),
                 askBtw: () => Promise.reject(new Error("unexpected side question")),
                 sendPrompt: () => Promise.resolve(admitted),
                 shake: async (mode) => shakeResult(mode),
@@ -195,6 +196,7 @@ describe("session pool publication", () => {
                       manager.releaseRetainedEntries();
                     },
                   },
+                  createHandoff: () => Promise.reject(new Error("unexpected handoff")),
                   askBtw: () => Promise.reject(new Error("unexpected side question")),
                   sendPrompt: (_value, onStarted) => {
                     onStarted?.();

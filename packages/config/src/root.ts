@@ -5,6 +5,23 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import type * as PlatformError from "effect/PlatformError";
+import * as Schema from "effect/Schema";
+
+const decodeDiscordBotId = Schema.decodeUnknownEffect(
+  Schema.String.check(Schema.isPattern(/^[0-9]+$/), Schema.isTrimmed()),
+);
+
+// Discord resolves its authenticated bot's storage before installing message handlers.
+export const discordBotRoot = Effect.fn("ConfigRoot.discordBotRoot")(function* (
+  root: PicoRootType,
+  botId: string,
+) {
+  const path = yield* Path.Path;
+  const id = yield* decodeDiscordBotId(botId).pipe(
+    Effect.mapError(() => new ConfigError({ message: "Invalid Discord bot ID" })),
+  );
+  return AbsolutePath.make(path.join(root, "agents", "discord", "bots", id));
+});
 
 const configError = (operation: string) => (error: PlatformError.PlatformError) =>
   new ConfigError({ message: `${operation} failed (${error.reason._tag})` });

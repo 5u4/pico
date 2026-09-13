@@ -55,6 +55,8 @@ const installInput = Effect.fn("test.installDeliveryInput")(function* (options: 
     },
   };
   const application = Application.of({
+    getOrCreateBotChat: () => Effect.die("unexpected bot chat creation"),
+    sendBotMessage: () => Effect.die("unexpected bot message"),
     askBtw: () => Effect.die("unexpected side question"),
     createWorkspace: () => Effect.die("unexpected explicit workspace creation"),
     getOrCreateWorkspaceByBinding: () => Effect.die("unexpected workspace creation"),

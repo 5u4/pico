@@ -196,6 +196,7 @@ const capture = Effect.fn("Schedules.capture")(function* (
           createdAt,
           target: targetFromInput(caller, input.target),
           trigger: input.trigger,
+          ...(caller.replyTarget === undefined ? {} : { replyTarget: caller.replyTarget }),
           ...(input.scriptTimeoutMs === undefined
             ? {}
             : { scriptTimeoutMs: input.scriptTimeoutMs }),
@@ -453,7 +454,7 @@ const capture = Effect.fn("Schedules.capture")(function* (
           }
           failureStage = "publish";
           const published = yield* host
-            .publish(target.chatId, decision.content)
+            .publish(target.chatId, decision.content, definition.replyTarget)
             .pipe(Effect.result);
           if (Result.isFailure(published)) {
             yield* fail("publish", published.failure.message);
@@ -510,6 +511,7 @@ const capture = Effect.fn("Schedules.capture")(function* (
                   (error) => new Schedule.ScheduleHostError({ message: error.message }),
                 ),
               ),
+            definition.replyTarget,
           )
           .pipe(Effect.result);
         if (Result.isFailure(captured)) {
@@ -566,7 +568,9 @@ const capture = Effect.fn("Schedules.capture")(function* (
           return;
         }
         failureStage = "publish";
-        const delivery = yield* host.deliver(target.chatId, text).pipe(Effect.result);
+        const delivery = yield* host
+          .deliver(target.chatId, text, definition.replyTarget)
+          .pipe(Effect.result);
         if (Result.isFailure(delivery)) {
           yield* fail("publish", delivery.failure.message);
           return;

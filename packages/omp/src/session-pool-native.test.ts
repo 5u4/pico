@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import NodeFileSystem from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as BunCrypto from "@effect/platform-bun/BunCrypto";
@@ -11,7 +11,10 @@ import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-sessi
 import type * as AgentEvent from "@pico/contract/agent-event";
 import * as AgentMessage from "@pico/contract/agent-message";
 import * as Chat from "@pico/contract/chat-model";
+import { AbsolutePath } from "@pico/contract/path";
+import type { ReplyTarget } from "@pico/contract/reply-target";
 import * as Schedule from "@pico/contract/schedule";
+import * as Workspace from "@pico/contract/workspace-model";
 import * as Cause from "effect/Cause";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
@@ -20,9 +23,11 @@ import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { open as openSchedules } from "../../schedule/src/schedule.ts";
 
 const importNative = async () => {
   const modules = await Promise.all([
@@ -41,6 +46,8 @@ const importNative = async () => {
     import("./session-pool.ts"),
     import("./agent-event.ts"),
     import("./layer.ts"),
+    import("@oh-my-pi/pi-coding-agent/extensibility/extensions/wrapper"),
+    import("./schedule-extension.ts"),
   ]);
   const [
     core,
@@ -58,6 +65,8 @@ const importNative = async () => {
     pool,
     normalized,
     adapter,
+    wrappers,
+    scheduleExtension,
   ] = modules;
   return {
     ...core,
@@ -74,8 +83,12 @@ const importNative = async () => {
     ...sender,
     ...pool,
     ...normalized,
+    ...wrappers,
+    makeScheduleExtension: scheduleExtension.make,
     makeSessionHandle: adapter.makeSessionHandle,
     makeBtw: adapter.makeBtw,
+    makeHandoff: adapter.makeHandoff,
+    makeShake: adapter.makeShake,
   };
 };
 
@@ -83,7 +96,7 @@ let native: Awaited<ReturnType<typeof importNative>>;
 let root: string;
 
 beforeAll(async () => {
-  root = await mkdtemp(join(tmpdir(), "pico-native-pool-"));
+  root = await NodeFileSystem.mkdtemp(join(tmpdir(), "pico-native-pool-"));
   vi.stubEnv("HOME", root);
   vi.stubEnv("PI_CODING_AGENT_DIR", join(root, "agent"));
   vi.stubEnv("XDG_DATA_HOME", join(root, "data"));
@@ -98,15 +111,16 @@ beforeAll(async () => {
 
 afterAll(async () => {
   vi.unstubAllEnvs();
-  if (root) await rm(root, { recursive: true, force: true });
+  if (root) await NodeFileSystem.rm(root, { recursive: true, force: true });
 });
 
 const platform = Layer.mergeAll(BunCrypto.layer, BunFileSystem.layer, BunPath.layer);
 const chatId = Chat.ChatId.make("018f47a0-0000-7000-8000-000000000001");
 const runId = Schedule.ScheduleRunId.make("scheduled-1000-018f47a0-0000-7000-8000-000000000003");
 const prompt = (text: string) => AgentMessage.AgentPrompt.make({ text, attachments: [] });
-const providerTurn = (text: string) => ({
+const providerTurn = (text: string, abortReason: "aborted" | "error" = "aborted") => ({
   text,
+  abortReason,
   entered: Promise.withResolvers<Context>(),
   release: Promise.withResolvers<void>(),
   aborted: Promise.withResolvers<void>(),
@@ -119,7 +133,7 @@ const withSession = async (
   run: (session: AgentSession, reopen: () => Promise<AgentSession>) => Promise<void>,
   extensionFactory?: ExtensionFactory,
 ) => {
-  const directory = await mkdtemp(join(root, "session-"));
+  const directory = await NodeFileSystem.mkdtemp(join(root, "session-"));
   const auth = new native.AuthStorage(
     await native.SqliteAuthCredentialStore.open(join(directory, "auth.db")),
   );
@@ -177,9 +191,9 @@ const withSession = async (
       options?.signal?.removeEventListener("abort", abort);
       if (options?.signal?.aborted) {
         await turn.finishAbort;
-        response.stopReason = "aborted";
+        response.stopReason = turn.abortReason;
         response.errorMessage = "Request was aborted";
-        stream.push({ type: "error", reason: "aborted", error: response });
+        stream.push({ type: "error", reason: turn.abortReason, error: response });
       } else {
         stream.push({ type: "text_delta", contentIndex: 0, delta: turn.text, partial: response });
         stream.push({ type: "done", reason: "stop", message: response });
@@ -268,6 +282,7 @@ const makePool = Effect.fn("NativePoolTest.make")(function* (
     readonly fileSystem?: FileSystem.FileSystem;
     readonly settlePersistence?: () => Promise<void>;
     readonly reopen?: () => Promise<AgentSession>;
+    readonly onOpenReplyTarget?: (getReplyTarget: () => ReplyTarget | undefined) => void;
   } = {},
 ) {
   const fileSystem = options.fileSystem ?? (yield* FileSystem.FileSystem);
@@ -276,8 +291,9 @@ const makePool = Effect.fn("NativePoolTest.make")(function* (
   let opened = false;
   return yield* native.makeSessionPool({
     factory: {
-      open: (_id, emit) =>
+      open: (_id, emit, getReplyTarget) =>
         Effect.promise(async () => {
+          options.onOpenReplyTarget?.(getReplyTarget);
           if (opened && options.reopen) session = await options.reopen();
           opened = true;
           const currentSession = session;
@@ -303,7 +319,8 @@ const makePool = Effect.fn("NativePoolTest.make")(function* (
             ),
             sendPrompt,
             askBtw: native.makeBtw(currentSession),
-            shake: () => Promise.reject(new Error("Shake is not part of ownership tests")),
+            createHandoff: native.makeHandoff(currentSession),
+            shake: native.makeShake(currentSession),
             contextUsage: () => ({ kind: "unavailable" }),
             appendAssistantMessage: () =>
               Promise.reject(new Error("Publication is not part of ownership tests")),
@@ -325,7 +342,315 @@ const assistantTexts = (events: ReadonlyArray<AgentEvent.AgentEvent>) =>
       : [],
   );
 
+const seedShake = async (session: AgentSession) => {
+  const original = "Tool output retained until shake commits.\n".repeat(100);
+  session.sessionManager.appendMessage({
+    role: "toolResult",
+    toolCallId: "shake-tool",
+    toolName: "bash",
+    content: [
+      { type: "text", text: original },
+      { type: "image", data: "aW1hZ2U=", mimeType: "image/png" },
+    ],
+    isError: false,
+    useless: true,
+    timestamp: 1,
+  });
+  session.agent.replaceMessages(session.sessionManager.buildSessionContext().messages);
+  await session.sessionManager.ensureOnDisk();
+  await session.sessionManager.flush();
+  const file = session.sessionManager.getSessionFile();
+  if (file === undefined) throw new Error("Expected native shake journal");
+  return { original, file };
+};
+
 describe("native SessionPool ownership", () => {
+  it("cancels native shake artifact staging without changing history, then shakes normally", async () => {
+    await withSession([], async (session, reopen) => {
+      const { original, file } = await seedShake(session);
+      const before = await NodeFileSystem.readFile(file, "utf8");
+      const entered = Promise.withResolvers<void>();
+      const controller = new AbortController();
+      const writeFile = NodeFileSystem.writeFile;
+      const staging = vi
+        .spyOn(NodeFileSystem, "writeFile")
+        .mockImplementation(async (path, content, options) => {
+          if (typeof path !== "string" || !path.includes(".shake.log.tmp-")) {
+            return writeFile(path, content, options);
+          }
+          const signal =
+            typeof options === "object" && options !== null ? options.signal : undefined;
+          if (!signal) throw new Error("Shake artifact staging did not receive cancellation");
+          await writeFile(path, content, options);
+          await new Promise<void>((_resolve, reject) => {
+            signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+            entered.resolve();
+          });
+          throw new Error("Cancelled artifact staging resumed");
+        });
+      try {
+        const pending = session.shake("elide", { signal: controller.signal });
+        const rejected = expect(pending).rejects.toMatchObject({ name: "AbortError" });
+        await entered.promise;
+        controller.abort();
+        await rejected;
+      } finally {
+        staging.mockRestore();
+      }
+      expect(await NodeFileSystem.readFile(file, "utf8")).toBe(before);
+      const directory = session.sessionManager.getArtifactsDir();
+      if (directory === null) throw new Error("Expected native shake artifact directory");
+      expect(await NodeFileSystem.readdir(directory)).toEqual([]);
+      const result = await session.shake("elide");
+      expect(result.toolResultsDropped).toBe(1);
+      if (result.artifactId === undefined) throw new Error("Shake did not preserve an artifact");
+      const artifact = await session.sessionManager.getArtifactPath(result.artifactId);
+      if (artifact === null) throw new Error("Shake recovery artifact is missing");
+      expect(await NodeFileSystem.readFile(artifact, "utf8")).toContain(original);
+      expect(session.messages.find((message) => message.role === "toolResult")?.content).toEqual([
+        { type: "text", text: expect.stringContaining(`artifact://${result.artifactId}`) },
+        { type: "image", data: "aW1hZ2U=", mimeType: "image/png" },
+      ]);
+      const expected = structuredClone(session.messages);
+      await session.dispose();
+      const persisted = await reopen();
+      expect(persisted.sessionManager.buildSessionContext().messages).toEqual(expected);
+    });
+  }, 5_000);
+
+  it("rejects a native pre-aborted shake before dropping images", async () => {
+    await withSession([], async (session) => {
+      const { file } = await seedShake(session);
+      const before = await NodeFileSystem.readFile(file, "utf8");
+      const controller = new AbortController();
+      controller.abort();
+      await expect(session.shake("images", { signal: controller.signal })).rejects.toMatchObject({
+        name: "AbortError",
+      });
+      expect(await NodeFileSystem.readFile(file, "utf8")).toBe(before);
+      expect((await session.shake("images")).imagesDropped).toBe(1);
+    });
+  }, 5_000);
+
+  it("finishes an admitted native rewrite before interrupted shake disposal", async () => {
+    await withSession([], async (session) => {
+      const { file } = await seedShake(session);
+      const rewriting = Promise.withResolvers<void>();
+      const cancelled = Promise.withResolvers<void>();
+      const order: string[] = [];
+      const nativeShake = session.shake.bind(session);
+      const nativeRewrite = session.sessionManager.rewriteEntries.bind(session.sessionManager);
+      const nativeDispose = session.dispose.bind(session);
+      const shake = vi.spyOn(session, "shake").mockImplementation((mode, options) => {
+        options?.signal?.addEventListener("abort", () => cancelled.resolve(), { once: true });
+        return nativeShake(mode, options);
+      });
+      const rewrite = vi
+        .spyOn(session.sessionManager, "rewriteEntries")
+        .mockImplementation(async () => {
+          rewriting.resolve();
+          await cancelled.promise;
+          await nativeRewrite();
+          order.push("committed");
+        });
+      const dispose = vi.spyOn(session, "dispose").mockImplementation(async () => {
+        order.push("disposed");
+        await nativeDispose();
+      });
+      try {
+        await Effect.runPromise(
+          Effect.scoped(
+            Effect.gen(function* () {
+              const pool = yield* makePool(session);
+              const pending = yield* pool.shake(chatId, "images").pipe(Effect.forkChild);
+              yield* Effect.promise(() => rewriting.promise);
+              yield* pool.close(chatId).pipe(Effect.timeout("1 second"));
+              const exit = yield* Fiber.await(pending);
+              expect(Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause)).toBe(true);
+              expect(order).toEqual(["committed", "disposed"]);
+              const persisted = yield* Effect.promise(() => NodeFileSystem.readFile(file, "utf8"));
+              expect(persisted).not.toContain('"type":"image"');
+              yield* Effect.sleep("1 millis");
+              expect(yield* Effect.promise(() => NodeFileSystem.readFile(file, "utf8"))).toBe(
+                persisted,
+              );
+            }).pipe(Effect.provide(platform)),
+          ),
+        );
+      } finally {
+        shake.mockRestore();
+        rewrite.mockRestore();
+        dispose.mockRestore();
+      }
+    });
+  }, 5_000);
+
+  it("propagates native shake artifact failures without rewriting history", async () => {
+    await withSession([], async (session) => {
+      const { file } = await seedShake(session);
+      const before = await NodeFileSystem.readFile(file, "utf8");
+      const failure = new Error("Artifact disk is unavailable");
+      const artifact = vi
+        .spyOn(session.sessionManager, "saveArtifact")
+        .mockRejectedValueOnce(failure);
+      try {
+        await expect(session.shake("elide")).rejects.toBe(failure);
+        expect(await NodeFileSystem.readFile(file, "utf8")).toBe(before);
+      } finally {
+        artifact.mockRestore();
+      }
+    });
+  }, 5_000);
+
+  it("captures each schedule tool origin and keeps definition routes across later turns", async () => {
+    const first = providerTurn("First DM complete");
+    const second = providerTurn("Scheduled continuation complete");
+    const ordinary = providerTurn("Ordinary turn complete");
+    const workspaceId = Workspace.WorkspaceId.make("018f47a0-0000-7000-8000-000000000002");
+    const firstTarget: ReplyTarget = {
+      platform: "discord",
+      conversationId: "first-dm",
+      messageId: "first-message",
+    };
+    const secondTarget: ReplyTarget = {
+      platform: "discord",
+      conversationId: "second-dm",
+      messageId: "second-message",
+    };
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem;
+          const directory = yield* fileSystem.makeTempDirectoryScoped({
+            prefix: "pico-native-schedule-origins-",
+          });
+          const schedules = yield* openSchedules(AbsolutePath.make(join(directory, "schedules")));
+          const sourceDirectory = AbsolutePath.make(join(directory, "source"));
+          yield* fileSystem.makeDirectory(sourceDirectory);
+          yield* fileSystem.writeFileString(
+            join(sourceDirectory, "prompt.md"),
+            "Continue the task.",
+          );
+          let getReplyTarget: () => ReplyTarget | undefined = () => undefined;
+          const caller = (): Schedule.ScheduleCaller => {
+            const replyTarget = getReplyTarget();
+            return {
+              chatId,
+              workspaceId,
+              ...(replyTarget === undefined ? {} : { replyTarget }),
+            };
+          };
+          const extension = native.makeScheduleExtension({
+            caller,
+            schedules,
+            runEffect: Effect.runPromise,
+          });
+          const input = {
+            name: "First destination",
+            enabled: false,
+            target: { kind: "current-chat" },
+            trigger: { kind: "once", at: 1_000 },
+            sourceDirectory,
+          } satisfies Schedule.CreateSchedule;
+          yield* Effect.promise(() =>
+            withSession(
+              [first, second, ordinary],
+              (session) =>
+                Effect.runPromise(
+                  Effect.scoped(
+                    Effect.gen(function* () {
+                      const pool = yield* makePool(session, {
+                        onOpenReplyTarget: (getter) => {
+                          getReplyTarget = getter;
+                        },
+                      });
+                      yield* pool.events.pipe(Stream.runDrain, Effect.forkChild);
+                      const runner = session.extensionRunner;
+                      if (runner === undefined) throw new Error("Schedule extension is missing");
+                      const execute = async (name: string, params: unknown) => {
+                        const tool = runner.getRegisteredTool(name);
+                        if (tool === undefined) throw new Error(`Missing schedule tool: ${name}`);
+                        const result = await native
+                          .wrapRegisteredTool(tool, runner)
+                          .execute(name, params);
+                        return Schema.decodeUnknownSync(Schedule.ScheduleView)(result.details);
+                      };
+                      const firstCapture = yield* pool
+                        .sendTurn(
+                          chatId,
+                          prompt("Create a schedule from the first DM"),
+                          () => Effect.void,
+                          firstTarget,
+                        )
+                        .pipe(Effect.forkChild);
+                      yield* Effect.promise(() => first.entered.promise);
+                      const firstCreated = yield* Effect.promise(() =>
+                        execute("schedule_create", input),
+                      );
+                      first.release.resolve();
+                      yield* Fiber.join(firstCapture);
+
+                      const secondCapture = yield* pool
+                        .sendCaptured(
+                          chatId,
+                          runId,
+                          prompt("Create another schedule from a scheduled DM continuation"),
+                          () => Effect.void,
+                          secondTarget,
+                        )
+                        .pipe(Effect.forkChild);
+                      yield* Effect.promise(() => second.entered.promise);
+                      const secondCreated = yield* Effect.promise(() =>
+                        execute("schedule_create", { ...input, name: "Second destination" }),
+                      );
+                      const updated = yield* Effect.promise(() =>
+                        execute("schedule_update", {
+                          scheduleId: firstCreated.id,
+                          name: "Renamed",
+                        }),
+                      );
+                      second.release.resolve();
+                      yield* Fiber.join(secondCapture);
+
+                      const admission = yield* pool.send(
+                        chatId,
+                        prompt("Create an ordinary schedule"),
+                      );
+                      yield* Effect.promise(() => ordinary.entered.promise);
+                      const ordinaryCreated = yield* Effect.promise(() =>
+                        execute("schedule_create", { ...input, name: "No destination" }),
+                      );
+                      ordinary.release.resolve();
+                      if (admission.kind !== "handled") yield* admission.completed;
+                      yield* pool.drain();
+
+                      if (updated.kind !== "ready")
+                        throw new Error("Updated schedule is not ready");
+                      expect(updated.definition.name).toBe("Renamed");
+                      const firstStored = yield* schedules.get(caller(), firstCreated.id);
+                      const secondStored = yield* schedules.get(caller(), secondCreated.id);
+                      const ordinaryStored = yield* schedules.get(caller(), ordinaryCreated.id);
+                      if (
+                        firstStored.kind !== "ready" ||
+                        secondStored.kind !== "ready" ||
+                        ordinaryStored.kind !== "ready"
+                      ) {
+                        throw new Error("Created schedules are not ready");
+                      }
+                      expect(firstStored.definition.replyTarget).toEqual(firstTarget);
+                      expect(secondStored.definition.replyTarget).toEqual(secondTarget);
+                      expect(ordinaryStored.definition.replyTarget).toBeUndefined();
+                    }).pipe(Effect.provide(platform)),
+                  ),
+                ),
+              extension,
+            ),
+          );
+        }).pipe(Effect.provide(platform)),
+      ),
+    );
+  }, 30_000);
+
   it("answers beside a pending main turn without steering, persisting, or emitting the aside", async () => {
     const main = providerTurn("Main answer");
     const side = providerTurn("Independent side answer");
@@ -456,6 +781,24 @@ describe("native SessionPool ownership", () => {
     },
     30_000,
   );
+
+  it("preserves a native side provider error received after cancellation", async () => {
+    const side = providerTurn("Must not be published", "error");
+    await withSession([side], async (session) => {
+      const controller = new AbortController();
+      const pending = session.runEphemeralTurn({
+        promptText: "Cancelled side question",
+        signal: controller.signal,
+      });
+      const rejected = expect(pending).rejects.toMatchObject({
+        name: "Error",
+        message: "Request was aborted",
+      });
+      await side.entered.promise;
+      controller.abort();
+      await rejected;
+    });
+  }, 5_000);
 
   it("drains discarded image cleanup before closing and reopening the same journal", async () => {
     const initial = providerTurn("Interrupted ordinary answer");

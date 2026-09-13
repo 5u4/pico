@@ -7,6 +7,7 @@ import type { AgentPrompt } from "./agent-message.ts";
 import type { CapturedAgentRun } from "./agent-runtime.ts";
 import { ChatId } from "./chat-model.ts";
 import { AbsolutePath } from "./path.ts";
+import { ReplyTarget } from "./reply-target.ts";
 import { WorkspaceId } from "./workspace-model.ts";
 
 export const ScheduleId = Schema.String.check(Schema.isUUID(7)).pipe(
@@ -80,6 +81,7 @@ export const ScheduleDefinition = Schema.Struct({
   target: ScheduleTarget,
   trigger: ScheduleTrigger,
   scriptTimeoutMs: Schema.optional(ScriptTimeoutMs),
+  replyTarget: Schema.optional(ReplyTarget),
 });
 export type ScheduleDefinition = typeof ScheduleDefinition.Type;
 
@@ -209,6 +211,7 @@ export type UpdateSchedule = typeof UpdateSchedule.Type;
 export interface ScheduleCaller {
   readonly chatId: typeof ChatId.Type;
   readonly workspaceId: typeof WorkspaceId.Type;
+  readonly replyTarget?: ReplyTarget;
 }
 
 export class ScheduleError extends Schema.TaggedError<ScheduleError>()("ScheduleError", {
@@ -230,16 +233,19 @@ export interface ScheduleRunHost {
   readonly deliver: (
     chatId: typeof ChatId.Type,
     content: string,
+    replyTarget?: ReplyTarget,
   ) => Effect.Effect<void, ScheduleHostError>;
   readonly publish: (
     chatId: typeof ChatId.Type,
     content: string,
+    replyTarget?: ReplyTarget,
   ) => Effect.Effect<void, ScheduleHostError>;
   readonly runPrompt: (
     chatId: typeof ChatId.Type,
     runId: ScheduleRunId,
     prompt: AgentPrompt,
     onEvent: (event: AgentEvent) => Effect.Effect<void, ScheduleHostError>,
+    replyTarget?: ReplyTarget,
   ) => Effect.Effect<CapturedAgentRun, ScheduleHostError>;
 }
 export class ScheduleRunHostService extends Context.Service<

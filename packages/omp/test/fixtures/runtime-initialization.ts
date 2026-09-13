@@ -5,6 +5,7 @@ import * as BunCrypto from "@effect/platform-bun/BunCrypto";
 import * as BunFileSystem from "@effect/platform-bun/BunFileSystem";
 import * as BunPath from "@effect/platform-bun/BunPath";
 import * as OmpSessionLoader from "@oh-my-pi/pi-coding-agent/session/session-loader";
+import { BotSessions } from "@pico/contract/bot-session";
 import { BranchNaming } from "@pico/contract/branch-naming";
 import * as Chat from "@pico/contract/chat-model";
 import { ChatSessionContext } from "@pico/contract/chat-session-context";
@@ -14,6 +15,7 @@ import * as Schedule from "@pico/contract/schedule";
 import { WorkspaceId } from "@pico/contract/workspace-model";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import { make } from "../../src/layer.ts";
 
 const root = process.cwd();
@@ -68,6 +70,16 @@ const platform = Layer.mergeAll(
   BunCrypto.layer,
   BunFileSystem.layer,
   BunPath.layer,
+  Layer.succeed(BotSessions, {
+    findByChat: () => Effect.succeed(Option.none()),
+    findByWorkspace: () => Effect.die("Unexpected bot lookup"),
+    findByRoot: () => Effect.die("Unexpected bot lookup"),
+    createConversation: () => Effect.die("Unexpected bot creation"),
+    setTurn: () => Effect.die("Unexpected bot turn"),
+    saveHandoff: () => Effect.die("Unexpected bot handoff"),
+    readHandoff: () => Effect.die("Unexpected bot handoff"),
+    rotate: () => Effect.die("Unexpected bot rotation"),
+  }),
   Layer.succeed(ChatSessionContext, {
     resolve: () => Effect.succeed({ chat, platform: null, appendSystemPrompt: "" }),
   }),

@@ -15,6 +15,7 @@
     "@effect/platform-bun": "catalog:",
     "@effect/vitest": "catalog:",
     "@pico/config": "workspace:*",
+    "@pico/omp": "workspace:*",
     "@pico/persistence": "workspace:*"
   }
 }

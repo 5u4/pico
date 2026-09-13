@@ -94,6 +94,8 @@ describe("Chat close", () => {
                 ),
               ),
             sendCaptured: () => Effect.die("unexpected scheduled request"),
+            sendTurn: () => Effect.die("unexpected bot turn"),
+            rotate: () => Effect.die("unexpected bot rotation"),
             deliver: () => Effect.die("unexpected delivery"),
             publish: () => Effect.die("unexpected publication"),
             close: () =>
@@ -165,6 +167,8 @@ describe("Chat close", () => {
               AgentSessionStore.of({
                 create: () => Effect.void,
                 remove: () => Effect.void,
+                createPhysical: () => Effect.die("unexpected physical session creation"),
+                removePhysical: () => Effect.die("unexpected physical session removal"),
               }),
             ),
           ),
@@ -224,6 +228,8 @@ describe("Chat close", () => {
                   finalAssistantText: "",
                 }),
               ),
+            sendTurn: () => Effect.die("unexpected bot turn"),
+            rotate: () => Effect.die("unexpected bot rotation"),
             deliver: () => Effect.die("unexpected scheduled delivery"),
             publish: () => Effect.die("unexpected scheduled publish"),
             close: (id) =>
@@ -249,7 +255,12 @@ describe("Chat close", () => {
       ).pipe(Layer.provide(persistenceLayer));
       const sessionsLayer = Layer.succeed(
         AgentSessionStore,
-        AgentSessionStore.of({ create: () => Effect.void, remove: () => Effect.void }),
+        AgentSessionStore.of({
+          create: () => Effect.void,
+          remove: () => Effect.void,
+          createPhysical: () => Effect.die("unexpected physical session creation"),
+          removePhysical: () => Effect.die("unexpected physical session removal"),
+        }),
       );
       const gitWorktree: GitWorktree = {
         validate: () => Effect.void,
@@ -392,6 +403,8 @@ describe("Chat close", () => {
                 ),
               ),
             ),
+          sendTurn: () => Effect.die("unexpected bot turn"),
+          rotate: () => Effect.die("unexpected bot rotation"),
           deliver: () => Effect.die("unexpected delivery"),
           publish: () => Effect.die("unexpected publication"),
           close: () => Deferred.succeed(stopped, undefined).pipe(Effect.asVoid),
@@ -402,7 +415,12 @@ describe("Chat close", () => {
       );
       const sessionsLayer = Layer.succeed(
         AgentSessionStore,
-        AgentSessionStore.of({ create: () => Effect.void, remove: () => Effect.void }),
+        AgentSessionStore.of({
+          create: () => Effect.void,
+          remove: () => Effect.void,
+          createPhysical: () => Effect.die("unexpected physical session creation"),
+          removePhysical: () => Effect.die("unexpected physical session removal"),
+        }),
       );
       const gitWorktree: GitWorktree = {
         validate: () => Effect.void,
@@ -505,6 +523,8 @@ describe("Chat close", () => {
             transcript: () => Effect.succeed([]),
             send: () => Effect.die("unexpected send"),
             sendCaptured: () => Effect.die("unexpected captured runtime send"),
+            sendTurn: () => Effect.die("unexpected bot turn"),
+            rotate: () => Effect.die("unexpected bot rotation"),
             deliver: () => Effect.die("unexpected scheduled delivery"),
             publish: () => Effect.die("unexpected scheduled publish"),
             close: (id) =>
@@ -523,7 +543,12 @@ describe("Chat close", () => {
       ).pipe(Layer.provide(persistenceLayer));
       const sessionsLayer = Layer.succeed(
         AgentSessionStore,
-        AgentSessionStore.of({ create: () => Effect.void, remove: () => Effect.void }),
+        AgentSessionStore.of({
+          create: () => Effect.void,
+          remove: () => Effect.void,
+          createPhysical: () => Effect.die("unexpected physical session creation"),
+          removePhysical: () => Effect.die("unexpected physical session removal"),
+        }),
       );
       const gitWorktree: GitWorktree = {
         validate: () => Effect.void,

@@ -83,6 +83,23 @@ describe("Discord startup", () => {
     }),
   );
 
+  it.effect(
+    "starts DM-only mode and removes guild commands without requiring guild membership",
+    () =>
+      Effect.gen(function* () {
+        const harness = makeBot(["3"]);
+        yield* Effect.scoped(
+          openBot(harness.bot, { ...config, allowedGuildIds: [] }, harness.collectedGuildIds),
+        );
+        assert.deepStrictEqual(harness.calls, [
+          { kind: "start" },
+          { kind: "global", commands: [] },
+          { kind: "guild", guildId: "3", commands: [] },
+          { kind: "shutdown" },
+        ]);
+      }),
+  );
+
   it.effect("fails missing allowed guilds and cleans up the connected bot", () =>
     Effect.gen(function* () {
       const harness = makeBot(["1", "3"]);

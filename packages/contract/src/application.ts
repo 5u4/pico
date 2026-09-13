@@ -2,11 +2,20 @@ import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
 import type * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
+import type { AgentEvent } from "./agent-event.ts";
 import type { AgentPrompt, AgentTranscript } from "./agent-message.ts";
 import type { ContextUsage, MessageDelivery, ShakeMode, ShakeResult } from "./agent-runtime.ts";
+import type { BotDescriptor } from "./bot-session.ts";
 import type { Chat, ChatId } from "./chat-model.ts";
-import type { ApplicationError, ChatClosed, GitError, WorkspaceBindingInvalid } from "./errors.ts";
+import type {
+  AgentError,
+  ApplicationError,
+  ChatClosed,
+  GitError,
+  WorkspaceBindingInvalid,
+} from "./errors.ts";
 import { AbsolutePath } from "./path.ts";
+import type { ReplyTarget } from "./reply-target.ts";
 import {
   type Workspace,
   WorkspaceBinding,
@@ -73,6 +82,16 @@ export class Application extends Context.Service<
     ) => Effect.Effect<Workspace, ApplicationError | GitError | WorkspaceBindingInvalid>;
 
     readonly createChat: (input: CreateChat) => Effect.Effect<Chat, ApplicationError>;
+    // Platform adapters resolve the single shared conversation before accepting bot input.
+    readonly getOrCreateBotChat: (bot: BotDescriptor) => Effect.Effect<Chat, ApplicationError>;
+
+    // Platform adapters capture output for the triggering message, never a chat-wide destination.
+    readonly sendBotMessage: (
+      chatId: ChatId,
+      prompt: AgentPrompt,
+      onEvent: (event: AgentEvent) => Effect.Effect<void, AgentError>,
+      replyTarget?: ReplyTarget,
+    ) => Effect.Effect<void, ApplicationError | ChatClosed>;
 
     readonly findWorkspaceByPlatformId: (
       platform: WorkspacePlatform,

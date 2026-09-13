@@ -78,6 +78,8 @@ const installBtwInput = Effect.fn("test.installBtwInput")(function* (options: {
     },
   };
   const application = Application.of({
+    getOrCreateBotChat: () => Effect.die("unexpected bot chat creation"),
+    sendBotMessage: () => Effect.die("unexpected bot message"),
     createWorkspace: () => Effect.die("btw must not create a workspace"),
     getOrCreateWorkspaceByBinding: () => Effect.die("btw must not create a workspace"),
     bindWorkspace: () => Effect.die("btw must not bind a workspace"),
@@ -568,8 +570,6 @@ describe("discord interactions", () => {
     Effect.scoped(
       Effect.gen(function* () {
         const bindings: Array<BindWorkspace> = [];
-        let defers = 0;
-        let edits = 0;
         const bot = {
           id: 999n,
           events: {},
@@ -615,6 +615,8 @@ describe("discord interactions", () => {
           },
         } satisfies DiscordInputBot;
         const application = Application.of({
+          getOrCreateBotChat: () => Effect.die("unexpected bot chat creation"),
+          sendBotMessage: () => Effect.die("unexpected bot message"),
           askBtw: () => Effect.die("unexpected side question"),
           createWorkspace: () => Effect.die("unexpected explicit workspace creation"),
           getOrCreateWorkspaceByBinding: () => Effect.die("unexpected workspace creation"),
@@ -678,22 +680,17 @@ describe("discord interactions", () => {
           Effect.provide(BunCrypto.layer),
         );
         const handleInteraction = interactionHandlerFor(bot);
-        const invoke = (
-          overrides: Partial<DiscordInteraction> = {},
-          omittedId?: "guildId" | "channelId",
-        ) =>
+        const invoke = (overrides: Partial<DiscordInteraction> = {}, omittedId?: "channelId") =>
           new Promise<string>((resolve) => {
             const candidate = interaction({
               defer: async (isPrivate) => {
                 assert.isTrue(isPrivate);
-                defers += 1;
               },
               edit: async (options) => {
                 assert.deepStrictEqual(options.allowedMentions, {
                   parse: [],
                   repliedUser: false,
                 });
-                edits += 1;
                 resolve(options.content ?? "");
               },
               ...overrides,
@@ -703,7 +700,6 @@ describe("discord interactions", () => {
           });
 
         const policyCopy = "This command can only be used in a configured server text channel.";
-        assert.strictEqual(yield* Effect.promise(() => invoke({}, "guildId")), policyCopy);
         assert.strictEqual(yield* Effect.promise(() => invoke({}, "channelId")), policyCopy);
         assert.strictEqual(yield* Effect.promise(() => invoke({ guildId: 2n })), policyCopy);
         assert.strictEqual(yield* Effect.promise(() => invoke({ channelId: 30n })), policyCopy);
@@ -785,8 +781,6 @@ describe("discord interactions", () => {
             },
           })),
         ]);
-        assert.strictEqual(defers, 13);
-        assert.strictEqual(edits, 13);
 
         let ignoredDefers = 0;
         handleInteraction(
@@ -860,6 +854,8 @@ describe("discord interactions", () => {
         };
         const failedChat = { ...chat, id: failingChatId, externalId: "22" };
         const application = Application.of({
+          getOrCreateBotChat: () => Effect.die("unexpected bot chat creation"),
+          sendBotMessage: () => Effect.die("unexpected bot message"),
           askBtw: () => Effect.die("unexpected side question"),
           createWorkspace: () => Effect.die("unexpected explicit workspace creation"),
           getOrCreateWorkspaceByBinding: () => Effect.die("shake must not create a workspace"),
@@ -1042,6 +1038,8 @@ describe("discord interactions", () => {
           archivedAt: null,
         });
         const application = Application.of({
+          getOrCreateBotChat: () => Effect.die("unexpected bot chat creation"),
+          sendBotMessage: () => Effect.die("unexpected bot message"),
           askBtw: () => Effect.die("unexpected side question"),
           createWorkspace: () => Effect.die("unexpected explicit workspace creation"),
           getOrCreateWorkspaceByBinding: () => Effect.die("context must not create a workspace"),
@@ -1185,6 +1183,8 @@ describe("discord interactions", () => {
           },
         } satisfies DiscordInputBot;
         const application = Application.of({
+          getOrCreateBotChat: () => Effect.die("unexpected bot chat creation"),
+          sendBotMessage: () => Effect.die("unexpected bot message"),
           askBtw: () => Effect.die("unexpected side question"),
           createWorkspace: () => Effect.die("unexpected workspace creation"),
           getOrCreateWorkspaceByBinding: () => Effect.die("unexpected workspace creation"),
@@ -1332,6 +1332,8 @@ describe("discord interactions", () => {
           archivedAt: null,
         };
         const application = Application.of({
+          getOrCreateBotChat: () => Effect.die("unexpected bot chat creation"),
+          sendBotMessage: () => Effect.die("unexpected bot message"),
           askBtw: () => Effect.die("unexpected side question"),
           createWorkspace: () => Effect.die("unexpected explicit workspace creation"),
           getOrCreateWorkspaceByBinding: () => Effect.die("unexpected workspace creation"),

@@ -79,7 +79,10 @@ describe("PicoConfig.load", () => {
           assert.isTrue(Option.isNone((yield* load(paths)).discord));
           yield* fileSystem.writeFileString(tokenFile, "token-value");
           yield* fileSystem.writeFileString(paths.configFile, config("[]", defaultCwd));
-          assert.isTrue(Option.isNone((yield* load(paths)).discord));
+          assert.deepStrictEqual(
+            Option.getOrThrow((yield* load(paths)).discord).allowedGuildIds,
+            [],
+          );
 
           yield* fileSystem.writeFileString(paths.configFile, config('["guild-1"]', "relative"));
           const invalidCwd = yield* load(paths).pipe(Effect.flip);
@@ -155,6 +158,32 @@ describe("PicoConfig.load", () => {
           assert.include(error.message, "browser.external_browser");
           assert.notInclude(error.message, "private-unsupported-provider");
         }
+      }).pipe(Effect.scoped, Effect.provide(platformLayer)),
+  );
+
+  it.effect(
+    "enables direct messages with an empty guild allowlist while validating configuration",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = PicoRoot.make(
+          yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-dm-config-" }),
+        );
+        const paths = yield* open(root);
+        yield* fileSystem.makeDirectory(paths.secretsDir, { recursive: true });
+        const tokenFile = path.join(paths.secretsDir, "discord_bot_token");
+        yield* fileSystem.writeFileString(tokenFile, "token-value", { mode: 0o600 });
+        yield* fileSystem.writeFileString(paths.configFile, config("[]", root));
+        const discord = Option.getOrThrow((yield* load(paths)).discord);
+        assert.deepStrictEqual(discord.allowedGuildIds, []);
+        assert.strictEqual(Redacted.value(discord.token), "token-value");
+        yield* fileSystem.writeFileString(paths.configFile, config("[]", "relative"));
+        const invalidCwd = yield* load(paths).pipe(Effect.flip);
+        assert.instanceOf(invalidCwd, ConfigError);
+        assert.include(invalidCwd.message, "discord.default_cwd");
+        yield* fileSystem.writeFileString(tokenFile, "");
+        assert.isTrue(Option.isNone((yield* load(paths)).discord));
       }).pipe(Effect.scoped, Effect.provide(platformLayer)),
   );
 

@@ -32,7 +32,7 @@ const PicoConfigFile = Schema.Struct({
 
 export interface DiscordConfig {
   readonly token: Redacted.Redacted<string>;
-  readonly allowedGuildIds: readonly [string, ...Array<string>];
+  readonly allowedGuildIds: ReadonlyArray<string>;
   readonly defaultCwd: AbsolutePath;
   readonly showToolCalls: boolean;
   readonly showThinking: boolean;
@@ -122,7 +122,7 @@ export const load = Effect.fn("PicoConfig.load")(function* (paths: PicoPaths) {
   const defaultCwd = config.discord.default_cwd.trim();
   const allowedGuildIds = config.discord.allowed_guild.map((guildId) => guildId.trim());
 
-  if (tokenValue.length === 0 || allowedGuildIds.length === 0) return disabled(browser);
+  if (tokenValue.length === 0) return disabled(browser);
   if (defaultCwd.length === 0 || !path.isAbsolute(defaultCwd)) {
     return yield* fieldError("discord.default_cwd", "expected an absolute, nonblank path");
   }
@@ -134,14 +134,11 @@ export const load = Effect.fn("PicoConfig.load")(function* (paths: PicoPaths) {
     );
   }
 
-  const [firstGuildId, ...restGuildIds] = allowedGuildIds;
-  if (firstGuildId === undefined) return disabled(browser);
-
   return {
     browser,
     discord: Option.some<DiscordConfig>({
       token: Redacted.make(tokenValue, { label: "discord_bot_token" }),
-      allowedGuildIds: [firstGuildId, ...restGuildIds],
+      allowedGuildIds,
       defaultCwd: AbsolutePath.make(path.normalize(defaultCwd)),
       showToolCalls: config.discord.show_tool_calls ?? false,
       showThinking: config.discord.show_thinking ?? false,

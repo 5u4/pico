@@ -1,16 +1,20 @@
 import { SQLiteError } from "bun:sqlite";
 import * as SqliteClient from "@effect/sql-sqlite-bun/SqliteClient";
 import * as SqliteMigrator from "@effect/sql-sqlite-bun/SqliteMigrator";
+import type { BotSessions } from "@pico/contract/bot-session";
 import type { ChatRepository } from "@pico/contract/chat-repository";
 import type { PersistenceError } from "@pico/contract/errors";
 import type { AbsolutePath } from "@pico/contract/path";
 import type { WorkspaceRepository } from "@pico/contract/workspace-repository";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
+import type * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import type * as Path from "effect/Path";
 import * as Migrator from "effect/unstable/sql/Migrator";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as SqlError from "effect/unstable/sql/SqlError";
+import * as BotSessionSql from "./bot-session-repository.ts";
 import * as ChatSql from "./chat-repository.ts";
 import { failure } from "./error.ts";
 import { loader } from "./migrations.ts";
@@ -80,5 +84,12 @@ const readySqlLayer = (storeFile: AbsolutePath) =>
 
 export const layer = (
   storeFile: AbsolutePath,
-): Layer.Layer<WorkspaceRepository | ChatRepository, PersistenceError> =>
-  Layer.merge(WorkspaceSql.layer, ChatSql.layer).pipe(Layer.provide(readySqlLayer(storeFile)));
+): Layer.Layer<
+  WorkspaceRepository | ChatRepository | BotSessions,
+  PersistenceError,
+  FileSystem.FileSystem | Path.Path
+> =>
+  BotSessionSql.layer.pipe(
+    Layer.provideMerge(Layer.merge(WorkspaceSql.layer, ChatSql.layer)),
+    Layer.provide(readySqlLayer(storeFile)),
+  );

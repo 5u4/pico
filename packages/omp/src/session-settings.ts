@@ -14,9 +14,14 @@ export const prepareSessionSettings = Effect.fn("OmpSession.prepareSettings")(fu
   cwd: AbsolutePath,
   platform: WorkspacePlatform | null,
   externalBrowser: ExternalBrowser,
+  botAgentDir?: AbsolutePath,
 ) {
   const settings = yield* Effect.tryPromise({
-    try: () => OmpSettings.Settings.loadIsolated({ cwd }),
+    try: () =>
+      OmpSettings.Settings.loadIsolated({
+        cwd,
+        ...(botAgentDir === undefined ? {} : { agentDir: botAgentDir }),
+      }),
     catch: (cause) => agentError("Failed to load OMP settings", cause),
   });
   return yield* Effect.try({
@@ -41,6 +46,10 @@ export const prepareSessionSettings = Effect.fn("OmpSession.prepareSettings")(fu
       }
       settings.override("skills.customDirectories", skillDirectories);
       settings.override("secrets.enabled", true);
+      if (botAgentDir !== undefined) {
+        settings.override("memory.backend", "local");
+        settings.override("compaction.enabled", true);
+      }
       if (platform === "discord") {
         settings.override("tui.renderMermaid", false);
       }

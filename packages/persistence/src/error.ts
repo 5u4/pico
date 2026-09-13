@@ -1,5 +1,6 @@
 import { PersistenceError } from "@pico/contract/errors";
 import * as Cause from "effect/Cause";
+import * as PlatformError from "effect/PlatformError";
 import * as Predicate from "effect/Predicate";
 import * as Schema from "effect/Schema";
 import * as Migrator from "effect/unstable/sql/Migrator";
@@ -7,6 +8,7 @@ import * as SqlError from "effect/unstable/sql/SqlError";
 
 const detail = (error: unknown): string => {
   if (error instanceof PersistenceError) return error.message;
+  if (error instanceof PlatformError.PlatformError) return `filesystem ${error.reason._tag}`;
   if (SqlError.isSqlError(error)) {
     const cause = error.reason.cause;
     const code = Predicate.hasProperty(cause, "errno")

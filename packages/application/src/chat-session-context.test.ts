@@ -2,6 +2,7 @@ import * as BunFileSystem from "@effect/platform-bun/BunFileSystem";
 import * as BunPath from "@effect/platform-bun/BunPath";
 import { assert, describe, it } from "@effect/vitest";
 import * as Instructions from "@pico/config/instructions";
+import { BotSessions } from "@pico/contract/bot-session";
 import * as Chat from "@pico/contract/chat-model";
 import { ChatRepository } from "@pico/contract/chat-repository";
 import { ChatSessionContext } from "@pico/contract/chat-session-context";
@@ -98,6 +99,20 @@ const workspaceLayer = (findById: WorkspaceRepository["Service"]["findById"]) =>
     }),
   );
 
+const botSessionsLayer = Layer.succeed(
+  BotSessions,
+  BotSessions.of({
+    findByRoot: () => Effect.succeed(Option.none()),
+    findByChat: () => Effect.succeed(Option.none()),
+    findByWorkspace: () => Effect.succeed(Option.none()),
+    createConversation: () => Effect.die("unexpected bot conversation creation"),
+    setTurn: () => Effect.die("unexpected bot turn update"),
+    saveHandoff: () => Effect.die("unexpected bot handoff write"),
+    readHandoff: () => Effect.die("unexpected bot handoff read"),
+    rotate: () => Effect.die("unexpected bot rotation"),
+  }),
+);
+
 const resolve = Effect.fn("ChatSessionContextTest.resolve")(function* (
   id: Chat.ChatId,
   chats: Layer.Layer<ChatRepository>,
@@ -109,6 +124,7 @@ const resolve = Effect.fn("ChatSessionContextTest.resolve")(function* (
   }).pipe(
     Effect.provide(SessionContext.layer({ instructions, discordBotId: null })),
     Effect.provide(Layer.merge(chats, workspaces)),
+    Effect.provide(botSessionsLayer),
   );
 });
 
