@@ -534,9 +534,9 @@ describe("bot session continuity", () => {
         const chat = yield* app.getOrCreateBotChat({ botRoot, platform: "discord" });
         const plannedChatId = ChatId.make("018f47a0-0000-7000-8000-000000000088");
         const target = yield* host.prepare({
-          kind: "workspace-chat",
-          ownerWorkspaceId: chat.workspaceId,
-          chatId: plannedChatId,
+          kind: "workspace",
+          workspaceId: chat.workspaceId,
+          newChatId: plannedChatId,
         });
         assert.strictEqual(target.chatId, chat.id);
         assert.strictEqual(target.cwd, chat.cwd);
@@ -578,6 +578,17 @@ describe("bot session continuity", () => {
         assert.strictEqual(model.opened[1]?.bot.journal.id, after.journal.id);
         assert.strictEqual(model.opened[1]?.bot.chatId, chat.id);
         assert.strictEqual(model.opened[1]?.bot.botRoot, botRoot);
+        yield* chats.archive(chat.id, 7_000);
+        assert.instanceOf(
+          yield* host
+            .prepare({
+              kind: "workspace",
+              workspaceId: chat.workspaceId,
+              newChatId: plannedChatId,
+            })
+            .pipe(Effect.flip),
+          Schedule.ScheduleHostError,
+        );
       }).pipe(Effect.provide(fixture(root, model)));
     }).pipe(Effect.provide(platform)),
   );
@@ -822,9 +833,9 @@ describe("bot script publications", () => {
           const host = yield* Schedule.ScheduleRunHostService;
           const chat = yield* app.getOrCreateBotChat({ botRoot, platform: "discord" });
           const target = yield* host.prepare({
-            kind: "workspace-chat",
-            ownerWorkspaceId: chat.workspaceId,
-            chatId: ChatId.make("018f47a0-0000-7000-8000-000000000090"),
+            kind: "workspace",
+            workspaceId: chat.workspaceId,
+            newChatId: ChatId.make("018f47a0-0000-7000-8000-000000000090"),
           });
           model.outcome = "failed";
           yield* app

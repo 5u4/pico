@@ -46,6 +46,46 @@ describe("schedule management", () => {
     ),
   );
 
+  it.effect("keeps management in the owning workspace after selecting another destination", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-schedule-owner-" });
+      const schedules = yield* open(AbsolutePath.make(path.join(root, "schedules")));
+      const destinationCaller = { ...caller, workspaceId: otherWorkspaceId };
+      const created = yield* schedules.create(caller, {
+        name: "owned here",
+        enabled: false,
+        target: { kind: "workspace", workspaceId: otherWorkspaceId },
+        trigger: { kind: "once", at: 1_000 },
+        sourceDirectory: yield* prepareSource({ "prompt.md": "Run elsewhere." }),
+      });
+      if (created.kind !== "ready") return yield* Effect.die("Explicit target was rejected");
+      assert.deepStrictEqual(yield* schedules.list(caller), [created]);
+      assert.deepStrictEqual(yield* schedules.list(destinationCaller), []);
+      assert.strictEqual(
+        (yield* schedules.get(destinationCaller, created.id).pipe(Effect.flip)).kind,
+        "not-found",
+      );
+      assert.strictEqual(
+        (yield* schedules
+          .update(destinationCaller, created.id, { enabled: true })
+          .pipe(Effect.flip)).kind,
+        "not-found",
+      );
+      const updated = yield* schedules.update(caller, created.id, {
+        target: { kind: "chat", chatId },
+      });
+      assert.deepStrictEqual(yield* schedules.get(caller, created.id), updated);
+      assert.strictEqual(
+        (yield* schedules.remove(destinationCaller, created.id).pipe(Effect.flip)).kind,
+        "not-found",
+      );
+      yield* schedules.remove(caller, created.id);
+      assert.deepStrictEqual(yield* schedules.list(caller), []);
+    }).pipe(Effect.provide(platformLayer), Effect.scoped),
+  );
+
   it.effect(
     "copies prepared sources and preserves source bytes and omitted metadata across updates",
     () =>
@@ -230,7 +270,7 @@ describe("schedule management", () => {
         path.join(directory, "meta.json"),
         JSON.stringify({
           ...created.definition,
-          target: { kind: "workspace", workspaceId: otherWorkspaceId },
+          target: { kind: "workspace", workspaceId: "not-a-workspace-id" },
         }),
       );
       const invalidTarget = yield* schedules.get(caller, created.id);

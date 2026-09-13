@@ -379,31 +379,67 @@ describe("Application", () => {
         const firstScheduledId = Chat.ChatId.make("018f47a0-0000-7000-8000-000000000010");
         const secondScheduledId = Chat.ChatId.make("018f47a0-0000-7000-8000-000000000011");
         const firstScheduled = yield* scheduleHost.prepare({
-          kind: "workspace-chat",
-          ownerWorkspaceId: worktreeWorkspace.id,
-          chatId: firstScheduledId,
+          kind: "workspace",
+          workspaceId: worktreeWorkspace.id,
+          newChatId: firstScheduledId,
         });
         const secondScheduled = yield* scheduleHost.prepare({
-          kind: "workspace-chat",
-          ownerWorkspaceId: worktreeWorkspace.id,
-          chatId: secondScheduledId,
+          kind: "workspace",
+          workspaceId: worktreeWorkspace.id,
+          newChatId: secondScheduledId,
         });
         assert.strictEqual(firstScheduled.chatId, firstScheduledId);
         assert.strictEqual(secondScheduled.chatId, secondScheduledId);
         assert.notStrictEqual(firstScheduled.chatId, secondScheduled.chatId);
         assert.strictEqual(firstScheduled.cwd, worktreeCwd);
         assert.strictEqual(secondScheduled.cwd, worktreeCwd);
-        const crossWorkspace = yield* scheduleHost
-          .prepare({
-            kind: "existing-chat",
-            ownerWorkspaceId: regularWorkspace.id,
-            chatId: discordChat.id,
-          })
-          .pipe(Effect.flip);
-        assert.strictEqual(
-          crossWorkspace.message,
-          "Scheduled chat does not belong to its owner workspace",
+        assert.strictEqual(firstScheduled.workspaceId, worktreeWorkspace.id);
+        assert.deepStrictEqual(
+          yield* scheduleHost.prepare({
+            kind: "workspace",
+            workspaceId: worktreeWorkspace.id,
+            newChatId: firstScheduledId,
+          }),
+          firstScheduled,
         );
+        const resolvedChat = yield* scheduleHost.prepare({
+          kind: "chat",
+          chatId: worktreeChat.id,
+        });
+        assert.deepStrictEqual(resolvedChat, {
+          chatId: worktreeChat.id,
+          workspaceId: worktreeWorkspace.id,
+          cwd: worktreeCwd,
+        });
+        for (const destination of [
+          { kind: "chat", chatId: missingChatId },
+          { kind: "workspace", workspaceId: missingWorkspaceId, newChatId: missingChatId },
+          {
+            kind: "workspace",
+            workspaceId: regularWorkspace.id,
+            newChatId: firstScheduledId,
+          },
+        ] satisfies ReadonlyArray<Schedule.ScheduleRunDestination>) {
+          assert.instanceOf(
+            yield* scheduleHost.prepare(destination).pipe(Effect.flip),
+            Schedule.ScheduleHostError,
+          );
+        }
+        assert.isTrue(Option.isNone(yield* chats.findById(missingChatId)));
+        yield* chats.archive(firstScheduledId, 7_000);
+        for (const destination of [
+          { kind: "chat", chatId: firstScheduledId },
+          {
+            kind: "workspace",
+            workspaceId: worktreeWorkspace.id,
+            newChatId: firstScheduledId,
+          },
+        ] satisfies ReadonlyArray<Schedule.ScheduleRunDestination>) {
+          assert.instanceOf(
+            yield* scheduleHost.prepare(destination).pipe(Effect.flip),
+            Schedule.ScheduleHostError,
+          );
+        }
         const runId = Schedule.ScheduleRunId.make(
           "scheduled-1000-018f47a0-0000-7000-8000-000000000003",
         );

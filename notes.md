@@ -59,9 +59,12 @@
 - schedule state comes only from the parent `enabled` or `disabled` directory; changing enabled moves the directory, so call schedule_get again before editing files
 - changes to name, target, trigger, or scriptTimeoutMs create a new metadata revision; enabled-only changes preserve it
 - schedule runs copy their exact metadata and complete source tree before execution; future immutable snapshots retain helper files and directories, and source edits never change existing snapshots
-- schedules created during a bot DM turn retain that turn's platform, channel, and message destination in metadata and run snapshots; later DMs, metadata updates, and restarts do not change it
-- scheduled prompts and script-only publications send to that stored destination and finish only after delivery succeeds; unavailable destinations fail the run rather than falling back to another sender
-- current-workspace schedules in a bot workspace reuse its logical bot chat, turn queue, physical journal, memory settings, and rotation policy; regular workspaces still create a separate scheduled chat
+- `target` accepts `{ kind: "current-chat" }`, `{ kind: "current-workspace" }`, `{ kind: "chat", chatId }`, or `{ kind: "workspace", workspaceId }`. Explicit IDs are Pico UUIDv7 IDs, not Discord IDs.
+- the creating workspace keeps schedule ownership and management access when the destination changes. Scripts and the agent use the destination chat's actual workspace and cwd.
+- workspace targets create a new local chat per run. Bot workspaces reuse their logical bot chat, turn queue, physical journal, memory settings, and rotation policy.
+- creation and target-supplied updates replace caller reply policy. Convenience selectors save that operation's caller reply or clear it when absent. Explicit selectors clear saved replies, even for the current chat or workspace.
+- updates that omit `target` preserve saved replies. Retargeting affects future claims, not an in-flight run's frozen destination or reply.
+- scheduled prompts and script-only publications use the saved reply or existing destination routing. Saved-reply delivery failures fail the run. UUID selection creates no external recipient or Discord thread. Missing workspaces and missing or archived chats fail before execution, without an owner or origin fallback.
 - schedule definitions and runs never use sqlite
 - each workspace can only belong to one platform (native | discord | ...)
 - an absent workspace platform binding means there is no foreign channel; native workspaces and shared bot workspaces both use this shape

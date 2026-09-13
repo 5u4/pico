@@ -39,6 +39,7 @@ export type ScheduleTarget = typeof ScheduleTarget.Type;
 export const ScheduleTargetInput = Schema.Union([
   Schema.Struct({ kind: Schema.Literal("current-chat") }),
   Schema.Struct({ kind: Schema.Literal("current-workspace") }),
+  ScheduleTarget,
 ]);
 export type ScheduleTargetInput = typeof ScheduleTargetInput.Type;
 export const CronExpression = Schema.String.check(Schema.isPattern(/^\S+(?:\s+\S+){4}$/u));
@@ -125,6 +126,12 @@ export const PlannedScheduleRunTarget = Schema.Union([
   }),
 ]);
 export type PlannedScheduleRunTarget = typeof PlannedScheduleRunTarget.Type;
+
+export type ScheduleRunDestination =
+  | Extract<ScheduleTarget, { readonly kind: "chat" }>
+  | (Extract<ScheduleTarget, { readonly kind: "workspace" }> & {
+      readonly newChatId: typeof ChatId.Type;
+    });
 
 export const ResolvedScheduleRunTarget = Schema.Struct({
   chatId: ChatId,
@@ -228,7 +235,7 @@ export class ScheduleHostError extends Schema.TaggedError<ScheduleHostError>()(
 
 export interface ScheduleRunHost {
   readonly prepare: (
-    target: PlannedScheduleRunTarget,
+    destination: ScheduleRunDestination,
   ) => Effect.Effect<ResolvedScheduleRunTarget, ScheduleHostError>;
   readonly deliver: (
     chatId: typeof ChatId.Type,
