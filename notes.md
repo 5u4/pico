@@ -117,6 +117,9 @@
   - construct one frontend-state graph per page registry. Initialized chats and pending actions survive navigation until the registry is disposed.
   - registry disposal starts asynchronous socket cleanup. Unmounting a chat does not stop its agent, so use the abort action.
   - transcripts use RPC snapshots only. Live deltas and tools stay separate because Events has no message IDs, cursor, replay, or subscription acknowledgement.
+  - render persisted messages, `live.pending`, then the active `live.blocks`. Snapshot acknowledgment publishes persisted content and removes its pending copy in one Atom batch.
+  - a successful snapshot only acknowledges eligible settled messages with fully equivalent payloads and enough new occurrences. Missing content and newer arrivals stay pending.
+  - settlements observed before any successful snapshot and fragments without a final message event have no safe identity to match. They survive until registry disposal, even if this conservatively duplicates content in a later snapshot.
   - connection `active` means an actual RPC response or event arrived, not that the server confirmed Events registration. A chat's run starts as unknown.
   - each chat has separate send and abort action lanes. A lane retains its first overlapping failure until a new batch starts. Its `waiting` flag covers every pending command.
   - Events failure makes live running state unknown and rejects new actions. It does not fabricate an agent outcome or cancel an independent send already admitted by the server.

@@ -582,4 +582,49 @@ describe("frontend state over WebSocket", () => {
         }).pipe(Effect.scoped, Effect.provide(server.layer));
       }),
   );
+
+  it.live(
+    "retains a live-first settlement when the first snapshot may contain an old identical message",
+    () =>
+      Effect.gen(function* () {
+        const server = yield* snapshotFixture();
+        yield* Effect.gen(function* () {
+          yield* Effect.addFinalizer(() => server.release);
+          const state = make({ url: yield* endpoint });
+          const registry = yield* registryInScope;
+          const repeated = assistant("same as history", 1);
+          registry.mount(state.live(firstChat));
+          const route = yield* Queue.take(server.opened);
+          yield* Queue.offerAll(route.queue, [
+            { chatId: firstChat, event: { type: "message-settled", message: repeated } },
+            { chatId: firstChat, event: { type: "title-changed", title: "settlement received" } },
+          ]);
+          yield* waitFor(
+            registry,
+            state.live(firstChat),
+            (value) => value.title === "settlement received",
+          );
+          registry.mount(state.transcript(firstChat));
+          yield* Deferred.succeed((yield* Queue.take(server.requests)).reply, [repeated]);
+          yield* waitFor(
+            registry,
+            state.transcript(firstChat),
+            (value) => AsyncResult.isSuccess(value) && !value.waiting,
+          );
+          assert.deepStrictEqual(
+            AsyncResult.getOrThrow(registry.get(state.transcript(firstChat))),
+            [repeated],
+          );
+          assert.deepStrictEqual(pendingMessages(registry.get(state.live(firstChat))), [repeated]);
+          registry.refresh(state.transcript(firstChat));
+          yield* Deferred.succeed((yield* Queue.take(server.requests)).reply, [repeated, repeated]);
+          yield* waitFor(
+            registry,
+            state.transcript(firstChat),
+            (value) => AsyncResult.isSuccess(value) && !value.waiting,
+          );
+          assert.deepStrictEqual(pendingMessages(registry.get(state.live(firstChat))), [repeated]);
+        }).pipe(Effect.scoped, Effect.provide(server.layer));
+      }),
+  );
 });
