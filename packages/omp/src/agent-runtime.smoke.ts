@@ -9,6 +9,7 @@ import { BranchNaming } from "@pico/contract/branch-naming";
 import * as Chat from "@pico/contract/chat-model";
 import { ChatRepository } from "@pico/contract/chat-repository";
 import { ChatSessionContext } from "@pico/contract/chat-session-context";
+import { PicoRoot } from "@pico/contract/config";
 import { AbsolutePath } from "@pico/contract/path";
 import { Schedules } from "@pico/contract/schedule";
 import * as Workspace from "@pico/contract/workspace-model";
@@ -62,7 +63,11 @@ const smoke = Effect.fn("AgentRuntime.smoke")(function* () {
         }),
     }),
   );
-  const runtimeLayer = AgentRuntimeLayer.layer(sessionsDir, schedules).pipe(
+  const runtimeLayer = AgentRuntimeLayer.layer({
+    paths: { root: PicoRoot.make(temporaryRoot), sessionsDir },
+    schedules,
+    browser: { idleTimeoutMs: 10_800_000 },
+  }).pipe(
     Layer.provide(
       Layer.merge(
         chatSessionContext,

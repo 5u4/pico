@@ -2,6 +2,7 @@
 import * as BunServices from "@effect/platform-bun/BunServices";
 import { PicoRoot } from "@pico/contract/config";
 import * as Daemon from "@pico/daemon";
+import * as BrowserInstall from "@pico/omp/browser-install";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -60,9 +61,18 @@ const main = Effect.gen(function* () {
     ),
     Command.withDescription("Start the daemon in the foreground"),
   );
+  const browser = Command.make("browser").pipe(
+    Command.withDescription("Manage Pico's local browser"),
+    Command.withSubcommands([
+      Command.make("install", { root }).pipe(
+        Command.withDescription("Install Chrome for this Pico root"),
+        Command.withHandler(({ root }) => BrowserInstall.install(root)),
+      ),
+    ]),
+  );
   const pico = Command.make("pico").pipe(
     Command.withDescription("Run pico"),
-    Command.withSubcommands([start]),
+    Command.withSubcommands([start, browser]),
   );
   const commandExit = yield* Command.run(pico, { version }).pipe(
     Effect.provide(BunServices.layer),

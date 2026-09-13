@@ -4,11 +4,14 @@
   "type": "module",
   "exports": {
     "./layer": "./src/layer.ts",
-    "./agent-session-store": "./src/agent-session-store.ts"
+    "./agent-session-store": "./src/agent-session-store.ts",
+    "./browser-install": "./src/browser-install.ts"
   },
   "dependencies": {
     "@oh-my-pi/pi-coding-agent": "catalog:",
+    "@oh-my-pi/pi-ai": "catalog:",
     "@pico/contract": "workspace:*",
+    "agent-browser": "0.37.1",
     "effect": "catalog:"
   },
   "devDependencies": {

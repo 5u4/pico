@@ -21,8 +21,14 @@ const bundledSchedulePath = Bun.fileURLToPath(
 const bundledInstructionsPath = Bun.fileURLToPath(
   new URL("../src/skills/pico-instructions/SKILL.md", import.meta.url),
 );
+const bundledBrowserPath = Bun.fileURLToPath(
+  new URL("../src/skills/pico-browser/SKILL.md", import.meta.url),
+);
 
-for (const customNames of [["user-skill"], ["user-skill", "pico-schedule", "pico-instructions"]]) {
+for (const customNames of [
+  ["user-skill"],
+  ["user-skill", "pico-schedule", "pico-instructions", "pico-browser"],
+]) {
   const cwd = AbsolutePath.make(join(root, `project-${customNames.length}`));
   const customDir = join(cwd, "custom-skills");
   await mkdir(join(cwd, ".omp"), { recursive: true });
@@ -43,7 +49,11 @@ for (const customNames of [["user-skill"], ["user-skill", "pico-schedule", "pico
   const instructionsPath = customNames.includes("pico-instructions")
     ? join(customDir, "pico-instructions", "SKILL.md")
     : bundledInstructionsPath;
+  const browserPath = customNames.includes("pico-browser")
+    ? join(customDir, "pico-browser", "SKILL.md")
+    : bundledBrowserPath;
   const expected = [
+    { name: "pico-browser", filePath: await realpath(browserPath) },
     { name: "pico-instructions", filePath: await realpath(instructionsPath) },
     { name: "pico-schedule", filePath: await realpath(schedulePath) },
     { name: "user-skill", filePath: await realpath(join(customDir, "user-skill", "SKILL.md")) },

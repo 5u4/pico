@@ -121,4 +121,44 @@ describe("PicoConfig.load", () => {
       );
     }).pipe(Effect.provide(platformLayer)),
   );
+  it.effect("loads and validates browser lifetime without Discord credentials", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const temporaryDirectory = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "pico-browser-config-",
+      });
+      const paths = yield* open(PicoRoot.make(path.join(temporaryDirectory, "root")));
+      assert.strictEqual((yield* load(paths)).browser.idleTimeoutMs, 10_800_000);
+      yield* fileSystem.writeFileString(
+        paths.configFile,
+        '[browser]\nidle_timeout = "90 minutes"\n',
+      );
+      assert.strictEqual((yield* load(paths)).browser.idleTimeoutMs, 5_400_000);
+      yield* fileSystem.writeFileString(
+        paths.configFile,
+        `${config('["guild-1"]', temporaryDirectory)}\n[browser]\nidle_timeout = 1234\n`,
+      );
+      const loaded = yield* load(paths);
+      assert.strictEqual(loaded.browser.idleTimeoutMs, 1234);
+      assert.isTrue(Option.isNone(loaded.discord));
+      for (const invalid of [
+        '"Infinity"',
+        '"0 seconds"',
+        '"-1 second"',
+        "0.5",
+        "9007199254740992",
+        '"private-invalid-value"',
+      ]) {
+        yield* fileSystem.writeFileString(
+          paths.configFile,
+          `[browser]\nidle_timeout = ${invalid}\n`,
+        );
+        const error = yield* load(paths).pipe(Effect.flip);
+        assert.instanceOf(error, ConfigError);
+        assert.include(error.message, "browser.idle_timeout");
+        assert.notInclude(error.message, "private-invalid-value");
+      }
+    }).pipe(Effect.scoped, Effect.provide(platformLayer)),
+  );
 });
