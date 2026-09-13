@@ -276,6 +276,14 @@ export const makeBrowserManager = async ({
     if (disposed || archived.has(owner.chatId))
       return Promise.reject(new Error("Browser owner is closed"));
     if (signal?.aborted) return Promise.reject(new Error("Browser operation cancelled"));
+    if (operation.op === "upload") {
+      if (operation.userApproved !== true)
+        return Promise.reject(
+          new Error("File uploads require explicit user approval and userApproved:true."),
+        );
+      if (operation.files.some((file) => !isAbsolute(file)))
+        return Promise.reject(new Error("Upload paths must be absolute"));
+    }
     if (
       (operation.op === "open" || (operation.op === "tabs" && operation.action === "new")) &&
       operation.url !== undefined
@@ -584,8 +592,6 @@ const browserCommand = (operation: PageOperation): Readonly<Record<string, unkno
     case "drag":
       return { action: "drag", source: operation.source, target: operation.target };
     case "upload":
-      if (operation.files.some((file) => !isAbsolute(file)))
-        throw new Error("Upload paths must be absolute");
       return { action: "upload", selector: operation.selector, files: operation.files };
     case "get": {
       const actions = {

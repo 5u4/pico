@@ -14,9 +14,11 @@ Use `pico_browser` through its discovered tool or `xd://pico_browser`. Read its 
 3. Use fresh refs such as `@e2` for `click`, `fill`, `type`, `hover`, `check`, or `select`.
 4. Take another snapshot after navigation or a page change. Discard old refs.
 
-`get` reads text, HTML, values, counts, the URL, or the title. `tabs` lists, creates, selects, and closes tabs only in your browser. `frame` selects an iframe or returns to the main page with `selector:null`. `dialog` inspects, accepts, or dismisses JavaScript dialogs. Uploads require absolute file paths and the user's authorization to send those files.
+`get` reads text, HTML, values, counts, the URL, or the title. `tabs` lists, creates, selects, and closes tabs only in your browser. `frame` selects an iframe or returns to the main page with `selector:null`. `dialog` inspects, accepts, or dismisses JavaScript dialogs.
 
 Open a local `file:` preview only after the user explicitly requests it. Include `userRequested:true` on `open` or `tabs` with `action:"new"`. This flag records that request, not an independent approval. Preview permission does not authorize uploading or otherwise transmitting the file's contents.
+
+Upload files only after the user explicitly approves sending those files to the page. Use absolute paths and include the required flag: `{"op":"upload","selector":"input[type=file]","files":["/absolute/path/to/file"],"userApproved":true}`. Never set `userApproved:true` without that approval. The flag records the model's assertion of user approval; it is not independent approval or an operating-system sandbox. Permission to read or preview a file does not authorize uploading it.
 
 Use `eval` for JavaScript inside the page, not host commands. Use a bounded `wait` for a selector, text, URL, load state, or page expression. Do not use waits to block on a human. `screenshot` returns image content and a durable file path.
 

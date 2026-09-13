@@ -66,7 +66,20 @@ const main = Effect.gen(function* () {
     Command.withSubcommands([
       Command.make("install", { root }).pipe(
         Command.withDescription("Install Chrome for this Pico root"),
-        Command.withHandler(({ root }) => BrowserInstall.install(root)),
+        Command.withHandler(({ root }) =>
+          BrowserInstall.install(root).pipe(
+            Effect.mapError(
+              (cause) =>
+                new CliError.UserError({
+                  cause,
+                  userMessage: `Browser installation failed: ${cause.message.replace(
+                    /[\p{Cc}\p{Cf}]/gu,
+                    (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`,
+                  )}`,
+                }),
+            ),
+          ),
+        ),
       ),
     ]),
   );
