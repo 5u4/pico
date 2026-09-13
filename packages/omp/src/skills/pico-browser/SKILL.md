@@ -1,6 +1,6 @@
 ---
 name: pico-browser
-description: Browse websites, inspect pages, fill forms, capture screenshots, and hand login to the user through Pico's isolated interactive browser viewer.
+description: Browse websites, inspect pages, fill forms, capture screenshots, import an approved local Cookie header or JSON export, and hand login to the user through Pico's isolated interactive browser viewer.
 ---
 
 # Pico browser
@@ -40,6 +40,28 @@ If login opens a popup, use Refresh tabs, select that page, then Show tab. These
 The link works on the daemon machine. It does not automatically work on a phone or another computer. A private tunnel must preserve the loopback host and origin. The viewer has no all-session dashboard or remote authentication service. Local processes can reach native loopback streams; browser separation is not an operating-system sandbox.
 
 Only after the user explicitly asks for a native window, call `{"op":"mode","mode":"headed","userRequested":true}`. This restarts the browser and may lose transient page state. Saved authentication remains. Returning to headless also requires an explicit request. Never switch modes merely because automation failed. Native passkey prompts and operating-system dialogs are not guaranteed to work in the viewer.
+
+## Import login from a cookie file
+
+Cookie files grant access like passwords. Keep their contents out of model context, tool arguments, and chat. Do not read the file to inspect it or ask the user to paste it.
+
+1. Ask the user to log in with their own browser and open DevTools Network. Have them select a request to the intended site.
+2. Have them copy the whole `Cookie` request header value, such as `key=value; other=value`, into a text file on the daemon machine. No browser extension or manual JSON conversion is needed.
+3. Get the file's absolute path, the request's target URL, and explicit approval to import into this chat's browser. Reading or uploading approval does not authorize cookie import. A path on another computer is not accessible to Pico.
+4. Call `{"op":"import_cookies","path":"/absolute/path/to/cookies.txt","format":"header","url":"https://x.com","userApproved":true}`. Set the flag only after that approval.
+5. Navigate to the site or reload its open tab, then take a fresh snapshot to check login.
+
+Header mode accepts one `Cookie` header value, optionally prefixed with `Cookie:`, with surrounding whitespace or a final newline. Values remain literal, including percent sequences, quotes, embedded equals signs, and empty values. Duplicate cookie names and malformed entries reject the whole file. A complete request, cURL command, or `Set-Cookie` response header is not a cookie file.
+
+A request header has no cookie attributes. Header mode creates new host-only session cookies for exactly the target URL's hostname, with path `/` regardless of the URL path. It sets `Secure` for HTTPS and leaves SameSite unspecified. It sets `HttpOnly=false` so JavaScript can read CSRF cookies, as sites such as X require. This also makes imported authentication cookies readable by JavaScript. These are new attributes, not the original settings. Secure cookie prefixes require HTTPS. The target must be an HTTP or HTTPS URL without credentials.
+
+To preserve the original attributes, use a JSON export instead. Call `{"op":"import_cookies","path":"/absolute/path/to/cookies.json","userApproved":true}` after approval. `format:"json"` is optional. The file must contain a nonempty JSON array or an object with a `cookies` array. Each cookie needs string `name`, `value`, and `domain` fields. Netscape files, URL-only cookies, and browser profiles are not supported.
+
+JSON import preserves `path`, `secure`, `httpOnly`, and host-only scope. It accepts `expires` or `expirationDate` in epoch seconds and session-cookie metadata. Conflicting expiry aliases or inconsistent session metadata reject the whole file. SameSite accepts case-insensitive `Strict`, `Lax`, `None`, `no_restriction`, and `unspecified`. `None` requires `secure:true`. Partitioned cookies and invalid metadata are rejected before browser startup. Other export metadata does not become native cookie options.
+
+A successful receipt reports the submitted count and completed checkpoint, not successful site authentication. Import preserves unrelated cookies and site storage, saves this owner's state across close and restart, and does not publish a login seed. Sharing with future chats requires the separate `remember_login` approval below.
+
+If import fails after submission, cookies may already have changed. Follow its outcome message and inspect the browser before deciding whether to retry. Pico leaves the source file untouched. The user can delete it manually after import.
 
 ## Keep or share login state
 
