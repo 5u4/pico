@@ -118,6 +118,18 @@
         "@effect/vitest": "catalog:",
       },
     },
+    "packages/frontend-state": {
+      "name": "@pico/frontend-state",
+      "dependencies": {
+        "@pico/contract": "workspace:*",
+        "@pico/rpc": "workspace:*",
+        "effect": "catalog:",
+      },
+      "devDependencies": {
+        "@effect/platform-node": "catalog:",
+        "@effect/vitest": "catalog:",
+      },
+    },
     "packages/git": {
       "name": "@pico/git",
       "dependencies": {
@@ -612,6 +624,8 @@
     "@pico/discord": ["@pico/discord@workspace:packages/discord"],
 
     "@pico/event-router": ["@pico/event-router@workspace:packages/event-router"],
+
+    "@pico/frontend-state": ["@pico/frontend-state@workspace:packages/frontend-state"],
 
     "@pico/git": ["@pico/git@workspace:packages/git"],
 
