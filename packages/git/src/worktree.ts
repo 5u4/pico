@@ -556,7 +556,9 @@ const fetchOwnership = (
   refspecs: ReadonlyArray<string>,
   ref: string,
 ): "owner" | "not-owner" | "unknown" => {
-  const exclusions = refspecs.filter((refspec) => refspec.startsWith("^"));
+  const exclusions = refspecs
+    .filter((refspec) => refspec.startsWith("^"))
+    .map((refspec) => (refspec === "^@" ? "HEAD" : refspec.slice(1)));
   let unresolved = false;
   for (const refspec of refspecs) {
     if (refspec.startsWith("^")) continue;
@@ -569,15 +571,16 @@ const fetchOwnership = (
         : destination;
     const matched = matchRefspec(fullDestination, ref);
     if (matched === undefined) continue;
-    const source =
-      refspec.slice(refspec.startsWith("+") ? 1 : 0, separator).replace("*", () => matched) ||
-      "HEAD";
+    const configuredSource = refspec
+      .slice(refspec.startsWith("+") ? 1 : 0, separator)
+      .replace("*", () => matched);
+    const source = configuredSource === "" || configuredSource === "@" ? "HEAD" : configuredSource;
     // Abbreviated sources need remote refs to resolve before exclusions can be checked.
     if (exclusions.length > 0 && source !== "HEAD" && !source.startsWith("refs/")) {
       unresolved = true;
       continue;
     }
-    if (!exclusions.some((exclusion) => matchRefspec(exclusion.slice(1), source) !== undefined)) {
+    if (!exclusions.some((exclusion) => matchRefspec(exclusion, source) !== undefined)) {
       return "owner";
     }
   }

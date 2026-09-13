@@ -317,6 +317,13 @@ describe("GitWorktree.create", () => {
       competing: false,
     },
     {
+      name: "excluded HEAD alias",
+      mapping: "HEAD:refs/remotes/cache/default",
+      branch: "cache/default",
+      exclusions: ["^@"],
+      competing: false,
+    },
+    {
       name: "excluded abbreviated source",
       mapping: "main:refs/remotes/origin/main",
       branch: "origin/main",
