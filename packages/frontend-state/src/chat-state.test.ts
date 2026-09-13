@@ -38,7 +38,7 @@ describe("live chat transitions", () => {
     });
   });
 
-  it("clears drafts on assistant settlement without erasing another assistant's text on tool settlement", () => {
+  it("retains assistant settlement beside the next draft without clearing on tool settlement", () => {
     const partial = reduceLiveChat(emptyLiveChat(), {
       type: "text-delta",
       contentIndex: 4,
@@ -68,7 +68,19 @@ describe("live chat transitions", () => {
         timestamp: 2,
       },
     });
-    assert.strictEqual(afterAssistant.blocks.size, 0);
+    assert.deepStrictEqual(
+      afterAssistant.pending.map((entry) =>
+        entry.kind === "message" ? entry.message.content : [],
+      ),
+      [[{ type: "text", text: "partial" }]],
+    );
+    const next = reduceLiveChat(afterAssistant, {
+      type: "text-delta",
+      contentIndex: 4,
+      text: "next",
+    });
+    assert.strictEqual(next.blocks.get(4)?.text, "next");
+    assert.deepStrictEqual(next.pending, afterAssistant.pending);
     assert.strictEqual(afterAssistant.run.kind, "running");
     assert.deepStrictEqual(
       reduceLiveChat(afterAssistant, {
@@ -78,4 +90,51 @@ describe("live chat transitions", () => {
       { kind: "finished", outcome: "aborted" },
     );
   });
+
+  for (const boundary of ["run-finished", "run-started"] as const) {
+    it(`retains an orphan draft across ${boundary} and the next run`, () => {
+      const partial = reduceLiveChat(emptyLiveChat(), {
+        type: "text-delta",
+        contentIndex: 0,
+        text: "orphan",
+      });
+      const sealed = reduceLiveChat(
+        partial,
+        boundary === "run-finished" ? { type: boundary, outcome: "aborted" } : { type: boundary },
+      );
+      const next = reduceLiveChat(reduceLiveChat(sealed, { type: "run-started" }), {
+        type: "text-delta",
+        contentIndex: 0,
+        text: "next run",
+      });
+      assert.deepStrictEqual(
+        next.pending.flatMap((entry) =>
+          entry.kind === "blocks" ? [...entry.blocks.values()].map((block) => block.text) : [],
+        ),
+        ["orphan"],
+      );
+      assert.strictEqual(next.blocks.get(0)?.text, "next run");
+    });
+  }
+
+  for (const previous of ["unknown", "finished"] as const) {
+    it(`marks running when tool completion arrives after ${previous}`, () => {
+      const initial =
+        previous === "unknown"
+          ? emptyLiveChat()
+          : reduceLiveChat(emptyLiveChat(), { type: "run-finished", outcome: "completed" });
+      const completed = reduceLiveChat(initial, {
+        type: "tool-finished",
+        toolCallId: "late",
+        toolName: "read",
+        status: "succeeded",
+      });
+      assert.strictEqual(completed.run.kind, "running");
+      assert.deepStrictEqual(completed.tools.get("late"), {
+        kind: "finished",
+        start: null,
+        end: { type: "tool-finished", toolCallId: "late", toolName: "read", status: "succeeded" },
+      });
+    });
+  }
 });
