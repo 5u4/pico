@@ -14,3 +14,7 @@ export interface PicoPaths {
   readonly logsDir: AbsolutePathType;
   readonly schedulesDir: AbsolutePathType;
 }
+
+export interface BrowserConfig {
+  readonly idleTimeoutMs: number;
+}

@@ -18,6 +18,7 @@ export const prepareSessionSettings = Effect.fn("OmpSession.prepareSettings")(fu
     try: () => {
       settings.override("async.enabled", false);
       settings.override("title.refreshOnReplan", false);
+      settings.override("browser.enabled", false);
       settings.override("skills.customDirectories", [
         ...settings.get("skills.customDirectories"),
         bundledSkillsDirectory,

@@ -8,6 +8,7 @@ import * as OmpSessionLoader from "@oh-my-pi/pi-coding-agent/session/session-loa
 import { BranchNaming } from "@pico/contract/branch-naming";
 import * as Chat from "@pico/contract/chat-model";
 import { ChatSessionContext } from "@pico/contract/chat-session-context";
+import { PicoRoot } from "@pico/contract/config";
 import { AbsolutePath } from "@pico/contract/path";
 import * as Schedule from "@pico/contract/schedule";
 import { WorkspaceId } from "@pico/contract/workspace-model";
@@ -96,7 +97,11 @@ const stopMarker = { type: "runtime-stop", data: { name: "extension-ready" } };
 await Effect.runPromise(
   Effect.scoped(
     Effect.gen(function* () {
-      const runtime = yield* make(sessions, schedules);
+      const runtime = yield* make({
+        paths: { root: PicoRoot.make(root), sessionsDir: sessions },
+        schedules,
+        browser: { idleTimeoutMs: 10_800_000 },
+      });
       yield* runtime.contextUsage(chat.id);
       const started = { title: "extension-ready", markers: startMarkers(1) };
       assert.deepEqual(yield* Effect.promise(readJournal), started);

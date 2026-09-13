@@ -174,9 +174,11 @@ const daemonLayer = (paths: PicoPaths, config: Config.PicoConfig) =>
       const application = ApplicationLayer.layer(gitWorktree).pipe(
         Layer.provide(Layer.merge(persistence, AgentSessionStoreLayer.layer(paths.sessionsDir))),
       );
-      const agentRuntime = AgentRuntimeLayer.layer(paths.sessionsDir, schedules).pipe(
-        Layer.provide(Layer.merge(chatSessionContext, branchNaming)),
-      );
+      const agentRuntime = AgentRuntimeLayer.layer({
+        paths,
+        schedules,
+        browser: config.browser,
+      }).pipe(Layer.provide(Layer.merge(chatSessionContext, branchNaming)));
       const core = Layer.merge(application, EventRouterLayer.layer).pipe(
         Layer.provide(agentRuntime),
       );

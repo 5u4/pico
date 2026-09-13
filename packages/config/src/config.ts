@@ -1,6 +1,7 @@
-import type { PicoPaths } from "@pico/contract/config";
+import type { BrowserConfig, PicoPaths } from "@pico/contract/config";
 import { ConfigError } from "@pico/contract/errors";
 import { AbsolutePath } from "@pico/contract/path";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
@@ -19,6 +20,13 @@ const DiscordSection = Schema.Struct({
 
 const PicoConfigFile = Schema.Struct({
   discord: Schema.optionalKey(DiscordSection),
+  browser: Schema.optionalKey(
+    Schema.Struct({
+      idle_timeout: Schema.optionalKey(
+        Schema.Union([Schema.DurationFromString, Schema.DurationFromMillis]),
+      ),
+    }),
+  ),
 });
 
 export interface DiscordConfig {
@@ -31,6 +39,7 @@ export interface DiscordConfig {
 
 export interface PicoConfig {
   readonly discord: Option.Option<DiscordConfig>;
+  readonly browser: BrowserConfig;
 }
 
 const platformError = (operation: string) => (error: PlatformError.PlatformError) =>
@@ -45,7 +54,10 @@ const formatIssue = SchemaIssue.makeFormatterStandardSchemaV1({
 const fieldError = (field: string, expected: string) =>
   new ConfigError({ message: `Invalid config.toml field ${field}; ${expected}` });
 
-const disabled = (): PicoConfig => ({ discord: Option.none() });
+const disabled = (browser: BrowserConfig = { idleTimeoutMs: 10_800_000 }): PicoConfig => ({
+  discord: Option.none(),
+  browser,
+});
 
 export const load = Effect.fn("PicoConfig.load")(function* (paths: PicoPaths) {
   const fileSystem = yield* FileSystem.FileSystem;
@@ -76,7 +88,18 @@ export const load = Effect.fn("PicoConfig.load")(function* (paths: PicoPaths) {
       return fieldError(field, issue?.message ?? "invalid configuration");
     }),
   );
-  if (config.discord === undefined) return disabled();
+  const idleTimeoutMs =
+    config.browser?.idle_timeout === undefined
+      ? 10_800_000
+      : Duration.toMillis(config.browser.idle_timeout);
+  if (!Number.isSafeInteger(idleTimeoutMs) || idleTimeoutMs <= 0) {
+    return yield* fieldError(
+      "browser.idle_timeout",
+      "expected a positive duration in whole milliseconds",
+    );
+  }
+  const browser = { idleTimeoutMs };
+  if (config.discord === undefined) return disabled(browser);
 
   const tokenPath = path.join(paths.secretsDir, "discord_bot_token");
   if (
@@ -84,7 +107,7 @@ export const load = Effect.fn("PicoConfig.load")(function* (paths: PicoPaths) {
       .exists(tokenPath)
       .pipe(Effect.mapError(platformError("Inspect Discord token file"))))
   ) {
-    return disabled();
+    return disabled(browser);
   }
 
   const tokenValue = (yield* fileSystem
@@ -93,7 +116,7 @@ export const load = Effect.fn("PicoConfig.load")(function* (paths: PicoPaths) {
   const defaultCwd = config.discord.default_cwd.trim();
   const allowedGuildIds = config.discord.allowed_guild.map((guildId) => guildId.trim());
 
-  if (tokenValue.length === 0 || allowedGuildIds.length === 0) return disabled();
+  if (tokenValue.length === 0 || allowedGuildIds.length === 0) return disabled(browser);
   if (defaultCwd.length === 0 || !path.isAbsolute(defaultCwd)) {
     return yield* fieldError("discord.default_cwd", "expected an absolute, nonblank path");
   }
@@ -106,9 +129,10 @@ export const load = Effect.fn("PicoConfig.load")(function* (paths: PicoPaths) {
   }
 
   const [firstGuildId, ...restGuildIds] = allowedGuildIds;
-  if (firstGuildId === undefined) return disabled();
+  if (firstGuildId === undefined) return disabled(browser);
 
   return {
+    browser,
     discord: Option.some<DiscordConfig>({
       token: Redacted.make(tokenValue, { label: "discord_bot_token" }),
       allowedGuildIds: [firstGuildId, ...restGuildIds],

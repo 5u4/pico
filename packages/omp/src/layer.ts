@@ -1,4 +1,5 @@
 import * as OmpModelRegistry from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { loadAllMCPConfigs } from "@oh-my-pi/pi-coding-agent/mcp/config";
 import * as OmpRuntimeInit from "@oh-my-pi/pi-coding-agent/modes/runtime-init";
 import * as OmpAgentRegistry from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import * as OmpSdk from "@oh-my-pi/pi-coding-agent/sdk";
@@ -10,17 +11,21 @@ import { AgentRuntime, type ContextUsage, type ShakeResult } from "@pico/contrac
 import { BranchNaming, type BranchNamingHandler } from "@pico/contract/branch-naming";
 import type * as Chat from "@pico/contract/chat-model";
 import { ChatSessionContext } from "@pico/contract/chat-session-context";
+import type { BrowserConfig, PicoPaths } from "@pico/contract/config";
 import type { AgentError } from "@pico/contract/errors";
 import type { AbsolutePath } from "@pico/contract/path";
 import type * as Schedule from "@pico/contract/schedule";
 import * as Cause from "effect/Cause";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import { agentError } from "./agent-error.ts";
 import { normalizeAgentEvent, normalizeTranscript } from "./agent-event.ts";
+import { makeBrowserExtension } from "./browser-extension.ts";
+import { type BrowserManager, makeBrowserManager } from "./browser-manager.ts";
 import { makeExchangeTitleFlow } from "./exchange-title.ts";
 import { makeOmpPromptSender } from "./omp-prompt-sender.ts";
 import { make as makeScheduleExtension } from "./schedule-extension.ts";
@@ -32,10 +37,18 @@ import {
 } from "./session-pool.ts";
 import { prepareSessionSettings } from "./session-settings.ts";
 
-export const make = Effect.fn("AgentRuntime.make")(function* (
-  sessionsDir: AbsolutePath,
-  schedules: Schedule.Schedules["Service"],
-) {
+interface RuntimeOptions {
+  readonly paths: Pick<PicoPaths, "root" | "sessionsDir">;
+  readonly schedules: Schedule.Schedules["Service"];
+  readonly browser: BrowserConfig;
+}
+
+export const make = Effect.fn("AgentRuntime.make")(function* ({
+  paths,
+  schedules,
+  browser,
+}: RuntimeOptions) {
+  const { sessionsDir } = paths;
   const fileSystem = yield* FileSystem.FileSystem;
   const crypto = yield* Crypto.Crypto;
   const path = yield* Path.Path;
@@ -69,6 +82,16 @@ export const make = Effect.fn("AgentRuntime.make")(function* (
       normalizeTranscript(messages),
     );
   });
+  const browsers = yield* Effect.acquireRelease(
+    promiseBoundary("Failed to initialize Pico browsers", () =>
+      makeBrowserManager({ root: paths.root, ...browser }),
+    ),
+    (manager) =>
+      ignoreCleanupFailure(
+        "Failed to close Pico browsers",
+        promiseBoundary("Failed to close Pico browsers", () => manager.dispose()),
+      ),
+  );
 
   const pool = yield* makeSessionPool({
     factory: makeFactory(
@@ -81,6 +104,7 @@ export const make = Effect.fn("AgentRuntime.make")(function* (
       modelRegistry,
       schedules,
       branchNaming.handle,
+      browsers,
     ),
     loadTranscript,
   });
@@ -94,15 +118,22 @@ export const make = Effect.fn("AgentRuntime.make")(function* (
     sendCaptured: pool.sendCaptured,
     deliver: pool.deliver,
     publish: pool.publish,
-    close: pool.close,
+    close: Effect.fn("AgentRuntime.close")(function* (chatId: Chat.ChatId) {
+      const closing = browsers.closeChat(chatId).then(
+        () => Exit.void,
+        (cause) => Exit.fail(agentError("Failed to close chat browsers", cause)),
+      );
+      const closed = yield* pool.close(chatId).pipe(Effect.exit);
+      const browserClosed = yield* Effect.promise(() => closing);
+      return yield* Exit.asVoidAll([closed, browserClosed]);
+    }, Effect.uninterruptible),
     abort: pool.abort,
     contextUsage: pool.contextUsage,
     shake: pool.shake,
   });
 });
 
-export const layer = (sessionsDir: AbsolutePath, schedules: Schedule.Schedules["Service"]) =>
-  Layer.effect(AgentRuntime, make(sessionsDir, schedules));
+export const layer = (options: RuntimeOptions) => Layer.effect(AgentRuntime, make(options));
 
 export const makeSessionHandle = (
   session: SessionHandle,
@@ -237,6 +268,7 @@ const makeFactory = (
   modelRegistry: OmpModelRegistry.ModelRegistry,
   schedules: Schedule.Schedules["Service"],
   handleBranchNaming: BranchNamingHandler,
+  browsers: BrowserManager,
 ): SessionFactory => ({
   open: Effect.fn("OmpSession.open")(function* (chatId, emit) {
     const runEffect = Effect.runPromiseWith(yield* Effect.context<never>());
@@ -260,7 +292,14 @@ const makeFactory = (
         modelRegistry,
         agentRegistry: new OmpAgentRegistry.AgentRegistry(),
         hasUI: false,
+        mcpConfigLoader: (cwd, options) =>
+          loadAllMCPConfigs(cwd, { ...options, filterBrowser: true }),
         extensions: [
+          makeBrowserExtension({
+            manager: browsers,
+            chatId: chat.id,
+            rootSessionId: manager.getSessionId(),
+          }),
           makeScheduleExtension({
             caller: { chatId: chat.id, workspaceId: chat.workspaceId },
             runEffect,
