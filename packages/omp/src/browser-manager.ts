@@ -12,6 +12,7 @@ import {
   prepareBrowserHome,
   sendBrowserCommand,
 } from "./browser-cli.ts";
+import { readCookieFile } from "./browser-cookie-file.ts";
 import type { BrowserOperation } from "./browser-extension.ts";
 import { BrowserTabs, type BrowserTabsRequest, makeBrowserViewer } from "./browser-viewer.ts";
 
@@ -43,6 +44,7 @@ const Stream = Schema.Struct({
   port: Schema.NullOr(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 65535 }))),
 });
 const Save = Schema.Struct({ saved: Schema.Literal(true), path: Schema.String });
+const CookiesSet = Schema.Struct({ set: Schema.Literal(true) });
 const Close = Schema.Struct({
   closed: Schema.Literal(true),
   saveStatus: Schema.optionalKey(Schema.String),
@@ -75,6 +77,16 @@ const failedRestore = (status: string) =>
   status === "load_failed" || status === "loaded_but_invalid";
 const missingFile = (error: unknown) =>
   error instanceof Error && "code" in error && error.code === "ENOENT";
+const cookieImportFailures = {
+  "pre-dispatch":
+    "Cookie import failed before submission. No imported cookies were applied. Check the approved file, import format, header target URL, and browser availability.",
+  submitted:
+    "Cookie import outcome is uncertain. Some cookies may have changed, and the native command may still run. Inspect the browser before deciding whether to retry.",
+  acknowledged:
+    "Cookies were submitted, but checkpoint or restore recovery could not be confirmed. The live browser may have changed. Inspect it before deciding whether to retry.",
+  checkpointed:
+    "Cookie import completed its checkpoint before the operation was interrupted. This owner's saved state includes the checkpoint. Inspect the browser before deciding whether to retry.",
+};
 
 export const makeBrowserManager = async ({
   root,
@@ -292,6 +304,14 @@ export const makeBrowserManager = async ({
       if (operation.files.some((file) => !isAbsolute(file)))
         return Promise.reject(new Error("Upload paths must be absolute"));
     }
+    if (operation.op === "import_cookies") {
+      if (operation.userApproved !== true)
+        return Promise.reject(
+          new Error("Cookie import requires explicit user approval and userApproved:true."),
+        );
+      if (typeof operation.path !== "string" || !isAbsolute(operation.path))
+        return Promise.reject(new Error("Cookie import requires an absolute file path."));
+    }
     if (
       (operation.op === "open" || (operation.op === "tabs" && operation.action === "new")) &&
       operation.url !== undefined
@@ -336,12 +356,21 @@ export const makeBrowserManager = async ({
         );
     };
     return enqueue(current, async () => {
+      let importPhase: keyof typeof cookieImportFailures = "pre-dispatch";
       try {
         check();
         if (operation.op === "close") {
           await closeEntry(current, signal);
           return [text("Browser closed. Saved login state retained.")];
         }
+        const request =
+          operation.op === "import_cookies"
+            ? {
+                op: "import_cookies" as const,
+                cookies: await readCookieFile(operation, signal),
+              }
+            : operation;
+        check();
         const exists = await Bun.file(manifestPath(current)).exists();
         if (!exists) {
           try {
@@ -367,7 +396,7 @@ export const makeBrowserManager = async ({
         }
         check();
         // Native dialogs block the identity query until they are handled.
-        if (operation.op !== "dialog") {
+        if (request.op !== "dialog") {
           await reconcileMode(current, browserConnected, signal);
           check();
         }
@@ -385,14 +414,31 @@ export const makeBrowserManager = async ({
           if (ownerClosed()) await closeEntry(current);
           throw error;
         }
-        if (operation.op === "mode") {
-          if (current.mode !== operation.mode) {
+        if (request.op === "import_cookies") {
+          importPhase = "submitted";
+          Schema.decodeUnknownSync(CookiesSet)(
+            await sendBrowserCommand(
+              home,
+              current.session,
+              { action: "cookies_set", cookies: request.cookies },
+              signal,
+            ),
+          );
+          importPhase = "acknowledged";
+          check();
+          await checkpoint(current, true, signal);
+          importPhase = "checkpointed";
+          check();
+          return [text({ submitted: request.cookies.length, checkpointed: true })];
+        }
+        if (request.op === "mode") {
+          if (current.mode !== request.mode) {
             await checkpoint(current, false, signal);
             check();
             const { cdpUrl } = Schema.decodeUnknownSync(Cdp)(
               await sendBrowserCommand(home, current.session, { action: "cdp_url" }, signal),
             );
-            current.pendingMode = { mode: operation.mode, cdpUrl };
+            current.pendingMode = { mode: request.mode, cdpUrl };
             await persist(current);
             check();
             revoke(current);
@@ -400,11 +446,11 @@ export const makeBrowserManager = async ({
               await launchBrowser(
                 home,
                 current.session,
-                operation.mode === "headed",
+                request.mode === "headed",
                 idleTimeoutMs,
                 signal,
               );
-              current.mode = operation.mode;
+              current.mode = request.mode;
               current.pendingMode = undefined;
               await persist(current);
               check();
@@ -423,10 +469,10 @@ export const makeBrowserManager = async ({
             }),
           ];
         }
-        if (operation.op === "checkpoint" || operation.op === "remember_login") {
+        if (request.op === "checkpoint" || request.op === "remember_login") {
           await checkpoint(current, true, signal);
           check();
-          if (operation.op === "remember_login") {
+          if (request.op === "remember_login") {
             const candidate = join(home.directory, `.seed-${crypto.randomUUID()}.json`);
             try {
               await copyFile(statePath(current), candidate);
@@ -439,14 +485,14 @@ export const makeBrowserManager = async ({
           }
           return [
             text(
-              operation.op === "remember_login"
+              request.op === "remember_login"
                 ? "Published all saved sites as the login seed. Only new browser owners copy it; existing owners keep their own state."
                 : "Saved this browser's login state.",
             ),
           ];
         }
         const content: Array<TextContent | ImageContent> = [];
-        if (operation.op === "screenshot") {
+        if (request.op === "screenshot") {
           const path = join(
             home.directory,
             "captures",
@@ -459,9 +505,9 @@ export const makeBrowserManager = async ({
               action: "screenshot",
               path,
               format: "png",
-              fullPage: operation.fullPage ?? false,
-              selector: operation.selector,
-              annotate: operation.annotate ?? false,
+              fullPage: request.fullPage ?? false,
+              selector: request.selector,
+              annotate: request.annotate ?? false,
             },
             signal,
           );
@@ -471,15 +517,15 @@ export const makeBrowserManager = async ({
             data: Buffer.from(await readFile(path)).toString("base64"),
             mimeType: "image/png",
           });
-        } else if (operation.op !== "viewer") {
+        } else if (request.op !== "viewer") {
           const result = await sendBrowserCommand(
             home,
             current.session,
-            browserCommand(operation),
+            browserCommand(request),
             signal,
           );
           check();
-          if (operation.op === "dialog") {
+          if (request.op === "dialog") {
             await reconcileMode(current, browserConnected, signal);
             check();
           }
@@ -508,6 +554,7 @@ export const makeBrowserManager = async ({
       } catch (error) {
         if (current.generation !== generation || disposed || archived.has(current.chatId))
           revoke(current);
+        if (operation.op === "import_cookies") throw new Error(cookieImportFailures[importPhase]);
         throw error;
       } finally {
         if (
@@ -555,7 +602,7 @@ export const makeBrowserManager = async ({
 };
 export type BrowserManager = Awaited<ReturnType<typeof makeBrowserManager>>;
 
-type PageOperation = Exclude<BrowserOperation, { op: "mode" | "screenshot" }>;
+type PageOperation = Exclude<BrowserOperation, { op: "mode" | "screenshot" | "import_cookies" }>;
 const browserCommand = (operation: PageOperation): Readonly<Record<string, unknown>> => {
   const { op } = operation;
   switch (op) {

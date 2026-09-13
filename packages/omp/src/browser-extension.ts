@@ -33,6 +33,25 @@ export const browserParameters = (Type: ExtensionAPI["typebox"]["Type"]) => {
     ),
     Type.Object(
       {
+        op: Type.Literal("import_cookies"),
+        path: Type.String({ minLength: 1 }),
+        userApproved: Type.Literal(true),
+        format: Type.Optional(Type.Literal("json")),
+      },
+      { additionalProperties: false },
+    ),
+    Type.Object(
+      {
+        op: Type.Literal("import_cookies"),
+        path: Type.String({ minLength: 1 }),
+        userApproved: Type.Literal(true),
+        format: Type.Literal("header"),
+        url: Type.String({ minLength: 1 }),
+      },
+      { additionalProperties: false },
+    ),
+    Type.Object(
+      {
         op: Type.Literal("mode"),
         mode: Type.Union([Type.Literal("headless"), Type.Literal("headed")]),
         userRequested: Type.Literal(true),
@@ -207,7 +226,7 @@ export const makeBrowserExtension =
       name: "pico_browser",
       label: "Browser",
       description:
-        "Use this session's isolated Pico browser. Read skill://pico-browser first. Headless by default. Direct file: previews through open or tabs/new require an explicit user request and userRequested:true; preview permission does not authorize uploading or transmitting the file. upload requires explicit user approval to send the files and userApproved:true. viewer returns a local interactive login link; end the turn and resume after the user's next message. mode requires an explicit user request and restarts the browser. checkpoint saves this owner's login after the user completes login and repairs failed restore state. remember_login requires user approval and publishes ALL saved sites as the seed for future new owners. Never use a raw browser CLI or select another owner. eval runs page JavaScript only.",
+        "Use this session's isolated Pico browser. Read skill://pico-browser first. Headless by default. Direct file: previews through open or tabs/new require an explicit user request and userRequested:true; preview permission does not authorize uploading or transmitting the file. upload requires explicit user approval to send the files and userApproved:true. import_cookies requires explicit user approval and an absolute local file path on the daemon machine. Save the whole DevTools Network Cookie header value as text, then use {op:'import_cookies',path:'/absolute/path/to/cookies.txt',format:'header',url:'https://x.com',userApproved:true}; no extension or manual JSON conversion is needed. Header mode creates host-only session cookies at path /, Secure only for HTTPS, HttpOnly=false for JavaScript CSRF access, and no explicit SameSite. It cannot preserve the original attributes. JSON exports remain supported with format:'json' or no format. Never read or paste cookie contents into tool arguments or chat. Import checkpoints only this owner's browser and does not publish a login seed. viewer returns a local interactive login link; end the turn and resume after the user's next message. mode requires an explicit user request and restarts the browser. checkpoint saves this owner's login after the user completes login and repairs failed restore state. remember_login requires user approval and publishes ALL saved sites as the seed for future new owners. Never use a raw browser CLI or select another owner. eval runs page JavaScript only.",
       approval: "exec",
       parameters: browserParameters(api.typebox.Type),
       execute: async (_id, params, signal, _update, ctx) => {
