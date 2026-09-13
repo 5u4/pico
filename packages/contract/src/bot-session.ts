@@ -2,7 +2,7 @@ import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
 import type * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
-import { ChatId } from "./chat-model.ts";
+import { type Chat, ChatId, type NewChat } from "./chat-model.ts";
 import type { PersistenceError } from "./errors.ts";
 import { AbsolutePath } from "./path.ts";
 import { type WorkspaceId, WorkspacePlatform } from "./workspace-model.ts";
@@ -52,10 +52,11 @@ export class BotSessions extends Context.Service<
     readonly findByWorkspace: (
       workspaceId: WorkspaceId,
     ) => Effect.Effect<Option.Option<BotSession>, PersistenceError>;
-    // Application publishes the initial journal after provisioning the chat.
-    readonly create: (
-      input: Omit<BotSession, "handoff" | "turn">,
-    ) => Effect.Effect<BotSession, PersistenceError>;
+    // Application publishes the workspace, chat, and initial pointer while it owns the journal.
+    readonly createConversation: (
+      input: Omit<BotSession, "handoff" | "turn"> &
+        Pick<NewChat, "workspaceId" | "cwd" | "createdAt">,
+    ) => Effect.Effect<Chat, PersistenceError>;
     // Application records admission before sending and completion only after a successful whole turn.
     readonly setTurn: (
       chatId: ChatId,

@@ -89,6 +89,7 @@ export const layer = (
   PersistenceError,
   FileSystem.FileSystem | Path.Path
 > =>
-  Layer.mergeAll(WorkspaceSql.layer, ChatSql.layer, BotSessionSql.layer).pipe(
+  BotSessionSql.layer.pipe(
+    Layer.provideMerge(Layer.merge(WorkspaceSql.layer, ChatSql.layer)),
     Layer.provide(readySqlLayer(storeFile)),
   );

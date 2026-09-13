@@ -1567,3 +1567,189 @@ index 3d323041c05b774377124205afea54a6bc4b59d6..04e41a91f4ae00bb98acf1fa4304c046
  			settings: this.session.settings,
  			signal,
  			sessionFile: this.session.getSessionFile() ?? undefined,
+diff --git a/src/session/artifacts.ts b/src/session/artifacts.ts
+--- a/src/session/artifacts.ts
++++ b/src/session/artifacts.ts
+@@ -4,7 +4,7 @@
+  * Artifacts are stored in a directory alongside the session file,
+  * accessible via artifact:// URLs.
+  */
+-import * as fs from "node:fs/promises";
++import fs from "node:fs/promises";
+ import * as path from "node:path";
+ import { replaceFileAtomically } from "../utils/atomic-file";
+ 
+@@ -41,20 +41,20 @@
+  *
+  * Returns the verified UTF-8 byte count.
+  */
+-export async function writeArtifact(path: string, content: string): Promise<number> {
++export async function writeArtifact(path: string, content: string, signal?: AbortSignal): Promise<number> {
++	signal?.throwIfAborted();
+ 	const expectedBytes = Buffer.byteLength(content);
+ 	const tempPath = `${path}.tmp-${crypto.randomUUID()}`;
+ 	try {
+-		const writtenBytes = await Bun.write(tempPath, content);
+-		if (writtenBytes !== expectedBytes) {
+-			throw new Error(`Artifact write incomplete: wrote ${writtenBytes} of ${expectedBytes} bytes`);
+-		}
++		await fs.writeFile(tempPath, content, { signal });
+ 		const file = Bun.file(tempPath);
+ 		if (file.size !== expectedBytes) {
+ 			throw new Error(`Artifact size mismatch: found ${file.size} of ${expectedBytes} bytes`);
+ 		}
+ 		await file.slice(0, Math.min(expectedBytes, 1)).arrayBuffer();
++		signal?.throwIfAborted();
+ 		await replaceFileAtomically(tempPath, path);
++		signal?.throwIfAborted();
+ 	} catch (error) {
+ 		await fs.rm(tempPath, { force: true });
+ 		throw error;
+@@ -150,9 +150,10 @@
+ 	 * @param toolType Tool name for file extension (e.g., "bash", "read")
+ 	 * @returns Artifact ID (numeric string)
+ 	 */
+-	async save(content: string, toolType: string): Promise<string> {
++	async save(content: string, toolType: string, signal?: AbortSignal): Promise<string> {
++		signal?.throwIfAborted();
+ 		const { id, path } = await this.allocatePath(toolType);
+-		await writeArtifact(path, content);
++		await writeArtifact(path, content, signal);
+ 		return id;
+ 	}
+ 
+diff --git a/src/session/session-manager.ts b/src/session/session-manager.ts
+--- a/src/session/session-manager.ts
++++ b/src/session/session-manager.ts
+@@ -2125,9 +2125,10 @@
+ 		return (await this.#artifactManagerForSession()?.allocatePath(toolType)) ?? {};
+ 	}
+ 
+-	async saveArtifact(content: string, toolType: string): Promise<string | undefined> {
++	async saveArtifact(content: string, toolType: string, signal?: AbortSignal): Promise<string | undefined> {
++		signal?.throwIfAborted();
+ 		const manager = this.#artifactManagerForSession();
+-		if (manager) return manager.save(content, toolType);
++		if (manager) return manager.save(content, toolType, signal);
+ 
+ 		// Non-persistent session: keep an in-memory copy so spill truncation works.
+ 		this.#inMemoryArtifacts ??= new Map();
+diff --git a/src/session/session-maintenance.ts b/src/session/session-maintenance.ts
+--- a/src/session/session-maintenance.ts
++++ b/src/session/session-maintenance.ts
+@@ -634,12 +634,16 @@
+ 	 * Mutates the branch in place, persists via `rewriteEntries`, replays the
+ 	 * rebuilt context through the agent, and tears down provider sessions that
+ 	 * cache message identity — same rewrite contract as {@link dropImages}.
++	 * Cancellation stops before branch mutation; an admitted rewrite finishes
++	 * before cancellation is reported.
+ 	 *
+ 	 * No-op (zero counts) when nothing is eligible.
+ 	 */
+ 	async shake(mode: ShakeMode, opts: { config?: ShakeConfig; signal?: AbortSignal } = {}): Promise<ShakeResult> {
++		opts.signal?.throwIfAborted();
+ 		if (mode === "images") {
+ 			const { removed } = await this.#host.dropImages();
++			opts.signal?.throwIfAborted();
+ 			return { mode, toolResultsDropped: 0, blocksDropped: 0, imagesDropped: removed, tokensFreed: 0 };
+ 		}
+ 
+@@ -667,6 +671,7 @@
+ 			this.#host.agent.replaceMessages(sessionContext.messages);
+ 			this.#host.resetAdvisorRuntimes("shake");
+ 			this.#host.closeCodexProviderSessionsForHistoryRewrite();
++			opts.signal?.throwIfAborted();
+ 			return { mode, toolResultsDropped: 0, blocksDropped: 0, thinkingBlocksDropped: removed, tokensFreed: 0 };
+ 		}
+ 
+@@ -685,7 +690,8 @@
+ 			return { mode, toolResultsDropped: 0, blocksDropped: 0, tokensFreed: 0 };
+ 		}
+ 
+-		const artifactId = await this.#saveShakeArtifact(regions);
++		const artifactId = await this.#saveShakeArtifact(regions, opts.signal);
++		opts.signal?.throwIfAborted();
+ 		const replacements = regions.map((region, index) => this.#shakeElidePlaceholder(region, index, artifactId));
+ 
+ 		const hasRemoteReplacementHistory = getOpenAiRemoteCompactionPayload(latestCompaction) !== undefined;
+@@ -730,6 +736,7 @@
+ 		this.#host.agent.replaceMessages(sessionContext.messages);
+ 		this.#host.resetAdvisorRuntimes("shake");
+ 		this.#host.closeCodexProviderSessionsForHistoryRewrite();
++		opts.signal?.throwIfAborted();
+ 
+ 		return {
+ 			mode,
+@@ -747,23 +754,14 @@
+ 		return `[shaken ~${region.tokens} tokens]`;
+ 	}
+ 
+-	/**
+-	 * Concatenate the original region contents into one session artifact so the
+-	 * agent can read them back via `artifact://<id>`. Returns `undefined` when
+-	 * the session is not persisted or the write fails — callers degrade to a
+-	 * bare placeholder.
+-	 */
+-	async #saveShakeArtifact(regions: ShakeRegion[]): Promise<string | undefined> {
++	/** Save the original regions before replacing any journal content. */
++	async #saveShakeArtifact(regions: ShakeRegion[], signal?: AbortSignal): Promise<string | undefined> {
+ 		const parts: string[] = [];
+ 		for (let i = 0; i < regions.length; i++) {
+ 			const region = regions[i];
+ 			parts.push(`### region ${i + 1} (${region.label}, ~${region.tokens} tok)`, "", region.originalText, "");
+ 		}
+-		try {
+-			return await this.#host.sessionManager.saveArtifact(parts.join("\n"), "shake");
+-		} catch {
+-			return undefined;
+-		}
++		return this.#host.sessionManager.saveArtifact(parts.join("\n"), "shake", signal);
+ 	}
+ 
+ 	/**
+diff --git a/dist/types/session/artifacts.d.ts b/dist/types/session/artifacts.d.ts
+--- a/dist/types/session/artifacts.d.ts
++++ b/dist/types/session/artifacts.d.ts
+@@ -13,7 +13,7 @@
+  *
+  * Returns the verified UTF-8 byte count.
+  */
+-export declare function writeArtifact(path: string, content: string): Promise<number>;
++export declare function writeArtifact(path: string, content: string, signal?: AbortSignal): Promise<number>;
+ /**
+  * Manages artifact storage for a session.
+  *
+@@ -56,7 +56,7 @@
+      * @param toolType Tool name for file extension (e.g., "bash", "read")
+      * @returns Artifact ID (numeric string)
+      */
+-    save(content: string, toolType: string): Promise<string>;
++    save(content: string, toolType: string, signal?: AbortSignal): Promise<string>;
+     /**
+      * Check if an artifact exists.
+      * @param id Artifact ID (numeric string)
+diff --git a/dist/types/session/session-manager.d.ts b/dist/types/session/session-manager.d.ts
+--- a/dist/types/session/session-manager.d.ts
++++ b/dist/types/session/session-manager.d.ts
+@@ -240,7 +240,7 @@
+         id?: string;
+         path?: string;
+     }>;
+-    saveArtifact(content: string, toolType: string): Promise<string | undefined>;
++    saveArtifact(content: string, toolType: string, signal?: AbortSignal): Promise<string | undefined>;
+     getArtifactPath(id: string): Promise<string | null>;
+     saveDraft(text: string): Promise<void>;
+     consumeDraft(): Promise<string | null>;
+diff --git a/src/session/agent-session.ts b/src/session/agent-session.ts
+--- a/src/session/agent-session.ts
++++ b/src/session/agent-session.ts
+@@ -8996,6 +8996,9 @@
+ 				break;
+ 			}
+ 			if (event.type === "error") {
++				if (event.reason === "aborted") {
++					throw new DOMException(event.error.errorMessage || "Ephemeral turn aborted", "AbortError");
++				}
+ 				throw new Error(event.error.errorMessage || "Ephemeral turn failed");
+ 			}
+ 		}

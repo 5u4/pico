@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import NodeFileSystem from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as BunCrypto from "@effect/platform-bun/BunCrypto";
@@ -88,6 +88,7 @@ const importNative = async () => {
     makeSessionHandle: adapter.makeSessionHandle,
     makeBtw: adapter.makeBtw,
     makeHandoff: adapter.makeHandoff,
+    makeShake: adapter.makeShake,
   };
 };
 
@@ -95,7 +96,7 @@ let native: Awaited<ReturnType<typeof importNative>>;
 let root: string;
 
 beforeAll(async () => {
-  root = await mkdtemp(join(tmpdir(), "pico-native-pool-"));
+  root = await NodeFileSystem.mkdtemp(join(tmpdir(), "pico-native-pool-"));
   vi.stubEnv("HOME", root);
   vi.stubEnv("PI_CODING_AGENT_DIR", join(root, "agent"));
   vi.stubEnv("XDG_DATA_HOME", join(root, "data"));
@@ -110,15 +111,16 @@ beforeAll(async () => {
 
 afterAll(async () => {
   vi.unstubAllEnvs();
-  if (root) await rm(root, { recursive: true, force: true });
+  if (root) await NodeFileSystem.rm(root, { recursive: true, force: true });
 });
 
 const platform = Layer.mergeAll(BunCrypto.layer, BunFileSystem.layer, BunPath.layer);
 const chatId = Chat.ChatId.make("018f47a0-0000-7000-8000-000000000001");
 const runId = Schedule.ScheduleRunId.make("scheduled-1000-018f47a0-0000-7000-8000-000000000003");
 const prompt = (text: string) => AgentMessage.AgentPrompt.make({ text, attachments: [] });
-const providerTurn = (text: string) => ({
+const providerTurn = (text: string, abortReason: "aborted" | "error" = "aborted") => ({
   text,
+  abortReason,
   entered: Promise.withResolvers<Context>(),
   release: Promise.withResolvers<void>(),
   aborted: Promise.withResolvers<void>(),
@@ -131,7 +133,7 @@ const withSession = async (
   run: (session: AgentSession, reopen: () => Promise<AgentSession>) => Promise<void>,
   extensionFactory?: ExtensionFactory,
 ) => {
-  const directory = await mkdtemp(join(root, "session-"));
+  const directory = await NodeFileSystem.mkdtemp(join(root, "session-"));
   const auth = new native.AuthStorage(
     await native.SqliteAuthCredentialStore.open(join(directory, "auth.db")),
   );
@@ -189,9 +191,9 @@ const withSession = async (
       options?.signal?.removeEventListener("abort", abort);
       if (options?.signal?.aborted) {
         await turn.finishAbort;
-        response.stopReason = "aborted";
+        response.stopReason = turn.abortReason;
         response.errorMessage = "Request was aborted";
-        stream.push({ type: "error", reason: "aborted", error: response });
+        stream.push({ type: "error", reason: turn.abortReason, error: response });
       } else {
         stream.push({ type: "text_delta", contentIndex: 0, delta: turn.text, partial: response });
         stream.push({ type: "done", reason: "stop", message: response });
@@ -318,7 +320,7 @@ const makePool = Effect.fn("NativePoolTest.make")(function* (
             sendPrompt,
             askBtw: native.makeBtw(currentSession),
             createHandoff: native.makeHandoff(currentSession),
-            shake: () => Promise.reject(new Error("Shake is not part of ownership tests")),
+            shake: native.makeShake(currentSession),
             contextUsage: () => ({ kind: "unavailable" }),
             appendAssistantMessage: () =>
               Promise.reject(new Error("Publication is not part of ownership tests")),
@@ -340,7 +342,166 @@ const assistantTexts = (events: ReadonlyArray<AgentEvent.AgentEvent>) =>
       : [],
   );
 
+const seedShake = async (session: AgentSession) => {
+  const original = "Tool output retained until shake commits.\n".repeat(100);
+  session.sessionManager.appendMessage({
+    role: "toolResult",
+    toolCallId: "shake-tool",
+    toolName: "bash",
+    content: [
+      { type: "text", text: original },
+      { type: "image", data: "aW1hZ2U=", mimeType: "image/png" },
+    ],
+    isError: false,
+    useless: true,
+    timestamp: 1,
+  });
+  session.agent.replaceMessages(session.sessionManager.buildSessionContext().messages);
+  await session.sessionManager.ensureOnDisk();
+  await session.sessionManager.flush();
+  const file = session.sessionManager.getSessionFile();
+  if (file === undefined) throw new Error("Expected native shake journal");
+  return { original, file };
+};
+
 describe("native SessionPool ownership", () => {
+  it("cancels native shake artifact staging without changing history, then shakes normally", async () => {
+    await withSession([], async (session, reopen) => {
+      const { original, file } = await seedShake(session);
+      const before = await NodeFileSystem.readFile(file, "utf8");
+      const entered = Promise.withResolvers<void>();
+      const controller = new AbortController();
+      const writeFile = NodeFileSystem.writeFile;
+      const staging = vi
+        .spyOn(NodeFileSystem, "writeFile")
+        .mockImplementation(async (path, content, options) => {
+          if (typeof path !== "string" || !path.includes(".shake.log.tmp-")) {
+            return writeFile(path, content, options);
+          }
+          const signal =
+            typeof options === "object" && options !== null ? options.signal : undefined;
+          if (!signal) throw new Error("Shake artifact staging did not receive cancellation");
+          await writeFile(path, content, options);
+          await new Promise<void>((_resolve, reject) => {
+            signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+            entered.resolve();
+          });
+          throw new Error("Cancelled artifact staging resumed");
+        });
+      try {
+        const pending = session.shake("elide", { signal: controller.signal });
+        const rejected = expect(pending).rejects.toMatchObject({ name: "AbortError" });
+        await entered.promise;
+        controller.abort();
+        await rejected;
+      } finally {
+        staging.mockRestore();
+      }
+      expect(await NodeFileSystem.readFile(file, "utf8")).toBe(before);
+      const directory = session.sessionManager.getArtifactsDir();
+      if (directory === null) throw new Error("Expected native shake artifact directory");
+      expect(await NodeFileSystem.readdir(directory)).toEqual([]);
+      const result = await session.shake("elide");
+      expect(result.toolResultsDropped).toBe(1);
+      if (result.artifactId === undefined) throw new Error("Shake did not preserve an artifact");
+      const artifact = await session.sessionManager.getArtifactPath(result.artifactId);
+      if (artifact === null) throw new Error("Shake recovery artifact is missing");
+      expect(await NodeFileSystem.readFile(artifact, "utf8")).toContain(original);
+      expect(session.messages.find((message) => message.role === "toolResult")?.content).toEqual([
+        { type: "text", text: expect.stringContaining(`artifact://${result.artifactId}`) },
+        { type: "image", data: "aW1hZ2U=", mimeType: "image/png" },
+      ]);
+      const expected = structuredClone(session.messages);
+      await session.dispose();
+      const persisted = await reopen();
+      expect(persisted.sessionManager.buildSessionContext().messages).toEqual(expected);
+    });
+  }, 5_000);
+
+  it("rejects a native pre-aborted shake before dropping images", async () => {
+    await withSession([], async (session) => {
+      const { file } = await seedShake(session);
+      const before = await NodeFileSystem.readFile(file, "utf8");
+      const controller = new AbortController();
+      controller.abort();
+      await expect(session.shake("images", { signal: controller.signal })).rejects.toMatchObject({
+        name: "AbortError",
+      });
+      expect(await NodeFileSystem.readFile(file, "utf8")).toBe(before);
+      expect((await session.shake("images")).imagesDropped).toBe(1);
+    });
+  }, 5_000);
+
+  it("finishes an admitted native rewrite before interrupted shake disposal", async () => {
+    await withSession([], async (session) => {
+      const { file } = await seedShake(session);
+      const rewriting = Promise.withResolvers<void>();
+      const cancelled = Promise.withResolvers<void>();
+      const order: string[] = [];
+      const nativeShake = session.shake.bind(session);
+      const nativeRewrite = session.sessionManager.rewriteEntries.bind(session.sessionManager);
+      const nativeDispose = session.dispose.bind(session);
+      const shake = vi.spyOn(session, "shake").mockImplementation((mode, options) => {
+        options?.signal?.addEventListener("abort", () => cancelled.resolve(), { once: true });
+        return nativeShake(mode, options);
+      });
+      const rewrite = vi
+        .spyOn(session.sessionManager, "rewriteEntries")
+        .mockImplementation(async () => {
+          rewriting.resolve();
+          await cancelled.promise;
+          await nativeRewrite();
+          order.push("committed");
+        });
+      const dispose = vi.spyOn(session, "dispose").mockImplementation(async () => {
+        order.push("disposed");
+        await nativeDispose();
+      });
+      try {
+        await Effect.runPromise(
+          Effect.scoped(
+            Effect.gen(function* () {
+              const pool = yield* makePool(session);
+              const pending = yield* pool.shake(chatId, "images").pipe(Effect.forkChild);
+              yield* Effect.promise(() => rewriting.promise);
+              yield* pool.close(chatId).pipe(Effect.timeout("1 second"));
+              const exit = yield* Fiber.await(pending);
+              expect(Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause)).toBe(true);
+              expect(order).toEqual(["committed", "disposed"]);
+              const persisted = yield* Effect.promise(() => NodeFileSystem.readFile(file, "utf8"));
+              expect(persisted).not.toContain('"type":"image"');
+              yield* Effect.sleep("1 millis");
+              expect(yield* Effect.promise(() => NodeFileSystem.readFile(file, "utf8"))).toBe(
+                persisted,
+              );
+            }).pipe(Effect.provide(platform)),
+          ),
+        );
+      } finally {
+        shake.mockRestore();
+        rewrite.mockRestore();
+        dispose.mockRestore();
+      }
+    });
+  }, 5_000);
+
+  it("propagates native shake artifact failures without rewriting history", async () => {
+    await withSession([], async (session) => {
+      const { file } = await seedShake(session);
+      const before = await NodeFileSystem.readFile(file, "utf8");
+      const failure = new Error("Artifact disk is unavailable");
+      const artifact = vi
+        .spyOn(session.sessionManager, "saveArtifact")
+        .mockRejectedValueOnce(failure);
+      try {
+        await expect(session.shake("elide")).rejects.toBe(failure);
+        expect(await NodeFileSystem.readFile(file, "utf8")).toBe(before);
+      } finally {
+        artifact.mockRestore();
+      }
+    });
+  }, 5_000);
+
   it("captures each schedule tool origin and keeps definition routes across later turns", async () => {
     const first = providerTurn("First DM complete");
     const second = providerTurn("Scheduled continuation complete");
@@ -620,6 +781,24 @@ describe("native SessionPool ownership", () => {
     },
     30_000,
   );
+
+  it("preserves a native side provider error received after cancellation", async () => {
+    const side = providerTurn("Must not be published", "error");
+    await withSession([side], async (session) => {
+      const controller = new AbortController();
+      const pending = session.runEphemeralTurn({
+        promptText: "Cancelled side question",
+        signal: controller.signal,
+      });
+      const rejected = expect(pending).rejects.toMatchObject({
+        name: "Error",
+        message: "Request was aborted",
+      });
+      await side.entered.promise;
+      controller.abort();
+      await rejected;
+    });
+  }, 5_000);
 
   it("drains discarded image cleanup before closing and reopening the same journal", async () => {
     const initial = providerTurn("Interrupted ordinary answer");

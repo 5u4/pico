@@ -393,27 +393,20 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
         }
         const cwd = AbsolutePath.make(path.join(botRoot, "work"));
         yield* fileSystem.makeDirectory(cwd, { recursive: true, mode: 0o700 });
-        const workspace = yield* createWorkspace({
-          name: "Bot",
-          binding: null,
-          defaultCwd: cwd,
-          worktree: null,
-        });
+        const workspaceId = Workspace.WorkspaceId.make(yield* crypto.randomUUIDv7);
         const id = Chat.ChatId.make(yield* crypto.randomUUIDv7);
         const createdAt = yield* Clock.currentTimeMillis;
         return yield* Effect.acquireUseRelease(
           sessions.createPhysical(botRoot, cwd),
           (journal) =>
-            Effect.gen(function* () {
-              const chat = yield* chats.create({
-                id,
-                workspaceId: workspace.id,
-                cwd,
-                externalId: null,
-                createdAt,
-              });
-              yield* bots.create({ ...descriptor, botRoot, chatId: id, journal });
-              return chat;
+            bots.createConversation({
+              ...descriptor,
+              botRoot,
+              chatId: id,
+              workspaceId,
+              cwd,
+              createdAt,
+              journal,
             }),
           (journal, exit) =>
             Exit.isFailure(exit)

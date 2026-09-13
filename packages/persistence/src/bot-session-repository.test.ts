@@ -7,7 +7,6 @@ import { ChatRepository } from "@pico/contract/chat-repository";
 import { PersistenceError } from "@pico/contract/errors";
 import { AbsolutePath } from "@pico/contract/path";
 import { WorkspaceId } from "@pico/contract/workspace-model";
-import { WorkspaceRepository } from "@pico/contract/workspace-repository";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -51,23 +50,16 @@ const makeFixture = Effect.fn("BotSessionsTest.makeFixture")(function* () {
   yield* fileSystem.writeFileString(workFile, "name,count\nretained,1\n");
 
   const seeded = yield* Effect.gen(function* () {
-    const workspaces = yield* WorkspaceRepository;
     const chats = yield* ChatRepository;
     const sessions = yield* Bot.BotSessions;
-    yield* workspaces.create({
-      id: workspaceId,
-      name: "bot",
-      binding: null,
-      defaultCwd: cwd,
-      worktree: null,
-      createdAt: 1,
-    });
-    const chat = yield* chats.create({
-      id: chatId,
+    const chat = yield* sessions.createConversation({
+      botRoot,
+      platform: null,
+      chatId,
       workspaceId,
       cwd,
-      externalId: null,
       createdAt: 2,
+      journal: sourceJournal,
     });
     const regularChat = yield* chats.create({
       id: regularChatId,
@@ -76,7 +68,6 @@ const makeFixture = Effect.fn("BotSessionsTest.makeFixture")(function* () {
       externalId: null,
       createdAt: 3,
     });
-    yield* sessions.create({ botRoot, platform: null, chatId, journal: sourceJournal });
     yield* sessions.setTurn(chatId, sourceJournal.id, { kind: "pending" });
     yield* sessions.setTurn(chatId, sourceJournal.id, { kind: "completed", at: 10 });
     return {

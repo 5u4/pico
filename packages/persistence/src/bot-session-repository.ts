@@ -1,10 +1,14 @@
 import { Buffer } from "node:buffer";
 import * as Bot from "@pico/contract/bot-session";
 import { ChatId } from "@pico/contract/chat-model";
+import { ChatRepository } from "@pico/contract/chat-repository";
 import { PersistenceError } from "@pico/contract/errors";
 import { AbsolutePath } from "@pico/contract/path";
 import { WorkspaceId } from "@pico/contract/workspace-model";
+import { WorkspaceRepository } from "@pico/contract/workspace-repository";
+import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -72,6 +76,8 @@ const BotSessionRow = Schema.Union([
 
 const make = Effect.fn("BotSessions.make")(function* () {
   const sql = yield* SqlClient.SqlClient;
+  const workspaces = yield* WorkspaceRepository;
+  const chats = yield* ChatRepository;
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
 
@@ -177,11 +183,53 @@ const make = Effect.fn("BotSessions.make")(function* () {
     Effect.mapError(failure("botSession.findByWorkspace")),
   );
 
-  const create = Effect.fn("BotSessions.create")(
-    function* (input: typeof NewBotSession.Type) {
-      return decodeSession(yield* insert(input));
+  const createConversation = Effect.fn("BotSessions.createConversation")(
+    function* (input: Parameters<Bot.BotSessions["Service"]["createConversation"]>[0]) {
+      const connection = yield* sql.reserve;
+      return yield* Effect.acquireUseRelease(
+        connection.executeUnprepared("BEGIN IMMEDIATE", [], undefined),
+        () =>
+          Effect.gen(function* () {
+            yield* workspaces.create({
+              id: input.workspaceId,
+              name: "Bot",
+              binding: null,
+              defaultCwd: input.cwd,
+              worktree: null,
+              createdAt: input.createdAt,
+            });
+            const chat = yield* chats.create({
+              id: input.chatId,
+              workspaceId: input.workspaceId,
+              cwd: input.cwd,
+              externalId: null,
+              createdAt: input.createdAt,
+            });
+            yield* insert(input);
+            // Keep COMMIT inside the rollback boundary; SqlClient.withTransaction does not.
+            yield* connection.executeUnprepared("COMMIT", [], undefined);
+            return chat;
+          }).pipe(Effect.provideService(sql.transactionService, [connection, 0])),
+        (_, exit) =>
+          Exit.isFailure(exit)
+            ? connection.executeUnprepared("ROLLBACK", [], undefined).pipe(
+                Effect.catchCause((cause) =>
+                  Effect.logError("Failed to roll back bot conversation").pipe(
+                    Effect.annotateLogs({
+                      component: "persistence",
+                      operation: "botSession.createConversation",
+                      chatId: input.chatId,
+                      phase: "rollback",
+                      failureKind: Cause.hasDies(cause) ? "defect" : "operation",
+                    }),
+                  ),
+                ),
+              )
+            : Effect.void,
+      ).pipe(Effect.uninterruptible);
     },
-    Effect.mapError(failure("botSession.create")),
+    Effect.scoped,
+    Effect.mapError(failure("botSession.createConversation")),
   );
 
   const setTurn = Effect.fn("BotSessions.setTurn")(
@@ -254,7 +302,7 @@ const make = Effect.fn("BotSessions.make")(function* () {
     findByRoot,
     findByChat,
     findByWorkspace,
-    create,
+    createConversation,
     setTurn,
     saveHandoff,
     readHandoff,

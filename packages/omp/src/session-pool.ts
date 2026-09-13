@@ -54,7 +54,7 @@ export interface OpenedSession {
   readonly sendPrompt: OmpPromptSender;
   readonly askBtw: (question: string, signal: AbortSignal) => Promise<string>;
   readonly createHandoff: (signal: AbortSignal) => Promise<string>;
-  readonly shake: (mode: ShakeMode) => Promise<ShakeResult>;
+  readonly shake: (mode: ShakeMode, signal: AbortSignal) => Promise<ShakeResult>;
   readonly contextUsage: () => ContextUsage;
   readonly appendAssistantMessage: (message: OmpAssistantMessage) => Promise<void>;
   readonly unsubscribe: () => void;
@@ -162,7 +162,7 @@ interface LiveEntry {
   readonly sendPrompt: OmpPromptSender;
   readonly askBtw: (question: string, signal: AbortSignal) => Promise<string>;
   readonly createHandoff: (signal: AbortSignal) => Promise<string>;
-  readonly shake: (mode: ShakeMode) => Promise<ShakeResult>;
+  readonly shake: OpenedSession["shake"];
   readonly contextUsage: () => ContextUsage;
   readonly appendAssistantMessage: (message: OmpAssistantMessage) => Promise<void>;
   readonly events: Queue.Queue<SessionItem, Cause.Done>;
@@ -259,25 +259,58 @@ const drainSessionEvents = Effect.fn("SessionPool.drainSessionEvents")(function*
 
 const runOperation = Effect.fn("SessionPool.runOperation")(function* <A>(
   entry: LiveEntry,
-  effect: Effect.Effect<A, AgentError>,
+  message: string,
+  evaluate: (signal: AbortSignal) => Promise<A>,
+  complete?: (value: A) => Effect.Effect<void>,
 ) {
+  const controller = new AbortController();
   const finished = yield* Deferred.make<void>();
-  return yield* Effect.acquireUseRelease(
-    entry.admission.withPermit(
-      Effect.gen(function* () {
-        if (MutableRef.get(entry.lifecycle).type !== "open") {
-          return yield* new AgentError({ message: "OMP session is closing" });
-        }
-        entry.operations.add(finished);
-      }),
-    ),
-    () => effect,
-    () =>
-      Effect.sync(() => entry.operations.delete(finished)).pipe(
-        Effect.andThen(Deferred.succeed(finished, undefined)),
+  return yield* Effect.uninterruptibleMask((restore) =>
+    Effect.acquireUseRelease(
+      Effect.acquireUseRelease(
+        restore(entry.admission.take(1)),
+        () =>
+          Effect.try({
+            try: () => {
+              if (MutableRef.get(entry.lifecycle).type !== "open") {
+                throw new AgentError({ message: "OMP session is closing" });
+              }
+              const pending = evaluate(controller.signal);
+              entry.operations.add(finished);
+              return pending;
+            },
+            catch: (cause) => agentError(message, cause),
+          }),
+        () => entry.admission.release(1),
       ),
+      (pending) =>
+        restore(
+          boundary(message, () => pending).pipe(
+            Effect.raceFirst(Deferred.await(entry.closed).pipe(Effect.andThen(Effect.interrupt))),
+          ),
+        ).pipe(
+          Effect.onExit((exit) => {
+            if (Exit.isSuccess(exit)) return complete?.(exit.value) ?? Effect.void;
+            if (!Cause.hasInterrupts(exit.cause)) return Effect.void;
+            return Effect.sync(() => controller.abort()).pipe(
+              Effect.andThen(
+                boundary(message, () => pending).pipe(
+                  Effect.flatMap((value) => complete?.(value) ?? Effect.void),
+                  Effect.catchCause((cause) =>
+                    Cause.hasInterruptsOnly(cause) ? Effect.void : Effect.failCause(cause),
+                  ),
+                ),
+              ),
+            );
+          }),
+        ),
+      () =>
+        Effect.sync(() => entry.operations.delete(finished)).pipe(
+          Effect.andThen(Deferred.succeed(finished, undefined)),
+        ),
+    ),
   );
-}, Effect.uninterruptible);
+});
 
 const closeEntry = Effect.fn("SessionPool.closeEntry")(function* (entry: LiveEntry) {
   const lifecycle = MutableRef.get(entry.lifecycle);
@@ -542,48 +575,8 @@ export const makeSessionPool = Effect.fn("SessionPool.make")(function* (
     return yield* Effect.scoped(
       Effect.gen(function* () {
         const entry = yield* retain(sessions, chatId);
-        const controller = new AbortController();
-        const finished = yield* Deferred.make<void>();
-        return yield* Effect.uninterruptibleMask((restore) =>
-          Effect.gen(function* () {
-            const pending = yield* Effect.acquireUseRelease(
-              restore(entry.admission.take(1)),
-              () =>
-                Effect.try({
-                  try: () => {
-                    if (MutableRef.get(entry.lifecycle).type !== "open") {
-                      throw new AgentError({ message: "OMP session is closing" });
-                    }
-                    const pending = entry.askBtw(question, controller.signal);
-                    entry.operations.add(finished);
-                    return pending;
-                  },
-                  catch: (cause) => agentError("Failed to ask OMP side question", cause),
-                }),
-              () => entry.admission.release(1),
-            );
-            return yield* restore(
-              boundary("Failed to ask OMP side question", () => pending).pipe(
-                Effect.raceFirst(
-                  Deferred.await(entry.closed).pipe(Effect.andThen(Effect.interrupt)),
-                ),
-              ),
-            ).pipe(
-              Effect.ensuring(
-                Effect.gen(function* () {
-                  controller.abort();
-                  yield* Effect.promise(() =>
-                    pending.then(
-                      () => undefined,
-                      () => undefined,
-                    ),
-                  );
-                  entry.operations.delete(finished);
-                  yield* Deferred.succeed(finished, undefined);
-                }),
-              ),
-            );
-          }),
+        return yield* runOperation(entry, "Failed to ask OMP side question", (signal) =>
+          entry.askBtw(question, signal),
         );
       }),
     );
@@ -1075,9 +1068,9 @@ export const makeSessionPool = Effect.fn("SessionPool.make")(function* (
         const entry = yield* retain(sessions, chatId);
         yield* runOperation(
           entry,
-          boundary("Failed to persist scheduled publication", () =>
-            entry.appendAssistantMessage(message),
-          ).pipe(Effect.andThen(deliverEvents(chatId, content, timestamp))),
+          "Failed to persist scheduled publication",
+          () => entry.appendAssistantMessage(message),
+          () => deliverEvents(chatId, content, timestamp),
         );
       }),
     );
@@ -1127,9 +1120,8 @@ export const makeSessionPool = Effect.fn("SessionPool.make")(function* (
     return yield* Effect.scoped(
       Effect.gen(function* () {
         const entry = yield* retain(sessions, chatId);
-        return yield* runOperation(
-          entry,
-          boundary("Failed to shake OMP session", () => entry.shake(mode)),
+        return yield* runOperation(entry, "Failed to shake OMP session", (signal) =>
+          entry.shake(mode, signal),
         );
       }),
     );
