@@ -93,7 +93,7 @@ export const readCookieFile = async (
           hostOnly: true,
           path: "/",
           secure: protocol === "https:",
-          httpOnly: false,
+          httpOnly: name.startsWith("__Http-") || name.startsWith("__Host-Http-"),
           session: true,
         };
       });
@@ -146,6 +146,8 @@ export const readCookieFile = async (
       if (sameSite === "None" && cookie.secure !== true) throw new Error();
       if (
         (cookie.name.startsWith("__Secure-") && cookie.secure !== true) ||
+        ((cookie.name.startsWith("__Http-") || cookie.name.startsWith("__Host-Http-")) &&
+          (cookie.secure !== true || cookie.httpOnly !== true)) ||
         (cookie.name.startsWith("__Host-") &&
           (cookie.secure !== true || !hostOnly || (cookie.path ?? "/") !== "/"))
       )

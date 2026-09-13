@@ -98,6 +98,8 @@ it("rejects unapproved or invalid cookie files before creating owner or browser 
     for (const input of [
       cookie.value,
       JSON.stringify([cookie, { ...cookie, httpOnly: "false" }]),
+      JSON.stringify([cookie, { ...cookie, name: `__Http-${cookie.name}`, secure: true }]),
+      JSON.stringify([cookie, { ...cookie, name: `__Host-Http-${cookie.name}`, secure: true }]),
       "[]",
     ]) {
       await writeFile(file, input);
@@ -369,6 +371,7 @@ it("imports a copied header before navigation and restores host-only login with 
   const directory = await mkdtemp(join(tmpdir(), "pico-cookie-header-"));
   const root = join(directory, "pico");
   const file = join(directory, "cookies.txt");
+  const secureFile = join(directory, "secure-cookies.txt");
   const host = "cookie-header.localhost";
   const auth = `synthetic-${crypto.randomUUID()}==embedded=`;
   const csrf = "%2B%3D+literal";
@@ -443,9 +446,15 @@ it("imports a copied header before navigation and restores host-only login with 
     }
     await manager.execute(child, { op: "open", url });
     assert.deepEqual(observed.get(host), [false, false, false]);
+    const secureNames = ["__Http-auth", "__Host-Http-auth"];
+    await writeFile(
+      secureFile,
+      [...secureNames.map((name) => `${name}=${auth}`), `csrf=${csrf}`].join("; "),
+      { mode: 0o600 },
+    );
     await manager.execute(main, {
       op: "import_cookies",
-      path: file,
+      path: secureFile,
       format: "header",
       url: "https://secure.header-import.test/private",
       userApproved: true,
@@ -453,12 +462,23 @@ it("imports a copied header before navigation and restores host-only login with 
     const httpsState = Schema.decodeUnknownSync(SavedState)(
       JSON.parse(await readFile(statePath, "utf8")),
     );
-    const secureAuth = httpsState.cookies.find(
-      (cookie) => cookie.name === "auth" && cookie.domain === "secure.header-import.test",
+    for (const name of secureNames) {
+      const savedCookie = httpsState.cookies.find(
+        (cookie) => cookie.name === name && cookie.domain === "secure.header-import.test",
+      );
+      assert.equal(savedCookie?.value, auth);
+      assert.equal(savedCookie?.secure, true);
+      assert.equal(savedCookie?.httpOnly, true);
+      assert.equal(savedCookie?.path, "/");
+      assert.equal(savedCookie?.session, true);
+    }
+    const secureCsrf = httpsState.cookies.find(
+      (cookie) => cookie.name === "csrf" && cookie.domain === "secure.header-import.test",
     );
-    assert.equal(secureAuth?.secure, true);
-    assert.equal(secureAuth?.httpOnly, false);
-    assert.equal(secureAuth?.session, true);
+    assert.equal(secureCsrf?.value, csrf);
+    assert.equal(secureCsrf?.secure, true);
+    assert.equal(secureCsrf?.httpOnly, false);
+    assert.equal(secureCsrf?.session, true);
     await manager.execute(main, { op: "close" });
     observed.clear();
     await manager.execute(main, { op: "open", url });

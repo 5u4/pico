@@ -179,11 +179,12 @@ it("requires an explicit valid target for header files even without schema valid
 
 it("enforces secure cookie prefixes before handing the batch to Chrome", async () => {
   const input = "__Host-auth=synthetic-secret; __Secure-csrf=synthetic-csrf";
-  await assert.rejects(
-    readExport(input, (path) =>
-      readCookieFile({ path, format: "header", url: "http://example.test" }),
-    ),
-  );
+  for (const name of ["__Host-auth", "__Secure-auth", "__Http-auth", "__Host-Http-auth"])
+    await assert.rejects(
+      readExport(`${name}=synthetic-secret`, (path) =>
+        readCookieFile({ path, format: "header", url: "http://example.test" }),
+      ),
+    );
   const cookies = await readExport(input, (path) =>
     readCookieFile({ path, format: "header", url: "https://example.test/private" }),
   );
@@ -197,5 +198,63 @@ it("enforces secure cookie prefixes before handing the batch to Chrome", async (
   for (const metadata of [{ hostOnly: false }, { path: "/private" }])
     await assert.rejects(
       readExport([{ ...cookie, name: "__Host-auth", secure: true, ...metadata }]),
+    );
+});
+
+it("infers HttpOnly only for HTTP cookie prefixes in a copied HTTPS header", async () => {
+  const cookies = await readExport(
+    "__Http-auth=synthetic-auth; __Host-Http-auth=synthetic-host-auth; csrf=synthetic-csrf",
+    (path) => readCookieFile({ path, format: "header", url: "https://example.test/private" }),
+  );
+  assert.deepEqual(
+    cookies.map(({ name, secure, httpOnly }) => ({ name, secure, httpOnly })),
+    [
+      { name: "__Http-auth", secure: true, httpOnly: true },
+      { name: "__Host-Http-auth", secure: true, httpOnly: true },
+      { name: "csrf", secure: true, httpOnly: false },
+    ],
+  );
+});
+
+it("requires explicit Secure and HttpOnly flags and preserves scope for prefixed JSON cookies", async () => {
+  const cookies = await readExport([
+    {
+      ...cookie,
+      name: "__Http-auth",
+      secure: true,
+      httpOnly: true,
+      hostOnly: false,
+      path: "/private",
+    },
+    {
+      ...cookie,
+      name: "__Host-Http-auth",
+      domain: ".example.test",
+      secure: true,
+      httpOnly: true,
+      hostOnly: true,
+      path: "/",
+    },
+  ]);
+  assert.deepEqual(
+    cookies.map(({ domain, path, secure, httpOnly }) => [domain, path, secure, httpOnly]),
+    [
+      [".example.test", "/private", true, true],
+      ["example.test", "/", true, true],
+    ],
+  );
+  for (const name of ["__Http-auth", "__Host-Http-auth"])
+    for (const metadata of [
+      { httpOnly: true },
+      { secure: true },
+      { secure: false, httpOnly: true },
+      { secure: true, httpOnly: false },
+    ])
+      await assert.rejects(readExport([{ ...cookie, name, ...metadata }]));
+  for (const metadata of [{ hostOnly: false }, { path: "/private" }])
+    await assert.rejects(
+      readExport([
+        { ...cookie, name: "__Host-Http-auth", secure: true, httpOnly: true, ...metadata },
+      ]),
     );
 });
