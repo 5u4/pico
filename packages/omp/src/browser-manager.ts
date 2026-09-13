@@ -114,6 +114,7 @@ export const makeBrowserManager = async ({
     if (file !== `${saved.session}.json`) throw new Error("Invalid browser owner manifest");
     entries.set(saved.session, makeEntry(saved.chatId, saved.session, saved.mode));
   }
+  // This queue serializes local waits. A cancelled or timed-out native command may still be running.
   const enqueue = <A>(entry: Entry, operation: () => Promise<A>): Promise<A> => {
     const pending = entry.queue.then(operation);
     entry.queue = pending.then(
@@ -126,11 +127,11 @@ export const makeBrowserManager = async ({
     if (entry.viewer) viewer.revoke(entry.viewer.token);
     entry.viewer = undefined;
   };
-  const closeEntry = async (entry: Entry) => {
+  const closeEntry = async (entry: Entry, signal?: AbortSignal) => {
     revoke(entry);
     try {
       const result = Schema.decodeUnknownSync(Close)(
-        await sendBrowserCommand(home, entry.session, { action: "close" }),
+        await sendBrowserCommand(home, entry.session, { action: "close" }, signal),
       );
       const deadline = Date.now() + 5_000;
       while (await Bun.file(join(home.socketDirectory, `${entry.session}.pid`)).exists()) {
@@ -149,9 +150,9 @@ export const makeBrowserManager = async ({
       if (!(error instanceof BrowserUnavailable)) throw error;
     }
   };
-  const checkpoint = async (entry: Entry, recover: boolean) => {
+  const checkpoint = async (entry: Entry, recover: boolean, signal?: AbortSignal) => {
     const info = Schema.decodeUnknownSync(Info)(
-      await sendBrowserCommand(home, entry.session, { action: "session_info" }),
+      await sendBrowserCommand(home, entry.session, { action: "session_info" }, signal),
     );
     if (!recover && failedRestore(info.restoreStatus))
       throw new Error(
@@ -161,29 +162,36 @@ export const makeBrowserManager = async ({
     await writeFile(candidate, "", { mode: 0o600 });
     try {
       const saved = Schema.decodeUnknownSync(Save)(
-        await sendBrowserCommand(home, entry.session, { action: "state_save", path: candidate }),
+        await sendBrowserCommand(
+          home,
+          entry.session,
+          { action: "state_save", path: candidate },
+          signal,
+        ),
       );
       if (saved.path !== candidate) throw new Error("Browser saved state outside its checkpoint");
       Schema.decodeUnknownSync(Storage)(JSON.parse(await readFile(candidate, "utf8")));
       await chmod(candidate, 0o600);
       await rename(candidate, statePath(entry));
       if (failedRestore(info.restoreStatus))
-        await sendBrowserCommand(home, entry.session, {
-          action: "state_load",
-          path: statePath(entry),
-        });
+        await sendBrowserCommand(
+          home,
+          entry.session,
+          { action: "state_load", path: statePath(entry) },
+          signal,
+        );
     } finally {
       await rm(candidate, { force: true });
     }
   };
-  const expose = async (entry: Entry) => {
+  const expose = async (entry: Entry, signal?: AbortSignal) => {
     const stream = Schema.decodeUnknownSync(Stream)(
-      await sendBrowserCommand(home, entry.session, { action: "stream_status" }),
+      await sendBrowserCommand(home, entry.session, { action: "stream_status" }, signal),
     );
     if (!stream.enabled || !stream.connected || stream.port === null)
       throw new Error("Browser has no live viewer stream");
     const info = Schema.decodeUnknownSync(Info)(
-      await sendBrowserCommand(home, entry.session, { action: "session_info" }),
+      await sendBrowserCommand(home, entry.session, { action: "session_info" }, signal),
     );
     const ownerAvailable = () =>
       !disposed && !archived.has(entry.chatId) && entry.state !== "closing";
@@ -241,6 +249,21 @@ export const makeBrowserManager = async ({
     if (disposed || archived.has(owner.chatId))
       return Promise.reject(new Error("Browser owner is closed"));
     if (signal?.aborted) return Promise.reject(new Error("Browser operation cancelled"));
+    if (
+      (operation.op === "open" || (operation.op === "tabs" && operation.action === "new")) &&
+      operation.url !== undefined
+    ) {
+      const destination = URL.parse(operation.url);
+      if (destination?.protocol === "file:") {
+        if (operation.userRequested !== true)
+          return Promise.reject(
+            new Error(
+              "Local file previews require an explicit user request and userRequested:true.",
+            ),
+          );
+        operation = { ...operation, url: destination.href };
+      }
+    }
     const session = browserKey(
       JSON.stringify([
         owner.chatId,
@@ -266,14 +289,14 @@ export const makeBrowserManager = async ({
       if (ownerClosed()) throw new Error("Browser operation cancelled because its owner closed");
       if (signal?.aborted)
         throw new Error(
-          "Browser operation cancelled. An already dispatched page action may have completed; inspect before retrying.",
+          "Browser operation cancelled; the command outcome is uncertain. The native command may still run; inspect the page before retrying.",
         );
     };
     return enqueue(current, async () => {
       try {
         check();
         if (operation.op === "close") {
-          await closeEntry(current);
+          await closeEntry(current, signal);
           return [text("Browser closed. Saved login state retained.")];
         }
         const exists = await Bun.file(manifestPath(current)).exists();
@@ -294,22 +317,23 @@ export const makeBrowserManager = async ({
         let browserConnected = false;
         try {
           browserConnected = Schema.decodeUnknownSync(Stream)(
-            await sendBrowserCommand(home, current.session, { action: "stream_status" }),
+            await sendBrowserCommand(home, current.session, { action: "stream_status" }, signal),
           ).connected;
         } catch (error) {
           if (!(error instanceof BrowserUnavailable)) throw error;
         }
         check();
         try {
-          await launchBrowser(home, current.session, current.mode === "headed", idleTimeoutMs);
+          if (!browserConnected)
+            await launchBrowser(home, current.session, current.mode === "headed", idleTimeoutMs);
           check();
         } catch (error) {
-          if (ownerClosed() || (!browserConnected && signal?.aborted)) await closeEntry(current);
+          if (ownerClosed()) await closeEntry(current);
           throw error;
         }
         if (operation.op === "mode") {
           if (current.mode !== operation.mode) {
-            await checkpoint(current, false);
+            await checkpoint(current, false, signal);
             check();
             revoke(current);
             try {
@@ -319,15 +343,15 @@ export const makeBrowserManager = async ({
                 operation.mode === "headed",
                 idleTimeoutMs,
               );
+              current.mode = operation.mode;
+              await persist(current);
               check();
             } catch (error) {
-              if (ownerClosed() || signal?.aborted) await closeEntry(current);
+              if (ownerClosed()) await closeEntry(current);
               throw error;
             }
-            current.mode = operation.mode;
-            await persist(current);
           }
-          const viewerUrl = await expose(current);
+          const viewerUrl = await expose(current, signal);
           check();
           return [
             text({
@@ -338,7 +362,7 @@ export const makeBrowserManager = async ({
           ];
         }
         if (operation.op === "checkpoint" || operation.op === "remember_login") {
-          await checkpoint(current, true);
+          await checkpoint(current, true, signal);
           check();
           if (operation.op === "remember_login") {
             const candidate = join(home.directory, `.seed-${crypto.randomUUID()}.json`);
@@ -366,14 +390,19 @@ export const makeBrowserManager = async ({
             "captures",
             `${current.session}-${crypto.randomUUID()}.png`,
           );
-          await sendBrowserCommand(home, current.session, {
-            action: "screenshot",
-            path,
-            format: "png",
-            fullPage: operation.fullPage ?? false,
-            selector: operation.selector,
-            annotate: operation.annotate ?? false,
-          });
+          await sendBrowserCommand(
+            home,
+            current.session,
+            {
+              action: "screenshot",
+              path,
+              format: "png",
+              fullPage: operation.fullPage ?? false,
+              selector: operation.selector,
+              annotate: operation.annotate ?? false,
+            },
+            signal,
+          );
           check();
           content.push(text({ path }), {
             type: "image",
@@ -381,14 +410,19 @@ export const makeBrowserManager = async ({
             mimeType: "image/png",
           });
         } else if (operation.op !== "viewer") {
-          const result = await sendBrowserCommand(home, current.session, browserCommand(operation));
+          const result = await sendBrowserCommand(
+            home,
+            current.session,
+            browserCommand(operation),
+            signal,
+          );
           check();
           content.push(text(result ?? null));
         }
-        const viewerUrl = await expose(current);
+        const viewerUrl = await expose(current, signal);
         check();
         const info = Schema.decodeUnknownSync(Info)(
-          await sendBrowserCommand(home, current.session, { action: "session_info" }),
+          await sendBrowserCommand(home, current.session, { action: "session_info" }, signal),
         );
         check();
         content.push(

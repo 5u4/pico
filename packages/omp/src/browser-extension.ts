@@ -14,7 +14,11 @@ export const browserParameters = (Type: ExtensionAPI["typebox"]["Type"]) => {
   ) => Type.Object({ op: Type.Literal(op) }, { additionalProperties: false });
   return Type.Union([
     Type.Object(
-      { op: Type.Literal("open"), url: Type.Optional(Type.String({ minLength: 1 })) },
+      {
+        op: Type.Literal("open"),
+        url: Type.Optional(Type.String({ minLength: 1 })),
+        userRequested: Type.Optional(Type.Literal(true)),
+      },
       { additionalProperties: false },
     ),
     empty("back"),
@@ -155,6 +159,7 @@ export const browserParameters = (Type: ExtensionAPI["typebox"]["Type"]) => {
         op: Type.Literal("tabs"),
         action: Type.Literal("new"),
         url: Type.Optional(Type.String({ minLength: 1 })),
+        userRequested: Type.Optional(Type.Literal(true)),
       },
       { additionalProperties: false },
     ),
@@ -201,7 +206,7 @@ export const makeBrowserExtension =
       name: "pico_browser",
       label: "Browser",
       description:
-        "Use this session's isolated Pico browser. Read skill://pico-browser first. Headless by default. viewer returns a local interactive login link; end the turn and resume after the user's next message. mode requires an explicit user request and restarts the browser. checkpoint saves this owner's login after the user completes login and repairs failed restore state. remember_login requires user approval and publishes ALL saved sites as the seed for future new owners. Never use a raw browser CLI or select another owner. eval runs page JavaScript only.",
+        "Use this session's isolated Pico browser. Read skill://pico-browser first. Headless by default. Direct file: previews through open or tabs/new require an explicit user request and userRequested:true; preview permission does not authorize uploading or transmitting the file. viewer returns a local interactive login link; end the turn and resume after the user's next message. mode requires an explicit user request and restarts the browser. checkpoint saves this owner's login after the user completes login and repairs failed restore state. remember_login requires user approval and publishes ALL saved sites as the seed for future new owners. Never use a raw browser CLI or select another owner. eval runs page JavaScript only.",
       approval: "exec",
       parameters: browserParameters(api.typebox.Type),
       execute: async (_id, params, signal, _update, ctx) => {

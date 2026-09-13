@@ -145,8 +145,13 @@ export const sendBrowserCommand = (
   home: BrowserHome,
   session: string,
   command: Readonly<Record<string, unknown>>,
+  signal?: AbortSignal,
 ): Promise<unknown> =>
   new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new Error("Browser operation cancelled before dispatch"));
+      return;
+    }
     const socket = createConnection({ path: join(home.socketDirectory, `${session}.sock`) });
     let received = "";
     let settled = false;
@@ -155,10 +160,19 @@ export const sendBrowserCommand = (
       if (settled) return;
       settled = true;
       clearTimeout(deadline);
+      signal?.removeEventListener("abort", cancel);
       socket.destroy();
       if (error !== undefined) reject(error);
       else resolve(value);
     };
+    const cancel = () =>
+      finish(
+        new Error(
+          connected
+            ? "Browser operation cancelled; the command outcome is uncertain. The native command may still run; inspect the page before retrying."
+            : "Browser operation cancelled before dispatch",
+        ),
+      );
     const deadline = setTimeout(
       () =>
         finish(
@@ -168,12 +182,15 @@ export const sendBrowserCommand = (
         ),
       120_000,
     );
+    signal?.addEventListener("abort", cancel, { once: true });
     socket.setEncoding("utf8");
     socket.on("connect", () => {
+      if (settled) return;
       connected = true;
       socket.write(`${JSON.stringify({ ...command, id: crypto.randomUUID() })}\n`);
     });
     socket.on("data", (chunk) => {
+      if (settled) return;
       received += chunk;
       if (received.length > 32 * 1024 * 1024)
         return finish(new Error("Browser response exceeded 32 MiB"));
@@ -192,11 +209,12 @@ export const sendBrowserCommand = (
         !connected && "code" in error && (error.code === "ENOENT" || error.code === "ECONNREFUSED");
       finish(unavailable ? new BrowserUnavailable("Browser is not running") : error);
     });
-    socket.on("close", () =>
+    socket.on("close", () => {
+      socket.removeAllListeners();
       finish(
         new Error(
           "Browser disconnected; the command outcome is uncertain. Inspect the page before retrying.",
         ),
-      ),
-    );
+      );
+    });
   });

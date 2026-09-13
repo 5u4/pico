@@ -46,20 +46,6 @@ on the next start. Relink from another checkout before deleting the linked workt
 Run `pico` directly, not through a package script: `bun run` can forward a terminal SIGINT that
 the child already received, turning one Ctrl-C into a forced exit.
 
-Install the local browser with `pico browser install` or `pico browser install /absolute/root`.
-The daemon and installer must use the same root. Installation is explicit, never part of an agent
-tool call. The pinned `agent-browser` package stays local to `packages/omp`.
-
-Set `[browser] idle_timeout = "3 hours"` in the root's `config.toml` to change the browser lifetime.
-Positive whole milliseconds are also accepted. Restart the daemon after a change.
-Browser config does not require Discord configuration or a Discord token.
-
-`packages/omp` owns isolated browsers for each chat and each calling child SDK session.
-The root-scoped manager outlives live OMP session eviction. Archive and daemon shutdown close
-owned browsers without deleting saved login state. Use the bundled `pico-browser` skill and
-`pico_browser` tool instead of the native OMP browser or direct CLI commands.
-Viewer links bind to loopback on the daemon machine, not to a remote user's device.
-
 ## Where code lives
 
 - `packages/contract` — cross-package schemas, branded values, errors, interfaces, and service tags;
