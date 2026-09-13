@@ -1,6 +1,8 @@
 import { AgentPrompt, type AgentTranscript } from "@pico/contract/agent-message";
-import type { ChatId } from "@pico/contract/chat-model";
+import type { CreateChat, CreateWorkspace } from "@pico/contract/application";
+import type { Chat, ChatId } from "@pico/contract/chat-model";
 import type { ApplicationError } from "@pico/contract/errors";
+import type { Workspace, WorkspaceId } from "@pico/contract/workspace-model";
 import * as RpcClient from "@pico/rpc/client";
 import type * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
@@ -118,6 +120,79 @@ export const make = ({ url }: { readonly url: string }) => {
     const session = get(owner);
     return session._tag === "Failure" ? { kind: "unavailable", cause: session.cause } : get(status);
   }).pipe(Atom.keepAlive);
+
+  const list = <A>(
+    execute: (client: Client) => Effect.Effect<A, ApplicationError | RpcClientError>,
+  ) => {
+    const result = Atom.make<AsyncResult.AsyncResult<A, ApplicationError | RpcClientError>>(
+      AsyncResult.initial(),
+    ).pipe(Atom.keepAlive);
+    const read = Atom.make((get) => {
+      let active = true;
+      get.addFinalizer(() => {
+        active = false;
+      });
+      get.set(result, AsyncResult.waiting(get.once(result)));
+      return Effect.gen(function* () {
+        const session = yield* get.resultOnce(owner);
+        yield* session.available;
+        const value = yield* execute(session.client).pipe(
+          Effect.tapErrorTag("ApplicationError", () => Effect.sync(session.recordResponse)),
+        );
+        session.recordResponse();
+        return value;
+      }).pipe(
+        Effect.onExit((exit) =>
+          Effect.sync(() => {
+            if (!active) return;
+            get.set(
+              result,
+              Exit.isSuccess(exit)
+                ? AsyncResult.success(exit.value)
+                : AsyncResult.failureWithPrevious(exit.cause, {
+                    previous: Option.some(get.once(result)),
+                  }),
+            );
+          }),
+        ),
+        Effect.asVoid,
+      );
+    }).pipe(Atom.keepAlive, Atom.setLazy(false));
+    return Atom.readable(
+      (get) => {
+        if (!get.registry.getNodes().has(read)) get.once(read);
+        return get(result);
+      },
+      (refresh) => refresh(read),
+    ).pipe(Atom.keepAlive);
+  };
+
+  const workspaces = list<readonly Workspace[]>((client) => client.ListWorkspaces());
+  const chats = Atom.family((workspaceId: WorkspaceId) =>
+    list<readonly Chat[]>((client) => client.ListChats({ workspaceId })),
+  );
+  const createWorkspace = Atom.fn<CreateWorkspace>()((input, get) =>
+    Effect.gen(function* () {
+      const session = yield* get.result(owner);
+      yield* session.available;
+      const workspace = yield* session.client.CreateWorkspace(input);
+      session.recordResponse();
+      get.registry.refresh(workspaces);
+      return workspace;
+    }),
+  ).pipe(Atom.keepAlive, Atom.setLazy(false));
+  const createChat = Atom.family((workspaceId: WorkspaceId) =>
+    Atom.fn<Omit<CreateChat, "workspaceId">>()((input, get) =>
+      Effect.gen(function* () {
+        const session = yield* get.result(owner);
+        yield* session.available;
+        const chat = yield* session.client.CreateChat({ ...input, workspaceId });
+        session.recordResponse();
+        get.registry.refresh(chats(workspaceId));
+        return chat;
+      }),
+    ).pipe(Atom.keepAlive, Atom.setLazy(false)),
+  );
 
   const transcriptRead = Atom.family((chatId: ChatId) =>
     Atom.make((get) => {
@@ -264,5 +339,15 @@ export const make = ({ url }: { readonly url: string }) => {
     ),
   );
 
-  return { connection, transcript, live, send, abort } as const;
+  return {
+    connection,
+    workspaces,
+    chats,
+    createWorkspace,
+    createChat,
+    transcript,
+    live,
+    send,
+    abort,
+  } as const;
 };

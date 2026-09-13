@@ -154,7 +154,7 @@ function TranscriptItemView({
       return (
         <article className="ml-auto max-w-[82%] rounded-bubble bg-surface px-4 py-3 md:max-w-[72%]">
           <p className="whitespace-pre-wrap text-copy">{item.text}</p>
-          <p className="mt-2 text-right text-meta text-subtle">{item.timestampLabel}</p>
+          <p className="mt-2 text-right text-meta text-muted">{item.timestampLabel}</p>
         </article>
       );
     case "assistant":
@@ -226,7 +226,11 @@ function AssistantBlockView({
             />
             {block.label}
             <span className={block.phase === "streaming" ? "text-accent" : "text-subtle"}>
-              {block.phase === "streaming" ? "Working" : "Complete"}
+              {block.phase === "streaming"
+                ? "Working"
+                : block.phase === "complete"
+                  ? "Complete"
+                  : "Status unknown"}
             </span>
           </button>
           <div
@@ -279,6 +283,8 @@ function AssistantStateView({ state }: { readonly state: AssistantState }) {
           {state.label}
         </p>
       );
+    case "unknown":
+      return <p className="mt-3 text-meta text-muted">{state.label}</p>;
     case "interrupted":
       return (
         <p className="mt-4 border-l-2 border-warning pl-3 text-label text-warning">{state.label}</p>
@@ -309,7 +315,9 @@ function ToolGroup({
       >
         <WrenchIcon aria-hidden="true" size={16} />
         <span className="min-w-0 flex-1 truncate">{item.title}</span>
-        <span className="text-meta text-subtle">{item.calls.length} actions</span>
+        <span className="text-meta text-subtle">
+          {item.calls.length === 1 ? "1 action" : `${item.calls.length} actions`}
+        </span>
         <CaretDownIcon
           aria-hidden="true"
           className={`transition-transform duration-feedback ${item.open ? "disclosure-caret-open" : ""}`}
@@ -333,11 +341,11 @@ function ToolGroup({
 
 function ToolCall({ call }: { readonly call: ToolCallPresentation }) {
   return (
-    <div className="flex items-start gap-3 rounded-control px-3 py-2 text-label hover:bg-surface">
+    <div className="flex flex-wrap items-start gap-3 rounded-control px-3 py-2 text-label hover:bg-surface">
       <span className="mt-0.5 text-muted">{toolIcon(call.icon)}</span>
-      <span className="min-w-0 flex-1">
+      <span className="min-w-0 flex-1 basis-32">
         <span className="block font-medium text-foreground">{call.label}</span>
-        <span className="block truncate text-meta text-subtle">{call.summary}</span>
+        <span className="block break-words text-meta text-muted">{call.summary}</span>
       </span>
       <span
         className={`flex shrink-0 items-center gap-1.5 text-meta ${toolStateClass(call.state)}`}
@@ -345,6 +353,11 @@ function ToolCall({ call }: { readonly call: ToolCallPresentation }) {
         {toolStateIcon(call.state)}
         {call.state.label}
       </span>
+      {call.output !== undefined && (
+        <pre className="w-full whitespace-pre-wrap break-words rounded-control bg-canvas p-3 font-mono text-label text-foreground">
+          {call.output}
+        </pre>
+      )}
     </div>
   );
 }
@@ -393,6 +406,7 @@ function toolStateClass(state: ToolState): string {
       return "text-success";
     case "failed":
       return "text-danger";
+    case "unknown":
     case "canceled":
       return "text-muted";
     default: {
@@ -412,6 +426,8 @@ function toolStateIcon(state: ToolState): ReactNode {
       return <XCircleIcon aria-hidden="true" size={14} weight="fill" />;
     case "canceled":
       return <XCircleIcon aria-hidden="true" size={14} />;
+    case "unknown":
+      return <WarningCircleIcon aria-hidden="true" size={14} />;
     default: {
       const exhaustive: never = state;
       return exhaustive;

@@ -24,6 +24,7 @@ import * as AgentSessionStoreLayer from "@pico/omp/agent-session-store";
 import * as AgentRuntimeLayer from "@pico/omp/layer";
 import * as PersistenceLayer from "@pico/persistence/layer";
 import * as ScheduleLayer from "@pico/schedule/layer";
+import { AssetBuildError } from "@pico/web/assets";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
@@ -32,15 +33,22 @@ import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Scope from "effect/Scope";
+import * as Web from "./web.ts";
 
 // Embedders acquire a daemon in their own scope and own any propagated failure.
 export const open = Effect.fn("Daemon.open")(function* (root: PicoRoot) {
-  const paths = yield* ConfigRoot.open(root);
-  const loggingContext = yield* Layer.build(LoggingLayer.layer(paths.logsDir));
-  yield* Effect.gen(function* () {
-    const config = yield* Config.load(paths);
-    yield* openComponents(paths, config);
-  }).pipe(Effect.provide(loggingContext));
+  const scope = yield* Scope.fork(yield* Effect.scope);
+  return yield* Effect.gen(function* () {
+    const paths = yield* ConfigRoot.open(root);
+    const loggingContext = yield* Layer.build(LoggingLayer.layer(paths.logsDir));
+    return yield* Effect.gen(function* () {
+      const config = yield* Config.load(paths);
+      return yield* openComponents(paths, config);
+    }).pipe(Effect.provide(loggingContext));
+  }).pipe(
+    Scope.provide(scope),
+    Effect.onExit((exit) => (Exit.isFailure(exit) ? Scope.close(scope, exit) : Effect.void)),
+  );
 });
 
 // The CLI receives the reported result only after resources and loggers have closed.
@@ -103,14 +111,17 @@ const openComponents = Effect.fn("Daemon.openComponents")(function* (
   paths: PicoPaths,
   config: Config.PicoConfig,
 ) {
-  yield* Layer.build(daemonLayer(paths, config));
+  const context = yield* Layer.build(daemonLayer(paths, config));
+  const web = yield* Web.open().pipe(Effect.provide(context));
   yield* Effect.logInfo("pico.daemon.ready").pipe(
     Effect.annotateLogs({
       phase: "ready",
       discord: Option.isSome(config.discord) ? "enabled" : "disabled",
-      rpc: "disabled",
+      rpc: "enabled",
+      webUrl: web.webUrl,
     }),
   );
+  return web;
 });
 
 const reportFailure = (cause: Cause.Cause<unknown>, phase: string) => {
@@ -128,6 +139,7 @@ const reportFailure = (cause: Cause.Cause<unknown>, phase: string) => {
         error instanceof ApplicationError ||
         error instanceof ScheduleError ||
         error instanceof ScheduleHostError ||
+        error instanceof AssetBuildError ||
         error instanceof DiscordLayer.DiscordError
       )
         return reason;

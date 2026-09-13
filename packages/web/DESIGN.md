@@ -12,6 +12,6 @@ When sources disagree, follow them in this order:
 4. This design note.
 5. External references.
 
-Future state integration belongs in one route adapter. It converts application records into the local presentation model without changing production component contracts.
+The normal route uses one live adapter and one registry-owned connection. The adapter owns workspace and chat selection, per-chat drafts, and transcript mapping. Production components remain controlled and domain-free. `/__design` remains an offline gallery.
 
-Both themes use the same semantic token vocabulary. `GalleryApp` owns theme as app-shell presentation state and passes it into the controlled `ChatScreen`. A synchronous head bootstrap selects a stored choice or the initial operating-system preference before React and the stylesheet load.
+Both themes use the same semantic token vocabulary. Each route owns theme state and passes it into the controlled `ChatScreen`. A synchronous head bootstrap selects a stored choice or the initial operating-system preference before React and the stylesheet load.

@@ -17,6 +17,7 @@ import * as Logger from "effect/Logger";
 import * as Queue from "effect/Queue";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
+import * as HttpRouter from "effect/unstable/http/HttpRouter";
 import * as HttpServer from "effect/unstable/http/HttpServer";
 
 const firstChatId = Chat.ChatId.make("018f47a0-0000-7000-8000-000000000001");
@@ -41,10 +42,12 @@ const secondEvent: AgentEvent.AgentEventEnvelope = {
 };
 
 const unusedApplication = Application.of({
+  listWorkspaces: () => Effect.die("unexpected workspace list"),
   askBtw: () => Effect.die("unexpected side question"),
   createWorkspace: () => Effect.die("unexpected workspace creation"),
   getOrCreateWorkspaceByBinding: () => Effect.die("unexpected workspace creation"),
   bindWorkspace: () => Effect.die("unexpected workspace binding"),
+  listChats: () => Effect.die("unexpected chat list"),
   createChat: () => Effect.die("unexpected chat creation"),
   getOrCreateBotChat: () => Effect.die("unexpected bot chat creation"),
   sendBotMessage: () => Effect.die("unexpected bot message send"),
@@ -60,7 +63,7 @@ const unusedApplication = Application.of({
 });
 
 describe("RPC", () => {
-  it.live("serves every procedure through one scoped WebSocket client", () =>
+  it.live("serves chat operations through one scoped WebSocket client", () =>
     Effect.gen(function* () {
       const logs: Array<ReturnType<typeof Logger.formatStructured.log>> = [];
       const logger = Logger.layer([
@@ -228,7 +231,7 @@ describe("RPC", () => {
         assert.strictEqual(failures().length, 1);
       }).pipe(
         Effect.scoped,
-        Effect.provide(RpcServer.layer),
+        Effect.provide(HttpRouter.serve(RpcServer.routes)),
         Effect.provide(services),
         Effect.provide(NodeHttpServer.layerTest),
         Effect.provide(logger),
@@ -275,7 +278,7 @@ describe("RPC", () => {
           return { exit, received };
         }).pipe(
           Effect.scoped,
-          Effect.provide(RpcServer.layer),
+          Effect.provide(HttpRouter.serve(RpcServer.routes)),
           Effect.provide(
             Layer.merge(
               Layer.succeed(Application, unusedApplication),

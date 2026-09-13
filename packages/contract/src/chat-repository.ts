@@ -8,6 +8,11 @@ import type { WorkspaceId } from "./workspace-model.ts";
 export class ChatRepository extends Context.Service<
   ChatRepository,
   {
+    /** Application calls this when listing a workspace's active chats. */
+    readonly listOpenByWorkspace: (
+      workspaceId: WorkspaceId,
+    ) => Effect.Effect<readonly Chat[], PersistenceError>;
+
     // Application calls this after it provisions the chat's external resources.
     readonly create: (chat: NewChat) => Effect.Effect<Chat, PersistenceError>;
 

@@ -121,9 +121,11 @@ const fixture = Effect.fn("DiscordBotTest.fixture")(function* (options: {
     triggerTyping: () => Effect.void,
   };
   const application = Application.of({
+    listWorkspaces: () => Effect.die("DM must not list workspaces"),
     createWorkspace: () => Effect.die("DM must not create a guild workspace"),
     getOrCreateWorkspaceByBinding: () => Effect.die("DM must not create a guild workspace"),
     bindWorkspace: () => Effect.die("DM must not bind a workspace"),
+    listChats: () => Effect.die("DM must not list thread chats"),
     createChat: () => Effect.die("DM must not create a thread chat"),
     getOrCreateBotChat:
       options.getOrCreateBotChat ??

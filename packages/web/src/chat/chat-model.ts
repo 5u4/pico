@@ -9,8 +9,13 @@ export interface ChatSummary {
   readonly title: string;
   readonly preview: string;
   readonly updatedLabel: string;
-  readonly activity: "idle" | "running" | "failed";
+  readonly activity: "idle" | "running" | "failed" | "unknown";
 }
+
+export type ChatListStatus =
+  | { readonly kind: "pending"; readonly label: string }
+  | { readonly kind: "empty"; readonly label: string }
+  | { readonly kind: "error"; readonly label: string };
 
 export type AssistantBlock =
   | {
@@ -24,7 +29,7 @@ export type AssistantBlock =
       readonly label: string;
       readonly text: string;
       readonly open: boolean;
-      readonly phase: "streaming" | "complete";
+      readonly phase: "streaming" | "complete" | "unknown";
     }
   | {
       readonly kind: "code";
@@ -43,12 +48,14 @@ export type AssistantBlock =
 export type AssistantState =
   | { readonly kind: "complete" }
   | { readonly kind: "streaming"; readonly label: string }
+  | { readonly kind: "unknown"; readonly label: string }
   | { readonly kind: "interrupted"; readonly label: string };
 
 export type ToolState =
   | { readonly kind: "running"; readonly label: string }
   | { readonly kind: "succeeded"; readonly label: string }
   | { readonly kind: "failed"; readonly label: string }
+  | { readonly kind: "unknown"; readonly label: string }
   | { readonly kind: "canceled"; readonly label: string };
 
 export interface ToolCallPresentation {
@@ -57,6 +64,7 @@ export interface ToolCallPresentation {
   readonly label: string;
   readonly summary: string;
   readonly state: ToolState;
+  readonly output?: string | undefined;
 }
 
 export type TranscriptItem =

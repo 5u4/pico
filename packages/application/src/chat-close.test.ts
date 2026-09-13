@@ -504,6 +504,7 @@ describe("Chat close", () => {
         prefix: "pico-application-cleanup-",
       });
       const defaultCwd = AbsolutePath.make(path.join(temporaryDirectory, "repository"));
+      yield* fileSystem.makeDirectory(defaultCwd);
       const worktreeCwd = AbsolutePath.make(path.join(temporaryDirectory, "worktree"));
       const storeFile = AbsolutePath.make(path.join(temporaryDirectory, "store.db"));
       const persistenceLayer = Persistence.layer(storeFile);

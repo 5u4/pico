@@ -46,7 +46,7 @@ export function Composer({ presentation, onValueChange, onSubmit, onStop }: Comp
       </label>
       <textarea
         aria-describedby="composer-status"
-        className="composer-input block w-full resize-none bg-transparent px-4 pb-2 pt-3 text-copy text-foreground placeholder:text-subtle disabled:opacity-60"
+        className="composer-input block w-full resize-none bg-transparent px-4 pb-2 pt-3 text-base text-foreground placeholder:text-subtle disabled:opacity-60 md:text-copy"
         disabled={!presentation.editable}
         id="chat-composer"
         onChange={(event) => onValueChange(event.currentTarget.value)}
@@ -61,7 +61,7 @@ export function Composer({ presentation, onValueChange, onSubmit, onStop }: Comp
         value={presentation.value}
       />
       <div className="flex min-h-11 items-center gap-3 px-3 pb-3">
-        <p className="min-w-0 flex-1 truncate text-meta text-muted" id="composer-status">
+        <p className="min-w-0 flex-1 text-meta text-muted" id="composer-status">
           {presentation.statusLabel}
         </p>
         {presentation.mode === "send" ? (

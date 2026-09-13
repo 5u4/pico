@@ -9,8 +9,8 @@
   --raw-surface-hover: #e9edf3;
   --raw-overlay: rgb(20 29 43 / 32%);
   --raw-foreground: #1a202c;
-  --raw-muted: #657083;
-  --raw-subtle: #687386;
+  --raw-muted: #5b6678;
+  --raw-subtle: #5f6a7d;
   --raw-border: #dce1e9;
   --raw-border-strong: #c7cfdb;
   --raw-accent: #2f64d6;
@@ -46,7 +46,7 @@
   --raw-overlay: rgb(0 0 0 / 58%);
   --raw-foreground: #edf1f7;
   --raw-muted: #a6b0c0;
-  --raw-subtle: #788397;
+  --raw-subtle: #8b96aa;
   --raw-border: #28313e;
   --raw-border-strong: #394556;
   --raw-accent: #7aa2f7;
@@ -149,12 +149,6 @@ body {
   line-height: 1.5;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
-}
-
-button,
-textarea,
-select {
-  font: inherit;
 }
 
 button,

@@ -6,6 +6,7 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
+    "@effect/platform-bun": "catalog:",
     "@pico/application": "workspace:*",
     "@pico/config": "workspace:*",
     "@pico/contract": "workspace:*",
@@ -15,7 +16,9 @@
     "@pico/logging": "workspace:*",
     "@pico/omp": "workspace:*",
     "@pico/persistence": "workspace:*",
+    "@pico/rpc": "workspace:*",
     "@pico/schedule": "workspace:*",
+    "@pico/web": "workspace:*",
     "effect": "catalog:"
   }
 }

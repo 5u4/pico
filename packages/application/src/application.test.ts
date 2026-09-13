@@ -208,6 +208,28 @@ describe("Application", () => {
         const application = yield* Application;
         const scheduleHost = yield* Schedule.ScheduleRunHostService;
         const chats = yield* ChatRepository;
+        assert.deepStrictEqual(yield* application.listWorkspaces(), []);
+        assertApplicationError(
+          yield* application.listChats(missingWorkspaceId).pipe(Effect.flip),
+          "not-found",
+        );
+        for (const invalidCwd of [
+          AbsolutePath.make(path.join(temporaryDirectory, "missing")),
+          storeFile,
+        ]) {
+          assertApplicationError(
+            yield* application
+              .createWorkspace({
+                name: "invalid",
+                binding: null,
+                defaultCwd: invalidCwd,
+                worktree: null,
+              })
+              .pipe(Effect.flip),
+            "invalid-state",
+          );
+          assert.deepStrictEqual(yield* application.listWorkspaces(), []);
+        }
 
         yield* TestClock.setTime(1_000);
         const regularWorkspace = yield* application.createWorkspace({
@@ -216,6 +238,7 @@ describe("Application", () => {
           defaultCwd,
           worktree: null,
         });
+        assert.deepStrictEqual(yield* application.listChats(regularWorkspace.id), []);
 
         yield* TestClock.setTime(2_000);
         const regularChat = yield* application.createChat({
@@ -275,6 +298,17 @@ describe("Application", () => {
           workspaceId: regularWorkspace.id,
           externalId: "local-thread",
         });
+        assert.deepStrictEqual(yield* application.listWorkspaces(), [
+          discordWorkspace,
+          worktreeWorkspace,
+          regularWorkspace,
+        ]);
+        assert.deepStrictEqual(yield* application.listChats(regularWorkspace.id), [
+          unboundChat,
+          regularChat,
+        ]);
+        assert.deepStrictEqual(yield* application.listChats(discordWorkspace.id), [discordChat]);
+        assert.deepStrictEqual(yield* application.listChats(worktreeWorkspace.id), [worktreeChat]);
 
         assert.deepStrictEqual(
           Option.getOrThrow(yield* application.findWorkspaceByPlatformId("discord", "channel-1")),
