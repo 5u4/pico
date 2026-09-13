@@ -121,6 +121,43 @@ describe("PicoConfig.load", () => {
       );
     }).pipe(Effect.provide(platformLayer)),
   );
+  it.effect(
+    "defaults the external browser off and validates explicit selection without Discord",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const temporaryDirectory = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "pico-external-browser-config-",
+        });
+        const paths = yield* open(PicoRoot.make(path.join(temporaryDirectory, "root")));
+        assert.strictEqual((yield* load(paths)).browser.externalBrowser, "off");
+        for (const source of ["", "[browser]\n", '[browser]\nidle_timeout = "1 minute"\n']) {
+          yield* fileSystem.writeFileString(paths.configFile, source);
+          assert.strictEqual((yield* load(paths)).browser.externalBrowser, "off");
+        }
+        for (const externalBrowser of ["agent-browser", "off"]) {
+          yield* fileSystem.writeFileString(
+            paths.configFile,
+            `[browser]\nexternal_browser = "${externalBrowser}"\n`,
+          );
+          const loaded = yield* load(paths);
+          assert.strictEqual(loaded.browser.externalBrowser, externalBrowser);
+          assert.isTrue(Option.isNone(loaded.discord));
+        }
+        for (const invalid of ['"private-unsupported-provider"', "true", "1", "[]", "{}"]) {
+          yield* fileSystem.writeFileString(
+            paths.configFile,
+            `[browser]\nexternal_browser = ${invalid}\n`,
+          );
+          const error = yield* load(paths).pipe(Effect.flip);
+          assert.instanceOf(error, ConfigError);
+          assert.include(error.message, "browser.external_browser");
+          assert.notInclude(error.message, "private-unsupported-provider");
+        }
+      }).pipe(Effect.scoped, Effect.provide(platformLayer)),
+  );
+
   it.effect("loads and validates browser lifetime without Discord credentials", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;

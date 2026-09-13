@@ -3,7 +3,6 @@ import { chmod, copyFile, readdir, readFile, rename, rm, writeFile } from "node:
 import { isAbsolute, join } from "node:path";
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import type { ChatId } from "@pico/contract/chat-model";
-import type { BrowserConfig } from "@pico/contract/config";
 import * as Schema from "effect/Schema";
 import {
   BrowserUnavailable,
@@ -11,12 +10,12 @@ import {
   launchBrowser,
   prepareBrowserHome,
   sendBrowserCommand,
-} from "./browser-cli.ts";
-import { readCookieFile } from "./browser-cookie-file.ts";
-import type { BrowserOperation } from "./browser-extension.ts";
-import { BrowserTabs, type BrowserTabsRequest, makeBrowserViewer } from "./browser-viewer.ts";
+} from "./cli.ts";
+import { readCookieFile } from "./cookie-file.ts";
+import type { BrowserOperation } from "./extension.ts";
+import { BrowserTabs, type BrowserTabsRequest, makeBrowserViewer } from "./viewer.ts";
 
-export interface BrowserOwner {
+export interface AgentBrowserOwner {
   readonly chatId: ChatId;
   readonly instance:
     | { readonly kind: "main" }
@@ -88,10 +87,13 @@ const cookieImportFailures = {
     "Cookie import completed its checkpoint before the operation was interrupted. This owner's saved state includes the checkpoint. Inspect the browser before deciding whether to retry.",
 };
 
-export const makeBrowserManager = async ({
+export const makeAgentBrowserManager = async ({
   root,
   idleTimeoutMs,
-}: { readonly root: string } & BrowserConfig) => {
+}: {
+  readonly root: string;
+  readonly idleTimeoutMs: number;
+}) => {
   const home = await prepareBrowserHome(root);
   const entries = new Map<string, Entry>();
   const archived = new Set<string>();
@@ -281,7 +283,7 @@ export const makeBrowserManager = async ({
     return entry.viewer.url;
   };
   const execute = (
-    owner: BrowserOwner,
+    owner: AgentBrowserOwner,
     operation: BrowserOperation,
     signal?: AbortSignal,
   ): Promise<Array<TextContent | ImageContent>> => {
@@ -600,7 +602,7 @@ export const makeBrowserManager = async ({
     },
   };
 };
-export type BrowserManager = Awaited<ReturnType<typeof makeBrowserManager>>;
+export type AgentBrowserManager = Awaited<ReturnType<typeof makeAgentBrowserManager>>;
 
 type PageOperation = Exclude<BrowserOperation, { op: "mode" | "screenshot" | "import_cookies" }>;
 const browserCommand = (operation: PageOperation): Readonly<Record<string, unknown>> => {

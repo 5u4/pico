@@ -22,10 +22,10 @@ import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import { makeAgentBrowserExtension } from "./agent-browser/extension.ts";
+import { type AgentBrowserManager, makeAgentBrowserManager } from "./agent-browser/manager.ts";
 import { agentError } from "./agent-error.ts";
 import { normalizeAgentEvent, normalizeTranscript } from "./agent-event.ts";
-import { makeBrowserExtension } from "./browser-extension.ts";
-import { type BrowserManager, makeBrowserManager } from "./browser-manager.ts";
 import { makeExchangeTitleFlow } from "./exchange-title.ts";
 import { makeOmpPromptSender } from "./omp-prompt-sender.ts";
 import { make as makeScheduleExtension } from "./schedule-extension.ts";
@@ -82,16 +82,27 @@ export const make = Effect.fn("AgentRuntime.make")(function* ({
       normalizeTranscript(messages),
     );
   });
-  const browsers = yield* Effect.acquireRelease(
-    promiseBoundary("Failed to initialize Pico browsers", () =>
-      makeBrowserManager({ root: paths.root, ...browser }),
-    ),
-    (manager) =>
-      ignoreCleanupFailure(
-        "Failed to close Pico browsers",
-        promiseBoundary("Failed to close Pico browsers", () => manager.dispose()),
-      ),
-  );
+  let browsers: AgentBrowserManager | undefined;
+  switch (browser.externalBrowser) {
+    case "off":
+      break;
+    case "agent-browser":
+      browsers = yield* Effect.acquireRelease(
+        promiseBoundary("Failed to initialize Pico browsers", () =>
+          makeAgentBrowserManager({ root: paths.root, idleTimeoutMs: browser.idleTimeoutMs }),
+        ),
+        (manager) =>
+          ignoreCleanupFailure(
+            "Failed to close Pico browsers",
+            promiseBoundary("Failed to close Pico browsers", () => manager.dispose()),
+          ),
+      );
+      break;
+    default: {
+      const exhaustive: never = browser.externalBrowser;
+      return exhaustive;
+    }
+  }
 
   const pool = yield* makeSessionPool({
     factory: makeFactory(
@@ -119,6 +130,7 @@ export const make = Effect.fn("AgentRuntime.make")(function* ({
     deliver: pool.deliver,
     publish: pool.publish,
     close: Effect.fn("AgentRuntime.close")(function* (chatId: Chat.ChatId) {
+      if (browsers === undefined) return yield* pool.close(chatId);
       const closing = browsers.closeChat(chatId).then(
         () => Exit.void,
         (cause) => Exit.fail(agentError("Failed to close chat browsers", cause)),
@@ -268,13 +280,17 @@ const makeFactory = (
   modelRegistry: OmpModelRegistry.ModelRegistry,
   schedules: Schedule.Schedules["Service"],
   handleBranchNaming: BranchNamingHandler,
-  browsers: BrowserManager,
+  browsers: AgentBrowserManager | undefined,
 ): SessionFactory => ({
   open: Effect.fn("OmpSession.open")(function* (chatId, emit) {
     const runEffect = Effect.runPromiseWith(yield* Effect.context<never>());
     const { chat, platform, appendSystemPrompt } = yield* chatSessionContext.resolve(chatId);
     const sessionFile = path.join(sessionsDir, `${chat.id}.jsonl`);
-    const settings = yield* prepareSessionSettings(chat.cwd, platform);
+    const settings = yield* prepareSessionSettings(
+      chat.cwd,
+      platform,
+      browsers === undefined ? "off" : "agent-browser",
+    );
 
     const manager = yield* promiseBoundary("Failed to open OMP session journal", () =>
       OmpSessionManager.SessionManager.open(sessionFile, sessionsDir, undefined, {
@@ -292,14 +308,22 @@ const makeFactory = (
         modelRegistry,
         agentRegistry: new OmpAgentRegistry.AgentRegistry(),
         hasUI: false,
-        mcpConfigLoader: (cwd, options) =>
-          loadAllMCPConfigs(cwd, { ...options, filterBrowser: true }),
+        ...(browsers === undefined
+          ? {}
+          : {
+              mcpConfigLoader: (cwd, options) =>
+                loadAllMCPConfigs(cwd, { ...options, filterBrowser: true }),
+            }),
         extensions: [
-          makeBrowserExtension({
-            manager: browsers,
-            chatId: chat.id,
-            rootSessionId: manager.getSessionId(),
-          }),
+          ...(browsers === undefined
+            ? []
+            : [
+                makeAgentBrowserExtension({
+                  manager: browsers,
+                  chatId: chat.id,
+                  rootSessionId: manager.getSessionId(),
+                }),
+              ]),
           makeScheduleExtension({
             caller: { chatId: chat.id, workspaceId: chat.workspaceId },
             runEffect,

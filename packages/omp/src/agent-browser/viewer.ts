@@ -174,10 +174,9 @@ export const makeBrowserViewer = () => {
               return new Response("WebSocket required", { status: 400, headers });
             }
             if (parts[2] === "client.js")
-              return new Response(
-                Bun.file(new URL("./browser-viewer-client.js", import.meta.url)),
-                { headers: { ...headers, "Content-Type": "text/javascript" } },
-              );
+              return new Response(Bun.file(new URL("./viewer-client.js", import.meta.url)), {
+                headers: { ...headers, "Content-Type": "text/javascript" },
+              });
             if (parts[2] !== "") return new Response("Not found", { status: 404, headers });
             return new Response(html, {
               headers: { ...headers, "Content-Type": "text/html; charset=utf-8" },

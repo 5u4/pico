@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { it } from "@effect/vitest";
-import { readCookieFile } from "./browser-cookie-file.ts";
+import { readCookieFile } from "./cookie-file.ts";
 
 const readExport = async (
   input: object | string,

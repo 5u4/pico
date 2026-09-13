@@ -25,6 +25,11 @@
 - register bundled `pico-schedule` and `pico-instructions` through per-session OMP `skills.customDirectories`; append after configured directories without copying into user settings
   - keep native skill filters and opt-outs; user custom directories win name collisions, but OMP custom-directory skills override ordinary project/provider skills
   - resolve bundled skill files relative to the package, not the chat cwd; deployments must retain these disk-backed resources
+- `[browser] external_browser` in the daemon root's `config.toml` selects `"off"` or `"agent-browser"` and defaults to `"off"` when omitted. Restart Pico after changing it.
+  - off creates no Pico browser manager, tool, or bundled `pico-browser` skill and leaves native OMP browser and MCP policy unchanged
+  - agent-browser supplies `pico_browser` and the bundled `pico-browser` skill, disables OMP's native browser, and filters browser MCP servers at startup and reconciliation
+  - register the provider skill after user custom directories only when selected; off does not remove user-owned skills with the same name
+  - `pico browser install [root]` installs Chrome for that root but does not select a provider; selection changes leave saved browser state in place
 - workspace is like folder
 - chat is like file; one chat = one omp session
 - one workspace can have multiple chats

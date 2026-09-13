@@ -6,14 +6,9 @@ import { pathToFileURL } from "node:url";
 import { it } from "@effect/vitest";
 import { ChatId } from "@pico/contract/chat-model";
 import * as Schema from "effect/Schema";
-import {
-  BrowserUnavailable,
-  browserKey,
-  prepareBrowserHome,
-  sendBrowserCommand,
-} from "./browser-cli.ts";
-import { makeBrowserManager } from "./browser-manager.ts";
-import { BrowserTabs } from "./browser-viewer.ts";
+import { BrowserUnavailable, browserKey, prepareBrowserHome, sendBrowserCommand } from "./cli.ts";
+import { makeAgentBrowserManager } from "./manager.ts";
+import { BrowserTabs } from "./viewer.ts";
 
 const Result = Schema.Struct({ result: Schema.String });
 
@@ -34,7 +29,7 @@ it("requires a user request for direct file previews before startup or page chan
       }),
   });
   const home = await prepareBrowserHome(root);
-  const manager = await makeBrowserManager({ root, idleTimeoutMs: 60_000 });
+  const manager = await makeAgentBrowserManager({ root, idleTimeoutMs: 60_000 });
   const chatId = ChatId.make("018f47a0-0000-7000-8000-000000000004");
   const owner = { chatId, instance: { kind: "main" } } as const;
   const session = browserKey(JSON.stringify([chatId, "main"]));

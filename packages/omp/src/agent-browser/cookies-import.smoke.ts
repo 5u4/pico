@@ -6,13 +6,8 @@ import { basename, dirname, join } from "node:path";
 import { it } from "@effect/vitest";
 import { ChatId } from "@pico/contract/chat-model";
 import * as Schema from "effect/Schema";
-import {
-  BrowserUnavailable,
-  browserKey,
-  prepareBrowserHome,
-  sendBrowserCommand,
-} from "./browser-cli.ts";
-import { type BrowserOwner, makeBrowserManager } from "./browser-manager.ts";
+import { BrowserUnavailable, browserKey, prepareBrowserHome, sendBrowserCommand } from "./cli.ts";
+import { type AgentBrowserOwner, makeAgentBrowserManager } from "./manager.ts";
 
 const Result = Schema.Struct({ result: Schema.String });
 const CookieState = Schema.Struct({
@@ -57,7 +52,7 @@ it("rejects unapproved or invalid cookie files before creating owner or browser 
     domain: "private-domain-sentinel.test",
   };
   const home = await prepareBrowserHome(root);
-  const manager = await makeBrowserManager({ root, idleTimeoutMs: 60_000 });
+  const manager = await makeAgentBrowserManager({ root, idleTimeoutMs: 60_000 });
   const chatId = ChatId.make("018f47a0-0000-7000-8000-000000000006");
   const owner = { chatId, instance: { kind: "main" } } as const;
   const session = browserKey(JSON.stringify([chatId, "main"]));
@@ -236,7 +231,7 @@ it("imports scoped authentication, checkpoints privately, and restores it withou
   });
   const url = `http://${host}:${site.port}/`;
   const home = await prepareBrowserHome(root);
-  const manager = await makeBrowserManager({ root, idleTimeoutMs: 60_000 });
+  const manager = await makeAgentBrowserManager({ root, idleTimeoutMs: 60_000 });
   const chatId = ChatId.make("018f47a0-0000-7000-8000-000000000007");
   const main = { chatId, instance: { kind: "main" } } as const;
   const child = { chatId, instance: { kind: "child", sessionId: "cookie-child" } } as const;
@@ -247,12 +242,12 @@ it("imports scoped authentication, checkpoints privately, and restores it withou
   const session = browserKey(JSON.stringify([chatId, "main"]));
   const statePath = join(home.stateDirectory, `${session}-${session}.json`);
   const seedPath = join(home.directory, "login-seed.json");
-  const evaluate = async (owner: BrowserOwner, script: string) => {
+  const evaluate = async (owner: AgentBrowserOwner, script: string) => {
     const [result] = await manager.execute(owner, { op: "eval", script });
     if (result?.type !== "text") throw new Error("Missing page result");
     return Schema.decodeUnknownSync(Result)(JSON.parse(result.text)).result;
   };
-  const readAuth = async (owner: BrowserOwner, path = "/private/auth") =>
+  const readAuth = async (owner: AgentBrowserOwner, path = "/private/auth") =>
     Schema.decodeUnknownSync(CookieState)(
       JSON.parse(
         await evaluate(
@@ -396,7 +391,7 @@ it("imports a copied header before navigation and restores host-only login with 
   });
   const url = `http://${host}:${site.port}/`;
   const home = await prepareBrowserHome(root);
-  const manager = await makeBrowserManager({ root, idleTimeoutMs: 60_000 });
+  const manager = await makeAgentBrowserManager({ root, idleTimeoutMs: 60_000 });
   const chatId = ChatId.make("018f47a0-0000-7000-8000-00000000000a");
   const main = { chatId, instance: { kind: "main" } } as const;
   const child = { chatId, instance: { kind: "child", sessionId: "header-child" } } as const;
@@ -514,7 +509,7 @@ for (const failure of [
     const value = "private-value-sentinel";
     const domain = "private-domain-sentinel.test";
     const home = await prepareBrowserHome(root);
-    const manager = await makeBrowserManager({ root, idleTimeoutMs: 60_000 });
+    const manager = await makeAgentBrowserManager({ root, idleTimeoutMs: 60_000 });
     const chatId = ChatId.make("018f47a0-0000-7000-8000-000000000009");
     const owner = { chatId, instance: { kind: "main" } } as const;
     const session = browserKey(JSON.stringify([chatId, "main"]));

@@ -66,7 +66,7 @@ const smoke = Effect.fn("AgentRuntime.smoke")(function* () {
   const runtimeLayer = AgentRuntimeLayer.layer({
     paths: { root: PicoRoot.make(temporaryRoot), sessionsDir },
     schedules,
-    browser: { idleTimeoutMs: 10_800_000 },
+    browser: { externalBrowser: "off", idleTimeoutMs: 10_800_000 },
   }).pipe(
     Layer.provide(
       Layer.merge(

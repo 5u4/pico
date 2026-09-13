@@ -42,7 +42,7 @@ const operation = (poolExit: Exit.Exit<void, AgentError>, browserError: Error | 
 });
 let active: ReturnType<typeof operation> | undefined;
 const { makeSessionPool } = await import("../../src/session-pool.ts");
-const { makeBrowserManager } = await import("../../src/browser-manager.ts");
+const { makeAgentBrowserManager } = await import("../../src/agent-browser/manager.ts");
 mock.module("../../src/session-pool.ts", () => ({
   makeSessionPool: (...args: Parameters<typeof makeSessionPool>) =>
     makeSessionPool(...args).pipe(
@@ -61,9 +61,9 @@ mock.module("../../src/session-pool.ts", () => ({
       })),
     ),
 }));
-mock.module("../../src/browser-manager.ts", () => ({
-  makeBrowserManager: async (...args: Parameters<typeof makeBrowserManager>) => {
-    const manager = await makeBrowserManager(...args);
+mock.module("../../src/agent-browser/manager.ts", () => ({
+  makeAgentBrowserManager: async (...args: Parameters<typeof makeAgentBrowserManager>) => {
+    const manager = await makeAgentBrowserManager(...args);
     return {
       ...manager,
       closeChat: async (chatId: ChatId) => {
@@ -119,7 +119,7 @@ await Effect.runPromise(
           remove: unusedSchedule,
           start: unusedSchedule,
         }),
-        browser: { idleTimeoutMs: 60_000 },
+        browser: { externalBrowser: "agent-browser", idleTimeoutMs: 60_000 },
       });
       const close = async (poolExit: Exit.Exit<void, AgentError>, failure?: Error) => {
         const current = operation(poolExit, failure);

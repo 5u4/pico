@@ -15,6 +15,10 @@ export interface PicoPaths {
   readonly schedulesDir: AbsolutePathType;
 }
 
+export const ExternalBrowser = Schema.Literals(["off", "agent-browser"]);
+export type ExternalBrowser = typeof ExternalBrowser.Type;
+
 export interface BrowserConfig {
+  readonly externalBrowser: ExternalBrowser;
   readonly idleTimeoutMs: number;
 }

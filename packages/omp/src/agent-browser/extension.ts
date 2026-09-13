@@ -4,7 +4,7 @@ import type {
   ExtensionFactory,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import type { ChatId } from "@pico/contract/chat-model";
-import type { BrowserManager } from "./browser-manager.ts";
+import type { AgentBrowserManager } from "./manager.ts";
 
 export const browserParameters = (Type: ExtensionAPI["typebox"]["Type"]) => {
   const selector = Type.String({ minLength: 1 });
@@ -211,13 +211,13 @@ export const browserParameters = (Type: ExtensionAPI["typebox"]["Type"]) => {
 };
 export type BrowserOperation = Static<ReturnType<typeof browserParameters>>;
 
-export const makeBrowserExtension =
+export const makeAgentBrowserExtension =
   ({
     manager,
     chatId,
     rootSessionId,
   }: {
-    readonly manager: BrowserManager;
+    readonly manager: AgentBrowserManager;
     readonly chatId: ChatId;
     readonly rootSessionId: string;
   }): ExtensionFactory =>

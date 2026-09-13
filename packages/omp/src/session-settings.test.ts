@@ -13,6 +13,7 @@ const platformLayer = Layer.merge(BunFileSystem.layer, BunPath.layer);
 
 const makeProject = Effect.fn("OmpSessionSettingsTest.makeProject")(function* (
   renderMermaid: boolean,
+  nativeBrowser = true,
 ) {
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -23,7 +24,7 @@ const makeProject = Effect.fn("OmpSessionSettingsTest.makeProject")(function* (
   yield* fileSystem.makeDirectory(configDir, { recursive: true });
   yield* fileSystem.writeFileString(
     path.join(configDir, "config.yml"),
-    `tui:\n  renderMermaid: ${renderMermaid}\nsecrets:\n  enabled: false\n`,
+    `tui:\n  renderMermaid: ${renderMermaid}\nsecrets:\n  enabled: false\nbrowser:\n  enabled: ${nativeBrowser}\n`,
   );
   return cwd;
 });
@@ -37,7 +38,7 @@ describe("OMP session settings", () => {
     testEffect(
       Effect.gen(function* () {
         const cwd = yield* makeProject(false);
-        const settings = yield* prepareSessionSettings(cwd, null);
+        const settings = yield* prepareSessionSettings(cwd, null, "off");
 
         assert.strictEqual(settings.get("tui.renderMermaid"), false);
       }),
@@ -48,7 +49,7 @@ describe("OMP session settings", () => {
     testEffect(
       Effect.gen(function* () {
         const cwd = yield* makeProject(true);
-        const settings = yield* prepareSessionSettings(cwd, null);
+        const settings = yield* prepareSessionSettings(cwd, null, "off");
 
         assert.strictEqual(settings.get("tui.renderMermaid"), true);
       }),
@@ -59,7 +60,7 @@ describe("OMP session settings", () => {
     testEffect(
       Effect.gen(function* () {
         const cwd = yield* makeProject(true);
-        const settings = yield* prepareSessionSettings(cwd, "discord");
+        const settings = yield* prepareSessionSettings(cwd, "discord", "off");
 
         assert.strictEqual(settings.get("tui.renderMermaid"), false);
       }),
@@ -70,9 +71,9 @@ describe("OMP session settings", () => {
     testEffect(
       Effect.gen(function* () {
         const cwd = yield* makeProject(true);
-        const first = yield* prepareSessionSettings(cwd, null);
+        const first = yield* prepareSessionSettings(cwd, null, "off");
         first.override("tui.renderMermaid", false);
-        const second = yield* prepareSessionSettings(cwd, null);
+        const second = yield* prepareSessionSettings(cwd, null, "off");
 
         assert.notStrictEqual(first, second);
         assert.strictEqual(first.get("tui.renderMermaid"), false);
@@ -83,6 +84,25 @@ describe("OMP session settings", () => {
         assert.strictEqual(second.get("title.refreshOnReplan"), false);
         assert.strictEqual(first.get("secrets.enabled"), true);
         assert.strictEqual(second.get("secrets.enabled"), true);
+      }),
+    ),
+  );
+
+  it.effect("preserves native browser on and off unless agent-browser is selected", () =>
+    testEffect(
+      Effect.gen(function* () {
+        for (const nativeBrowser of [true, false]) {
+          const cwd = yield* makeProject(true, nativeBrowser);
+          const off = yield* prepareSessionSettings(cwd, null, "off");
+          assert.strictEqual(off.get("browser.enabled"), nativeBrowser);
+
+          const enabled = yield* prepareSessionSettings(cwd, null, "agent-browser");
+          assert.strictEqual(enabled.get("browser.enabled"), false);
+          assert.strictEqual(off.get("browser.enabled"), nativeBrowser);
+
+          const disabledAgain = yield* prepareSessionSettings(cwd, null, "off");
+          assert.strictEqual(disabledAgain.get("browser.enabled"), nativeBrowser);
+        }
       }),
     ),
   );

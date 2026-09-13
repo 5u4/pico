@@ -5,7 +5,7 @@
   "exports": {
     "./layer": "./src/layer.ts",
     "./agent-session-store": "./src/agent-session-store.ts",
-    "./browser-install": "./src/browser-install.ts"
+    "./agent-browser/install": "./src/agent-browser/install.ts"
   },
   "dependencies": {
     "@oh-my-pi/pi-coding-agent": "catalog:",
