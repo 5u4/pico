@@ -113,6 +113,7 @@ const interaction = (overrides: Partial<DiscordInteraction> = {}): DiscordIntera
   defer: async () => undefined,
   deferEdit: async () => undefined,
   edit: async () => undefined,
+  respond: async () => undefined,
   ...overrides,
 });
 
@@ -123,7 +124,442 @@ const interactionHandlerFor = (bot: DiscordInputBot) => {
   return handler;
 };
 
+const installBtwInput = Effect.fn("test.installBtwInput")(function* (options: {
+  readonly askBtw: Application["Service"]["askBtw"];
+  readonly sendMessage?: Application["Service"]["sendMessage"];
+  readonly closeChat?: Application["Service"]["closeChat"];
+  readonly editChannel?: DiscordInputBot["helpers"]["editChannel"];
+  readonly drainOutput?: () => Effect.Effect<void>;
+}) {
+  const bot: DiscordInputBot = {
+    id: 999n,
+    events: {},
+    helpers: {
+      addReaction: async () => undefined,
+      deleteOwnReaction: async () => undefined,
+      getChannel: async (id) => ({
+        id,
+        guildId: 1n,
+        type: id === 10n ? ChannelTypes.GuildText : ChannelTypes.PublicThread,
+        parentId: 10n,
+      }),
+      sendMessage: async () => {
+        throw new Error("btw must use its public interaction");
+      },
+      editChannel:
+        options.editChannel ??
+        (async () => {
+          throw new Error("btw must not archive its thread");
+        }),
+      startThreadWithMessage: async () => {
+        throw new Error("btw must not create a thread");
+      },
+    },
+  };
+  const application = Application.of({
+    createWorkspace: () => Effect.die("btw must not create a workspace"),
+    getOrCreateWorkspaceByBinding: () => Effect.die("btw must not create a workspace"),
+    bindWorkspace: () => Effect.die("btw must not bind a workspace"),
+    createChat: () => Effect.die("btw must not create a chat"),
+    findWorkspaceByPlatformId: () => Effect.die("unexpected workspace lookup"),
+    findChatByPlatformId: (_platform, _workspace, thread) =>
+      Effect.succeed(
+        thread === "20"
+          ? Option.some({
+              id: chatId,
+              workspaceId,
+              cwd: defaultCwd,
+              externalId: thread,
+              createdAt: 0,
+              archivedAt: null,
+            })
+          : Option.none(),
+      ),
+    findChatPlatformBinding: () => Effect.die("unexpected binding lookup"),
+    transcript: () => Effect.die("btw must not read a separate transcript"),
+    closeChat: options.closeChat ?? (() => Effect.die("unexpected close")),
+    sendMessage: options.sendMessage ?? (() => Effect.die("btw must not send a main prompt")),
+    askBtw: options.askBtw,
+    abort: () => Effect.die("btw must not abort the main request"),
+    contextUsage: () => Effect.die("unexpected context read"),
+    shake: () => Effect.die("unexpected shake"),
+  });
+  yield* install(bot, config, options.drainOutput).pipe(
+    Effect.provideService(Application, application),
+    Effect.provide(BunCrypto.layer),
+  );
+  return bot;
+});
+
 describe("Discord input", () => {
+  it.effect("keeps long side questions and answers public while normal input continues", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const mainStarted = yield* Deferred.make<void>();
+        const mainFinished = yield* Deferred.make<void>();
+        const sideStarted = yield* Deferred.make<void>();
+        const sideFinished = yield* Deferred.make<string>();
+        const laterSent = yield* Deferred.make<void>();
+        const delivered = yield* Deferred.make<void>();
+        const question = `Why ${"x".repeat(2_200)}?`;
+        const answer = `${"Answer ".repeat(700)}last-answer-marker`;
+        const publicMessages: Array<{ kind: "edit" | "followup"; content: string }> = [];
+        let deferred = false;
+        const bot = yield* installBtwInput({
+          sendMessage: (_id, prompt) =>
+            Deferred.succeed(prompt.text === "main" ? mainStarted : laterSent, undefined).pipe(
+              Effect.as({ kind: "started", completed: Deferred.await(mainFinished) }),
+            ),
+          askBtw: () =>
+            Deferred.succeed(sideStarted, undefined).pipe(
+              Effect.andThen(Deferred.await(sideFinished)),
+            ),
+        });
+        const receive = async (
+          kind: "edit" | "followup",
+          response: Parameters<DiscordInteraction["edit"]>[0],
+        ) => {
+          assert.deepStrictEqual(response.allowedMentions, { parse: [], repliedUser: false });
+          assert.isUndefined(response.flags);
+          const content = response.content ?? "";
+          assert.isAtMost(content.length, 2_000);
+          publicMessages.push({ kind, content });
+          if (content.includes("last-answer-marker")) {
+            Effect.runSync(Deferred.succeed(delivered, undefined));
+          }
+        };
+        handlerFor(bot)(message({ channelId: 20n, content: "main" }));
+        yield* Deferred.await(mainStarted);
+        interactionHandlerFor(bot)(
+          interaction({
+            channelId: 20n,
+            data: {
+              name: "btw",
+              options: [
+                {
+                  name: "question",
+                  type: ApplicationCommandOptionTypes.String,
+                  value: ` ${question} `,
+                },
+              ],
+            },
+            defer: async (isPrivate) => {
+              assert.isFalse(isPrivate);
+              deferred = true;
+            },
+            edit: (response) => receive("edit", response),
+            respond: (response) => receive("followup", response),
+          }),
+        );
+        yield* Deferred.await(sideStarted);
+        assert.isTrue(deferred);
+        assert.isFalse(yield* Deferred.isDone(mainFinished));
+        handlerFor(bot)(message({ channelId: 20n, content: "later" }));
+        yield* Deferred.await(laterSent);
+        yield* Deferred.succeed(sideFinished, answer);
+        yield* Deferred.await(delivered);
+        assert.strictEqual(publicMessages[0]?.kind, "edit");
+        assert.isTrue(publicMessages.slice(1).every(({ kind }) => kind === "followup"));
+        assert.strictEqual(
+          publicMessages.map(({ content }) => content).join(""),
+          `/btw · <@100>\n\n${question}\n\n${answer}`,
+        );
+        yield* Deferred.succeed(mainFinished, undefined);
+      }),
+    ),
+  );
+
+  it.effect("drains successful and cancelled side replies before archiving their thread", () =>
+    Effect.gen(function* () {
+      for (const outcome of ["answer", "cancelled"] as const) {
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const asked = yield* Deferred.make<void>();
+            const cancelled = yield* Deferred.make<void>();
+            const replyStarted = yield* Deferred.make<void>();
+            const draining = yield* Deferred.make<void>();
+            const closeReplied = yield* Deferred.make<void>();
+            const releaseReply = Promise.withResolvers<void>();
+            const question = outcome === "answer" ? `Explain ${"x".repeat(2_200)}` : "Explain this";
+            const answer = "The complete answer.";
+            const publicMessages: string[] = [];
+            const order: string[] = [];
+            const bot = yield* installBtwInput({
+              askBtw: () =>
+                Deferred.succeed(asked, undefined).pipe(
+                  Effect.andThen(
+                    outcome === "answer"
+                      ? Effect.succeed(answer)
+                      : Deferred.await(cancelled).pipe(Effect.andThen(Effect.interrupt)),
+                  ),
+                ),
+              closeChat: () =>
+                Deferred.succeed(cancelled, undefined).pipe(Effect.as({ kind: "closed" })),
+              drainOutput: () => Deferred.succeed(draining, undefined).pipe(Effect.asVoid),
+              editChannel: async () => {
+                order.push("archive");
+              },
+            });
+            const receive = async (response: Parameters<DiscordInteraction["edit"]>[0]) => {
+              const content = response.content ?? "";
+              if (outcome === "cancelled" || content.includes(answer)) {
+                Effect.runSync(Deferred.succeed(replyStarted, undefined));
+                await releaseReply.promise;
+              }
+              publicMessages.push(content);
+              order.push("public-reply");
+            };
+            yield* Effect.gen(function* () {
+              interactionHandlerFor(bot)(
+                interaction({
+                  channelId: 20n,
+                  data: {
+                    name: "btw",
+                    options: [
+                      {
+                        name: "question",
+                        type: ApplicationCommandOptionTypes.String,
+                        value: question,
+                      },
+                    ],
+                  },
+                  edit: receive,
+                  respond: receive,
+                }),
+              );
+              yield* Deferred.await(asked);
+              if (outcome === "answer") yield* Deferred.await(replyStarted);
+              interactionHandlerFor(bot)(
+                interaction({
+                  channelId: 20n,
+                  data: { name: "close" },
+                  edit: async () => {
+                    Effect.runSync(Deferred.succeed(closeReplied, undefined));
+                  },
+                }),
+              );
+              yield* Deferred.await(draining);
+              yield* Deferred.await(replyStarted);
+              assert.notInclude(order, "archive");
+              releaseReply.resolve();
+              yield* Deferred.await(closeReplied);
+              assert.strictEqual(order.at(-1), "archive");
+              const content = publicMessages.join("");
+              if (outcome === "answer") {
+                assert.strictEqual(content, `/btw · <@100>\n\n${question}\n\n${answer}`);
+              } else {
+                assert.isTrue(content.startsWith(`/btw · <@100>\n\n${question}\n\n`));
+                assert.include(content, "cancelled");
+              }
+            }).pipe(Effect.ensuring(Effect.sync(() => releaseReply.resolve())));
+          }),
+        );
+      }
+    }),
+  );
+
+  it.effect("drains side replies accepted before their Discord deferral completes", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const deferStarted = yield* Deferred.make<void>();
+        const draining = yield* Deferred.make<void>();
+        const sideReplied = yield* Deferred.make<void>();
+        const closeReplied = yield* Deferred.make<void>();
+        const releaseDefer = Promise.withResolvers<void>();
+        const order: string[] = [];
+        const bot = yield* installBtwInput({
+          askBtw: () => Effect.fail(new ChatClosed()),
+          closeChat: () =>
+            Effect.sync(() => {
+              order.push("close");
+              return { kind: "closed" } as const;
+            }),
+          drainOutput: () => Deferred.succeed(draining, undefined).pipe(Effect.asVoid),
+          editChannel: async () => {
+            order.push("archive");
+          },
+        });
+        yield* Effect.gen(function* () {
+          interactionHandlerFor(bot)(
+            interaction({
+              channelId: 20n,
+              data: {
+                name: "btw",
+                options: [
+                  {
+                    name: "question",
+                    type: ApplicationCommandOptionTypes.String,
+                    value: "Explain this",
+                  },
+                ],
+              },
+              defer: async () => {
+                Effect.runSync(Deferred.succeed(deferStarted, undefined));
+                await releaseDefer.promise;
+              },
+              edit: async (response) => {
+                assert.include(response.content ?? "", "closed");
+                order.push("public-reply");
+                Effect.runSync(Deferred.succeed(sideReplied, undefined));
+              },
+            }),
+          );
+          yield* Deferred.await(deferStarted);
+          interactionHandlerFor(bot)(
+            interaction({
+              channelId: 20n,
+              data: { name: "close" },
+              edit: async () => {
+                Effect.runSync(Deferred.succeed(closeReplied, undefined));
+              },
+            }),
+          );
+          yield* Deferred.await(draining);
+          releaseDefer.resolve();
+          yield* Deferred.await(sideReplied);
+          yield* Deferred.await(closeReplied);
+          assert.deepStrictEqual(order, ["close", "public-reply", "archive"]);
+        }).pipe(Effect.ensuring(Effect.sync(() => releaseDefer.resolve())));
+      }),
+    ),
+  );
+
+  it.effect(
+    "terminates cancelled, timed out, and failed side replies without losing the question",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const waiting = yield* Deferred.make<void>();
+          const cancelled = yield* Deferred.make<void>();
+          const releaseCleanup = yield* Deferred.make<void>();
+          const settled = yield* Deferred.make<void>();
+          const archived = yield* Deferred.make<void>();
+          const logs: Array<ReturnType<typeof Logger.formatStructured.log>> = [];
+          const bot = yield* installBtwInput({
+            askBtw: (_id, question) => {
+              if (question === "cancel") return Effect.interrupt;
+              if (question === "closed") return Effect.fail(new ChatClosed());
+              if (question === "timeout")
+                return Deferred.succeed(waiting, undefined).pipe(
+                  Effect.andThen(Effect.never),
+                  Effect.ensuring(
+                    Deferred.succeed(cancelled, undefined).pipe(
+                      Effect.andThen(Deferred.await(releaseCleanup)),
+                      Effect.andThen(Deferred.succeed(settled, undefined)),
+                    ),
+                  ),
+                );
+              return Effect.die(new Error("private-provider-payload"));
+            },
+            closeChat: () => Effect.succeed({ kind: "closed" }),
+            editChannel: async () => {
+              Effect.runSync(Deferred.succeed(archived, undefined));
+            },
+          }).pipe(
+            Effect.provide(
+              Logger.layer([
+                Logger.make((options) => {
+                  logs.push(Logger.formatStructured.log(options));
+                }),
+              ]),
+            ),
+          );
+          const invoke = (question: string) =>
+            new Promise<string>((resolve) => {
+              interactionHandlerFor(bot)(
+                interaction({
+                  channelId: 20n,
+                  data: {
+                    name: "btw",
+                    options: [
+                      {
+                        name: "question",
+                        type: ApplicationCommandOptionTypes.String,
+                        value: question,
+                      },
+                    ],
+                  },
+                  defer: async (isPrivate) => {
+                    assert.isFalse(isPrivate);
+                  },
+                  edit: async (response) => {
+                    resolve(response.content ?? "");
+                  },
+                }),
+              );
+            });
+          for (const question of ["cancel", "closed", "fail"]) {
+            const reply = yield* Effect.promise(() => invoke(question));
+            assert.isTrue(reply.startsWith(`/btw · <@100>\n\n${question}\n\n`));
+            assert.isFalse(reply.includes("private-provider-payload"));
+          }
+          yield* Effect.gen(function* () {
+            const timedOut = invoke("timeout");
+            yield* Deferred.await(waiting);
+            yield* TestClock.adjust("10 minutes");
+            const reply = yield* Effect.promise(() => timedOut);
+            assert.isTrue(reply.startsWith("/btw · <@100>\n\ntimeout\n\n"));
+            assert.include(reply, "timed out");
+            yield* Deferred.await(cancelled);
+            interactionHandlerFor(bot)(interaction({ channelId: 20n, data: { name: "close" } }));
+            yield* Deferred.await(archived);
+            assert.isFalse(yield* Deferred.isDone(settled));
+            yield* Deferred.succeed(releaseCleanup, undefined);
+            yield* Deferred.await(settled);
+            assert.isFalse(JSON.stringify(logs).includes("private-provider-payload"));
+          }).pipe(Effect.ensuring(Deferred.succeed(releaseCleanup, undefined)));
+        }),
+      ),
+  );
+
+  it.effect("rejects side questions outside existing Pico threads without creating chats", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        let asked = false;
+        const bot = yield* installBtwInput({
+          askBtw: () =>
+            Effect.sync(() => {
+              asked = true;
+              return "unexpected answer";
+            }),
+        });
+        for (const [channelId, guildId, question] of [
+          [10n, 1n, "channel question"],
+          [21n, 1n, "unbound thread question"],
+          [20n, 2n, "other guild question"],
+          [20n, 1n, " \n "],
+        ] as const) {
+          const reply = yield* Effect.promise(
+            () =>
+              new Promise<string>((resolve) => {
+                interactionHandlerFor(bot)(
+                  interaction({
+                    channelId,
+                    guildId,
+                    data: {
+                      name: "btw",
+                      options: [
+                        {
+                          name: "question",
+                          type: ApplicationCommandOptionTypes.String,
+                          value: question,
+                        },
+                      ],
+                    },
+                    edit: async (response) => {
+                      resolve(response.content ?? "");
+                    },
+                  }),
+                );
+              }),
+          );
+          assert.notInclude(reply, "unexpected answer");
+        }
+        assert.isFalse(asked);
+      }),
+    ),
+  );
+
   it.effect("owns channel creation, caching, ordering, and the output lookup", () =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -158,6 +594,7 @@ describe("Discord input", () => {
         } satisfies DiscordInputBot;
 
         const application = Application.of({
+          askBtw: () => Effect.die("unexpected side question"),
           createWorkspace: () => Effect.die("unexpected explicit workspace creation"),
           getOrCreateWorkspaceByBinding: () =>
             Effect.sync(() => {
@@ -293,6 +730,7 @@ describe("Discord input", () => {
           },
         } satisfies DiscordInputBot;
         const application = Application.of({
+          askBtw: () => Effect.die("unexpected side question"),
           createWorkspace: () => Effect.die("unexpected explicit workspace creation"),
           getOrCreateWorkspaceByBinding: () =>
             Effect.succeed({
@@ -432,6 +870,7 @@ describe("Discord input", () => {
           },
         } satisfies DiscordInputBot;
         const application = Application.of({
+          askBtw: () => Effect.die("unexpected side question"),
           createWorkspace: () => Effect.die("unexpected explicit workspace creation"),
           getOrCreateWorkspaceByBinding: () => Effect.die("unexpected workspace creation"),
           bindWorkspace: () => Effect.die("unexpected workspace binding"),
@@ -586,6 +1025,7 @@ describe("Discord input", () => {
           },
         } satisfies DiscordInputBot;
         const application = Application.of({
+          askBtw: () => Effect.die("unexpected side question"),
           createWorkspace: () => Effect.die("unexpected explicit workspace creation"),
           getOrCreateWorkspaceByBinding: () => Effect.die("unexpected workspace creation"),
           bindWorkspace: () => Effect.die("unexpected workspace binding"),
@@ -757,6 +1197,7 @@ describe("Discord input", () => {
           },
         } satisfies DiscordInputBot;
         const application = Application.of({
+          askBtw: () => Effect.die("unexpected side question"),
           createWorkspace: () => Effect.die("unexpected explicit workspace creation"),
           getOrCreateWorkspaceByBinding: () => Effect.die("unexpected workspace creation"),
           bindWorkspace: (input) => {
@@ -1001,6 +1442,7 @@ describe("Discord input", () => {
         };
         const failedChat = { ...chat, id: failingChatId, externalId: "22" };
         const application = Application.of({
+          askBtw: () => Effect.die("unexpected side question"),
           createWorkspace: () => Effect.die("unexpected explicit workspace creation"),
           getOrCreateWorkspaceByBinding: () => Effect.die("shake must not create a workspace"),
           bindWorkspace: () => Effect.die("unexpected workspace binding"),
@@ -1182,6 +1624,7 @@ describe("Discord input", () => {
           archivedAt: null,
         });
         const application = Application.of({
+          askBtw: () => Effect.die("unexpected side question"),
           createWorkspace: () => Effect.die("unexpected explicit workspace creation"),
           getOrCreateWorkspaceByBinding: () => Effect.die("context must not create a workspace"),
           bindWorkspace: () => Effect.die("unexpected workspace binding"),
@@ -1324,6 +1767,7 @@ describe("Discord input", () => {
           },
         } satisfies DiscordInputBot;
         const application = Application.of({
+          askBtw: () => Effect.die("unexpected side question"),
           createWorkspace: () => Effect.die("unexpected workspace creation"),
           getOrCreateWorkspaceByBinding: () => Effect.die("unexpected workspace creation"),
           bindWorkspace: () => Effect.die("unexpected workspace binding"),
@@ -1445,6 +1889,7 @@ describe("Discord input", () => {
           },
         } satisfies DiscordInputBot;
         const application = Application.of({
+          askBtw: () => Effect.die("unexpected side question"),
           createWorkspace: () => Effect.die("unexpected workspace creation"),
           getOrCreateWorkspaceByBinding: () => Effect.die("unexpected workspace creation"),
           bindWorkspace: () => Effect.die("unexpected workspace binding"),
@@ -1592,6 +2037,7 @@ describe("Discord input", () => {
           },
         } satisfies DiscordInputBot;
         const application = Application.of({
+          askBtw: () => Effect.die("unexpected side question"),
           createWorkspace: () => Effect.die("unexpected explicit workspace creation"),
           getOrCreateWorkspaceByBinding: () => Effect.die("unexpected workspace creation"),
           bindWorkspace: () => Effect.die("unexpected workspace binding"),
@@ -1685,6 +2131,7 @@ describe("Discord input", () => {
           },
         } satisfies DiscordInputBot;
         const application = Application.of({
+          askBtw: () => Effect.die("unexpected side question"),
           createWorkspace: () => Effect.die("unexpected explicit workspace creation"),
           getOrCreateWorkspaceByBinding: () => Effect.die("unexpected workspace creation"),
           bindWorkspace: () => Effect.die("unexpected workspace binding"),
@@ -1779,6 +2226,7 @@ describe("Discord input", () => {
           },
         } satisfies DiscordInputBot;
         const application = Application.of({
+          askBtw: () => Effect.die("unexpected side question"),
           createWorkspace: () => Effect.die("unexpected explicit workspace creation"),
           getOrCreateWorkspaceByBinding: () => Effect.die("unexpected workspace creation"),
           bindWorkspace: () => Effect.die("unexpected workspace binding"),
@@ -1896,6 +2344,7 @@ describe("Discord input", () => {
           },
         } satisfies DiscordInputBot;
         const application = Application.of({
+          askBtw: () => Effect.die("unexpected side question"),
           createWorkspace: () => Effect.die("unexpected explicit workspace creation"),
           getOrCreateWorkspaceByBinding: () => Effect.die("unexpected workspace creation"),
           bindWorkspace: ({ configuration }) =>
@@ -2003,6 +2452,7 @@ describe("Discord input", () => {
           },
         } satisfies DiscordInputBot;
         const application = Application.of({
+          askBtw: () => Effect.die("unexpected side question"),
           createWorkspace: () => Effect.die("unexpected explicit workspace creation"),
           getOrCreateWorkspaceByBinding: () => Effect.die("unexpected workspace creation"),
           bindWorkspace: () =>
@@ -2092,6 +2542,7 @@ describe("Discord input", () => {
           },
         } satisfies DiscordInputBot;
         const application = Application.of({
+          askBtw: () => Effect.die("unexpected side question"),
           createWorkspace: () => Effect.die("unexpected explicit workspace creation"),
           getOrCreateWorkspaceByBinding: () =>
             Effect.succeed({
@@ -2207,6 +2658,7 @@ describe("Discord input", () => {
             },
           } satisfies DiscordInputBot;
           const application = Application.of({
+            askBtw: () => Effect.die("unexpected side question"),
             createWorkspace: () => Effect.die("unexpected explicit workspace creation"),
             getOrCreateWorkspaceByBinding: () =>
               Effect.succeed({
@@ -2357,6 +2809,7 @@ describe("Discord input", () => {
           archivedAt: null,
         };
         const application = Application.of({
+          askBtw: () => Effect.die("unexpected side question"),
           createWorkspace: () => Effect.die("unexpected explicit workspace creation"),
           getOrCreateWorkspaceByBinding: () => Effect.die("unexpected workspace creation"),
           bindWorkspace: () => Effect.die("unexpected workspace binding"),
@@ -2554,6 +3007,7 @@ describe("Discord input", () => {
           },
         };
         const application = Application.of({
+          askBtw: () => Effect.die("unexpected side question"),
           createWorkspace: () => Effect.die("unexpected workspace creation"),
           getOrCreateWorkspaceByBinding: () => Effect.die("unexpected workspace creation"),
           bindWorkspace: () => Effect.die("unexpected workspace binding"),
@@ -2681,6 +3135,7 @@ describe("Discord input", () => {
           },
         };
         const application = Application.of({
+          askBtw: () => Effect.die("unexpected side question"),
           createWorkspace: () => Effect.die("unexpected workspace creation"),
           getOrCreateWorkspaceByBinding: () => Effect.die("unexpected workspace creation"),
           bindWorkspace: () => Effect.die("unexpected workspace binding"),
@@ -2810,6 +3265,7 @@ describe("Discord input", () => {
           },
         };
         const application = Application.of({
+          askBtw: () => Effect.die("unexpected side question"),
           createWorkspace: () => Effect.die("unexpected workspace creation"),
           getOrCreateWorkspaceByBinding: () => Effect.die("unexpected workspace creation"),
           bindWorkspace: () => Effect.die("unexpected workspace binding"),

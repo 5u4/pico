@@ -20,6 +20,7 @@ import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
@@ -74,6 +75,7 @@ const importNative = async () => {
     ...pool,
     ...normalized,
     makeSessionHandle: adapter.makeSessionHandle,
+    makeBtw: adapter.makeBtw,
   };
 };
 
@@ -107,6 +109,9 @@ const providerTurn = (text: string) => ({
   text,
   entered: Promise.withResolvers<Context>(),
   release: Promise.withResolvers<void>(),
+  aborted: Promise.withResolvers<void>(),
+  settled: Promise.withResolvers<void>(),
+  finishAbort: Promise.resolve(),
 });
 
 const withSession = async (
@@ -161,20 +166,26 @@ const withSession = async (
       },
       timestamp: Date.now(),
     };
-    const abort = () => turn.release.resolve();
+    const abort = () => {
+      turn.aborted.resolve();
+      turn.release.resolve();
+    };
     options?.signal?.addEventListener("abort", abort, { once: true });
     turn.entered.resolve(context);
     if (options?.signal?.aborted) abort();
-    void turn.release.promise.then(() => {
+    void turn.release.promise.then(async () => {
       options?.signal?.removeEventListener("abort", abort);
       if (options?.signal?.aborted) {
+        await turn.finishAbort;
         response.stopReason = "aborted";
         response.errorMessage = "Request was aborted";
         stream.push({ type: "error", reason: "aborted", error: response });
       } else {
+        stream.push({ type: "text_delta", contentIndex: 0, delta: turn.text, partial: response });
         stream.push({ type: "done", reason: "stop", message: response });
       }
       stream.end();
+      turn.settled.resolve();
     });
     return stream;
   };
@@ -220,6 +231,7 @@ const withSession = async (
       settings,
       modelRegistry: registry,
       sessionManager,
+      sideStreamFn: streamFn,
       ...(extensionRunner === undefined ? {} : { extensionRunner }),
       skills: [],
       skillsSettings: { enableSkillCommands: true },
@@ -290,6 +302,7 @@ const makePool = Effect.fn("NativePoolTest.make")(function* (
               sendPrompt.settle,
             ),
             sendPrompt,
+            askBtw: native.makeBtw(currentSession),
             shake: () => Promise.reject(new Error("Shake is not part of ownership tests")),
             contextUsage: () => ({ kind: "unavailable" }),
             appendAssistantMessage: () =>
@@ -313,6 +326,137 @@ const assistantTexts = (events: ReadonlyArray<AgentEvent.AgentEvent>) =>
   );
 
 describe("native SessionPool ownership", () => {
+  it("answers beside a pending main turn without steering, persisting, or emitting the aside", async () => {
+    const main = providerTurn("Main answer");
+    const side = providerTurn("Independent side answer");
+    const steered = providerTurn("Corrected main answer");
+    const idleSide = providerTurn("Idle side answer");
+    await withSession([main, side, steered, idleSide], (session, reopen) =>
+      Effect.runPromise(
+        Effect.scoped(
+          Effect.gen(function* () {
+            const pool = yield* makePool(session);
+            const events: AgentEvent.AgentEvent[] = [];
+            const initialMessage = Promise.withResolvers<void>();
+            yield* pool.events.pipe(
+              Stream.runForEach(({ event }) =>
+                Effect.sync(() => {
+                  events.push(event);
+                  if (event.type === "message-settled" && event.message.role === "user") {
+                    initialMessage.resolve();
+                  }
+                }),
+              ),
+              Effect.forkChild,
+            );
+            const first = yield* pool.send(chatId, prompt("Main request"));
+            yield* Effect.promise(() => main.entered.promise);
+            yield* Effect.promise(() => initialMessage.promise);
+            const before = structuredClone(session.messages);
+            const eventsBefore = [...events];
+            const entriesBefore = session.sessionManager.getEntries();
+            const aside = yield* pool
+              .askBtw(chatId, "Explain the current request")
+              .pipe(Effect.forkChild);
+            const sideContext = yield* Effect.promise(() => side.entered.promise);
+            expect(JSON.stringify(sideContext.messages)).toContain("Main request");
+            const correction = yield* pool.send(chatId, prompt("Correct the main request"));
+            if (correction.kind !== "steered")
+              throw new Error("Expected immediate steering admission");
+            side.release.resolve();
+            expect(yield* Fiber.join(aside)).toBe(side.text);
+            yield* pool.drain();
+            expect(session.messages).toEqual(before);
+            expect(session.sessionManager.getEntries()).toEqual(entriesBefore);
+            expect(events).toEqual(eventsBefore);
+            main.release.resolve();
+            yield* Effect.promise(() => steered.entered.promise);
+            expect(yield* correction.consumed).toBe("consumed");
+            steered.release.resolve();
+            if (first.kind !== "handled") yield* first.completed;
+            yield* Effect.promise(() => session.waitForIdle());
+            yield* pool.drain();
+            expect(assistantTexts(events)).toEqual([main.text, steered.text]);
+            const transcript = native.normalizeTranscript(session.messages);
+            const ordinaryEvents = [...events];
+            const idle = yield* pool.askBtw(chatId, "What just finished?").pipe(Effect.forkChild);
+            const idleContext = yield* Effect.promise(() => idleSide.entered.promise);
+            expect(JSON.stringify(idleContext.messages)).not.toContain(
+              "Explain the current request",
+            );
+            expect(JSON.stringify(idleContext.messages)).not.toContain(side.text);
+            yield* pool.abort(chatId);
+            idleSide.release.resolve();
+            expect(yield* Fiber.join(idle)).toBe(idleSide.text);
+            yield* pool.drain();
+            expect(native.normalizeTranscript(session.messages)).toEqual(transcript);
+            expect(events).toEqual(ordinaryEvents);
+            yield* pool.close(chatId);
+            const persisted = yield* Effect.promise(reopen);
+            expect(
+              native.normalizeTranscript(persisted.sessionManager.buildSessionContext().messages),
+            ).toEqual(transcript);
+          }).pipe(Effect.provide(platform)),
+        ),
+      ),
+    );
+  }, 30_000);
+
+  it.each(["interrupt", "close", "shutdown"] as const)(
+    "settles native side cancellation before releasing the session on %s",
+    async (stop) => {
+      const side = providerTurn("Must not be published");
+      const releaseAbort = Promise.withResolvers<void>();
+      side.finishAbort = releaseAbort.promise;
+      await withSession([side], (session) =>
+        Effect.runPromise(
+          Effect.scoped(
+            Effect.gen(function* () {
+              const poolScope = yield* Scope.make();
+              const dispose = vi.spyOn(session, "dispose");
+              const pool = yield* makePool(session).pipe(
+                Effect.provideService(Scope.Scope, poolScope),
+              );
+              const aside = yield* pool
+                .askBtw(chatId, "Cancelled side question")
+                .pipe(Effect.forkChild);
+              yield* Effect.promise(() => side.entered.promise);
+              let stopped = false;
+              const stopping = yield* (
+                stop === "interrupt"
+                  ? Fiber.interrupt(aside)
+                  : stop === "close"
+                    ? pool.close(chatId)
+                    : Scope.close(poolScope, Exit.void)
+              ).pipe(
+                Effect.tap(() =>
+                  Effect.sync(() => {
+                    stopped = true;
+                  }),
+                ),
+                Effect.forkChild,
+              );
+              yield* Effect.gen(function* () {
+                yield* Effect.promise(() => side.aborted.promise);
+                expect(stopped).toBe(false);
+                expect(dispose).not.toHaveBeenCalled();
+                releaseAbort.resolve();
+                yield* Fiber.join(stopping);
+                yield* Effect.promise(() => side.settled.promise);
+                const result = yield* Fiber.await(aside);
+                expect(Exit.isFailure(result) && Cause.hasInterruptsOnly(result.cause)).toBe(true);
+                if (stop === "interrupt") expect(dispose).not.toHaveBeenCalled();
+                yield* Scope.close(poolScope, Exit.void);
+                expect(dispose).toHaveBeenCalledOnce();
+              }).pipe(Effect.ensuring(Effect.sync(() => releaseAbort.resolve())));
+            }).pipe(Effect.provide(platform)),
+          ),
+        ),
+      );
+    },
+    30_000,
+  );
+
   it("drains discarded image cleanup before closing and reopening the same journal", async () => {
     const initial = providerTurn("Interrupted ordinary answer");
     const reused = providerTurn("Reopened image answer");

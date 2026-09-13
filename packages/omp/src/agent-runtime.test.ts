@@ -65,6 +65,7 @@ describe("AgentRuntime", () => {
                 beginDispose: () => {},
                 dispose: async () => {},
               },
+              askBtw: () => Promise.reject(new Error("unexpected side question")),
               sendPrompt: async (): Promise<MessageDelivery> => ({
                 kind: "steered",
                 consumed: Deferred.await(nativeConsumption),
@@ -114,6 +115,7 @@ describe("AgentRuntime", () => {
                       Deferred.doneUnsafe(disposed, Effect.void);
                     },
                   },
+                  askBtw: () => Promise.reject(new Error("unexpected side question")),
                   sendPrompt: async (value, onStarted): Promise<MessageDelivery> => {
                     submitted.push(value.text);
                     if (submitted.length === 1) {
@@ -200,6 +202,7 @@ describe("AgentRuntime", () => {
                     beginDispose: () => {},
                     dispose: async () => {},
                   },
+                  askBtw: () => Promise.reject(new Error("unexpected side question")),
                   sendPrompt: async (value, onStarted): Promise<MessageDelivery> => {
                     if (value.text === "reject")
                       throw new AgentError({ message: "Rejected before admission" });
@@ -283,6 +286,7 @@ describe("AgentRuntime", () => {
                   beginDispose: () => {},
                   dispose: async () => {},
                 },
+                askBtw: () => Promise.reject(new Error("unexpected side question")),
                 sendPrompt: async (value, onStarted): Promise<MessageDelivery> => {
                   if (value.text === "following") {
                     emit({ type: "run-finished", outcome: "completed" });
@@ -398,6 +402,7 @@ describe("AgentRuntime", () => {
                   return Promise.resolve();
                 },
               },
+              askBtw: () => Promise.reject(new Error("unexpected side question")),
               sendPrompt: (value) => {
                 if (value.text !== "acquire") {
                   emit({ type: "notice", level: "info", message: value.text });
@@ -514,6 +519,7 @@ describe("AgentRuntime", () => {
                     manager.releaseRetainedEntries();
                   },
                 },
+                askBtw: () => Promise.reject(new Error("unexpected side question")),
                 sendPrompt: () => Promise.resolve(admitted),
                 shake: async (mode) => shakeResult(mode),
                 appendAssistantMessage: async (message) => {
@@ -636,6 +642,7 @@ describe("AgentRuntime", () => {
                       manager.releaseRetainedEntries();
                     },
                   },
+                  askBtw: () => Promise.reject(new Error("unexpected side question")),
                   sendPrompt: (_value, onStarted) => {
                     onStarted?.();
                     manager.appendMessage(assistantMessage);
@@ -732,6 +739,7 @@ describe("AgentRuntime", () => {
                 beginDispose: () => {},
                 dispose: () => Promise.resolve(),
               },
+              askBtw: () => Promise.reject(new Error("unexpected side question")),
               sendPrompt: () => {
                 sends += 1;
                 return Promise.reject(
@@ -830,6 +838,7 @@ describe("AgentRuntime", () => {
                   return Promise.resolve();
                 },
               },
+              askBtw: () => Promise.reject(new Error("unexpected side question")),
               sendPrompt: () => Promise.resolve(admitted),
               shake: async (mode) => shakeResult(mode),
               appendAssistantMessage: () => Promise.resolve(),
@@ -891,6 +900,7 @@ describe("AgentRuntime", () => {
                         return disposal;
                       },
                     },
+                    askBtw: () => Promise.reject(new Error("unexpected side question")),
                     sendPrompt: () => Promise.resolve(admitted),
                     shake: async (mode) => shakeResult(mode),
                     appendAssistantMessage: () => Promise.resolve(),
@@ -961,6 +971,7 @@ describe("AgentRuntime", () => {
                   beginDispose: () => {},
                   dispose: () => Promise.resolve(),
                 },
+                askBtw: () => Promise.reject(new Error("unexpected side question")),
                 sendPrompt: () => {
                   emit({ type: "notice", level: "info", message: "last" });
                   return Promise.resolve(admitted);
@@ -1008,6 +1019,7 @@ describe("AgentRuntime", () => {
                   beginDispose: () => {},
                   dispose: () => Promise.resolve(),
                 },
+                askBtw: () => Promise.reject(new Error("unexpected side question")),
                 sendPrompt: (_value, onStarted) => {
                   onStarted?.();
                   emit({ type: "run-started" });
@@ -1083,6 +1095,7 @@ describe("AgentRuntime", () => {
                   beginDispose: () => {},
                   dispose: () => Promise.resolve(),
                 },
+                askBtw: () => Promise.reject(new Error("unexpected side question")),
                 sendPrompt: (_value, onStarted) => {
                   onStarted?.();
                   emit({ type: "run-started" });
@@ -1169,6 +1182,7 @@ describe("AgentRuntime", () => {
                   beginDispose: () => {},
                   dispose: () => Promise.resolve(),
                 },
+                askBtw: () => Promise.reject(new Error("unexpected side question")),
                 sendPrompt: (_value, onStarted) => {
                   sends += 1;
                   if (sends === 1) {
@@ -1278,6 +1292,7 @@ describe("AgentRuntime", () => {
                   beginDispose: () => {},
                   dispose: () => Promise.resolve(),
                 },
+                askBtw: () => Promise.reject(new Error("unexpected side question")),
                 sendPrompt: (_value, onStarted) => {
                   sends += 1;
                   if (sends === 1) {
@@ -1355,6 +1370,7 @@ describe("AgentRuntime", () => {
                     beginDispose: () => {},
                     dispose: () => Promise.resolve(),
                   },
+                  askBtw: () => Promise.reject(new Error("unexpected side question")),
                   sendPrompt: (value, onStarted) => {
                     if (value.text === "reject") return Promise.reject(rejected);
                     if (value.text === "abort-reject")
@@ -1459,6 +1475,7 @@ describe("AgentRuntime", () => {
                   beginDispose: () => {},
                   dispose: () => Promise.resolve(),
                 },
+                askBtw: () => Promise.reject(new Error("unexpected side question")),
                 sendPrompt: async (_value, onStarted) => {
                   onStarted?.();
                   emit({ type: "run-started" });

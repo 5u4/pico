@@ -82,7 +82,11 @@
   - concurrent messages and bind share one workspace identity; messages never replace existing configuration
   - a successful bind applies its requested configuration, including when a message created the workspace first
   - binds in the same channel serialize validation, configuration updates, and awaited replies
-  - thread input and commands remain serialized; chat publication and the opening prompt hold that same thread lock
+  - main-message admission remains serialized with chat publication and the opening prompt; `/abort` and `/btw` bypass the thread input lock
+  - `/btw` uses OMP's `runEphemeralTurn` on the current session. It does not run tools, steer the main task, or append either side-question message to OMP history.
+  - Discord keeps the question and answer publicly in the thread under `/btw · @requester`. This Discord history does not become context for later main or side questions.
+  - side requests retain the native session until cancellation settles. Closing cancels side requests before disposing the session and waits for their public replies before archiving the thread.
+  - side replies have a ten-minute deadline to leave time before Discord's fifteen-minute interaction token expiry. A timeout reply does not wait for slow provider cancellation.
 - a workspace can be a regular workspace (worktree_* = null) or a worktree workspace (worktree_* != null)
   - regular workspace new chats with workspace.default_cwd
   - worktree workspace new chats with new worktree from worktree_branch, creating `{worktree_prefix}/{chat.id}` to `{picoHome}/worktrees/{chat.id}`

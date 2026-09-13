@@ -90,6 +90,7 @@ export const make = Effect.fn("AgentRuntime.make")(function* (
     drain: pool.drain,
     transcript: pool.transcript,
     send: pool.send,
+    askBtw: pool.askBtw,
     sendCaptured: pool.sendCaptured,
     deliver: pool.deliver,
     publish: pool.publish,
@@ -123,6 +124,22 @@ export const makeSessionHandle = (
     }
   },
 });
+
+export const makeBtw =
+  (session: Pick<OmpAgentSession.AgentSession, "runEphemeralTurn">) =>
+  async (question: string, signal: AbortSignal): Promise<string> => {
+    const result = await session.runEphemeralTurn({
+      promptText: `<btw>
+Ephemeral side question for the current session.
+Answer briefly and directly using the conversation context already provided.
+Never use tools or ask follow-up questions.
+Question:
+${question}
+</btw>`,
+      signal,
+    });
+    return result.replyText;
+  };
 
 const promiseBoundary = <A>(message: string, evaluate: () => Promise<A>) =>
   Effect.tryPromise({
@@ -356,6 +373,7 @@ const makeFactory = (
     const opened: OpenedSession = {
       session: makeSessionHandle(created.session, sendPrompt.settle),
       sendPrompt: titleFlow.sendPrompt,
+      askBtw: makeBtw(created.session),
       shake: (mode) => created.session.shake(mode).then(normalizeShakeResult),
       contextUsage: () => normalizeContextUsage(created.session.getContextBreakdown()),
       appendAssistantMessage: async (message) => {
