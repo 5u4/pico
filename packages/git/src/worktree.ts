@@ -530,12 +530,67 @@ const removeChat = Effect.fn("GitWorktree.removeChat")(function* (
   return yield* gitError("remove worktree", `Git exited with code ${exitCode}`);
 });
 
+const prepareBase = Effect.fn("GitWorktree.create.prepareBase")(function* (
+  spawner: Spawner,
+  repositoryCwd: AbsolutePath,
+  base: string,
+) {
+  // Git otherwise omits the resolved ref when a local branch shadows a remote-tracking ref.
+  const resolved = yield* runGitResult(spawner, repositoryCwd, "resolve worktree base", [
+    "-c",
+    "core.warnAmbiguousRefs=false",
+    "rev-parse",
+    "--verify",
+    "--symbolic-full-name",
+    "--end-of-options",
+    base,
+  ]);
+  if (resolved.exitCode !== 0) {
+    return yield* gitError("resolve worktree base", `Git exited with code ${resolved.exitCode}`);
+  }
+  const ref = resolved.output.trim();
+  if (!ref.startsWith("refs/remotes/")) return ref || base;
+
+  const remotes = yield* runGitResult(spawner, repositoryCwd, "inspect remotes", ["remote"]);
+  if (remotes.exitCode !== 0) {
+    return yield* gitError("inspect remotes", `Git exited with code ${remotes.exitCode}`);
+  }
+  let remote: string | undefined;
+  for (const name of remotes.output.trim().split("\n")) {
+    if (
+      name.length > 0 &&
+      ref.startsWith(`refs/remotes/${name}/`) &&
+      (remote === undefined || name.length > remote.length)
+    ) {
+      remote = name;
+    }
+  }
+  if (remote === undefined) {
+    return yield* gitError(
+      "fetch worktree base",
+      "remote-tracking branch has no configured remote",
+    );
+  }
+  const fetched = yield* runGitResult(
+    spawner,
+    repositoryCwd,
+    "fetch worktree base",
+    ["fetch", "--", remote],
+    remoteCommandOptions,
+  );
+  if (fetched.exitCode !== 0) {
+    return yield* gitError("fetch worktree base", `Git exited with code ${fetched.exitCode}`);
+  }
+  return ref;
+});
+
 const acquire = Effect.fn("GitWorktree.create.acquire")(function* (
   fileSystem: FileSystem.FileSystem,
   path: Path.Path,
   spawner: Spawner,
   worktreesDir: AbsolutePath,
   options: CreateWorktreeOptions,
+  base: string,
 ) {
   const cwd = AbsolutePath.make(path.join(worktreesDir, options.chatId));
   const worktree: CreatedWorktree = {
@@ -557,7 +612,7 @@ const acquire = Effect.fn("GitWorktree.create.acquire")(function* (
     worktree.branch,
     "--",
     worktree.cwd,
-    options.settings.branch,
+    base,
   ]);
   yield* Effect.logDebug("Worktree acquired").pipe(
     Effect.annotateLogs({
@@ -646,8 +701,9 @@ export const make = Effect.fn("GitWorktree.make")(function* (
     options: CreateWorktreeOptions,
     use: (cwd: AbsolutePath) => Effect.Effect<A, E>,
   ): Effect.fn.Return<A, GitError | E> {
+    const base = yield* prepareBase(spawner, options.repositoryCwd, options.settings.branch);
     return yield* Effect.acquireUseRelease(
-      acquire(fileSystem, path, spawner, worktreesDir, options),
+      acquire(fileSystem, path, spawner, worktreesDir, options, base),
       (worktree) => use(worktree.cwd),
       (worktree, exit) =>
         Exit.isFailure(exit)

@@ -215,6 +215,147 @@ const renamedBranch = (id: Chat.ChatId, topic: string) =>
   `${settings.prefix}${topic}-${id.slice(-BRANCH_ID_SUFFIX_LENGTH)}`;
 
 describe("GitWorktree.create", () => {
+  for (const { remote, base, unrelated } of [
+    { remote: "origin", base: "origin/main", unrelated: "backup" },
+    { remote: "upstream", base: "refs/remotes/upstream/main", unrelated: "origin" },
+    { remote: "team/upstream", base: "team/upstream/main", unrelated: "origin" },
+  ]) {
+    it.effect(`fetches ${remote} once before creating from stale ${base}`, () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const { repositoryCwd, worktreesDir } = yield* makeRepository();
+        const remoteCwd = yield* makeRemote(repositoryCwd, "remote");
+        yield* git(repositoryCwd, ["remote", "add", remote, remoteCwd]);
+        yield* git(repositoryCwd, [
+          "remote",
+          "add",
+          unrelated,
+          path.join(repositoryCwd, "missing.git"),
+        ]);
+        yield* git(repositoryCwd, ["fetch", remote]);
+        const stale = (yield* git(repositoryCwd, [
+          "rev-parse",
+          `refs/remotes/${remote}/main`,
+        ])).trim();
+        yield* git(repositoryCwd, ["commit", "--allow-empty", "-m", "remote update"]);
+        const latest = (yield* git(repositoryCwd, ["rev-parse", "HEAD"])).trim();
+        yield* git(remoteCwd, [
+          "-c",
+          "protocol.file.allow=always",
+          "fetch",
+          repositoryCwd,
+          "refs/heads/main:refs/heads/main",
+        ]);
+        assert.notStrictEqual(stale, latest);
+        assert.strictEqual(
+          (yield* git(repositoryCwd, ["rev-parse", `refs/remotes/${remote}/main`])).trim(),
+          stale,
+        );
+        const uploadPack = path.join(repositoryCwd, "..", "upload-pack");
+        yield* fileSystem.writeFileString(
+          uploadPack,
+          '#!/bin/sh\nprintf "fetch\\n" >> "$0.log"\nexec git-upload-pack "$@"\n',
+        );
+        yield* fileSystem.chmod(uploadPack, 0o700);
+        yield* git(repositoryCwd, ["config", `remote.${remote}.uploadpack`, `"${uploadPack}"`]);
+        const { create } = yield* make(worktreesDir);
+        const cwd = yield* create(
+          { ...options(chatId(6), repositoryCwd), settings: { ...settings, branch: base } },
+          Effect.succeed,
+        );
+
+        assert.strictEqual((yield* git(cwd, ["rev-parse", "HEAD"])).trim(), latest);
+        assert.strictEqual(yield* fileSystem.readFileString(`${uploadPack}.log`), "fetch\n");
+      }).pipe(Effect.provide(BunServices.layer)),
+    );
+  }
+
+  for (const baseKind of ["local branch", "commit", "ambiguous local branch"]) {
+    it.effect(`does not fetch when the base resolves to a ${baseKind}`, () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const { repositoryCwd, worktreesDir } = yield* makeRepository();
+        const remoteCwd = yield* makeRemote(repositoryCwd, "origin");
+        yield* git(repositoryCwd, ["remote", "add", "origin", remoteCwd]);
+        yield* git(repositoryCwd, ["fetch", "origin"]);
+        const commit = (yield* git(repositoryCwd, ["rev-parse", "HEAD"])).trim();
+        yield* git(repositoryCwd, ["commit", "--allow-empty", "-m", "local update"]);
+        const local = (yield* git(repositoryCwd, ["rev-parse", "HEAD"])).trim();
+        yield* git(repositoryCwd, ["branch", "origin/main"]);
+        yield* git(repositoryCwd, [
+          "remote",
+          "set-url",
+          "origin",
+          path.join(repositoryCwd, "missing.git"),
+        ]);
+        const branch =
+          baseKind === "commit" ? commit : baseKind === "local branch" ? "main" : "origin/main";
+        const { create } = yield* make(worktreesDir);
+        const cwd = yield* create(
+          { ...options(chatId(7), repositoryCwd), settings: { ...settings, branch } },
+          Effect.succeed,
+        );
+
+        assert.strictEqual(
+          (yield* git(cwd, ["rev-parse", "HEAD"])).trim(),
+          baseKind === "commit" ? commit : local,
+        );
+        assert.strictEqual(
+          (yield* git(repositoryCwd, ["rev-parse", "refs/remotes/origin/main"])).trim(),
+          commit,
+        );
+      }).pipe(Effect.provide(BunServices.layer)),
+    );
+  }
+
+  it.effect(
+    "stops after one failed fetch without acquiring a worktree or using the stale base",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const { repositoryCwd, worktreesDir } = yield* makeRepository();
+        const remoteCwd = yield* makeRemote(repositoryCwd, "origin");
+        yield* git(repositoryCwd, ["remote", "add", "origin", remoteCwd]);
+        yield* git(repositoryCwd, ["fetch", "origin"]);
+        const uploadPack = path.join(repositoryCwd, "..", "upload-pack");
+        yield* fileSystem.writeFileString(
+          uploadPack,
+          '#!/bin/sh\nprintf "fetch\\n" >> "$0.log"\nexit 1\n',
+        );
+        yield* fileSystem.chmod(uploadPack, 0o700);
+        yield* git(repositoryCwd, ["config", "remote.origin.uploadpack", `"${uploadPack}"`]);
+        const worktrees = yield* git(repositoryCwd, ["worktree", "list", "--porcelain"]);
+        const { create } = yield* make(worktreesDir);
+        const id = chatId(8);
+        let callbackRan = false;
+        const error = yield* create(
+          {
+            ...options(id, repositoryCwd),
+            settings: { ...settings, branch: "origin/main" },
+          },
+          () =>
+            Effect.sync(() => {
+              callbackRan = true;
+            }),
+        ).pipe(Effect.flip);
+
+        assert.instanceOf(error, GitError);
+        assert.isFalse(callbackRan);
+        assert.isFalse(yield* fileSystem.exists(worktreesDir));
+        assert.strictEqual(yield* fileSystem.readFileString(`${uploadPack}.log`), "fetch\n");
+        assert.strictEqual(
+          yield* git(repositoryCwd, ["worktree", "list", "--porcelain"]),
+          worktrees,
+        );
+        assert.strictEqual(
+          (yield* git(repositoryCwd, ["branch", "--list", `chat/${id}`])).trim(),
+          "",
+        );
+      }).pipe(Effect.provide(BunServices.layer)),
+  );
+
   it.effect("retains the worktree after commit succeeds", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
