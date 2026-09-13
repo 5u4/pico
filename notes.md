@@ -98,6 +98,7 @@
   - worktree workspace new chats with new worktree from worktree_branch, creating `{worktree_prefix}/{chat.id}` to `{picoHome}/worktrees/{chat.id}`
   - new worktree branches do not inherit upstream tracking; the source branch is a starting point, not the chat branch's synchronization target.
   - automatic branch naming waits for the first completed exchange and uses its user prompt and terminal assistant reply. It only renames the generated local placeholder; user-chosen names and remote branches remain untouched.
+  - calls through one `GitWorktree` instance serialize naming checks and renames by repository common Git directory. Different repositories remain concurrent. This does not coordinate other instances or external Git processes.
   - before renaming, pico checks the exact source and target branch names on every configured fetch and push endpoint. Upstream configuration and cached remote refs do not establish publication. A remote match, query failure, or 10-second lookup timeout preserves the original name.
   - this check covers currently advertised names on configured endpoints, not arbitrary aliases or historical pushes. It cannot prevent a separate process from publishing between the check and the local rename. Naming remains a one-shot attempt, with no automatic retry or old-branch migration.
 - keep boundary error tags small; make messages specific to the failed operation and safe reason

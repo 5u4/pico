@@ -13,8 +13,10 @@ import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Logger from "effect/Logger";
 import * as Path from "effect/Path";
+import * as Queue from "effect/Queue";
 import * as References from "effect/References";
 import * as Schedule from "effect/Schedule";
+import * as Scheduler from "effect/Scheduler";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
@@ -900,6 +902,143 @@ describe("GitWorktree.renameChatBranch", () => {
         ])).trim(),
         `refs/heads/${finalBranch} ${commit}`,
       );
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
+
+  it.effect("serializes repository renames without blocking an independent repository", () =>
+    Effect.gen(function* () {
+      const path = yield* Path.Path;
+      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const { repositoryCwd, worktreesDir } = yield* makeRepository();
+      const { repositoryCwd: independentRepositoryCwd } = yield* makeRepository();
+      const setup = yield* make(worktreesDir);
+      const firstId = chatId(62);
+      const secondId = chatId(63);
+      const independentId = chatId(64);
+      const firstCwd = AbsolutePath.make(path.join(worktreesDir, firstId));
+      const secondCwd = AbsolutePath.make(path.join(worktreesDir, secondId));
+      const independentCwd = AbsolutePath.make(path.join(worktreesDir, independentId));
+      yield* setup.create(options(firstId, repositoryCwd), () => Effect.void);
+      yield* setup.create(options(secondId, repositoryCwd), () => Effect.void);
+      yield* setup.create(options(independentId, independentRepositoryCwd), () => Effect.void);
+      const commit = (yield* git(repositoryCwd, ["rev-parse", "main^{commit}"])).trim();
+      const independentCommit = (yield* git(independentRepositoryCwd, [
+        "rev-parse",
+        "main^{commit}",
+      ])).trim();
+      const entered = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const commandFinished = yield* Queue.unbounded<void>();
+      let activeCommands = 0;
+      const gatedSpawner = ChildProcessSpawner.make(
+        Effect.fn("GitWorktreeTest.gatedSpawn")(function* (command: ChildProcess.Command) {
+          if (command._tag === "StandardCommand") {
+            if (
+              command.options.cwd === firstCwd &&
+              command.args[0] === "branch" &&
+              command.args[1] === "-m"
+            ) {
+              yield* Deferred.succeed(entered, undefined);
+              yield* Deferred.await(release);
+            }
+            if (command.options.cwd === secondCwd) {
+              activeCommands += 1;
+              yield* Effect.addFinalizer(() =>
+                Effect.sync(() => {
+                  activeCommands -= 1;
+                  Queue.offerUnsafe(commandFinished, undefined);
+                }),
+              );
+            }
+          }
+          return yield* spawner.spawn(command);
+        }),
+      );
+      const worktree = yield* make(worktreesDir).pipe(
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, gatedSpawner),
+      );
+      const first = yield* worktree
+        .renameChatBranch(renameOptions(firstId, firstCwd, "first-topic"))
+        .pipe(Effect.forkScoped);
+
+      yield* Effect.gen(function* () {
+        yield* Deferred.await(entered);
+        const second = yield* worktree
+          .renameChatBranch(renameOptions(secondId, secondCwd, "second-topic"))
+          .pipe(Effect.provideService(Scheduler.PreventSchedulerYield, true), Effect.forkScoped);
+        do {
+          yield* Queue.take(commandFinished);
+          second.currentDispatcher.flush();
+        } while (activeCommands !== 0);
+
+        assert.strictEqual(
+          (yield* git(repositoryCwd, [
+            "for-each-ref",
+            "--format=%(refname) %(objectname)",
+            "refs/heads/chat/",
+          ])).trim(),
+          [`refs/heads/chat/${firstId} ${commit}`, `refs/heads/chat/${secondId} ${commit}`].join(
+            "\n",
+          ),
+        );
+        assert.isUndefined(second.pollUnsafe());
+        assert.deepStrictEqual(
+          yield* worktree
+            .renameChatBranch(renameOptions(independentId, independentCwd, "independent-topic"))
+            .pipe(Effect.timeout("5 seconds"), TestClock.withLive),
+          { kind: "renamed" },
+        );
+        assert.strictEqual(
+          (yield* git(independentRepositoryCwd, [
+            "for-each-ref",
+            "--format=%(refname) %(objectname)",
+            "refs/heads/chat/",
+          ])).trim(),
+          `refs/heads/${renamedBranch(independentId, "independent-topic")} ${independentCommit}`,
+        );
+        assert.strictEqual(
+          (yield* git(firstCwd, ["branch", "--show-current"])).trim(),
+          `chat/${firstId}`,
+        );
+        assert.strictEqual(
+          (yield* git(secondCwd, ["branch", "--show-current"])).trim(),
+          `chat/${secondId}`,
+        );
+
+        yield* Deferred.succeed(release, undefined);
+        assert.deepStrictEqual(yield* Fiber.join(first), { kind: "renamed" });
+        assert.deepStrictEqual(yield* Fiber.join(second), { kind: "renamed" });
+        assert.strictEqual(
+          (yield* git(repositoryCwd, [
+            "for-each-ref",
+            "--format=%(refname) %(objectname)",
+            "refs/heads/chat/",
+          ])).trim(),
+          [
+            `refs/heads/${renamedBranch(firstId, "first-topic")} ${commit}`,
+            `refs/heads/${renamedBranch(secondId, "second-topic")} ${commit}`,
+          ].join("\n"),
+        );
+        for (const { id, cwd, topic, expectedCommit } of [
+          { id: firstId, cwd: firstCwd, topic: "first-topic", expectedCommit: commit },
+          { id: secondId, cwd: secondCwd, topic: "second-topic", expectedCommit: commit },
+          {
+            id: independentId,
+            cwd: independentCwd,
+            topic: "independent-topic",
+            expectedCommit: independentCommit,
+          },
+        ]) {
+          assert.strictEqual(
+            (yield* git(cwd, ["branch", "--show-current"])).trim(),
+            renamedBranch(id, topic),
+          );
+          assert.strictEqual(
+            (yield* git(cwd, ["rev-parse", "HEAD^{commit}"])).trim(),
+            expectedCommit,
+          );
+        }
+      }).pipe(Effect.ensuring(Deferred.succeed(release, undefined)));
     }).pipe(Effect.provide(BunServices.layer)),
   );
 });
