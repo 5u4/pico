@@ -31,6 +31,7 @@ import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
 import type * as HttpClient from "effect/unstable/http/HttpClient";
+import * as DiscordBtw from "./discord-btw.ts";
 import * as DiscordCommand from "./discord-command.ts";
 import { discordError, promiseBoundary, reportFailure } from "./discord-error.ts";
 import * as DiscordMarkdown from "./discord-markdown.ts";
@@ -701,11 +702,14 @@ export const install = Effect.fn("DiscordInput.install")(function* <
                 ),
           ),
         );
-        const content =
+        const chunks =
           command.kind === "btw" && interaction.user !== undefined
-            ? `/btw · <@${interaction.user.id}>\n\n${command.question}\n\n${response}`
-            : response;
-        const chunks = DiscordMarkdown.split(content);
+            ? DiscordBtw.format({
+                userId: interaction.user.id,
+                question: command.question,
+                answer: response,
+              })
+            : DiscordMarkdown.split(response);
         for (const [index, chunk] of chunks.entries()) {
           yield* promiseBoundary("reply-btw", () =>
             index === 0

@@ -355,7 +355,10 @@ const buildIndex = (source: string, root: Root): MarkdownIndex => {
   }
   const unsafeBoundaries = new Set<number>();
   for (let index = 0; index + 1 < source.length; index++) {
-    if (source.charCodeAt(index) === 92) unsafeBoundaries.add(index + 1);
+    if (source.charCodeAt(index) === 92) {
+      unsafeBoundaries.add(index + 1);
+      index++;
+    }
   }
   for (const match of source.matchAll(/&(?:#[xX][\dA-Fa-f]+|#\d+|[A-Za-z][\dA-Za-z]+);/gu)) {
     for (let index = match.index + 1; index < match.index + match[0].length; index++) {
