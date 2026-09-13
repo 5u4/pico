@@ -75,8 +75,8 @@ export const openBot = Effect.fn("Discord.openBot")(function* (
       );
     }
 
-    yield* promiseBoundary("clear-global-commands", () =>
-      bot.helpers.upsertGlobalApplicationCommands([]),
+    yield* promiseBoundary("register-global-commands", () =>
+      bot.helpers.upsertGlobalApplicationCommands(DiscordCommand.directMessageCommands),
     );
     yield* Effect.forEach(allowedGuildIds, (guildId) =>
       promiseBoundary(

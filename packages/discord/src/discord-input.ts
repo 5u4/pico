@@ -282,6 +282,17 @@ export const install = Effect.fn("DiscordInput.install")(function* <
     return Option.some(chat.value.id);
   });
 
+  const resolveBotCommandChatId = Effect.fnUntraced(function* () {
+    if (botOptions === undefined) return Option.none<Chat.ChatId>();
+    yield* Effect.annotateLogsScoped({ phase: "resolve-bot-chat" });
+    const chat = yield* application.getOrCreateBotChat({
+      botRoot: botOptions.botRoot,
+      platform: "discord",
+    });
+    yield* Effect.annotateLogsScoped({ chatId: chat.id });
+    return Option.some(chat.id);
+  });
+
   const sendMessageToChat = Effect.fnUntraced(function* (
     chatId: Chat.ChatId,
     prompt: AgentMessage.AgentPrompt,
@@ -627,12 +638,14 @@ export const install = Effect.fn("DiscordInput.install")(function* <
   ) {
     const policyCopy = "This command can only be used in a pico-owned Discord thread.";
     const thread = yield* resolveCommandThread(interaction);
-    if (Option.isNone(thread)) return policyCopy;
+    if (interaction.guildId !== undefined && Option.isNone(thread)) return policyCopy;
     if (command.kind === "malformedShake") {
       return "The /shake command accepts one mode: elide, images, or thinking.";
     }
 
-    const chatId = yield* resolveCommandChatId(thread.value);
+    const chatId = Option.isSome(thread)
+      ? yield* resolveCommandChatId(thread.value)
+      : yield* resolveBotCommandChatId();
     if (Option.isNone(chatId)) return policyCopy;
     yield* Effect.annotateLogsScoped({ phase: "shake-chat" });
     return formatShakeResult(yield* application.shake(chatId.value, command.mode));
@@ -660,9 +673,11 @@ export const install = Effect.fn("DiscordInput.install")(function* <
   const contextResponse = Effect.fnUntraced(function* (interaction: Interaction) {
     const policyCopy = "This command can only be used in a pico-owned Discord thread.";
     const thread = yield* resolveCommandThread(interaction);
-    if (Option.isNone(thread)) return policyCopy;
+    if (interaction.guildId !== undefined && Option.isNone(thread)) return policyCopy;
 
-    const chatId = yield* resolveCommandChatId(thread.value);
+    const chatId = Option.isSome(thread)
+      ? yield* resolveCommandChatId(thread.value)
+      : yield* resolveBotCommandChatId();
     if (Option.isNone(chatId)) return policyCopy;
     yield* Effect.annotateLogsScoped({ phase: "context-usage" });
     return formatContextUsage(yield* application.contextUsage(chatId.value));
@@ -679,8 +694,15 @@ export const install = Effect.fn("DiscordInput.install")(function* <
           if (command.kind === "malformedBtw") return "Provide a non-empty question.";
           const policyCopy = "This command can only be used in a pico-owned Discord thread.";
           const thread = yield* resolveCommandThread(interaction);
-          if (Option.isNone(thread) || interaction.user === undefined) return policyCopy;
-          const chatId = yield* resolveCommandChatId(thread.value);
+          if (
+            (interaction.guildId !== undefined && Option.isNone(thread)) ||
+            interaction.user === undefined
+          ) {
+            return policyCopy;
+          }
+          const chatId = Option.isSome(thread)
+            ? yield* resolveCommandChatId(thread.value)
+            : yield* resolveBotCommandChatId();
           if (Option.isNone(chatId)) return policyCopy;
           yield* Effect.annotateLogsScoped({ phase: "ask-btw" });
           const answer = yield* application.askBtw(chatId.value, command.question);
@@ -1003,7 +1025,11 @@ export const install = Effect.fn("DiscordInput.install")(function* <
 
     const response = Effect.scoped(
       Effect.gen(function* () {
-        if (interaction.guildId === undefined) {
+        if (
+          interaction.guildId === undefined &&
+          (closeNonce !== undefined ||
+            !DiscordCommand.directMessageCommands.some((command) => command.name === name))
+        ) {
           yield* promiseBoundary("reply-unsupported-direct-command", () =>
             interaction.respond({
               content: "This command is only available in server channels and threads.",
@@ -1012,9 +1038,18 @@ export const install = Effect.fn("DiscordInput.install")(function* <
           );
           return;
         }
+        if (interaction.guildId === undefined && botOptions === undefined) {
+          yield* promiseBoundary("reply-unconfigured-direct-command", () =>
+            interaction.respond({
+              content: "Direct messages are unavailable because bot storage is not configured.",
+              allowedMentions,
+            }),
+          );
+          return;
+        }
         const channelId = interaction.channelId;
         const btwClosed =
-          name === "btw" && channelId !== undefined
+          interaction.guildId !== undefined && name === "btw" && channelId !== undefined
             ? (yield* Effect.acquireRelease(
                 Effect.sync(() => {
                   const entry = inputLock(channelId);
@@ -1060,6 +1095,10 @@ export const install = Effect.fn("DiscordInput.install")(function* <
               ? undefined
               : handleInteraction(interaction, command);
         if (effect === undefined) return;
+        if (interaction.guildId === undefined) {
+          yield* directMessages.withPermit(effect);
+          return;
+        }
         if (channelId === undefined || command?.kind === "abort" || name === "btw") {
           yield* effect;
           return;

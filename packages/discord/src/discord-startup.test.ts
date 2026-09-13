@@ -1,6 +1,10 @@
 import { assert, describe, it } from "@effect/vitest";
 import { AbsolutePath } from "@pico/contract/path";
-import type { CreateApplicationCommand } from "discordeno";
+import {
+  type CreateApplicationCommand,
+  DiscordApplicationIntegrationType,
+  DiscordInteractionContextType,
+} from "discordeno";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Logger from "effect/Logger";
@@ -70,11 +74,24 @@ describe("Discord startup", () => {
           yield* openBot(harness.bot, config, harness.collectedGuildIds);
           assert.deepStrictEqual(harness.calls, [
             { kind: "start" },
-            { kind: "global", commands: [] },
+            { kind: "global", commands: DiscordCommand.directMessageCommands },
             { kind: "guild", guildId: "1", commands: DiscordCommand.applicationCommands },
             { kind: "guild", guildId: "2", commands: DiscordCommand.applicationCommands },
             { kind: "guild", guildId: "3", commands: [] },
           ]);
+          const global = harness.calls.find((call) => call.kind === "global");
+          assert.isDefined(global);
+          assert.deepStrictEqual(global?.commands.map(({ name }) => name).sort(), [
+            "btw",
+            "context",
+            "shake",
+          ]);
+          for (const command of global?.commands ?? []) {
+            assert.deepStrictEqual(command.contexts, [DiscordInteractionContextType.BotDm]);
+            assert.deepStrictEqual(command.integrationTypes, [
+              DiscordApplicationIntegrationType.GuildInstall,
+            ]);
+          }
         }),
       );
 
@@ -93,7 +110,7 @@ describe("Discord startup", () => {
         );
         assert.deepStrictEqual(harness.calls, [
           { kind: "start" },
-          { kind: "global", commands: [] },
+          { kind: "global", commands: DiscordCommand.directMessageCommands },
           { kind: "guild", guildId: "3", commands: [] },
           { kind: "shutdown" },
         ]);
@@ -122,7 +139,7 @@ describe("Discord startup", () => {
       assert.isTrue(Exit.isFailure(exit));
       assert.deepStrictEqual(harness.calls, [
         { kind: "start" },
-        { kind: "global", commands: [] },
+        { kind: "global", commands: DiscordCommand.directMessageCommands },
         { kind: "guild", guildId: "1", commands: DiscordCommand.applicationCommands },
         { kind: "guild", guildId: "2", commands: DiscordCommand.applicationCommands },
         { kind: "shutdown" },

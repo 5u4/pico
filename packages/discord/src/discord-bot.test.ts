@@ -2,11 +2,13 @@ import * as BunCrypto from "@effect/platform-bun/BunCrypto";
 import { assert, describe, it } from "@effect/vitest";
 import type { AgentEvent } from "@pico/contract/agent-event";
 import type { AgentPrompt } from "@pico/contract/agent-message";
+import type { ContextUsage, ShakeResult } from "@pico/contract/agent-runtime";
 import { Application } from "@pico/contract/application";
 import type * as Chat from "@pico/contract/chat-model";
 import { ApplicationError } from "@pico/contract/errors";
 import { AbsolutePath } from "@pico/contract/path";
 import type { ReplyTarget } from "@pico/contract/reply-target";
+import { ApplicationCommandOptionTypes, InteractionTypes } from "discordeno";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
@@ -21,7 +23,7 @@ import {
   message,
   workspaceId,
 } from "./discord-input.fixture.ts";
-import { type DiscordInputBot, install } from "./discord-input.ts";
+import { type DiscordInputBot, type DiscordInteraction, install } from "./discord-input.ts";
 import {
   type DiscordOutputClient,
   makeReplyDelivery,
@@ -48,6 +50,13 @@ const directMessage = (
   attachments: [],
   ...overrides,
 });
+const directInteraction = (
+  overrides: Partial<Omit<DiscordInteraction, "guildId">> = {},
+): DiscordInteraction => {
+  const command = interaction(overrides);
+  Reflect.deleteProperty(command, "guildId");
+  return command;
+};
 const completed = (text: string): AgentEvent => ({
   type: "message-settled",
   message: {
@@ -67,6 +76,10 @@ const pngBytes = Buffer.from(
 const fixture = Effect.fn("DiscordBotTest.fixture")(function* (options: {
   readonly sendBotMessage: Application["Service"]["sendBotMessage"];
   readonly getOrCreateBotChat?: Application["Service"]["getOrCreateBotChat"];
+  readonly askBtw?: Application["Service"]["askBtw"];
+  readonly contextUsage?: Application["Service"]["contextUsage"];
+  readonly shake?: Application["Service"]["shake"];
+  readonly botStorage?: boolean;
   readonly httpClient?: HttpClient.HttpClient;
 }) {
   const replies: Array<{
@@ -142,10 +155,10 @@ const fixture = Effect.fn("DiscordBotTest.fixture")(function* (options: {
     transcript: () => Effect.die("unexpected transcript read"),
     closeChat: () => Effect.die("DM commands must not close a shared bot chat"),
     sendMessage: () => Effect.die("DM must not use thread message delivery"),
-    askBtw: () => Effect.die("DM commands must not start a side turn"),
+    askBtw: options.askBtw ?? (() => Effect.die("unexpected side question")),
     abort: () => Effect.die("DM commands must not abort a shared bot chat"),
-    contextUsage: () => Effect.die("DM commands must not inspect a thread chat"),
-    shake: () => Effect.die("DM commands must not compact a thread chat"),
+    contextUsage: options.contextUsage ?? (() => Effect.die("unexpected context read")),
+    shake: options.shake ?? (() => Effect.die("unexpected chat shake")),
   });
   const httpClient =
     options.httpClient ??
@@ -157,7 +170,7 @@ const fixture = Effect.fn("DiscordBotTest.fixture")(function* (options: {
     { ...config, allowedGuildIds: [], showToolCalls: true },
     undefined,
     httpClient,
-    { botRoot, outputClient },
+    options.botStorage === false ? undefined : { botRoot, outputClient },
   ).pipe(Effect.provideService(Application, application), Effect.provide(BunCrypto.layer));
   return {
     bot,
@@ -406,32 +419,473 @@ describe("Discord bot direct messages", () => {
     }),
   );
 
-  it.effect("rejects guild commands in DMs before any thread control effects", () =>
+  it.effect("shares message context across DM commands but keeps their replies separate", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const transcripts = new Map<Chat.ChatId, string>();
+        const messageReceived = yield* Deferred.make<void>();
+        const harness = yield* fixture({
+          sendBotMessage: (id, prompt) =>
+            Effect.sync(() => {
+              transcripts.set(id, prompt.text);
+              Deferred.doneUnsafe(messageReceived, Effect.void);
+            }),
+          contextUsage: (id) =>
+            Effect.sync(() => {
+              const tokens = transcripts.get(id)?.length ?? 0;
+              return {
+                kind: "available",
+                contextWindow: 100,
+                usedTokens: tokens,
+                systemPromptTokens: 0,
+                systemToolsTokens: 0,
+                systemContextTokens: 0,
+                skillsTokens: 0,
+                messagesTokens: tokens,
+              } satisfies ContextUsage;
+            }),
+          shake: (id, mode) =>
+            Effect.sync(() => {
+              assert.strictEqual(mode, "thinking");
+              const tokens = transcripts.get(id)?.length ?? 0;
+              const dropped = transcripts.delete(id);
+              return {
+                mode: "thinking",
+                thinkingBlocksDropped: dropped ? 1 : 0,
+                tokensFreed: tokens,
+              } satisfies ShakeResult;
+            }),
+        });
+        handlerFor(harness.bot)(
+          directMessage({ channelId: 101n, author: { id: 11n }, content: "remember this" }),
+        );
+        yield* Deferred.await(messageReceived);
+        const readReply = yield* Deferred.make<string>();
+        const shakeReply = yield* Deferred.make<string>();
+        const rereadReply = yield* Deferred.make<string>();
+        const handle = interactionHandlerFor(harness.bot);
+        handle(
+          directInteraction({
+            channelId: 202n,
+            user: { id: 22n },
+            data: { name: "context" },
+            edit: async ({ content }) => {
+              Deferred.doneUnsafe(readReply, Effect.succeed(content ?? ""));
+            },
+          }),
+        );
+        assert.match(yield* Deferred.await(readReply), /13 \/ 100 tokens/);
+        handle(
+          directInteraction({
+            channelId: 101n,
+            user: { id: 11n },
+            data: {
+              name: "shake",
+              options: [
+                {
+                  name: "mode",
+                  type: ApplicationCommandOptionTypes.String,
+                  value: "thinking",
+                },
+              ],
+            },
+            edit: async ({ content }) => {
+              Deferred.doneUnsafe(shakeReply, Effect.succeed(content ?? ""));
+            },
+          }),
+        );
+        assert.match(yield* Deferred.await(shakeReply), /Dropped 1 thinking block/);
+        handle(
+          directInteraction({
+            channelId: 202n,
+            user: { id: 22n },
+            data: { name: "context" },
+            edit: async ({ content }) => {
+              Deferred.doneUnsafe(rereadReply, Effect.succeed(content ?? ""));
+            },
+          }),
+        );
+        assert.match(yield* Deferred.await(rereadReply), /0 \/ 100 tokens/);
+        assert.deepStrictEqual(harness.resolvedRoots, [botRoot, botRoot, botRoot, botRoot]);
+        assert.deepStrictEqual(harness.sent, []);
+        assert.deepStrictEqual(harness.replies, []);
+        assert.isTrue(Option.isNone(yield* harness.resolveThreadId(chatId)));
+      }),
+    ),
+  );
+
+  it.effect("acknowledges DM commands before serializing context and shake across senders", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const firstStarted = yield* Deferred.make<void>();
+        const releaseFirst = yield* Deferred.make<void>();
+        const contextDeferred = yield* Deferred.make<void>();
+        const shakeDeferred = yield* Deferred.make<void>();
+        const contextStarted = yield* Deferred.make<void>();
+        const releaseContext = yield* Deferred.make<void>();
+        const editStarted = yield* Deferred.make<void>();
+        const releaseEdit = Promise.withResolvers<void>();
+        const shakeStarted = yield* Deferred.make<void>();
+        const releaseShake = yield* Deferred.make<void>();
+        const laterSent = yield* Deferred.make<void>();
+        const order: Array<string> = [];
+        const harness = yield* fixture({
+          sendBotMessage: (_id, prompt) =>
+            Effect.gen(function* () {
+              order.push(prompt.text);
+              if (prompt.text === "first") {
+                yield* Deferred.succeed(firstStarted, undefined);
+                yield* Deferred.await(releaseFirst);
+              } else {
+                yield* Deferred.succeed(laterSent, undefined);
+              }
+            }),
+          contextUsage: () =>
+            Effect.gen(function* () {
+              order.push("context");
+              yield* Deferred.succeed(contextStarted, undefined);
+              yield* Deferred.await(releaseContext);
+              return { kind: "unavailable" } satisfies ContextUsage;
+            }),
+          shake: () =>
+            Effect.gen(function* () {
+              order.push("shake");
+              yield* Deferred.succeed(shakeStarted, undefined);
+              yield* Deferred.await(releaseShake);
+              return {
+                mode: "elide",
+                toolResultsDropped: 0,
+                blocksDropped: 0,
+                tokensFreed: 0,
+              } satisfies ShakeResult;
+            }),
+        });
+        handlerFor(harness.bot)(
+          directMessage({ channelId: 101n, author: { id: 11n }, content: "first" }),
+        );
+        yield* Deferred.await(firstStarted);
+        const handle = interactionHandlerFor(harness.bot);
+        handle(
+          directInteraction({
+            channelId: 202n,
+            user: { id: 22n },
+            data: { name: "context" },
+            defer: async () => {
+              Deferred.doneUnsafe(contextDeferred, Effect.void);
+            },
+            edit: async () => {
+              order.push("context-edit");
+              Deferred.doneUnsafe(editStarted, Effect.void);
+              await releaseEdit.promise;
+              order.push("context-replied");
+            },
+          }),
+        );
+        yield* Deferred.await(contextDeferred);
+        yield* Effect.yieldNow;
+        handle(
+          directInteraction({
+            channelId: 303n,
+            user: { id: 33n },
+            data: { name: "shake" },
+            defer: async () => {
+              Deferred.doneUnsafe(shakeDeferred, Effect.void);
+            },
+            edit: async () => {
+              order.push("shake-replied");
+            },
+          }),
+        );
+        yield* Deferred.await(shakeDeferred);
+        yield* Effect.yieldNow;
+        assert.deepStrictEqual(order, ["first"]);
+        yield* Deferred.succeed(releaseFirst, undefined);
+        yield* Deferred.await(contextStarted);
+        handlerFor(harness.bot)(
+          directMessage({ channelId: 404n, author: { id: 44n }, content: "later" }),
+        );
+        yield* Effect.yieldNow;
+        assert.deepStrictEqual(order, ["first", "context"]);
+        yield* Deferred.succeed(releaseContext, undefined);
+        yield* Deferred.await(editStarted);
+        yield* Effect.yieldNow;
+        assert.deepStrictEqual(order, ["first", "context", "context-edit"]);
+        releaseEdit.resolve();
+        yield* Deferred.await(shakeStarted);
+        assert.deepStrictEqual(order, [
+          "first",
+          "context",
+          "context-edit",
+          "context-replied",
+          "shake",
+        ]);
+        yield* Deferred.succeed(releaseShake, undefined);
+        yield* Deferred.await(laterSent);
+        assert.deepStrictEqual(order, [
+          "first",
+          "context",
+          "context-edit",
+          "context-replied",
+          "shake",
+          "shake-replied",
+          "later",
+        ]);
+      }),
+    ),
+  );
+
+  it.effect("acknowledges DM side questions immediately and queues their complete replies", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const firstStarted = yield* Deferred.make<void>();
+        const releaseFirst = yield* Deferred.make<void>();
+        const sideDeferred = yield* Deferred.make<void>();
+        const sideStarted = yield* Deferred.make<void>();
+        const releaseSide = yield* Deferred.make<string>();
+        const laterSent = yield* Deferred.make<void>();
+        const replyStarted = yield* Deferred.make<void>();
+        const releaseReply = yield* Deferred.make<void>();
+        const order: Array<string> = [];
+        const replies: Array<{ readonly kind: "edit" | "followup"; readonly content: string }> = [];
+        const harness = yield* fixture({
+          sendBotMessage: (id, prompt) => {
+            assert.strictEqual(id, chatId);
+            return Effect.gen(function* () {
+              order.push(prompt.text);
+              if (prompt.text === "first") {
+                yield* Deferred.succeed(firstStarted, undefined);
+                yield* Deferred.await(releaseFirst);
+                order.push("first-completed");
+              } else {
+                yield* Deferred.succeed(laterSent, undefined);
+              }
+            });
+          },
+          askBtw: (id, question) => {
+            assert.strictEqual(id, chatId);
+            assert.strictEqual(question, "What did I miss?");
+            return Effect.gen(function* () {
+              order.push("btw");
+              yield* Deferred.succeed(sideStarted, undefined);
+              return yield* Deferred.await(releaseSide);
+            });
+          },
+        });
+        const receive = async (
+          kind: "edit" | "followup",
+          response: Parameters<DiscordInteraction["edit"]>[0],
+        ) => {
+          assert.deepStrictEqual(response.allowedMentions, { parse: [], repliedUser: false });
+          const content = response.content ?? "";
+          assert.isAtMost(content.length, 2_000);
+          replies.push({ kind, content });
+          if (content.includes("last-answer-marker")) {
+            Deferred.doneUnsafe(replyStarted, Effect.void);
+            await Effect.runPromise(Deferred.await(releaseReply));
+            order.push("btw-replied");
+          }
+        };
+        handlerFor(harness.bot)(
+          directMessage({ channelId: 101n, author: { id: 11n }, content: "first" }),
+        );
+        yield* Deferred.await(firstStarted);
+        interactionHandlerFor(harness.bot)(
+          directInteraction({
+            channelId: 202n,
+            user: { id: 22n },
+            data: {
+              name: "btw",
+              options: [
+                {
+                  name: "question",
+                  type: ApplicationCommandOptionTypes.String,
+                  value: "What did I miss?",
+                },
+              ],
+            },
+            defer: async () => {
+              Deferred.doneUnsafe(sideDeferred, Effect.void);
+            },
+            edit: (response) => receive("edit", response),
+            respond: (response) => receive("followup", response),
+          }),
+        );
+        yield* Deferred.await(sideDeferred);
+        yield* Effect.yieldNow;
+        assert.isFalse(yield* Deferred.isDone(sideStarted));
+        assert.deepStrictEqual(order, ["first"]);
+        yield* Deferred.succeed(releaseFirst, undefined);
+        yield* Deferred.await(sideStarted);
+        assert.deepStrictEqual(order, ["first", "first-completed", "btw"]);
+        handlerFor(harness.bot)(
+          directMessage({ channelId: 303n, author: { id: 33n }, content: "later" }),
+        );
+        yield* Effect.yieldNow;
+        assert.isFalse(yield* Deferred.isDone(laterSent));
+        yield* Deferred.succeed(releaseSide, `${"Answer ".repeat(700)}last-answer-marker`);
+        yield* Deferred.await(replyStarted);
+        yield* Effect.yieldNow;
+        assert.isFalse(yield* Deferred.isDone(laterSent));
+        assert.deepStrictEqual(order, ["first", "first-completed", "btw"]);
+        yield* Deferred.succeed(releaseReply, undefined);
+        yield* Deferred.await(laterSent);
+        assert.deepStrictEqual(order, ["first", "first-completed", "btw", "btw-replied", "later"]);
+        assert.strictEqual(replies[0]?.kind, "edit");
+        assert.isAbove(replies.length, 1);
+        assert.isTrue(replies.slice(1).every(({ kind }) => kind === "followup"));
+        assert.include(replies.map(({ content }) => content).join("\n"), "What did I miss?");
+        assert.deepStrictEqual(harness.resolvedRoots, [botRoot, botRoot, botRoot]);
+        assert.deepStrictEqual(harness.sent, []);
+        assert.deepStrictEqual(harness.replies, []);
+        assert.isTrue(Option.isNone(yield* harness.resolveThreadId(chatId)));
+      }),
+    ),
+  );
+
+  it.effect("rejects DM commands cleanly when bot storage is not configured", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* fixture({
+          botStorage: false,
+          sendBotMessage: () => Effect.die("a command must not prompt the bot"),
+        });
+        const handle = interactionHandlerFor(harness.bot);
+        for (const name of ["btw", "context", "shake"]) {
+          const responded = yield* Deferred.make<string>();
+          handle(
+            directInteraction({
+              data: { name },
+              defer: async () => {
+                throw new Error("unconfigured DM command must be rejected immediately");
+              },
+              respond: async ({ content }) => {
+                Deferred.doneUnsafe(responded, Effect.succeed(content ?? ""));
+              },
+            }),
+          );
+          assert.match(yield* Deferred.await(responded), /bot storage is not configured/);
+        }
+        assert.deepStrictEqual(harness.resolvedRoots, []);
+      }),
+    ),
+  );
+
+  it.effect("rejects malformed DM commands before creating a bot chat", () =>
     Effect.scoped(
       Effect.gen(function* () {
         const harness = yield* fixture({
           sendBotMessage: () => Effect.die("a command must not prompt the bot"),
         });
         const handle = interactionHandlerFor(harness.bot);
-        for (const name of ["close", "abort", "btw", "bind", "shake", "context"]) {
-          const responded = yield* Deferred.make<string>();
-          const command = interaction({
-            channelId: 202n,
-            data: { name },
-            defer: async () => {
-              throw new Error("DM command must not enter thread defer flow");
-            },
-            respond: async (options) => {
-              Deferred.doneUnsafe(responded, Effect.succeed(options.content ?? ""));
-            },
-          });
-          Reflect.deleteProperty(command, "guildId");
-          handle(command);
-          assert.match(yield* Deferred.await(responded), /server channels and threads/);
+        for (const data of [
+          {
+            name: "btw",
+            options: [
+              { name: "question", type: ApplicationCommandOptionTypes.String, value: " \n " },
+            ],
+          },
+          {
+            name: "shake",
+            options: [
+              { name: "mode", type: ApplicationCommandOptionTypes.String, value: "unknown" },
+            ],
+          },
+        ]) {
+          const edited = yield* Deferred.make<string>();
+          handle(
+            directInteraction({
+              data,
+              edit: async ({ content }) => {
+                Deferred.doneUnsafe(edited, Effect.succeed(content ?? ""));
+              },
+            }),
+          );
+          assert.match(yield* Deferred.await(edited), /non-empty question|accepts one mode/);
         }
         assert.deepStrictEqual(harness.resolvedRoots, []);
-        assert.deepStrictEqual(harness.sent, []);
       }),
     ),
+  );
+
+  it.effect("finishes DM command replies when bot chat resolution fails", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* fixture({
+          getOrCreateBotChat: () =>
+            Effect.fail(
+              new ApplicationError({ reason: "operation", message: "private storage path" }),
+            ),
+          sendBotMessage: () => Effect.die("a command must not prompt the bot"),
+        });
+        const handle = interactionHandlerFor(harness.bot);
+        for (const name of ["btw", "context", "shake"]) {
+          const edited = yield* Deferred.make<string>();
+          handle(
+            directInteraction({
+              data: {
+                name,
+                options:
+                  name === "btw"
+                    ? [
+                        {
+                          name: "question",
+                          type: ApplicationCommandOptionTypes.String,
+                          value: "What happened?",
+                        },
+                      ]
+                    : [],
+              },
+              edit: async ({ content }) => {
+                Deferred.doneUnsafe(edited, Effect.succeed(content ?? ""));
+              },
+            }),
+          );
+          const response = yield* Deferred.await(edited);
+          assert.match(response, /could not/);
+          assert.notInclude(response, "private storage path");
+        }
+        assert.deepStrictEqual(harness.sent, []);
+        assert.deepStrictEqual(harness.replies, []);
+      }),
+    ),
+  );
+
+  it.effect(
+    "rejects guild-only commands and close confirmations before thread control effects",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const harness = yield* fixture({
+            sendBotMessage: () => Effect.die("a command must not prompt the bot"),
+          });
+          const handle = interactionHandlerFor(harness.bot);
+          for (const data of [
+            { name: "close" },
+            { name: "abort" },
+            { name: "bind" },
+            { customId: "pico:close:confirmation" },
+          ]) {
+            const responded = yield* Deferred.make<string>();
+            const command = directInteraction({
+              channelId: 202n,
+              type:
+                "customId" in data
+                  ? InteractionTypes.MessageComponent
+                  : InteractionTypes.ApplicationCommand,
+              data,
+              defer: async () => {
+                throw new Error("DM command must not enter thread defer flow");
+              },
+              respond: async (options) => {
+                Deferred.doneUnsafe(responded, Effect.succeed(options.content ?? ""));
+              },
+            });
+            handle(command);
+            assert.match(yield* Deferred.await(responded), /server channels and threads/);
+          }
+          assert.deepStrictEqual(harness.resolvedRoots, []);
+          assert.deepStrictEqual(harness.sent, []);
+        }),
+      ),
   );
 });
