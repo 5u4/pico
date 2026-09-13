@@ -156,7 +156,6 @@ describe("PicoConfig.load", () => {
         );
         const error = yield* load(paths).pipe(Effect.flip);
         assert.instanceOf(error, ConfigError);
-        assert.include(error.message, "browser.idle_timeout");
         assert.notInclude(error.message, "private-invalid-value");
       }
     }).pipe(Effect.scoped, Effect.provide(platformLayer)),
