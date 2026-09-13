@@ -94,7 +94,7 @@ export const applicationCommands = [
 ] satisfies Array<CreateApplicationCommand>;
 
 export const directMessageCommands = applicationCommands
-  .filter(({ name }) => name === "btw" || name === "context" || name === "shake")
+  .filter(({ name }) => name === "context" || name === "shake")
   .map((command) => ({
     ...command,
     contexts: [DiscordInteractionContextType.BotDm],

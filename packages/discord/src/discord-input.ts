@@ -694,15 +694,8 @@ export const install = Effect.fn("DiscordInput.install")(function* <
           if (command.kind === "malformedBtw") return "Provide a non-empty question.";
           const policyCopy = "This command can only be used in a pico-owned Discord thread.";
           const thread = yield* resolveCommandThread(interaction);
-          if (
-            (interaction.guildId !== undefined && Option.isNone(thread)) ||
-            interaction.user === undefined
-          ) {
-            return policyCopy;
-          }
-          const chatId = Option.isSome(thread)
-            ? yield* resolveCommandChatId(thread.value)
-            : yield* resolveBotCommandChatId();
+          if (Option.isNone(thread) || interaction.user === undefined) return policyCopy;
+          const chatId = yield* resolveCommandChatId(thread.value);
           if (Option.isNone(chatId)) return policyCopy;
           yield* Effect.annotateLogsScoped({ phase: "ask-btw" });
           const answer = yield* application.askBtw(chatId.value, command.question);
@@ -1049,7 +1042,7 @@ export const install = Effect.fn("DiscordInput.install")(function* <
         }
         const channelId = interaction.channelId;
         const btwClosed =
-          interaction.guildId !== undefined && name === "btw" && channelId !== undefined
+          name === "btw" && channelId !== undefined
             ? (yield* Effect.acquireRelease(
                 Effect.sync(() => {
                   const entry = inputLock(channelId);

@@ -82,7 +82,6 @@ describe("Discord startup", () => {
           const global = harness.calls.find((call) => call.kind === "global");
           assert.isDefined(global);
           assert.deepStrictEqual(global?.commands.map(({ name }) => name).sort(), [
-            "btw",
             "context",
             "shake",
           ]);
