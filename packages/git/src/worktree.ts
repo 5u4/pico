@@ -18,6 +18,7 @@ import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import type * as PlatformError from "effect/PlatformError";
+import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import * as ChildProcess from "effect/unstable/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
@@ -35,6 +36,11 @@ type Spawner = ChildProcessSpawner.ChildProcessSpawner["Service"];
 interface GitResult {
   readonly exitCode: number;
   readonly output: string;
+}
+
+interface RenameLock {
+  readonly semaphore: Semaphore.Semaphore;
+  users: number;
 }
 
 type ManagedWorktreeInspection =
@@ -380,6 +386,7 @@ const renameChatBranch = Effect.fn("GitWorktree.renameChatBranch")(function* (
   fileSystem: FileSystem.FileSystem,
   path: Path.Path,
   spawner: Spawner,
+  renameLocks: Map<AbsolutePath, RenameLock>,
   worktreesDir: AbsolutePath,
   options: RenameChatBranchOptions,
 ): Effect.fn.Return<RenameChatBranchResult, GitError> {
@@ -390,59 +397,83 @@ const renameChatBranch = Effect.fn("GitWorktree.renameChatBranch")(function* (
   if (inspection.state === "absent") {
     return { kind: "skipped", reason: "already-absent" };
   }
-  const target = `${options.prefix}${options.topic}-${options.chatId.slice(-BRANCH_ID_SUFFIX_LENGTH)}`;
-  const source = `${options.prefix}${options.chatId}`;
-  if (
-    !(yield* runGitExit(spawner, options.cwd, "validate worktree branch", [
-      "check-ref-format",
-      "--branch",
-      target,
-    ]))
-  ) {
-    return { kind: "skipped", reason: "invalid-target" };
-  }
+  const commonDir = inspection.commonDir;
+  return yield* Effect.acquireUseRelease(
+    Effect.sync(() => {
+      const existing = renameLocks.get(commonDir);
+      if (existing !== undefined) {
+        existing.users += 1;
+        return existing;
+      }
+      const created: RenameLock = { semaphore: Semaphore.makeUnsafe(1), users: 1 };
+      renameLocks.set(commonDir, created);
+      return created;
+    }),
+    (entry) =>
+      entry.semaphore.withPermit(
+        Effect.gen(function* (): Effect.fn.Return<RenameChatBranchResult, GitError> {
+          const target = `${options.prefix}${options.topic}-${options.chatId.slice(-BRANCH_ID_SUFFIX_LENGTH)}`;
+          const source = `${options.prefix}${options.chatId}`;
+          if (
+            !(yield* runGitExit(spawner, options.cwd, "validate worktree branch", [
+              "check-ref-format",
+              "--branch",
+              target,
+            ]))
+          ) {
+            return { kind: "skipped", reason: "invalid-target" };
+          }
 
-  const head = yield* symbolicHead(spawner, options.cwd);
-  if (head.kind === "detached") return { kind: "skipped", reason: "detached" };
-  if (head.branch === target) return { kind: "already-renamed" };
-  if (head.branch !== source) return { kind: "skipped", reason: "branch-changed" };
-  if (yield* hasRemoteState(spawner, options.cwd, source, target)) {
-    return { kind: "skipped", reason: "remote-state" };
-  }
-  const targetExists = yield* localBranchExists(spawner, options.cwd, target);
-  const currentHead = yield* symbolicHead(spawner, options.cwd);
-  if (currentHead.kind === "detached") return { kind: "skipped", reason: "detached" };
-  if (currentHead.branch === target) return { kind: "already-renamed" };
-  if (currentHead.branch !== source) return { kind: "skipped", reason: "branch-changed" };
-  if (targetExists) {
-    return { kind: "skipped", reason: "target-exists" };
-  }
+          const head = yield* symbolicHead(spawner, options.cwd);
+          if (head.kind === "detached") return { kind: "skipped", reason: "detached" };
+          if (head.branch === target) return { kind: "already-renamed" };
+          if (head.branch !== source) return { kind: "skipped", reason: "branch-changed" };
+          if (yield* hasRemoteState(spawner, options.cwd, source, target)) {
+            return { kind: "skipped", reason: "remote-state" };
+          }
+          const targetExists = yield* localBranchExists(spawner, options.cwd, target);
+          const currentHead = yield* symbolicHead(spawner, options.cwd);
+          if (currentHead.kind === "detached") return { kind: "skipped", reason: "detached" };
+          if (currentHead.branch === target) return { kind: "already-renamed" };
+          if (currentHead.branch !== source) return { kind: "skipped", reason: "branch-changed" };
+          if (targetExists) {
+            return { kind: "skipped", reason: "target-exists" };
+          }
 
-  const { exitCode } = yield* runGitResult(spawner, options.cwd, "rename worktree branch", [
-    "branch",
-    "-m",
-    "--",
-    source,
-    target,
-  ]);
-  if (exitCode === 0) return { kind: "renamed" };
+          const { exitCode } = yield* runGitResult(spawner, options.cwd, "rename worktree branch", [
+            "branch",
+            "-m",
+            "--",
+            source,
+            target,
+          ]);
+          if (exitCode === 0) return { kind: "renamed" };
 
-  const afterFailure = yield* symbolicHead(spawner, options.cwd).pipe(
-    Effect.mapError((error) =>
-      gitError(
-        "rename worktree branch",
-        `Git exited with code ${exitCode}; reinspection failed: ${error.message}`,
+          const afterFailure = yield* symbolicHead(spawner, options.cwd).pipe(
+            Effect.mapError((error) =>
+              gitError(
+                "rename worktree branch",
+                `Git exited with code ${exitCode}; reinspection failed: ${error.message}`,
+              ),
+            ),
+          );
+          if (afterFailure.kind === "detached") return { kind: "skipped", reason: "detached" };
+          if (afterFailure.branch === target) {
+            return { kind: "already-renamed" };
+          }
+          if (afterFailure.branch !== source) {
+            return { kind: "skipped", reason: "branch-changed" };
+          }
+          return yield* gitError("rename worktree branch", `Git exited with code ${exitCode}`);
+        }),
       ),
-    ),
+    (entry) =>
+      Effect.sync(() => {
+        entry.users -= 1;
+        if (entry.users === 0 && renameLocks.get(commonDir) === entry)
+          renameLocks.delete(commonDir);
+      }),
   );
-  if (afterFailure.kind === "detached") return { kind: "skipped", reason: "detached" };
-  if (afterFailure.branch === target) {
-    return { kind: "already-renamed" };
-  }
-  if (afterFailure.branch !== source) {
-    return { kind: "skipped", reason: "branch-changed" };
-  }
-  return yield* gitError("rename worktree branch", `Git exited with code ${exitCode}`);
 });
 
 const removeChat = Effect.fn("GitWorktree.removeChat")(function* (
@@ -608,6 +639,8 @@ export const make = Effect.fn("GitWorktree.make")(function* (
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+  // Linked worktrees share branch configuration and Git's temporary rename reflog.
+  const renameLocks = new Map<AbsolutePath, RenameLock>();
 
   const create: CreateWorktree = Effect.fn("GitWorktree.create")(function* <A, E>(
     options: CreateWorktreeOptions,
@@ -630,7 +663,7 @@ export const make = Effect.fn("GitWorktree.make")(function* (
     create,
     inspectChat: (options) => inspectChat(fileSystem, path, spawner, worktreesDir, options),
     renameChatBranch: (options) =>
-      renameChatBranch(fileSystem, path, spawner, worktreesDir, options),
+      renameChatBranch(fileSystem, path, spawner, renameLocks, worktreesDir, options),
     removeChat: (options) => removeChat(fileSystem, path, spawner, worktreesDir, options),
   };
 });
