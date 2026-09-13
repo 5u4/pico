@@ -1,3 +1,4 @@
+import * as BranchNaming from "@pico/application/branch-naming";
 import * as ApplicationLayer from "@pico/application/layer";
 import * as SessionContext from "@pico/application/session-context";
 import * as Config from "@pico/config/config";
@@ -165,9 +166,7 @@ const daemonLayer = (paths: PicoPaths, config: Config.PicoConfig) =>
               return yield* authenticated.value;
             });
       const persistence = PersistenceLayer.layer(paths.storeFile);
-      const branchNaming = ApplicationLayer.branchNamingLayer(gitWorktree).pipe(
-        Layer.provide(persistence),
-      );
+      const branchNaming = BranchNaming.layer(gitWorktree).pipe(Layer.provide(persistence));
       const chatSessionContext = SessionContext.layer({
         instructions,
         discordBotId,

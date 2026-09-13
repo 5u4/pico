@@ -3,6 +3,7 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./branch-naming": "./src/branch-naming.ts",
     "./layer": "./src/application.ts",
     "./session-context": "./src/session-context.ts"
   },
