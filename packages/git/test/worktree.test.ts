@@ -215,10 +215,37 @@ const renamedBranch = (id: Chat.ChatId, topic: string) =>
   `${settings.prefix}${topic}-${id.slice(-BRANCH_ID_SUFFIX_LENGTH)}`;
 
 describe("GitWorktree.create", () => {
-  for (const { remote, base, unrelated } of [
-    { remote: "origin", base: "origin/main", unrelated: "backup" },
-    { remote: "upstream", base: "refs/remotes/upstream/main", unrelated: "origin" },
-    { remote: "team/upstream", base: "team/upstream/main", unrelated: "origin" },
+  for (const { remote, base, unrelated, refspec } of [
+    {
+      remote: "origin",
+      base: "origin/main",
+      unrelated: "backup",
+      refspec: "+refs/heads/*:refs/remotes/origin/*",
+    },
+    {
+      remote: "upstream",
+      base: "refs/remotes/upstream/main",
+      unrelated: "origin",
+      refspec: "+refs/heads/*:refs/remotes/upstream/*",
+    },
+    {
+      remote: "team/upstream",
+      base: "team/upstream/main",
+      unrelated: "origin",
+      refspec: "+refs/heads/*:refs/remotes/team/upstream/*",
+    },
+    {
+      remote: "origin",
+      base: "refs/remotes/cache/mirror-main",
+      unrelated: "backup",
+      refspec: "+refs/heads/*:refs/remotes/cache/mirror-*",
+    },
+    {
+      remote: "origin",
+      base: "refs/remotes/cache/release",
+      unrelated: "backup",
+      refspec: "refs/heads/main:remotes/cache/release",
+    },
   ]) {
     it.effect(`fetches ${remote} once before creating from stale ${base}`, () =>
       Effect.gen(function* () {
@@ -227,17 +254,23 @@ describe("GitWorktree.create", () => {
         const { repositoryCwd, worktreesDir } = yield* makeRepository();
         const remoteCwd = yield* makeRemote(repositoryCwd, "remote");
         yield* git(repositoryCwd, ["remote", "add", remote, remoteCwd]);
+        yield* git(repositoryCwd, ["config", `remote.${remote}.fetch`, refspec]);
         yield* git(repositoryCwd, [
           "remote",
           "add",
           unrelated,
           path.join(repositoryCwd, "missing.git"),
         ]);
+        yield* git(repositoryCwd, ["config", "--add", `remote.${unrelated}.fetch`, refspec]);
+        yield* git(repositoryCwd, [
+          "config",
+          "--add",
+          `remote.${unrelated}.fetch`,
+          "^refs/heads/main",
+        ]);
         yield* git(repositoryCwd, ["fetch", remote]);
-        const stale = (yield* git(repositoryCwd, [
-          "rev-parse",
-          `refs/remotes/${remote}/main`,
-        ])).trim();
+        const ref = base.startsWith("refs/") ? base : `refs/remotes/${base}`;
+        const stale = (yield* git(repositoryCwd, ["rev-parse", ref])).trim();
         yield* git(repositoryCwd, ["commit", "--allow-empty", "-m", "remote update"]);
         const latest = (yield* git(repositoryCwd, ["rev-parse", "HEAD"])).trim();
         yield* git(remoteCwd, [
@@ -248,10 +281,7 @@ describe("GitWorktree.create", () => {
           "refs/heads/main:refs/heads/main",
         ]);
         assert.notStrictEqual(stale, latest);
-        assert.strictEqual(
-          (yield* git(repositoryCwd, ["rev-parse", `refs/remotes/${remote}/main`])).trim(),
-          stale,
-        );
+        assert.strictEqual((yield* git(repositoryCwd, ["rev-parse", ref])).trim(), stale);
         const uploadPack = path.join(repositoryCwd, "..", "upload-pack");
         yield* fileSystem.writeFileString(
           uploadPack,
@@ -270,6 +300,209 @@ describe("GitWorktree.create", () => {
       }).pipe(Effect.provide(BunServices.layer)),
     );
   }
+
+  for (const { name, mapping, branch, exclusions, competing } of [
+    {
+      name: "unmapped",
+      mapping: "+refs/heads/*:refs/remotes/cache/*",
+      branch: "origin/main",
+      exclusions: [],
+      competing: false,
+    },
+    {
+      name: "excluded exact source",
+      mapping: "+refs/heads/*:refs/remotes/origin/*",
+      branch: "origin/main",
+      exclusions: ["^refs/heads/main"],
+      competing: false,
+    },
+    {
+      name: "excluded abbreviated source",
+      mapping: "main:refs/remotes/origin/main",
+      branch: "origin/main",
+      exclusions: ["^refs/heads/main"],
+      competing: false,
+    },
+    {
+      name: "excluded wildcard source",
+      mapping: "+refs/heads/*:refs/remotes/origin/mirror-*",
+      branch: "origin/mirror-main",
+      exclusions: ["^refs/heads/ma*"],
+      competing: false,
+    },
+    {
+      name: "ambiguous fetch ownership",
+      mapping: "+refs/heads/*:refs/remotes/origin/*",
+      branch: "origin/main",
+      exclusions: [],
+      competing: true,
+    },
+  ]) {
+    it.effect(`rejects ${name} before fetching or acquiring a worktree`, () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const { repositoryCwd, worktreesDir } = yield* makeRepository();
+        const remoteCwd = yield* makeRemote(repositoryCwd, "origin");
+        yield* git(repositoryCwd, ["remote", "add", "origin", remoteCwd]);
+        yield* git(repositoryCwd, ["fetch", "origin"]);
+        yield* git(repositoryCwd, ["update-ref", `refs/remotes/${branch}`, "HEAD"]);
+        yield* git(repositoryCwd, ["config", "remote.origin.fetch", mapping]);
+        for (const exclusion of exclusions) {
+          yield* git(repositoryCwd, ["config", "--add", "remote.origin.fetch", exclusion]);
+        }
+        if (competing) {
+          yield* git(repositoryCwd, ["remote", "add", "upstream", remoteCwd]);
+          yield* git(repositoryCwd, ["config", "remote.upstream.fetch", mapping]);
+        }
+        const uploadPack = path.join(repositoryCwd, "..", "upload-pack");
+        yield* fileSystem.writeFileString(
+          uploadPack,
+          '#!/bin/sh\nprintf "fetch\\n" >> "$0.log"\nexec git-upload-pack "$@"\n',
+        );
+        yield* fileSystem.chmod(uploadPack, 0o700);
+        yield* git(repositoryCwd, ["config", "remote.origin.uploadpack", `"${uploadPack}"`]);
+        const before = yield* git(repositoryCwd, ["worktree", "list", "--porcelain"]);
+        const { create } = yield* make(worktreesDir);
+        const id = chatId(9);
+        let callbackRan = false;
+        const error = yield* create(
+          { ...options(id, repositoryCwd), settings: { ...settings, branch } },
+          () =>
+            Effect.sync(() => {
+              callbackRan = true;
+            }),
+        ).pipe(Effect.flip);
+
+        assert.instanceOf(error, GitError);
+        assert.isFalse(callbackRan);
+        assert.isFalse(yield* fileSystem.exists(`${uploadPack}.log`));
+        assert.isFalse(yield* fileSystem.exists(worktreesDir));
+        assert.strictEqual(yield* git(repositoryCwd, ["worktree", "list", "--porcelain"]), before);
+        assert.strictEqual(
+          (yield* git(repositoryCwd, ["branch", "--list", `chat/${id}`])).trim(),
+          "",
+        );
+      }).pipe(Effect.provide(BunServices.layer)),
+    );
+  }
+
+  it.effect(
+    "serializes shared-repository fetches without blocking local bases or independent repositories",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+        const { repositoryCwd, worktreesDir } = yield* makeRepository();
+        const { repositoryCwd: independentRepositoryCwd } = yield* makeRepository();
+        for (const cwd of [repositoryCwd, independentRepositoryCwd]) {
+          const remoteCwd = yield* makeRemote(cwd, "origin");
+          yield* git(cwd, ["remote", "add", "origin", remoteCwd]);
+          yield* git(cwd, ["fetch", "origin"]);
+          yield* git(cwd, ["commit", "--allow-empty", "-m", "remote update"]);
+          yield* git(remoteCwd, [
+            "-c",
+            "protocol.file.allow=always",
+            "fetch",
+            cwd,
+            "refs/heads/main:refs/heads/main",
+          ]);
+        }
+        const latest = (yield* git(repositoryCwd, ["rev-parse", "HEAD"])).trim();
+        const stale = (yield* git(repositoryCwd, ["rev-parse", "origin/main"])).trim();
+        const independentLatest = (yield* git(independentRepositoryCwd, [
+          "rev-parse",
+          "HEAD",
+        ])).trim();
+        const linkedCwd = AbsolutePath.make(path.join(repositoryCwd, "..", "linked"));
+        const aliasCwd = AbsolutePath.make(path.join(repositoryCwd, "..", "linked-alias"));
+        yield* git(repositoryCwd, ["worktree", "add", "--detach", linkedCwd, "HEAD"]);
+        yield* fileSystem.symlink(linkedCwd, aliasCwd);
+        const entered = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        const operationFinished = yield* Queue.unbounded<void>();
+        let activeOperations = 0;
+        const completed = Effect.sync(() => {
+          activeOperations -= 1;
+          Queue.offerUnsafe(operationFinished, undefined);
+        });
+        const gatedSpawner = ChildProcessSpawner.make(
+          Effect.fn("GitWorktreeTest.gatedFetch")(function* (command: ChildProcess.Command) {
+            if (command._tag === "StandardCommand") {
+              if (command.options.cwd === repositoryCwd && command.args[0] === "fetch") {
+                yield* Deferred.succeed(entered, undefined);
+                yield* Deferred.await(release);
+              }
+              if (command.options.cwd === aliasCwd) {
+                activeOperations += 1;
+                yield* Effect.addFinalizer(() => completed);
+              }
+            }
+            return yield* spawner.spawn(command);
+          }),
+        );
+        const trackedFileSystem: FileSystem.FileSystem = {
+          ...fileSystem,
+          realPath: (path) =>
+            Effect.acquireUseRelease(
+              Effect.sync(() => {
+                activeOperations += 1;
+              }),
+              () => fileSystem.realPath(path),
+              () => completed,
+            ),
+        };
+        const { create } = yield* make(worktreesDir).pipe(
+          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, gatedSpawner),
+          Effect.provideService(FileSystem.FileSystem, trackedFileSystem),
+        );
+        const remoteOptions = (id: number, cwd: AbsolutePath) => ({
+          ...options(chatId(id), cwd),
+          settings: { ...settings, branch: "origin/main" },
+        });
+        const first = yield* create(remoteOptions(10, repositoryCwd), Effect.succeed).pipe(
+          Effect.forkScoped,
+        );
+        yield* Effect.gen(function* () {
+          yield* Deferred.await(entered);
+          const second = yield* create(remoteOptions(11, aliasCwd), Effect.succeed).pipe(
+            Effect.provideService(Scheduler.PreventSchedulerYield, true),
+            Effect.forkScoped,
+          );
+          do {
+            yield* Queue.take(operationFinished);
+            second.currentDispatcher.flush();
+          } while (activeOperations !== 0);
+
+          assert.isUndefined(second.pollUnsafe());
+          assert.isFalse(yield* fileSystem.exists(path.join(worktreesDir, chatId(11))));
+          assert.strictEqual(
+            (yield* git(repositoryCwd, ["rev-parse", "origin/main"])).trim(),
+            stale,
+          );
+          const localCwd = yield* create(options(chatId(12), aliasCwd), Effect.succeed).pipe(
+            Effect.timeout("5 seconds"),
+            TestClock.withLive,
+          );
+          assert.strictEqual((yield* git(localCwd, ["rev-parse", "HEAD"])).trim(), latest);
+          const independentCwd = yield* create(
+            remoteOptions(13, independentRepositoryCwd),
+            Effect.succeed,
+          ).pipe(Effect.timeout("5 seconds"), TestClock.withLive);
+          assert.strictEqual(
+            (yield* git(independentCwd, ["rev-parse", "HEAD"])).trim(),
+            independentLatest,
+          );
+
+          yield* Deferred.succeed(release, undefined);
+          const firstCwd = yield* Fiber.join(first);
+          const secondCwd = yield* Fiber.join(second);
+          assert.strictEqual((yield* git(firstCwd, ["rev-parse", "HEAD"])).trim(), latest);
+          assert.strictEqual((yield* git(secondCwd, ["rev-parse", "HEAD"])).trim(), latest);
+        }).pipe(Effect.ensuring(Deferred.succeed(release, undefined)));
+      }).pipe(Effect.provide(BunServices.layer)),
+  );
 
   for (const baseKind of ["local branch", "commit", "ambiguous local branch"]) {
     it.effect(`does not fetch when the base resolves to a ${baseKind}`, () =>
