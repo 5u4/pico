@@ -1,4 +1,4 @@
-import type { BrowserConfig, PicoPaths } from "@pico/contract/config";
+import { type BrowserConfig, ExternalBrowser, type PicoPaths } from "@pico/contract/config";
 import { ConfigError } from "@pico/contract/errors";
 import { AbsolutePath } from "@pico/contract/path";
 import * as Duration from "effect/Duration";
@@ -22,6 +22,7 @@ const PicoConfigFile = Schema.Struct({
   discord: Schema.optionalKey(DiscordSection),
   browser: Schema.optionalKey(
     Schema.Struct({
+      external_browser: Schema.optionalKey(ExternalBrowser),
       idle_timeout: Schema.optionalKey(
         Schema.Union([Schema.DurationFromString, Schema.DurationFromMillis]),
       ),
@@ -54,7 +55,9 @@ const formatIssue = SchemaIssue.makeFormatterStandardSchemaV1({
 const fieldError = (field: string, expected: string) =>
   new ConfigError({ message: `Invalid config.toml field ${field}; ${expected}` });
 
-const disabled = (browser: BrowserConfig = { idleTimeoutMs: 10_800_000 }): PicoConfig => ({
+const disabled = (
+  browser: BrowserConfig = { externalBrowser: "off", idleTimeoutMs: 10_800_000 },
+): PicoConfig => ({
   discord: Option.none(),
   browser,
 });
@@ -98,7 +101,10 @@ export const load = Effect.fn("PicoConfig.load")(function* (paths: PicoPaths) {
       "expected a positive duration in whole milliseconds",
     );
   }
-  const browser = { idleTimeoutMs };
+  const browser: BrowserConfig = {
+    externalBrowser: config.browser?.external_browser ?? "off",
+    idleTimeoutMs,
+  };
   if (config.discord === undefined) return disabled(browser);
 
   const tokenPath = path.join(paths.secretsDir, "discord_bot_token");

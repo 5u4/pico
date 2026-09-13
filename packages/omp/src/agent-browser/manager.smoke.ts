@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { it } from "@effect/vitest";
 import { ChatId } from "@pico/contract/chat-model";
 import * as Schema from "effect/Schema";
-import { makeBrowserManager } from "./browser-manager.ts";
+import { makeAgentBrowserManager } from "./manager.ts";
 
 const Result = Schema.Struct({ result: Schema.String });
 const Value = Schema.Struct({ value: Schema.String });
@@ -22,7 +22,7 @@ it("isolates owners, restores saved login, and rejects work admitted before arch
       ),
   });
   const url = `http://127.0.0.1:${site.port}/`;
-  const manager = await makeBrowserManager({ root, idleTimeoutMs: 60_000 });
+  const manager = await makeAgentBrowserManager({ root, idleTimeoutMs: 60_000 });
   const chatId = ChatId.make("018f47a0-0000-7000-8000-000000000002");
   const main = { chatId, instance: { kind: "main" } } as const;
   const child = { chatId, instance: { kind: "child", sessionId: "child-one" } } as const;

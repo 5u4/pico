@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import { isIP } from "node:net";
 import { domainToASCII } from "node:url";
 import * as Schema from "effect/Schema";
-import type { BrowserOperation } from "./browser-extension.ts";
+import type { BrowserOperation } from "./extension.ts";
 
 const Expiry = Schema.Number.check(Schema.isFinite(), Schema.isGreaterThanOrEqualTo(-1));
 const ExportCookie = Schema.Struct({

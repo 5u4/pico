@@ -2,11 +2,11 @@ import { copyFile, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { browserKey } from "../../omp/src/browser-cli.ts";
+import * as AgentBrowserCli from "../../omp/src/agent-browser/cli.ts";
 
 const main = fileURLToPath(new URL("../src/main.ts", import.meta.url));
-const installer = fileURLToPath(new URL("../../omp/src/browser-install.ts", import.meta.url));
-const launcher = fileURLToPath(new URL("../../omp/src/browser-cli.ts", import.meta.url));
+const installer = fileURLToPath(new URL("../../omp/src/agent-browser/install.ts", import.meta.url));
+const launcher = fileURLToPath(new URL("../../omp/src/agent-browser/cli.ts", import.meta.url));
 
 export const installDiagnostic = "ENOSPC: free disk space before installing Chrome";
 
@@ -19,7 +19,7 @@ export const runInstallFixture = async (mode: "failure" | "success") => {
   let child: Bun.Subprocess<"ignore", "pipe", "pipe"> | undefined;
   try {
     await Promise.all([
-      mkdir(omp, { recursive: true }),
+      mkdir(join(omp, "agent-browser"), { recursive: true }),
       mkdir(join(browser, "bin"), { recursive: true }),
       mkdir(join(directory, "home")),
     ]);
@@ -37,14 +37,14 @@ export const runInstallFixture = async (mode: "failure" | "success") => {
     await Promise.all([
       copyFile(main, join(directory, "main.ts")),
       copyFile(join(dirname(main), "runtime.ts"), join(directory, "runtime.ts")),
-      copyFile(installer, join(omp, "browser-install.ts")),
-      copyFile(launcher, join(omp, "browser-cli.ts")),
+      copyFile(installer, join(omp, "agent-browser", "install.ts")),
+      copyFile(launcher, join(omp, "agent-browser", "cli.ts")),
       writeFile(
         join(omp, "package.json"),
         JSON.stringify({
           name: "@pico/omp",
           type: "module",
-          exports: { "./browser-install": "./browser-install.ts" },
+          exports: { "./agent-browser/install": "./agent-browser/install.ts" },
         }),
       ),
       writeFile(join(browser, "package.json"), '{"name":"agent-browser","type":"module"}'),
@@ -88,7 +88,7 @@ ${mode === "failure" ? `process.stderr.write(${JSON.stringify(`\u001b[2J${instal
         process.platform === "win32" ? join(root, "browser") : "/tmp",
         `pico-browser-${process.getuid?.() ?? "user"}`,
         "namespaces",
-        browserKey(root).slice(0, 16),
+        AgentBrowserCli.browserKey(root).slice(0, 16),
       ),
       { recursive: true, force: true },
     );

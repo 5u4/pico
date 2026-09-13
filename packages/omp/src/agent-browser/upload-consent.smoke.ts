@@ -6,13 +6,8 @@ import { pathToFileURL } from "node:url";
 import { it } from "@effect/vitest";
 import { ChatId } from "@pico/contract/chat-model";
 import * as Schema from "effect/Schema";
-import {
-  BrowserUnavailable,
-  browserKey,
-  prepareBrowserHome,
-  sendBrowserCommand,
-} from "./browser-cli.ts";
-import { makeBrowserManager } from "./browser-manager.ts";
+import { BrowserUnavailable, browserKey, prepareBrowserHome, sendBrowserCommand } from "./cli.ts";
+import { makeAgentBrowserManager } from "./manager.ts";
 
 const UploadedFiles = Schema.Struct({
   result: Schema.Array(
@@ -27,7 +22,7 @@ it("rejects unapproved browser operations before startup and uploads approved fi
   const contents = `upload-fixture-${crypto.randomUUID()}`;
   const page = join(directory, "upload.html");
   const home = await prepareBrowserHome(root);
-  const manager = await makeBrowserManager({ root, idleTimeoutMs: 60_000 });
+  const manager = await makeAgentBrowserManager({ root, idleTimeoutMs: 60_000 });
   const chatId = ChatId.make("018f47a0-0000-7000-8000-000000000005");
   const owner = { chatId, instance: { kind: "main" } } as const;
   const session = browserKey(JSON.stringify([chatId, "main"]));

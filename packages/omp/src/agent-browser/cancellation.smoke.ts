@@ -7,13 +7,8 @@ import { it } from "@effect/vitest";
 import { ChatId } from "@pico/contract/chat-model";
 import * as Schema from "effect/Schema";
 import { vi } from "vitest";
-import {
-  browserKey,
-  prepareBrowserHome,
-  runBrowserLauncher,
-  sendBrowserCommand,
-} from "./browser-cli.ts";
-import { makeBrowserManager } from "./browser-manager.ts";
+import { browserKey, prepareBrowserHome, runBrowserLauncher, sendBrowserCommand } from "./cli.ts";
+import { makeAgentBrowserManager } from "./manager.ts";
 
 const within = async <A>(pending: Promise<A>, milliseconds: number): Promise<A> => {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -125,7 +120,7 @@ it("releases the owner queue on cancellation while the native action can still f
       }
     },
   });
-  const manager = await makeBrowserManager({ root, idleTimeoutMs: 60_000 });
+  const manager = await makeAgentBrowserManager({ root, idleTimeoutMs: 60_000 });
   const owner = {
     chatId: ChatId.make("018f47a0-0000-7000-8000-000000000004"),
     instance: { kind: "main" },
@@ -297,8 +292,8 @@ for (const phase of ["first launch", "mode restart"] as const) {
   it(`cancels ${phase} without replay and reconciles a surviving native browser`, async () => {
     const root = await mkdtemp(join(tmpdir(), "pico-browser-native-cancel-"));
     const home = await prepareBrowserHome(root);
-    const manager = await makeBrowserManager({ root, idleTimeoutMs: 60_000 });
-    let reopened: Awaited<ReturnType<typeof makeBrowserManager>> | undefined;
+    const manager = await makeAgentBrowserManager({ root, idleTimeoutMs: 60_000 });
+    let reopened: Awaited<ReturnType<typeof makeAgentBrowserManager>> | undefined;
     const hold = join(root, "hold");
     const ready = join(root, "ready");
     const launches = join(root, "launches");
@@ -461,7 +456,7 @@ while (await Bun.file(${JSON.stringify(hold)}).exists()) await Bun.sleep(20);`,
       assert.equal(info.browserLaunched, true);
       assert.equal(info.backgroundPid, daemonPid);
       assert.equal(visits, 0);
-      reopened = await makeBrowserManager({ root, idleTimeoutMs: 60_000 });
+      reopened = await makeAgentBrowserManager({ root, idleTimeoutMs: 60_000 });
       const result = await within(
         reopened.execute(owner, {
           op: "eval",

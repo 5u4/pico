@@ -1,9 +1,9 @@
 import type { PicoRoot } from "@pico/contract/config";
 import * as Effect from "effect/Effect";
-import { prepareBrowserHome, runBrowserLauncher } from "./browser-cli.ts";
+import { prepareBrowserHome, runBrowserLauncher } from "./cli.ts";
 
 // The CLI calls this when the operator installs Chrome for a Pico root.
-export const install = Effect.fn("Browser.install")(function* (root: PicoRoot) {
+export const install = Effect.fn("AgentBrowser.install")(function* (root: PicoRoot) {
   yield* Effect.tryPromise({
     try: async () => {
       const home = await prepareBrowserHome(root);

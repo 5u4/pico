@@ -2,7 +2,7 @@
 import * as BunServices from "@effect/platform-bun/BunServices";
 import { PicoRoot } from "@pico/contract/config";
 import * as Daemon from "@pico/daemon";
-import * as BrowserInstall from "@pico/omp/browser-install";
+import * as AgentBrowserInstall from "@pico/omp/agent-browser/install";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -67,7 +67,7 @@ const main = Effect.gen(function* () {
       Command.make("install", { root }).pipe(
         Command.withDescription("Install Chrome for this Pico root"),
         Command.withHandler(({ root }) =>
-          BrowserInstall.install(root).pipe(
+          AgentBrowserInstall.install(root).pipe(
             Effect.mapError(
               (cause) =>
                 new CliError.UserError({

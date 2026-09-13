@@ -5,8 +5,8 @@ import { dirname, join } from "node:path";
 import { it } from "@effect/vitest";
 import * as Schema from "effect/Schema";
 import { expect, vi } from "vitest";
-import { launchBrowser, prepareBrowserHome, sendBrowserCommand } from "./browser-cli.ts";
-import { type BrowserTabsRequest, makeBrowserViewer } from "./browser-viewer.ts";
+import { launchBrowser, prepareBrowserHome, sendBrowserCommand } from "./cli.ts";
+import { type BrowserTabsRequest, makeBrowserViewer } from "./viewer.ts";
 
 const connected = { type: "status", connected: true };
 const ready = { type: "viewer_ready" };

@@ -77,8 +77,19 @@ To reuse login in future chats, first get the user's approval to copy **all save
 
 `{"op":"close"}` closes this browser without deleting its credentials. Archiving a chat closes Main and all its children. Do not close a browser while the user is using the viewer.
 
-## Idle lifetime and installation
+## Enable the browser and set its lifetime
+
+Pico's external browser is off by default. To enable this tool and skill, the operator sets the following in the daemon root's `config.toml`, then restarts Pico.
+
+```toml
+[browser]
+external_browser = "agent-browser"
+```
+
+With `external_browser = "off"`, Pico leaves OMP's native browser and MCP settings unchanged. Pico does not load this bundled skill or touch saved browser credentials.
 
 The default browser idle timeout is three hours. The operator can set `[browser] idle_timeout = "3 hours"` or positive whole milliseconds in `config.toml`, then restart Pico. Genuine viewer input resets the native idle timer; passive frames do not. Explicit timeouts also apply in headed mode. Native-window clicks are not guaranteed to reset that timer.
 
 If Chrome is missing, ask the operator to run `pico browser install` for the daemon's root, or `pico browser install /absolute/root`. Do not install it from an agent tool or use `npx` or a global `agent-browser` installation.
+
+Installing Chrome does not enable the external browser. The operator must select `agent-browser` separately.

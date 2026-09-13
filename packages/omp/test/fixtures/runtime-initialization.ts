@@ -100,7 +100,7 @@ await Effect.runPromise(
       const runtime = yield* make({
         paths: { root: PicoRoot.make(root), sessionsDir: sessions },
         schedules,
-        browser: { idleTimeoutMs: 10_800_000 },
+        browser: { externalBrowser: "off", idleTimeoutMs: 10_800_000 },
       });
       yield* runtime.contextUsage(chat.id);
       const started = { title: "extension-ready", markers: startMarkers(1) };
