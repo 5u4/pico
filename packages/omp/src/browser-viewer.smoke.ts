@@ -9,6 +9,7 @@ import { launchBrowser, prepareBrowserHome, sendBrowserCommand } from "./browser
 import { type BrowserTabsRequest, makeBrowserViewer } from "./browser-viewer.ts";
 
 const connected = { type: "status", connected: true };
+const ready = { type: "viewer_ready" };
 const browserTabs = {
   tabs: [
     { tabId: "t1", title: "Login", url: "https://login.example.test/", active: true },
@@ -51,14 +52,15 @@ const bounded = async <T>(promise: Promise<T>, label: string, timeout = 5_000) =
   }
 };
 
-const fixture = () => {
+const fixture = (handshake: () => Promise<void> = async () => {}) => {
   const nativeSockets: Bun.ServerWebSocket<NativeConnection>[] = [];
   const nativeRequests: string[] = [];
   const native = Bun.serve<NativeConnection>({
     hostname: "127.0.0.1",
     port: 0,
-    fetch(request, server) {
+    async fetch(request, server) {
       nativeRequests.push(new URL(request.url).search);
+      await handshake();
       if (server.upgrade(request, { data: { messages: [], closed: false } })) return;
       return new Response(null, { status: 400 });
     },
@@ -245,7 +247,7 @@ it("authorizes viewer assets, tab control, and real websocket upgrades", async (
     ];
     for (const headers of allowedSockets) {
       const client = test.connect(route.url, headers);
-      await settled(() => assert.deepEqual(client.state.messages, [connected]));
+      await settled(() => assert.deepEqual(client.state.messages, [ready, connected]));
     }
     assert.deepEqual(test.nativeRequests, ["?pacing=ack&maxFps=10", "?pacing=ack&maxFps=10"]);
   } finally {
@@ -259,18 +261,18 @@ it("proxies both directions and revokes one route with held inputs without closi
   const sibling = test.expose({ identity: 2 });
   try {
     const client = test.connect(first.url);
-    await settled(() => assert.deepEqual(client.state.messages, [connected]));
+    await settled(() => assert.deepEqual(client.state.messages, [ready, connected]));
     const secondClient = test.connect(first.url);
-    await settled(() => assert.deepEqual(secondClient.state.messages, [connected]));
+    await settled(() => assert.deepEqual(secondClient.state.messages, [ready, connected]));
     const otherClient = test.connect(sibling.url);
-    await settled(() => assert.deepEqual(otherClient.state.messages, [connected]));
+    await settled(() => assert.deepEqual(otherClient.state.messages, [ready, connected]));
     const [upstream, secondUpstream, otherUpstream] = test.nativeSockets;
     assert.ok(upstream);
     assert.ok(secondUpstream);
     assert.ok(otherUpstream);
     const navigation = { type: "url", url: "https://login.example.test/continue" };
     upstream.send(JSON.stringify(navigation));
-    await settled(() => assert.deepEqual(client.state.messages, [connected, navigation]));
+    await settled(() => assert.deepEqual(client.state.messages, [ready, connected, navigation]));
     const ack = { type: "ack", seq: 17 };
     for (const message of [ack, keyDown, mouseDown]) client.socket.send(JSON.stringify(message));
     await settled(() => assert.deepEqual(upstream.data.messages, [ack, keyDown, mouseDown]));
@@ -307,7 +309,7 @@ it("proxies both directions and revokes one route with held inputs without closi
     otherUpstream.send(JSON.stringify(navigation));
     await settled(() => {
       assert.deepEqual(otherUpstream.data.messages, [ack]);
-      assert.deepEqual(otherClient.state.messages, [connected, navigation]);
+      assert.deepEqual(otherClient.state.messages, [ready, connected, navigation]);
     });
     assert.equal((await http(sibling.url)).status, 200);
     assert.equal(otherUpstream.data.closed, false);
@@ -342,7 +344,7 @@ it("rejects expired owners and closes invalid websocket input without forwarding
 
     valid = true;
     const client = test.connect(route.url);
-    await settled(() => assert.deepEqual(client.state.messages, [connected]));
+    await settled(() => assert.deepEqual(client.state.messages, [ready, connected]));
     const [upstream] = test.nativeSockets;
     assert.ok(upstream);
     client.socket.send(JSON.stringify({ ...mouseDown, x: "40" }));
@@ -356,14 +358,29 @@ it("rejects expired owners and closes invalid websocket input without forwarding
   }
 });
 
-it("the browser client releases held keyboard and pointer input on blur while its socket stays open", async () => {
+it("the browser client retains unsent text across handshake and reconnect races and releases held input", async () => {
   const root = await mkdtemp(join(tmpdir(), "pico-viewer-client-"));
-  const test = fixture();
-  const route = test.expose();
+  const handshake = Promise.withResolvers<void>();
+  const verification = Promise.withResolvers<boolean>();
+  const test = fixture(() => handshake.promise);
+  const site = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch: () =>
+      new Response('<!doctype html><input id="target" autofocus>', {
+        headers: { "Content-Type": "text/html" },
+      }),
+  });
+  let validations = 0;
+  const route = test.expose({
+    valid: async () => (++validations === 2 ? verification.promise : true),
+  });
   let home: Awaited<ReturnType<typeof prepareBrowserHome>> | undefined;
   let driver: WebSocket | undefined;
   let daemonPid: number | undefined;
+  let targetDaemonPid: number | undefined;
   const session = "viewer-client";
+  const targetSession = "viewer-target";
   try {
     home = await prepareBrowserHome(root);
     await bounded(launchBrowser(home, session, false, 60_000), "Browser launch", 30_000);
@@ -373,9 +390,102 @@ it("the browser client releases held keyboard and pointer input on blur while it
     const command = (value: Readonly<Record<string, unknown>>) =>
       sendBrowserCommand(browserHome, session, value, AbortSignal.timeout(5_000));
     await command({ action: "navigate", url: route.url });
-    await settled(() => assert.equal(test.nativeSockets.length, 1));
-    const [upstream] = test.nativeSockets;
+    const evaluate = async (script: string) =>
+      Schema.decodeUnknownSync(Schema.Struct({ result: Schema.Unknown }))(
+        await command({ action: "evaluate", script }),
+      ).result;
+    const state = `({
+      value: document.querySelector('#text').value,
+      disabled: document.querySelector('#text-form button[type=submit]').disabled
+    })`;
+    const submit =
+      "document.querySelector('#text-form').dispatchEvent(new Event('submit', { cancelable: true }))";
+    const retained = { value: "one-time-code", disabled: true };
+    await settled(() => assert.equal(test.nativeRequests.length, 1));
+    assert.equal(test.nativeSockets.length, 0);
+    assert.deepEqual(
+      await evaluate(
+        `document.querySelector('#text').value = 'one-time-code'; ${submit}; ${state}`,
+      ),
+      retained,
+    );
+    handshake.resolve();
+    await settled(() => {
+      assert.equal(test.nativeSockets.length, 1);
+      assert.equal(validations, 2);
+    });
+    const [unverified] = test.nativeSockets;
+    assert.ok(unverified);
+    assert.deepEqual(await evaluate(`${submit}; ${state}`), retained);
+    assert.deepEqual(unverified.data.messages, []);
+    assert.deepEqual(
+      await evaluate(
+        `globalThis.previousConnection = socket; document.querySelector('#disconnect').click(); ${submit}; ${state}`,
+      ),
+      retained,
+    );
+    assert.deepEqual(
+      await evaluate(`document.querySelector('#connect').click(); ${submit}; ${state}`),
+      retained,
+    );
+    await vi.waitFor(
+      async () => assert.deepEqual(await evaluate(state), { ...retained, disabled: false }),
+      { interval: 20, timeout: 5_000 },
+    );
+    verification.resolve(true);
+    await settled(() => assert.equal(unverified.data.closed, true));
+    assert.deepEqual(
+      await evaluate(
+        `previousConnection.onmessage(new MessageEvent('message', { data: JSON.stringify({ type: 'status', connected: false }) })); previousConnection.onclose(); previousConnection.onerror(); ${state}`,
+      ),
+      { ...retained, disabled: false },
+    );
+    const reconnected = test.nativeSockets[1];
+    assert.ok(reconnected);
+    assert.deepEqual(reconnected.data.messages, []);
+    assert.deepEqual(await evaluate(`${submit}; ${state}`), { value: "", disabled: false });
+    const characters = (value: string) =>
+      Array.from(value, (character) => ({
+        type: "input_keyboard",
+        eventType: "char",
+        key: "",
+        code: "",
+        text: character,
+        windowsVirtualKeyCode: 0,
+        modifiers: 0,
+      }));
+    await settled(() => assert.deepEqual(reconnected.data.messages, characters(retained.value)));
+    reconnected.send(JSON.stringify({ ...connected, connected: false }));
+    await vi.waitFor(
+      async () => assert.deepEqual(await evaluate(state), { value: "", disabled: true }),
+      { interval: 20, timeout: 5_000 },
+    );
+    assert.deepEqual(
+      await evaluate(`document.querySelector('#text').value = 'next-code'; ${submit}; ${state}`),
+      { value: "next-code", disabled: true },
+    );
+    reconnected.send(JSON.stringify(connected));
+    await vi.waitFor(
+      async () => assert.deepEqual(await evaluate(state), { value: "next-code", disabled: false }),
+      { interval: 20, timeout: 5_000 },
+    );
+    assert.deepEqual(await evaluate(`socket.close(); ${submit}; ${state}`), {
+      value: "next-code",
+      disabled: true,
+    });
+    await settled(() => assert.equal(reconnected.data.closed, true));
+    assert.deepEqual(reconnected.data.messages, characters(retained.value));
+    await evaluate("document.querySelector('#connect').click()");
+    await vi.waitFor(
+      async () => assert.deepEqual(await evaluate(state), { value: "next-code", disabled: false }),
+      { interval: 20, timeout: 5_000 },
+    );
+    const upstream = test.nativeSockets[2];
     assert.ok(upstream);
+    assert.deepEqual(upstream.data.messages, []);
+    assert.deepEqual(await evaluate(`${submit}; ${state}`), { value: "", disabled: false });
+    await settled(() => assert.deepEqual(upstream.data.messages, characters("next-code")));
+    upstream.data.messages.length = 0;
     const stream = Schema.decodeUnknownSync(Schema.Struct({ port: Schema.Number }))(
       await command({ action: "stream_status" }),
     );
@@ -460,28 +570,105 @@ it("the browser client releases held keyboard and pointer input on blur while it
     );
     input({ ...shift, eventType: "keyUp", modifiers: 0 });
     input({ ...press, eventType: "mouseReleased", modifiers: 0 });
+    await bounded(launchBrowser(home, targetSession, false, 60_000), "Target launch", 30_000);
+    targetDaemonPid = Number(
+      await Bun.file(join(home.socketDirectory, `${targetSession}.pid`)).text(),
+    );
+    assert.ok(Number.isSafeInteger(targetDaemonPid) && targetDaemonPid > 0);
+    const targetCommand = (value: Readonly<Record<string, unknown>>) =>
+      sendBrowserCommand(browserHome, targetSession, value, AbortSignal.timeout(5_000));
+    await targetCommand({ action: "navigate", url: `http://127.0.0.1:${site.port}/` });
+    await targetCommand({
+      action: "evaluate",
+      script: "document.querySelector('#target').focus()",
+    });
+    const targetStream = Schema.decodeUnknownSync(Schema.Struct({ port: Schema.Number }))(
+      await targetCommand({ action: "stream_status" }),
+    );
+    const targetRoute = test.expose({ port: targetStream.port, identity: targetDaemonPid });
+    await command({ action: "navigate", url: targetRoute.url });
+    await vi.waitFor(
+      async () => assert.deepEqual(await evaluate(state), { value: "", disabled: false }),
+      { interval: 20, timeout: 5_000 },
+    );
+    assert.deepEqual(
+      await evaluate(
+        `document.querySelector('#disconnect').click(); document.querySelector('#text').value = 'live-otp-123'; ${submit}; ${state}`,
+      ),
+      { value: "live-otp-123", disabled: true },
+    );
+    await evaluate("document.querySelector('#connect').click()");
+    await vi.waitFor(
+      async () =>
+        assert.deepEqual(await evaluate(state), { value: "live-otp-123", disabled: false }),
+      { interval: 20, timeout: 5_000 },
+    );
+    const targetValue = async () =>
+      Schema.decodeUnknownSync(Schema.Struct({ result: Schema.String }))(
+        await targetCommand({
+          action: "evaluate",
+          script: "document.querySelector('#target').value",
+        }),
+      ).result;
+    assert.equal(await targetValue(), "");
+    assert.deepEqual(await evaluate(`${submit}; ${state}`), { value: "", disabled: false });
+    await vi.waitFor(async () => assert.equal(await targetValue(), "live-otp-123"), {
+      interval: 20,
+      timeout: 5_000,
+    });
+    assert.deepEqual(
+      await evaluate(
+        `document.querySelector('#text').value = 'failed-code'; socket.send = () => { throw new Error('transport failed'); }; ${submit}; ${state}`,
+      ),
+      { value: "failed-code", disabled: true },
+    );
+    assert.equal(await targetValue(), "live-otp-123");
+    await evaluate("document.querySelector('#connect').click()");
+    await vi.waitFor(
+      async () =>
+        assert.deepEqual(await evaluate(state), { value: "failed-code", disabled: false }),
+      { interval: 20, timeout: 5_000 },
+    );
+    await evaluate("document.querySelector('#text').value = 'revoked-code'");
+    test.viewer.revoke(targetRoute.token);
+    await vi.waitFor(
+      async () =>
+        assert.deepEqual(await evaluate(state), { value: "revoked-code", disabled: true }),
+      { interval: 20, timeout: 5_000 },
+    );
+    assert.deepEqual(await evaluate(`${submit}; ${state}`), {
+      value: "revoked-code",
+      disabled: true,
+    });
+    assert.equal(await targetValue(), "live-otp-123");
   } finally {
+    handshake.resolve();
+    verification.resolve(false);
     driver?.close();
     try {
       if (home) {
-        await sendBrowserCommand(home, session, { action: "close" }, AbortSignal.timeout(5_000));
-        const socketDirectory = home.socketDirectory;
-        const pid = daemonPid;
-        await vi.waitFor(
-          async () => {
-            assert.equal(await Bun.file(join(socketDirectory, `${session}.pid`)).exists(), false);
-            assert.equal(await Bun.file(join(socketDirectory, `${session}.sock`)).exists(), false);
-            if (pid !== undefined) assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
-            if (driver) assert.equal(driver.readyState, WebSocket.CLOSED);
-          },
-          { interval: 20, timeout: 5_000 },
-        );
+        const daemons: [string, number | undefined][] = [[session, daemonPid]];
+        if (targetDaemonPid !== undefined) daemons.push([targetSession, targetDaemonPid]);
+        for (const [name, pid] of daemons) {
+          await sendBrowserCommand(home, name, { action: "close" }, AbortSignal.timeout(5_000));
+          const socketDirectory = home.socketDirectory;
+          await vi.waitFor(
+            async () => {
+              assert.equal(await Bun.file(join(socketDirectory, `${name}.pid`)).exists(), false);
+              assert.equal(await Bun.file(join(socketDirectory, `${name}.sock`)).exists(), false);
+              if (pid !== undefined) assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
+            },
+            { interval: 20, timeout: 5_000 },
+          );
+        }
+        if (driver) await settled(() => assert.equal(driver?.readyState, WebSocket.CLOSED));
       }
     } finally {
       try {
         await test.dispose();
       } finally {
         if (home) await rm(dirname(home.socketDirectory), { recursive: true, force: true });
+        await site.stop(true);
         await rm(root, { recursive: true, force: true });
       }
     }

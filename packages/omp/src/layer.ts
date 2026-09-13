@@ -18,6 +18,7 @@ import type * as Schedule from "@pico/contract/schedule";
 import * as Cause from "effect/Cause";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
@@ -119,13 +120,12 @@ export const make = Effect.fn("AgentRuntime.make")(function* ({
     publish: pool.publish,
     close: Effect.fn("AgentRuntime.close")(function* (chatId: Chat.ChatId) {
       const closing = browsers.closeChat(chatId).then(
-        () => undefined,
-        (cause) => agentError("Failed to close chat browsers", cause),
+        () => Exit.void,
+        (cause) => Exit.fail(agentError("Failed to close chat browsers", cause)),
       );
       const closed = yield* pool.close(chatId).pipe(Effect.exit);
-      const browserError = yield* Effect.promise(() => closing);
-      if (browserError !== undefined) return yield* Effect.fail(browserError);
-      return yield* closed;
+      const browserClosed = yield* Effect.promise(() => closing);
+      return yield* Exit.asVoidAll([closed, browserClosed]);
     }, Effect.uninterruptible),
     abort: pool.abort,
     contextUsage: pool.contextUsage,

@@ -20,7 +20,7 @@ const UploadedFiles = Schema.Struct({
   ),
 });
 
-it("rejects unapproved uploads before startup and uploads approved files", async () => {
+it("rejects unapproved browser operations before startup and uploads approved files", async () => {
   const directory = await mkdtemp(join(tmpdir(), "pico-browser-upload-consent-"));
   const root = join(directory, "pico");
   const file = join(directory, `private-${crypto.randomUUID()}.txt`);
@@ -43,6 +43,7 @@ it("rejects unapproved uploads before startup and uploads approved files", async
     assert.deepEqual(await readdir(join(home.directory, "owners")), []);
     assert.deepEqual(await readdir(home.stateDirectory), []);
     assert.deepEqual(await readdir(home.socketDirectory), []);
+    assert.equal(await Bun.file(join(home.directory, "login-seed.json")).exists(), false);
   };
   const safeError = (error: unknown, message: RegExp) => {
     assert.ok(error instanceof Error);
@@ -58,6 +59,18 @@ it("rejects unapproved uploads before startup and uploads approved files", async
       page,
       '<!doctype html><title>Upload fixture</title><input id="upload" type="file">',
     );
+    for (const request of [{}, { userRequested: false }]) {
+      await assert.rejects(executeUnchecked({ op: "mode", mode: "headed", ...request }), (error) =>
+        safeError(error, /explicit user request.*userRequested:true/),
+      );
+      await noBrowserState();
+    }
+    for (const approval of [{}, { userApproved: false }]) {
+      await assert.rejects(executeUnchecked({ op: "remember_login", ...approval }), (error) =>
+        safeError(error, /explicit user approval.*userApproved:true/),
+      );
+      await noBrowserState();
+    }
     for (const approval of [{}, { userApproved: false }]) {
       await assert.rejects(
         executeUnchecked({ op: "upload", selector: "#upload", files: [file], ...approval }),

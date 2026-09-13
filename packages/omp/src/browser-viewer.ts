@@ -54,7 +54,7 @@ type Connection = {
 };
 
 const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Pico browser</title><style>
-*{box-sizing:border-box}body{margin:0;background:#171918;color:#f4f5f2;font:15px system-ui,sans-serif}header{padding:16px 24px;border-bottom:1px solid #40443f;display:flex;gap:16px;align-items:center;flex-wrap:wrap}h1{font-size:18px;margin:0}#status{color:#d0d8cb}#url{margin:0;padding:10px 24px;overflow-wrap:anywhere;color:#bbcbb4;min-height:38px}main{padding:0 24px 24px}canvas{display:block;max-width:100%;height:auto;background:white;touch-action:none;outline-offset:4px}canvas:focus{outline:3px solid #96c883}button,input,select{font:inherit;padding:10px 12px;border:1px solid #899081;border-radius:5px}button{cursor:pointer;background:#e8efdf;color:#172115;min-height:44px}button:disabled{cursor:default;opacity:.6}button:focus-visible,input:focus-visible,select:focus-visible{outline:3px solid #96c883;outline-offset:2px}form{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:18px 0}input,select{background:#242822;color:inherit}input{min-width:230px}select{min-width:0;max-width:100%;min-height:44px}p{line-height:1.5}small{color:#c0c4bb}</style></head><body><header><h1>Pico browser</h1><span id="status" role="status" aria-live="polite">Connecting</span><button id="connect" type="button">Reconnect viewer</button><button id="disconnect" type="button">Disconnect viewer</button></header><p id="url"></p><main><form id="tabs-form"><label for="tabs">Browser tab</label><select id="tabs" aria-describedby="tabs-help" disabled><option value="">Refresh tabs to load open pages</option></select><button id="select-tab" type="submit" disabled>Show tab</button><button id="refresh-tabs" type="button">Refresh tabs</button><span id="tabs-status" role="status" aria-live="polite"></span></form><p id="tabs-help">Opened a login popup? Refresh tabs, then choose it and select Show tab.</p><canvas id="page" tabindex="0" aria-label="Remote browser. Click to interact, then type. Escape releases keyboard focus."></canvas><form id="text-form"><label for="text">Send text to focused field</label><input id="text" type="password" autocomplete="off"><button type="submit">Send text</button></form><p>Complete login here, then send a message in your Pico chat to resume. This viewer does not resume the assistant automatically.</p><small>Local to the daemon machine. Native passkey and operating-system dialogs may need explicitly requested headed mode. Hiding this page stops its stream.</small></main><script src="./client.js"></script></body></html>`;
+*{box-sizing:border-box}body{margin:0;background:#171918;color:#f4f5f2;font:15px system-ui,sans-serif}header{padding:16px 24px;border-bottom:1px solid #40443f;display:flex;gap:16px;align-items:center;flex-wrap:wrap}h1{font-size:18px;margin:0}#status{color:#d0d8cb}#url{margin:0;padding:10px 24px;overflow-wrap:anywhere;color:#bbcbb4;min-height:38px}main{padding:0 24px 24px}canvas{display:block;max-width:100%;height:auto;background:white;touch-action:none;outline-offset:4px}canvas:focus{outline:3px solid #96c883}button,input,select{font:inherit;padding:10px 12px;border:1px solid #899081;border-radius:5px}button{cursor:pointer;background:#e8efdf;color:#172115;min-height:44px}button:disabled{cursor:default;opacity:.6}button:focus-visible,input:focus-visible,select:focus-visible{outline:3px solid #96c883;outline-offset:2px}form{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:18px 0}input,select{background:#242822;color:inherit}input{min-width:230px}select{min-width:0;max-width:100%;min-height:44px}p{line-height:1.5}small{color:#c0c4bb}</style></head><body><header><h1>Pico browser</h1><span id="status" role="status" aria-live="polite">Connecting</span><button id="connect" type="button">Reconnect viewer</button><button id="disconnect" type="button">Disconnect viewer</button></header><p id="url"></p><main><form id="tabs-form"><label for="tabs">Browser tab</label><select id="tabs" aria-describedby="tabs-help" disabled><option value="">Refresh tabs to load open pages</option></select><button id="select-tab" type="submit" disabled>Show tab</button><button id="refresh-tabs" type="button">Refresh tabs</button><span id="tabs-status" role="status" aria-live="polite"></span></form><p id="tabs-help">Opened a login popup? Refresh tabs, then choose it and select Show tab.</p><canvas id="page" tabindex="0" aria-label="Remote browser. Click to interact, then type. Escape releases keyboard focus."></canvas><form id="text-form"><label for="text">Send text to focused field</label><input id="text" type="password" autocomplete="off"><button type="submit" disabled>Send text</button></form><p>Complete login here, then send a message in your Pico chat to resume. This viewer does not resume the assistant automatically.</p><small>Local to the daemon machine. Native passkey and operating-system dialogs may need explicitly requested headed mode. Hiding this page stops its stream.</small></main><script src="./client.js"></script></body></html>`;
 
 export const makeBrowserViewer = () => {
   const routes = new Map<string, Route>();
@@ -193,11 +193,17 @@ export const makeBrowserViewer = () => {
               socket.data.upstream = upstream;
               const pending: string[] = [];
               upstream.onopen = async () => {
-                if (!(await socket.data.route.valid()) || socket.data.upstream !== upstream) {
+                if (
+                  !(await socket.data.route.valid()) ||
+                  socket.data.upstream !== upstream ||
+                  upstream.readyState !== WebSocket.OPEN ||
+                  socket.readyState !== WebSocket.OPEN
+                ) {
                   socket.close(1001, "Viewer expired");
                   return;
                 }
                 socket.data.verified = true;
+                socket.send(JSON.stringify({ type: "viewer_ready" }));
                 for (const message of pending) socket.send(message);
                 pending.length = 0;
               };
@@ -216,7 +222,10 @@ export const makeBrowserViewer = () => {
                   JSON.parse(typeof raw === "string" ? raw : raw.toString()),
                 );
                 const upstream = socket.data.upstream;
-                if (!socket.data.verified || upstream?.readyState !== WebSocket.OPEN) return;
+                if (!socket.data.verified || upstream?.readyState !== WebSocket.OPEN) {
+                  socket.close(1013, "Viewer is not ready");
+                  return;
+                }
                 if (message.type === "input_keyboard") {
                   if (message.eventType === "keyDown")
                     socket.data.keys.set(message.code || message.key, message);

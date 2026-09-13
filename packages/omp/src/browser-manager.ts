@@ -276,6 +276,14 @@ export const makeBrowserManager = async ({
     if (disposed || archived.has(owner.chatId))
       return Promise.reject(new Error("Browser owner is closed"));
     if (signal?.aborted) return Promise.reject(new Error("Browser operation cancelled"));
+    if (operation.op === "mode" && operation.userRequested !== true)
+      return Promise.reject(
+        new Error("Browser mode changes require an explicit user request and userRequested:true."),
+      );
+    if (operation.op === "remember_login" && operation.userApproved !== true)
+      return Promise.reject(
+        new Error("Remembering logins requires explicit user approval and userApproved:true."),
+      );
     if (operation.op === "upload") {
       if (operation.userApproved !== true)
         return Promise.reject(

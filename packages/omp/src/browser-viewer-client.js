@@ -2,12 +2,15 @@ const canvas = document.querySelector("#page");
 const status = document.querySelector("#status");
 const url = document.querySelector("#url");
 const text = document.querySelector("#text");
+const submitText = document.querySelector("#text-form button[type=submit]");
 const tabs = document.querySelector("#tabs");
 const tabsStatus = document.querySelector("#tabs-status");
 const refreshTabs = document.querySelector("#refresh-tabs");
 const selectTab = document.querySelector("#select-tab");
 const context = canvas.getContext("2d");
 let socket;
+let verified = false;
+let browserConnected = false;
 let width = 1280;
 let height = 720;
 let point = { x: 0, y: 0 };
@@ -18,8 +21,25 @@ const modifiers = (event) =>
   (event.ctrlKey ? 2 : 0) |
   (event.metaKey ? 4 : 0) |
   (event.shiftKey ? 8 : 0);
+const canSend = () => verified && browserConnected && socket?.readyState === WebSocket.OPEN;
+const updateSubmit = () => {
+  submitText.disabled = !canSend();
+};
 const send = (message) => {
-  if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
+  if (!canSend()) {
+    updateSubmit();
+    return false;
+  }
+  try {
+    socket.send(JSON.stringify(message));
+    return true;
+  } catch {
+    verified = false;
+    disconnect();
+    status.textContent =
+      "Unable to send input. Check the page before reconnecting and sending again.";
+    return false;
+  }
 };
 const mouse = (eventType, button, event, clickCount = 0) => ({
   type: "input_mouse",
@@ -96,6 +116,9 @@ const disconnect = () => {
   release();
   const previous = socket;
   socket = undefined;
+  verified = false;
+  browserConnected = false;
+  updateSubmit();
   previous?.close();
   status.textContent = "Disconnected. Reconnect this viewer or request a new link in chat.";
 };
@@ -109,10 +132,19 @@ const connect = () => {
     if (socket !== connection) return;
     try {
       const message = JSON.parse(event.data);
-      if (message.type === "status")
-        status.textContent = message.connected
+      if (message.type === "viewer_ready") {
+        verified = true;
+        updateSubmit();
+      }
+      if (message.type === "status") {
+        browserConnected = message.connected === true;
+        updateSubmit();
+        status.textContent = canSend()
           ? "Connected. Click the page to control it."
-          : "Browser disconnected. Send a message in chat to reopen it.";
+          : browserConnected
+            ? "Connecting"
+            : "Browser disconnected. Send a message in chat to reopen it.";
+      }
       if (message.type === "url") url.textContent = message.url ?? "";
       if (message.type !== "frame" || typeof message.data !== "string") return;
       const image = new Image();
@@ -139,9 +171,15 @@ const connect = () => {
     heldKeys.clear();
     heldButtons.clear();
     socket = undefined;
+    verified = false;
+    browserConnected = false;
+    updateSubmit();
     status.textContent = "Browser disconnected or expired. Send a message in chat to reopen it.";
   };
-  connection.onerror = () => connection.close();
+  connection.onerror = () => {
+    if (socket !== connection) return;
+    disconnect();
+  };
 };
 const movePoint = (event) => {
   const bounds = canvas.getBoundingClientRect();
@@ -157,8 +195,8 @@ canvas.addEventListener("pointerdown", (event) => {
   canvas.setPointerCapture(event.pointerId);
   movePoint(event);
   const button = buttonName(event.button);
-  heldButtons.set(button, event.pointerId);
-  send(mouse("mousePressed", button, event, event.detail || 1));
+  if (send(mouse("mousePressed", button, event, event.detail || 1)))
+    heldButtons.set(button, event.pointerId);
 });
 canvas.addEventListener("pointermove", (event) => {
   movePoint(event);
@@ -193,8 +231,7 @@ canvas.addEventListener("keydown", (event) => {
   if (event.isComposing) return;
   event.preventDefault();
   const message = key(event, "keyDown");
-  heldKeys.set(event.code, message);
-  send(message);
+  if (send(message)) heldKeys.set(event.code, message);
   if (event.key === "Escape") canvas.blur();
 });
 canvas.addEventListener("keyup", (event) => {
@@ -204,16 +241,25 @@ canvas.addEventListener("keyup", (event) => {
   heldKeys.delete(event.code);
 });
 const insertText = (value) => {
-  for (const character of value)
-    send({
-      type: "input_keyboard",
-      eventType: "char",
-      key: "",
-      code: "",
-      text: character,
-      windowsVirtualKeyCode: 0,
-      modifiers: 0,
-    });
+  if (!canSend()) {
+    updateSubmit();
+    return false;
+  }
+  for (const character of value) {
+    if (
+      !send({
+        type: "input_keyboard",
+        eventType: "char",
+        key: "",
+        code: "",
+        text: character,
+        windowsVirtualKeyCode: 0,
+        modifiers: 0,
+      })
+    )
+      return false;
+  }
+  return true;
 };
 canvas.addEventListener("paste", (event) => {
   event.preventDefault();
@@ -239,7 +285,7 @@ document.querySelector("#tabs-form").addEventListener("submit", (event) => {
 });
 document.querySelector("#text-form").addEventListener("submit", (event) => {
   event.preventDefault();
-  insertText(text.value);
+  if (!insertText(text.value)) return;
   text.value = "";
   canvas.focus();
 });
