@@ -94,6 +94,7 @@ describe("discord attachments", () => {
           getOrCreateBotChat: () => Effect.die("unexpected bot chat creation"),
           sendBotMessage: () => Effect.die("unexpected bot message"),
           askBtw: () => Effect.die("unexpected side question"),
+          listWorkspaces: () => Effect.die("unexpected workspace list"),
           createWorkspace: () => Effect.die("unexpected explicit workspace creation"),
           getOrCreateWorkspaceByBinding: () =>
             Effect.succeed({
@@ -105,6 +106,7 @@ describe("discord attachments", () => {
               createdAt: 0,
             }),
           bindWorkspace: () => Effect.die("unexpected workspace binding"),
+          listChats: () => Effect.die("unexpected chat list"),
           createChat: () =>
             Effect.succeed({
               id: chatId,
@@ -277,9 +279,11 @@ describe("discord attachments", () => {
           getOrCreateBotChat: () => Effect.die("unexpected bot chat creation"),
           sendBotMessage: () => Effect.die("unexpected bot message"),
           askBtw: () => Effect.die("unexpected side question"),
+          listWorkspaces: () => Effect.die("unexpected workspace list"),
           createWorkspace: () => Effect.die("unexpected explicit workspace creation"),
           getOrCreateWorkspaceByBinding: () => Effect.die("unexpected workspace creation"),
           bindWorkspace: () => Effect.die("unexpected workspace binding"),
+          listChats: () => Effect.die("unexpected chat list"),
           createChat: () => Effect.die("unexpected chat creation"),
           findWorkspaceByPlatformId: () => Effect.die("unexpected workspace lookup"),
           findChatByPlatformId: () => Effect.die("unexpected chat lookup"),

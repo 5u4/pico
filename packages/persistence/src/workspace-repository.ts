@@ -70,6 +70,24 @@ const decodeWorkspace = Effect.fn("WorkspaceRepository.decodeWorkspace")(functio
 const make = Effect.fn("WorkspaceRepository.make")(function* () {
   const sql = yield* SqlClient.SqlClient;
 
+  const selectAll = SqlSchema.findAll({
+    Request: Schema.Void,
+    Result: WorkspaceRow,
+    execute: () => sql`
+      SELECT
+        id,
+        name,
+        platform,
+        external_id AS "externalId",
+        default_cwd AS "defaultCwd",
+        worktree_branch AS "worktreeBranch",
+        worktree_prefix AS "worktreePrefix",
+        created_at AS "createdAt"
+      FROM workspaces
+      ORDER BY created_at DESC, id DESC
+    `,
+  });
+
   const insert = SqlSchema.findOne({
     Request: Workspace.Workspace,
     Result: WorkspaceRow,
@@ -191,6 +209,14 @@ const make = Effect.fn("WorkspaceRepository.make")(function* () {
     `,
   });
 
+  const list = Effect.fn("WorkspaceRepository.list")(
+    function* () {
+      const rows = yield* selectAll(undefined);
+      return yield* Effect.forEach(rows, decodeWorkspace);
+    },
+    Effect.mapError(failure("workspace.list")),
+  );
+
   const create = Effect.fn("WorkspaceRepository.create")(
     function* (workspace: Workspace.Workspace) {
       return yield* decodeWorkspace(yield* insert(workspace));
@@ -237,6 +263,7 @@ const make = Effect.fn("WorkspaceRepository.make")(function* () {
   );
 
   return WorkspaceRepository.of({
+    list,
     create,
     getOrCreateByBinding,
     findById,

@@ -12,6 +12,9 @@ import type {
 export class WorkspaceRepository extends Context.Service<
   WorkspaceRepository,
   {
+    /** Application calls this when listing the root's workspaces. */
+    readonly list: () => Effect.Effect<readonly Workspace[], PersistenceError>;
+
     readonly create: (workspace: Workspace) => Effect.Effect<Workspace, PersistenceError>;
 
     /** Application calls this when a platform binding may already have a workspace. */

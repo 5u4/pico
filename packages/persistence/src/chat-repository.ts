@@ -22,6 +22,23 @@ const ArchiveChat = Schema.Struct({
 const make = Effect.fn("ChatRepository.make")(function* () {
   const sql = yield* SqlClient.SqlClient;
 
+  const selectOpenByWorkspace = SqlSchema.findAll({
+    Request: Workspace.WorkspaceId,
+    Result: Chat.Chat,
+    execute: (workspaceId) => sql`
+      SELECT
+        id,
+        workspace_id AS "workspaceId",
+        cwd,
+        external_id AS "externalId",
+        created_at AS "createdAt",
+        archived_at AS "archivedAt"
+      FROM chats
+      WHERE workspace_id = ${workspaceId} AND archived_at IS NULL
+      ORDER BY created_at DESC, id DESC
+    `,
+  });
+
   const insert = SqlSchema.findOne({
     Request: Chat.NewChat,
     Result: Chat.Chat,
@@ -93,6 +110,13 @@ const make = Effect.fn("ChatRepository.make")(function* () {
     `,
   });
 
+  const listOpenByWorkspace = Effect.fn("ChatRepository.listOpenByWorkspace")(
+    function* (workspaceId: Workspace.WorkspaceId) {
+      return yield* selectOpenByWorkspace(workspaceId);
+    },
+    Effect.mapError(failure("chat.listOpenByWorkspace")),
+  );
+
   const create = Effect.fn("ChatRepository.create")(
     function* (chat: Chat.NewChat) {
       return yield* insert(chat);
@@ -121,7 +145,7 @@ const make = Effect.fn("ChatRepository.make")(function* () {
     Effect.mapError(failure("chat.findByExternalId")),
   );
 
-  return ChatRepository.of({ create, archive, findById, findByExternalId });
+  return ChatRepository.of({ listOpenByWorkspace, create, archive, findById, findByExternalId });
 });
 
 export const layer = Layer.effect(ChatRepository, make());

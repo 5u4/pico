@@ -6,7 +6,6 @@ import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
-import * as HttpRouter from "effect/unstable/http/HttpRouter";
 import * as RpcSerialization from "effect/unstable/rpc/RpcSerialization";
 import * as RpcServer from "effect/unstable/rpc/RpcServer";
 
@@ -16,6 +15,44 @@ const handlers = PicoRpcs.toLayer(
     const eventRouter = yield* EventRouter;
 
     return PicoRpcs.of({
+      ListWorkspaces: (_, { requestId }) =>
+        application.listWorkspaces().pipe(
+          Effect.tapCause(reportFailure),
+          Effect.annotateLogs({
+            component: "rpc",
+            procedure: "ListWorkspaces",
+            requestId: String(requestId),
+          }),
+        ),
+      ListChats: ({ workspaceId }, { requestId }) =>
+        application.listChats(workspaceId).pipe(
+          Effect.tapCause(reportFailure),
+          Effect.annotateLogs({
+            component: "rpc",
+            procedure: "ListChats",
+            workspaceId,
+            requestId: String(requestId),
+          }),
+        ),
+      CreateWorkspace: (input, { requestId }) =>
+        application.createWorkspace(input).pipe(
+          Effect.tapCause(reportFailure),
+          Effect.annotateLogs({
+            component: "rpc",
+            procedure: "CreateWorkspace",
+            requestId: String(requestId),
+          }),
+        ),
+      CreateChat: (input, { requestId }) =>
+        application.createChat(input).pipe(
+          Effect.tapCause(reportFailure),
+          Effect.annotateLogs({
+            component: "rpc",
+            procedure: "CreateChat",
+            workspaceId: input.workspaceId,
+            requestId: String(requestId),
+          }),
+        ),
       Transcript: ({ chatId }, { requestId }) =>
         application.transcript(chatId).pipe(
           Effect.tapCause(reportFailure),
@@ -65,12 +102,11 @@ const handlers = PicoRpcs.toLayer(
   }),
 );
 
-const routes = RpcServer.layerHttp({ group: PicoRpcs, path: "/rpc" }).pipe(
+/** Daemon composition installs these routes on its shared HTTP listener. */
+export const routes = RpcServer.layerHttp({ group: PicoRpcs, path: "/rpc" }).pipe(
   Layer.provide(handlers),
   Layer.provide(RpcSerialization.layerJson),
 );
-
-export const layer = HttpRouter.serve(routes);
 
 const reportFailure = (cause: Cause.Cause<unknown>) => {
   const operational = cause.reasons.some((reason) => {

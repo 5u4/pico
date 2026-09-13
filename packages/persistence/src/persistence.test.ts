@@ -58,6 +58,94 @@ const worktreeWorkspace: Workspace.Workspace = {
 };
 
 describe("Persistence.layer", () => {
+  it.effect("lists root-scoped workspaces and only their open chats in stable creation order", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const temporaryDirectory = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "pico-persistence-lists-",
+      });
+      const storeFile = AbsolutePath.make(path.join(temporaryDirectory, "store.db"));
+      const otherStoreFile = AbsolutePath.make(path.join(temporaryDirectory, "other.db"));
+      const tiedWorkspace = { ...secondWorkspace, createdAt: worktreeWorkspace.createdAt };
+
+      yield* Effect.gen(function* () {
+        const workspaces = yield* WorkspaceRepository;
+        const chats = yield* ChatRepository;
+        yield* workspaces.create(tiedWorkspace);
+        yield* workspaces.create(regularWorkspace);
+        yield* workspaces.create(worktreeWorkspace);
+        assert.deepStrictEqual(yield* workspaces.list(), [
+          worktreeWorkspace,
+          tiedWorkspace,
+          regularWorkspace,
+        ]);
+
+        const older = yield* chats.create({
+          id: chatId(1),
+          workspaceId: regularWorkspaceId,
+          cwd: cwdA,
+          externalId: null,
+          createdAt: 10,
+        });
+        const tied = yield* chats.create({
+          id: chatId(2),
+          workspaceId: regularWorkspaceId,
+          cwd: cwdA,
+          externalId: null,
+          createdAt: 10,
+        });
+        const archived = yield* chats.create({
+          id: chatId(3),
+          workspaceId: regularWorkspaceId,
+          cwd: cwdA,
+          externalId: null,
+          createdAt: 20,
+        });
+        const foreign = yield* chats.create({
+          id: chatId(4),
+          workspaceId: worktreeWorkspaceId,
+          cwd: worktreeCwd,
+          externalId: "thread-1",
+          createdAt: 30,
+        });
+        const newest = yield* chats.create({
+          id: chatId(5),
+          workspaceId: regularWorkspaceId,
+          cwd: cwdB,
+          externalId: null,
+          createdAt: 11,
+        });
+        yield* chats.archive(archived.id, 40);
+        assert.deepStrictEqual(yield* chats.listOpenByWorkspace(regularWorkspaceId), [
+          newest,
+          tied,
+          older,
+        ]);
+        assert.deepStrictEqual(yield* chats.listOpenByWorkspace(worktreeWorkspaceId), [foreign]);
+        assert.deepStrictEqual(yield* chats.listOpenByWorkspace(secondWorkspaceId), []);
+      }).pipe(Effect.provide(layer(storeFile)), Effect.scoped);
+
+      yield* Effect.gen(function* () {
+        const workspaces = yield* WorkspaceRepository;
+        const chats = yield* ChatRepository;
+        const otherWorkspace = { ...regularWorkspace, name: "other root" };
+        yield* workspaces.create(otherWorkspace);
+        assert.deepStrictEqual(yield* workspaces.list(), [otherWorkspace]);
+        assert.deepStrictEqual(yield* chats.listOpenByWorkspace(regularWorkspaceId), []);
+      }).pipe(Effect.provide(layer(otherStoreFile)), Effect.scoped);
+
+      yield* Effect.gen(function* () {
+        const workspaces = yield* WorkspaceRepository;
+        assert.deepStrictEqual(yield* workspaces.list(), [
+          worktreeWorkspace,
+          tiedWorkspace,
+          regularWorkspace,
+        ]);
+      }).pipe(Effect.provide(layer(storeFile)), Effect.scoped);
+    }).pipe(Effect.provide(platformLayer)),
+  );
+
   it.effect(
     "concurrent binding creation keeps one identity and never overwrites its configuration",
     () =>

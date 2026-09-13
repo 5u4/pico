@@ -156,11 +156,27 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
     if (chat.value.archivedAt !== null) return yield* new ChatClosed();
   });
 
+  const listWorkspaces = Effect.fn("Application.listWorkspaces")(
+    function* () {
+      return yield* workspaces.list();
+    },
+    Effect.mapError(failure("Failed to list workspaces")),
+  );
+
   const createWorkspace = Effect.fn("Application.createWorkspace")(
     function* (input: CreateWorkspace) {
+      const configuration = yield* resolveConfiguration(
+        input.worktree === null
+          ? { kind: "direct", cwd: input.defaultCwd }
+          : {
+              kind: "worktree",
+              repository: input.defaultCwd,
+              settings: input.worktree,
+            },
+      );
       const id = Workspace.WorkspaceId.make(yield* crypto.randomUUIDv7);
       const createdAt = yield* Clock.currentTimeMillis;
-      const workspace = yield* workspaces.create({ ...input, id, createdAt });
+      const workspace = yield* workspaces.create({ ...input, ...configuration, id, createdAt });
       yield* Effect.logInfo("Workspace created").pipe(
         Effect.annotateLogs({
           component: "application",
@@ -356,6 +372,20 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
           ),
         ),
       ),
+  );
+
+  const listChats = Effect.fn("Application.listChats")(
+    function* (workspaceId: Workspace.WorkspaceId) {
+      const workspace = yield* workspaces.findById(workspaceId);
+      if (Option.isNone(workspace)) {
+        return yield* new ApplicationError({
+          reason: "not-found",
+          message: "Workspace not found",
+        });
+      }
+      return yield* chats.listOpenByWorkspace(workspaceId);
+    },
+    Effect.mapError(failure("Failed to list chats")),
   );
 
   const createChat = Effect.fn("Application.createChat")(function* (input: CreateChat) {
@@ -937,9 +967,11 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
   });
 
   const application = Application.of({
+    listWorkspaces,
     createWorkspace,
     getOrCreateWorkspaceByBinding,
     bindWorkspace,
+    listChats,
     createChat,
     getOrCreateBotChat,
     sendBotMessage,

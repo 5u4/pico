@@ -68,6 +68,9 @@ export type CloseChatResult =
 export class Application extends Context.Service<
   Application,
   {
+    /** Web clients call this when opening or refreshing the workspace picker. */
+    readonly listWorkspaces: () => Effect.Effect<readonly Workspace[], ApplicationError>;
+
     readonly createWorkspace: (
       input: CreateWorkspace,
     ) => Effect.Effect<Workspace, ApplicationError>;
@@ -80,6 +83,11 @@ export class Application extends Context.Service<
     readonly bindWorkspace: (
       input: BindWorkspace,
     ) => Effect.Effect<Workspace, ApplicationError | GitError | WorkspaceBindingInvalid>;
+
+    /** Web clients call this when selecting or refreshing a workspace. */
+    readonly listChats: (
+      workspaceId: WorkspaceId,
+    ) => Effect.Effect<readonly Chat[], ApplicationError>;
 
     readonly createChat: (input: CreateChat) => Effect.Effect<Chat, ApplicationError>;
     // Platform adapters resolve the single shared conversation before accepting bot input.

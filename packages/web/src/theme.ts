@@ -24,9 +24,14 @@ export function readBootstrappedTheme(): Theme {
 
 export function applyThemePreference(theme: Theme): void {
   const root = document.documentElement;
+  const transitions = document.createElement("style");
+  transitions.textContent = "*,*::before,*::after{transition:none!important}";
+  document.head.append(transitions);
   root.classList.remove("light", "dark");
   root.classList.add(theme);
   root.style.colorScheme = theme;
+  void root.offsetHeight;
+  window.requestAnimationFrame(() => transitions.remove());
 
   try {
     window.localStorage.setItem(THEME_STORAGE_KEY, theme);

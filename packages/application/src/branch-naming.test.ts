@@ -106,6 +106,7 @@ describe("BranchNaming", () => {
         Layer.succeed(
           ChatRepository,
           ChatRepository.of({
+            listOpenByWorkspace: () => Effect.die("unexpected open chat list"),
             create: () => Effect.die("unexpected chat create"),
             archive: () => Effect.die("unexpected chat archive"),
             findById: (id) => Effect.succeed(Option.fromUndefinedOr(chats.get(id))),
@@ -115,6 +116,7 @@ describe("BranchNaming", () => {
         Layer.succeed(
           WorkspaceRepository,
           WorkspaceRepository.of({
+            list: () => Effect.die("unexpected workspace list"),
             create: () => Effect.die("unexpected workspace create"),
             getOrCreateByBinding: () => Effect.die("unexpected bound workspace creation"),
             findById: (id) => Effect.succeed(Option.fromUndefinedOr(workspaces.get(id))),
@@ -210,6 +212,7 @@ describe("BranchNaming", () => {
         Layer.succeed(
           ChatRepository,
           ChatRepository.of({
+            listOpenByWorkspace: () => Effect.die("unexpected open chat list"),
             create: () => Effect.die("unexpected chat create"),
             archive: () => Effect.die("unexpected chat archive"),
             findById: (id) =>
@@ -225,6 +228,7 @@ describe("BranchNaming", () => {
         Layer.succeed(
           WorkspaceRepository,
           WorkspaceRepository.of({
+            list: () => Effect.die("unexpected workspace list"),
             create: () => Effect.die("unexpected workspace create"),
             getOrCreateByBinding: () => Effect.die("unexpected bound workspace creation"),
             findById: (id) =>
@@ -361,6 +365,7 @@ describe("BranchNaming", () => {
         Layer.succeed(
           ChatRepository,
           ChatRepository.of({
+            listOpenByWorkspace: () => Effect.die("unexpected open chat list"),
             create: () => Effect.die("unexpected chat create"),
             archive: () => Effect.die("unexpected chat archive"),
             findById: () =>
@@ -381,6 +386,7 @@ describe("BranchNaming", () => {
         Layer.succeed(
           WorkspaceRepository,
           WorkspaceRepository.of({
+            list: () => Effect.die("unexpected workspace list"),
             create: () => Effect.die("unexpected workspace create"),
             getOrCreateByBinding: () => Effect.die("unexpected bound workspace creation"),
             findById: () => Effect.succeed(Option.some(workspace)),

@@ -3,10 +3,32 @@ import * as Rpc from "effect/unstable/rpc/Rpc";
 import * as RpcGroup from "effect/unstable/rpc/RpcGroup";
 import * as AgentEvent from "./agent-event.ts";
 import * as AgentMessage from "./agent-message.ts";
+import * as Application from "./application.ts";
 import * as Chat from "./chat-model.ts";
 import * as Errors from "./errors.ts";
+import * as Workspace from "./workspace-model.ts";
 
 export const PicoRpcs = RpcGroup.make(
+  Rpc.make("ListWorkspaces", {
+    payload: Schema.Void,
+    success: Schema.Array(Workspace.Workspace),
+    error: Errors.ApplicationError,
+  }),
+  Rpc.make("ListChats", {
+    payload: { workspaceId: Workspace.WorkspaceId },
+    success: Schema.Array(Chat.Chat),
+    error: Errors.ApplicationError,
+  }),
+  Rpc.make("CreateWorkspace", {
+    payload: Application.CreateWorkspace,
+    success: Workspace.Workspace,
+    error: Errors.ApplicationError,
+  }),
+  Rpc.make("CreateChat", {
+    payload: Application.CreateChat,
+    success: Chat.Chat,
+    error: Errors.ApplicationError,
+  }),
   Rpc.make("Transcript", {
     payload: { chatId: Chat.ChatId },
     success: AgentMessage.AgentTranscript,

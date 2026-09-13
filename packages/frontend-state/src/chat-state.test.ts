@@ -1,5 +1,15 @@
 import { assert, describe, it } from "@effect/vitest";
-import { emptyLiveChat, reduceLiveChat } from "./chat-state.ts";
+import type { AgentAssistantMessage } from "@pico/contract/agent-message";
+import { acknowledgeTranscript, emptyLiveChat, reduceLiveChat } from "./chat-state.ts";
+
+const repeated: AgentAssistantMessage = {
+  role: "assistant",
+  status: "completed",
+  stopReason: "stop",
+  content: [{ type: "text", text: "repeated" }],
+  model: "test",
+  timestamp: 1,
+};
 
 describe("live chat transitions", () => {
   it("retains tool start arguments and represents a completion observed without its start", () => {
@@ -88,6 +98,68 @@ describe("live chat transitions", () => {
         outcome: "aborted",
       }).run,
       { kind: "finished", outcome: "aborted" },
+    );
+  });
+
+  it("requires a second occurrence for an equal settlement after acknowledging the first", () => {
+    const running = reduceLiveChat(emptyLiveChat(), { type: "run-started" }, []);
+    const first = reduceLiveChat(running, { type: "message-settled", message: repeated }, []);
+    const acknowledged = acknowledgeTranscript(first, [repeated], first.pending);
+    assert.deepStrictEqual(acknowledged.pending, []);
+    const second = reduceLiveChat(acknowledged, { type: "message-settled", message: repeated }, [
+      repeated,
+    ]);
+    const missing = acknowledgeTranscript(second, [repeated], second.pending);
+    assert.deepStrictEqual(
+      missing.pending.flatMap((entry) => (entry.kind === "message" ? [entry.message] : [])),
+      [repeated],
+    );
+    assert.deepStrictEqual(
+      acknowledgeTranscript(missing, [repeated, repeated], missing.pending).pending,
+      [],
+    );
+  });
+
+  it("carries unresolved occurrence targets across runs without recounting their snapshot", () => {
+    const running = reduceLiveChat(emptyLiveChat(), { type: "run-started" }, []);
+    const first = reduceLiveChat(running, { type: "message-settled", message: repeated }, []);
+    const second = reduceLiveChat(first, { type: "message-settled", message: repeated }, []);
+    const nextRun = reduceLiveChat(second, { type: "run-started" }, [repeated]);
+    const third = reduceLiveChat(nextRun, { type: "message-settled", message: repeated }, [
+      repeated,
+    ]);
+    const missing = acknowledgeTranscript(third, [repeated, repeated], third.pending);
+    assert.deepStrictEqual(
+      missing.pending.flatMap((entry) => (entry.kind === "message" ? [entry.message] : [])),
+      [repeated],
+    );
+    assert.deepStrictEqual(
+      acknowledgeTranscript(missing, [repeated, repeated, repeated], missing.pending).pending,
+      [],
+    );
+  });
+
+  it("retains unknown occurrence targets through later snapshots and inherited equal settlements", () => {
+    const draft = reduceLiveChat(emptyLiveChat(), {
+      type: "text-delta",
+      contentIndex: 0,
+      text: "repeated",
+    });
+    const first = reduceLiveChat(draft, { type: "message-settled", message: repeated }, [repeated]);
+    const missing = acknowledgeTranscript(first, [repeated, repeated], first.pending);
+    assert.deepStrictEqual(
+      missing.pending.flatMap((entry) => (entry.kind === "message" ? [entry.message] : [])),
+      [repeated],
+    );
+    const nextRun = reduceLiveChat(missing, { type: "run-started" }, [repeated, repeated]);
+    const second = reduceLiveChat(nextRun, { type: "message-settled", message: repeated }, [
+      repeated,
+      repeated,
+    ]);
+    const ambiguous = acknowledgeTranscript(second, [repeated, repeated, repeated], second.pending);
+    assert.deepStrictEqual(
+      ambiguous.pending.flatMap((entry) => (entry.kind === "message" ? [entry.message] : [])),
+      [repeated, repeated],
     );
   });
 

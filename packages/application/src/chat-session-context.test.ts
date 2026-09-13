@@ -80,6 +80,7 @@ const chatLayer = (findById: ChatRepository["Service"]["findById"]) =>
   Layer.succeed(
     ChatRepository,
     ChatRepository.of({
+      listOpenByWorkspace: () => Effect.die("unexpected open chat list"),
       create: () => Effect.die("unexpected chat create"),
       archive: () => Effect.die("unexpected chat archive"),
       findById,
@@ -91,6 +92,7 @@ const workspaceLayer = (findById: WorkspaceRepository["Service"]["findById"]) =>
   Layer.succeed(
     WorkspaceRepository,
     WorkspaceRepository.of({
+      list: () => Effect.die("unexpected workspace list"),
       create: () => Effect.die("unexpected workspace create"),
       getOrCreateByBinding: () => Effect.die("unexpected bound workspace creation"),
       findById,

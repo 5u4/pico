@@ -58,9 +58,11 @@ const installInput = Effect.fn("test.installDeliveryInput")(function* (options: 
     getOrCreateBotChat: () => Effect.die("unexpected bot chat creation"),
     sendBotMessage: () => Effect.die("unexpected bot message"),
     askBtw: () => Effect.die("unexpected side question"),
+    listWorkspaces: () => Effect.die("unexpected workspace list"),
     createWorkspace: () => Effect.die("unexpected explicit workspace creation"),
     getOrCreateWorkspaceByBinding: () => Effect.die("unexpected workspace creation"),
     bindWorkspace: () => Effect.die("unexpected workspace binding"),
+    listChats: () => Effect.die("unexpected chat list"),
     createChat: () => Effect.succeed(chat),
     findWorkspaceByPlatformId: () =>
       Effect.succeed(
