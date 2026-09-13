@@ -16,8 +16,10 @@ import {
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Crypto from "effect/Crypto";
+import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as FiberSet from "effect/FiberSet";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -28,6 +30,7 @@ import type * as HttpClient from "effect/unstable/http/HttpClient";
 import type * as HttpClientResponse from "effect/unstable/http/HttpClientResponse";
 import * as DiscordCommand from "./discord-command.ts";
 import { discordError, promiseBoundary, reportFailure } from "./discord-error.ts";
+import * as DiscordMarkdown from "./discord-markdown.ts";
 
 export interface DiscordMessage {
   readonly guildId?: bigint;
@@ -67,6 +70,7 @@ export interface DiscordInteraction {
   readonly defer: (isPrivate?: boolean) => Promise<unknown>;
   readonly deferEdit: () => Promise<unknown>;
   readonly edit: (options: InteractionCallbackData) => Promise<unknown>;
+  readonly respond: (options: InteractionCallbackData) => Promise<unknown>;
 }
 
 export interface DiscordInputBot<
@@ -337,6 +341,8 @@ interface ComponentResponse {
 
 const closeConfirmationPrefix = "pico:close:";
 const closeConfirmationTtl = 5 * 60 * 1_000;
+// Interaction tokens last 15 minutes. Leave five minutes for public response delivery.
+const btwResponseDeadline = "10 minutes";
 const closedMessage = "This chat is closed. Start a new thread to continue.";
 const decodeThreadId = Schema.decodeUnknownEffect(Schema.BigIntFromString);
 
@@ -359,7 +365,12 @@ export const install = Effect.fn("DiscordInput.install")(function* <
   const threadIds = new Map<Chat.ChatId, bigint>();
   const inputLocks = new Map<
     bigint,
-    { readonly semaphore: Semaphore.Semaphore; knownThread: boolean }
+    {
+      readonly semaphore: Semaphore.Semaphore;
+      readonly btwReplies: Set<Deferred.Deferred<void>>;
+      acceptingBtw: boolean;
+      knownThread: boolean;
+    }
   >();
   const bindLocks = new Map<bigint, Semaphore.Semaphore>();
   const closeConfirmations = new Map<string, CloseConfirmation>();
@@ -372,7 +383,12 @@ export const install = Effect.fn("DiscordInput.install")(function* <
   const inputLock = (channelId: bigint) => {
     const existing = inputLocks.get(channelId);
     if (existing !== undefined) return existing;
-    const entry = { semaphore: Semaphore.makeUnsafe(1), knownThread: false };
+    const entry = {
+      semaphore: Semaphore.makeUnsafe(1),
+      btwReplies: new Set<Deferred.Deferred<void>>(),
+      acceptingBtw: true,
+      knownThread: false,
+    };
     inputLocks.set(channelId, entry);
     return entry;
   };
@@ -804,6 +820,56 @@ export const install = Effect.fn("DiscordInput.install")(function* <
     return formatContextUsage(yield* application.contextUsage(chatId.value));
   });
 
+  const handleBtw = Effect.fn("Discord.handleBtw")(function* (
+    interaction: Interaction,
+    command: DiscordCommand.BtwCommand,
+  ) {
+    yield* Effect.uninterruptibleMask((restore) =>
+      Effect.gen(function* () {
+        // Native cancellation may drain slowly; the Discord scope owns it past the reply deadline.
+        const request = yield* Effect.gen(function* () {
+          if (command.kind === "malformedBtw") return "Provide a non-empty question.";
+          const policyCopy = "This command can only be used in a pico-owned Discord thread.";
+          const thread = yield* resolveCommandThread(interaction);
+          if (Option.isNone(thread) || interaction.user === undefined) return policyCopy;
+          const chatId = yield* resolveCommandChatId(thread.value);
+          if (Option.isNone(chatId)) return policyCopy;
+          yield* Effect.annotateLogsScoped({ phase: "ask-btw" });
+          const answer = yield* application.askBtw(chatId.value, command.question);
+          return answer.length === 0 ? "pico returned no text for this question." : answer;
+        }).pipe(Effect.forkIn(scope));
+        const response = yield* restore(
+          Fiber.join(request).pipe(Effect.timeout(btwResponseDeadline)),
+        ).pipe(
+          Effect.ensuring(Effect.sync(() => request.interruptUnsafe())),
+          Effect.catchTag("ChatClosed", () => Effect.succeed(closedMessage)),
+          Effect.catchTag("TimeoutError", () =>
+            Effect.succeed("This /btw request timed out. Try a shorter question."),
+          ),
+          Effect.catchCause((cause) =>
+            Cause.hasInterruptsOnly(cause)
+              ? Effect.succeed("This /btw request was cancelled.")
+              : reportFailure("ask-btw", cause).pipe(
+                  Effect.as("pico could not answer this side question."),
+                ),
+          ),
+        );
+        const content =
+          command.kind === "btw" && interaction.user !== undefined
+            ? `/btw · <@${interaction.user.id}>\n\n${command.question}\n\n${response}`
+            : response;
+        const chunks = DiscordMarkdown.split(content);
+        for (const [index, chunk] of chunks.entries()) {
+          yield* promiseBoundary("reply-btw", () =>
+            index === 0
+              ? interaction.edit({ content: chunk.content, allowedMentions })
+              : interaction.respond({ content: chunk.content, allowedMentions }),
+          );
+        }
+      }),
+    ).pipe(Effect.catchCause((cause) => reportFailure("reply-btw", cause)));
+  });
+
   const abortResponse = Effect.fnUntraced(function* (interaction: Interaction) {
     const policyCopy = "This command can only be used in a pico-owned Discord thread.";
     const thread = yield* resolveCommandThread(interaction);
@@ -817,8 +883,13 @@ export const install = Effect.fn("DiscordInput.install")(function* <
   });
 
   const archiveThread = Effect.fnUntraced(function* (threadId: bigint) {
+    const entry = inputLock(threadId);
+    entry.acceptingBtw = false;
     yield* Effect.annotateLogsScoped({ phase: "drain-output" });
     yield* drainOutput();
+    for (const finished of entry.btwReplies) {
+      yield* Deferred.await(finished);
+    }
     yield* Effect.annotateLogsScoped({ phase: "archive-thread" });
     yield* promiseBoundary("archive-thread", () =>
       bot.helpers.editChannel(threadId, { archived: true, locked: true }),
@@ -952,6 +1023,9 @@ export const install = Effect.fn("DiscordInput.install")(function* <
     interaction: Interaction,
     command: DiscordCommand.Command,
   ) {
+    if (command.kind === "btw" || command.kind === "malformedBtw") {
+      return yield* handleBtw(interaction, command);
+    }
     const response = yield* (() => {
       switch (command.kind) {
         case "bindDirect":
@@ -1076,63 +1150,83 @@ export const install = Effect.fn("DiscordInput.install")(function* <
       DiscordCommand.applicationCommands.some((command) => command.name === name);
     if (closeNonce === undefined && !isCommand) return;
 
-    run(
-      Effect.scoped(
-        Effect.gen(function* () {
-          yield* Effect.annotateLogsScoped({ phase: "defer" });
-          yield* promiseBoundary("defer-interaction", () =>
-            closeNonce === undefined ? interaction.defer(true) : interaction.deferEdit(),
-          );
-          yield* Effect.annotateLogsScoped({ phase: "request" });
-          const command =
-            closeNonce === undefined
-              ? DiscordCommand.parse(name, interaction.data?.options)
-              : undefined;
-          const effect =
-            closeNonce !== undefined
-              ? closeConfirmationResponse(interaction, closeNonce).pipe(
-                  Effect.catchCause((cause) =>
-                    reportFailure("close-confirmation", cause).pipe(
-                      Effect.as({
-                        content: "pico could not close this chat.",
-                        components: [],
-                      } satisfies ComponentResponse),
-                    ),
+    const response = Effect.scoped(
+      Effect.gen(function* () {
+        const channelId = interaction.channelId;
+        const btwClosed =
+          name === "btw" && channelId !== undefined
+            ? (yield* Effect.acquireRelease(
+                Effect.sync(() => {
+                  const entry = inputLock(channelId);
+                  if (!entry.acceptingBtw) return undefined;
+                  const finished = Deferred.makeUnsafe<void>();
+                  entry.btwReplies.add(finished);
+                  return { replies: entry.btwReplies, finished };
+                }),
+                (registration) =>
+                  Effect.sync(() => {
+                    if (registration === undefined) return;
+                    registration.replies.delete(registration.finished);
+                    Deferred.doneUnsafe(registration.finished, Effect.void);
+                  }),
+              )) === undefined
+            : false;
+        yield* Effect.annotateLogsScoped({ phase: "defer" });
+        yield* promiseBoundary("defer-interaction", () =>
+          closeNonce === undefined
+            ? interaction.defer(name !== "btw" || btwClosed)
+            : interaction.deferEdit(),
+        );
+        yield* Effect.annotateLogsScoped({ phase: "request" });
+        if (btwClosed) return yield* editInteraction(interaction, closedMessage);
+        const command =
+          closeNonce === undefined
+            ? DiscordCommand.parse(name, interaction.data?.options)
+            : undefined;
+        const effect =
+          closeNonce !== undefined
+            ? closeConfirmationResponse(interaction, closeNonce).pipe(
+                Effect.catchCause((cause) =>
+                  reportFailure("close-confirmation", cause).pipe(
+                    Effect.as({
+                      content: "pico could not close this chat.",
+                      components: [],
+                    } satisfies ComponentResponse),
                   ),
-                  Effect.flatMap((response) => editInteraction(interaction, response)),
-                )
-              : command === undefined
-                ? undefined
-                : handleInteraction(interaction, command);
-          if (effect === undefined) return;
-          const channelId = interaction.channelId;
-          if (channelId === undefined || command?.kind === "abort") {
-            yield* effect;
-            return;
+                ),
+                Effect.flatMap((response) => editInteraction(interaction, response)),
+              )
+            : command === undefined
+              ? undefined
+              : handleInteraction(interaction, command);
+        if (effect === undefined) return;
+        if (channelId === undefined || command?.kind === "abort" || name === "btw") {
+          yield* effect;
+          return;
+        }
+        if (closeNonce === undefined && name === "bind") {
+          let semaphore = bindLocks.get(channelId);
+          if (semaphore === undefined) {
+            semaphore = Semaphore.makeUnsafe(1);
+            bindLocks.set(channelId, semaphore);
           }
-          if (closeNonce === undefined && name === "bind") {
-            let semaphore = bindLocks.get(channelId);
-            if (semaphore === undefined) {
-              semaphore = Semaphore.makeUnsafe(1);
-              bindLocks.set(channelId, semaphore);
-            }
-            yield* semaphore.withPermit(effect);
-            return;
-          }
-          yield* inputLock(channelId).semaphore.withPermit(effect);
-        }).pipe(
-          Effect.catchCause((cause) => reportFailure("interaction-request", cause)),
-          Effect.annotateLogs({
-            component: "discord",
-            eventType: "interactionCreate",
-            command: closeNonce === undefined ? name : "close-confirmation",
-            interactionId: interaction.id?.toString(),
-            guildId: interaction.guildId?.toString(),
-            channelId: interaction.channelId?.toString(),
-          }),
-        ),
+          yield* semaphore.withPermit(effect);
+          return;
+        }
+        yield* inputLock(channelId).semaphore.withPermit(effect);
+      }).pipe(
+        Effect.catchCause((cause) => reportFailure("interaction-request", cause)),
+        Effect.annotateLogs({
+          component: "discord",
+          eventType: "interactionCreate",
+          command: closeNonce === undefined ? name : "close-confirmation",
+          interactionId: interaction.id?.toString(),
+          guildId: interaction.guildId?.toString(),
+          channelId: interaction.channelId?.toString(),
+        }),
       ),
     );
+    run(response);
   };
 
   return resolveThreadId;

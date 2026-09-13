@@ -102,6 +102,12 @@ export class Application extends Context.Service<
       prompt: AgentPrompt,
     ) => Effect.Effect<MessageDelivery<ApplicationError>, ApplicationError | ChatClosed>;
 
+    /** Platform adapters call this for a side question in an existing open chat. */
+    readonly askBtw: (
+      chatId: ChatId,
+      question: string,
+    ) => Effect.Effect<string, ApplicationError | ChatClosed>;
+
     readonly abort: (chatId: ChatId) => Effect.Effect<void, ApplicationError>;
 
     readonly contextUsage: (

@@ -41,6 +41,7 @@ const secondEvent: AgentEvent.AgentEventEnvelope = {
 };
 
 const unusedApplication = Application.of({
+  askBtw: () => Effect.die("unexpected side question"),
   createWorkspace: () => Effect.die("unexpected workspace creation"),
   getOrCreateWorkspaceByBinding: () => Effect.die("unexpected workspace creation"),
   bindWorkspace: () => Effect.die("unexpected workspace binding"),

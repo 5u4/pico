@@ -29,6 +29,7 @@ describe("Discord command", () => {
     assert.deepStrictEqual(DiscordCommand.applicationCommands.map(({ name }) => name).sort(), [
       "abort",
       "bind",
+      "btw",
       "close",
       "context",
       "shake",
@@ -42,6 +43,30 @@ describe("Discord command", () => {
     }
     assert.isUndefined(DiscordCommand.parse(undefined, validOptions));
     assert.isUndefined(DiscordCommand.parse("unknown", validOptions));
+  });
+
+  it("accepts one text question and rejects empty or malformed side questions", () => {
+    const question = {
+      name: "question",
+      type: ApplicationCommandOptionTypes.String,
+      value: "  What is running?\n ",
+    };
+    assert.deepStrictEqual(DiscordCommand.parse("btw", [question]), {
+      kind: "btw",
+      question: "What is running?",
+    });
+    for (const options of [
+      undefined,
+      [],
+      [{ ...question, value: " \n\t" }],
+      [{ ...question, value: 42 }],
+      [{ ...question, name: "other" }],
+      [{ ...question, type: ApplicationCommandOptionTypes.Integer }],
+      [{ ...question, options: [] }],
+      [question, question],
+    ]) {
+      assert.deepStrictEqual(DiscordCommand.parse("btw", options), { kind: "malformedBtw" });
+    }
   });
 
   it("parses bind without rewriting cwd", () => {

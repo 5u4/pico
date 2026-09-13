@@ -34,6 +34,7 @@ import * as Persistence from "@pico/persistence/layer";
 import * as Cause from "effect/Cause";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -70,6 +71,128 @@ const assertApplicationError = (
 };
 
 describe("Application", () => {
+  it.effect(
+    "admits normal input during a side question and cancels the side before chat disposal",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const directory = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-btw-close-" });
+        const cwd = AbsolutePath.make(path.join(directory, "workspace"));
+        yield* fileSystem.makeDirectory(cwd);
+        const persistence = Persistence.layer(AbsolutePath.make(path.join(directory, "store.db")));
+        const started = yield* Deferred.make<void>();
+        const mainFinished = yield* Deferred.make<void>();
+        const cleaning = yield* Deferred.make<void>();
+        const releaseCleanup = yield* Deferred.make<void>();
+        const sent: string[] = [];
+        const order: string[] = [];
+        const runtime = Layer.succeed(
+          AgentRuntime,
+          AgentRuntime.of({
+            events: Stream.empty,
+            drain: () => Effect.void,
+            transcript: () => Effect.die("unexpected transcript read"),
+            send: (_id, prompt) =>
+              Effect.sync(() => {
+                sent.push(prompt.text);
+                return { kind: "started" as const, completed: Deferred.await(mainFinished) };
+              }),
+            askBtw: () =>
+              Deferred.succeed(started, undefined).pipe(
+                Effect.andThen(Effect.never),
+                Effect.ensuring(
+                  Deferred.succeed(cleaning, undefined).pipe(
+                    Effect.andThen(Deferred.await(releaseCleanup)),
+                    Effect.andThen(
+                      Effect.sync(() => {
+                        order.push("side-settled");
+                      }),
+                    ),
+                  ),
+                ),
+              ),
+            sendCaptured: () => Effect.die("unexpected scheduled request"),
+            deliver: () => Effect.die("unexpected delivery"),
+            publish: () => Effect.die("unexpected publication"),
+            close: () =>
+              Effect.sync(() => {
+                order.push("runtime-close");
+              }),
+            abort: () => Effect.die("unexpected main abort"),
+            contextUsage: () => Effect.die("unexpected context read"),
+            shake: () => Effect.die("unexpected shake"),
+          }),
+        );
+        const git: GitWorktree = {
+          validate: () => Effect.void,
+          create: (_options, use) => use(cwd),
+          inspectChat: () => Effect.succeed({ kind: "managed", state: "clean" }),
+          renameChatBranch: () => Effect.die("unexpected branch rename"),
+          removeChat: () =>
+            Effect.sync(() => {
+              order.push("worktree-remove");
+              return { kind: "removed" as const };
+            }),
+        };
+        yield* Effect.gen(function* () {
+          const application = yield* Application;
+          const workspace = yield* application.createWorkspace({
+            name: "btw",
+            binding: null,
+            defaultCwd: cwd,
+            worktree: { branch: "main", prefix: "chat/" },
+          });
+          const chat = yield* application.createChat({
+            workspaceId: workspace.id,
+            externalId: null,
+          });
+          assertApplicationError(
+            yield* application.askBtw(missingChatId, "missing").pipe(Effect.flip),
+            "not-found",
+          );
+          yield* application.sendMessage(chat.id, textPrompt("main"));
+          const aside = yield* application
+            .askBtw(chat.id, "side")
+            .pipe(Effect.exit, Effect.forkChild);
+          yield* Deferred.await(started);
+          yield* application.sendMessage(chat.id, textPrompt("later"));
+          assert.deepStrictEqual(sent, ["main", "later"]);
+          yield* Deferred.succeed(mainFinished, undefined);
+          const closing = yield* application
+            .closeChat(chat.id, { allowDirtyWorktree: false })
+            .pipe(Effect.forkChild);
+          yield* Deferred.await(cleaning);
+          assert.deepStrictEqual(order, []);
+          yield* Deferred.succeed(releaseCleanup, undefined);
+          assert.deepStrictEqual(yield* Fiber.join(closing), { kind: "closed" });
+          const result = yield* Fiber.join(aside);
+          assert.isTrue(Exit.isFailure(result) && Cause.hasInterruptsOnly(result.cause));
+          assert.deepStrictEqual(order, ["side-settled", "runtime-close", "worktree-remove"]);
+          assert.instanceOf(
+            yield* application.askBtw(chat.id, "closed").pipe(Effect.flip),
+            ChatClosed,
+          );
+        }).pipe(
+          Effect.ensuring(Deferred.succeed(releaseCleanup, undefined)),
+          Effect.provide(ApplicationLayer.layer(git)),
+          Effect.provide(persistence),
+          Effect.provide(runtime),
+          Effect.provide(
+            Layer.succeed(
+              AgentSessionStore,
+              AgentSessionStore.of({
+                create: () => Effect.void,
+                remove: () => Effect.void,
+              }),
+            ),
+          ),
+          Effect.provide(BunCrypto.layer),
+          Effect.scoped,
+        );
+      }).pipe(Effect.provide(platformLayer)),
+  );
+
   it.effect("creates chats, resolves platform identities, and delegates agent operations", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
@@ -112,6 +235,7 @@ describe("Application", () => {
       const runtimeLayer = Layer.succeed(
         AgentRuntime,
         AgentRuntime.of({
+          askBtw: () => Effect.die("unexpected side question"),
           events: Stream.empty,
           drain: () => Effect.void,
           transcript: (chatId) =>
@@ -501,6 +625,7 @@ describe("Application", () => {
       const runtimeLayer = Layer.succeed(
         AgentRuntime,
         AgentRuntime.of({
+          askBtw: () => Effect.die("unexpected side question"),
           events: Stream.empty,
           drain: () => Effect.void,
           transcript: () => Effect.die("unexpected transcript read"),
@@ -749,6 +874,7 @@ describe("Application", () => {
       const runtimeLayer = Layer.succeed(
         AgentRuntime,
         AgentRuntime.of({
+          askBtw: () => Effect.die("unexpected side question"),
           events: Stream.empty,
           drain: () => Effect.void,
           transcript: () => Effect.die("unexpected transcript read"),
@@ -888,6 +1014,7 @@ describe("Application", () => {
         Effect.gen(function* () {
           const chats = yield* ChatRepository;
           return AgentRuntime.of({
+            askBtw: () => Effect.die("unexpected side question"),
             events: Stream.empty,
             drain: () => Effect.void,
             transcript: () => Effect.succeed(runtimeTranscript),
@@ -1061,6 +1188,7 @@ describe("Application", () => {
       const runtimeLayer = Layer.succeed(
         AgentRuntime,
         AgentRuntime.of({
+          askBtw: () => Effect.die("unexpected side question"),
           events: Stream.empty,
           drain: () => Effect.void,
           transcript: () => Effect.succeed([]),
@@ -1187,6 +1315,7 @@ describe("Application", () => {
         Effect.gen(function* () {
           const chats = yield* ChatRepository;
           return AgentRuntime.of({
+            askBtw: () => Effect.die("unexpected side question"),
             events: Stream.empty,
             drain: () => Effect.void,
             transcript: () => Effect.succeed([]),
@@ -1360,6 +1489,7 @@ describe("Application", () => {
       const runtimeLayer = Layer.succeed(
         AgentRuntime,
         AgentRuntime.of({
+          askBtw: () => Effect.die("unexpected side question"),
           events: Stream.empty,
           drain: () => Effect.void,
           transcript: () => Effect.die("unexpected transcript read"),

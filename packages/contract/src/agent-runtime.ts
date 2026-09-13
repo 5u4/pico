@@ -67,6 +67,8 @@ export class AgentRuntime extends Context.Service<
       chatId: ChatId,
       prompt: AgentPrompt,
     ) => Effect.Effect<MessageDelivery, AgentError>;
+    /** Application calls this for a side question without changing the main conversation. */
+    readonly askBtw: (chatId: ChatId, question: string) => Effect.Effect<string, AgentError>;
     readonly sendCaptured: (
       chatId: ChatId,
       runId: ScheduleRunId,

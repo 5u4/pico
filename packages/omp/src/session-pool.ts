@@ -48,6 +48,7 @@ export interface SessionHandle {
 export interface OpenedSession {
   readonly session: SessionHandle;
   readonly sendPrompt: OmpPromptSender;
+  readonly askBtw: (question: string, signal: AbortSignal) => Promise<string>;
   readonly shake: (mode: ShakeMode) => Promise<ShakeResult>;
   readonly contextUsage: () => ContextUsage;
   readonly appendAssistantMessage: (message: OmpAssistantMessage) => Promise<void>;
@@ -71,6 +72,7 @@ export interface SessionPool {
     chatId: Chat.ChatId,
     prompt: AgentMessage.AgentPrompt,
   ) => Effect.Effect<MessageDelivery, AgentError>;
+  readonly askBtw: (chatId: Chat.ChatId, question: string) => Effect.Effect<string, AgentError>;
   readonly close: (chatId: Chat.ChatId) => Effect.Effect<void, AgentError>;
   readonly abort: (chatId: Chat.ChatId) => Effect.Effect<void, AgentError>;
   readonly contextUsage: (chatId: Chat.ChatId) => Effect.Effect<ContextUsage, AgentError>;
@@ -130,6 +132,7 @@ interface LiveEntry {
   readonly chatId: Chat.ChatId;
   readonly session: SessionHandle;
   readonly sendPrompt: OmpPromptSender;
+  readonly askBtw: (question: string, signal: AbortSignal) => Promise<string>;
   readonly shake: (mode: ShakeMode) => Promise<ShakeResult>;
   readonly contextUsage: () => ContextUsage;
   readonly appendAssistantMessage: (message: OmpAssistantMessage) => Promise<void>;
@@ -374,6 +377,7 @@ const acquireEntry = Effect.fn("SessionPool.acquireEntry")(function* (
     chatId,
     session: opened.session,
     sendPrompt: opened.sendPrompt,
+    askBtw: opened.askBtw,
     shake: opened.shake,
     appendAssistantMessage: opened.appendAssistantMessage,
     contextUsage: opened.contextUsage,
@@ -440,6 +444,60 @@ export const makeSessionPool = Effect.fn("SessionPool.make")(function* (
       }),
     );
     return yield* options.loadTranscript(chatId);
+  });
+
+  const askBtw = Effect.fn("AgentRuntime.askBtw")(function* (
+    chatId: Chat.ChatId,
+    question: string,
+  ) {
+    return yield* Effect.scoped(
+      Effect.gen(function* () {
+        const entry = yield* retain(sessions, chatId);
+        const controller = new AbortController();
+        const finished = yield* Deferred.make<void>();
+        return yield* Effect.uninterruptibleMask((restore) =>
+          Effect.gen(function* () {
+            const pending = yield* Effect.acquireUseRelease(
+              restore(entry.admission.take(1)),
+              () =>
+                Effect.try({
+                  try: () => {
+                    if (MutableRef.get(entry.lifecycle).type !== "open") {
+                      throw new AgentError({ message: "OMP session is closing" });
+                    }
+                    const pending = entry.askBtw(question, controller.signal);
+                    entry.operations.add(finished);
+                    return pending;
+                  },
+                  catch: (cause) => agentError("Failed to ask OMP side question", cause),
+                }),
+              () => entry.admission.release(1),
+            );
+            return yield* restore(
+              boundary("Failed to ask OMP side question", () => pending).pipe(
+                Effect.raceFirst(
+                  Deferred.await(entry.closed).pipe(Effect.andThen(Effect.interrupt)),
+                ),
+              ),
+            ).pipe(
+              Effect.ensuring(
+                Effect.gen(function* () {
+                  controller.abort();
+                  yield* Effect.promise(() =>
+                    pending.then(
+                      () => undefined,
+                      () => undefined,
+                    ),
+                  );
+                  entry.operations.delete(finished);
+                  yield* Deferred.succeed(finished, undefined);
+                }),
+              ),
+            );
+          }),
+        );
+      }),
+    );
   });
 
   const send = Effect.fn("AgentRuntime.send")(function* (
@@ -896,6 +954,7 @@ export const makeSessionPool = Effect.fn("SessionPool.make")(function* (
     drain,
     transcript,
     send,
+    askBtw,
     sendCaptured,
     deliver,
     publish,

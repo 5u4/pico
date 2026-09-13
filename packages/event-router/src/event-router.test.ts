@@ -32,6 +32,7 @@ describe("EventRouter", () => {
       const runtimeLayer = Layer.succeed(
         AgentRuntime,
         AgentRuntime.of({
+          askBtw: () => Effect.die("unexpected side question"),
           events: Stream.fromQueue(source).pipe(
             Stream.ensuring(Deferred.succeed(pumpStopped, undefined)),
           ),
@@ -167,6 +168,7 @@ describe("EventRouter", () => {
         const runtimeLayer = Layer.succeed(
           AgentRuntime,
           AgentRuntime.of({
+            askBtw: () => Effect.die("unexpected side question"),
             events: Stream.fromQueue(source).pipe(
               Stream.mapEffect((item) =>
                 failureAt === "upstream"

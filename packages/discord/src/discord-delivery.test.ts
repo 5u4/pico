@@ -54,6 +54,7 @@ const installInput = Effect.fn("test.installDeliveryInput")(function* (options: 
     },
   };
   const application = Application.of({
+    askBtw: () => Effect.die("unexpected side question"),
     createWorkspace: () => Effect.die("unexpected explicit workspace creation"),
     getOrCreateWorkspaceByBinding: () => Effect.die("unexpected workspace creation"),
     bindWorkspace: () => Effect.die("unexpected workspace binding"),

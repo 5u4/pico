@@ -63,6 +63,18 @@ export const applicationCommands = [
     ],
   },
   {
+    name: "btw",
+    description: "Ask a side question without changing this chat's conversation",
+    options: [
+      {
+        name: "question",
+        description: "Question about the current conversation",
+        type: ApplicationCommandOptionTypes.String,
+        required: true,
+      },
+    ],
+  },
+  {
     name: "abort",
     description: "Stop this chat's current run",
   },
@@ -100,9 +112,14 @@ export type ShakeCommand =
     }
   | { readonly kind: "malformedShake" };
 
+export type BtwCommand =
+  | { readonly kind: "btw"; readonly question: string }
+  | { readonly kind: "malformedBtw" };
+
 export type Command =
   | BindCommand
   | ShakeCommand
+  | BtwCommand
   | { readonly kind: "abort" }
   | { readonly kind: "context" }
   | { readonly kind: "close" };
@@ -116,6 +133,8 @@ export const parse = (
       return parseBind(options);
     case "shake":
       return parseShake(options);
+    case "btw":
+      return parseBtw(options);
     case "abort":
       return { kind: "abort" };
     case "context":
@@ -125,6 +144,21 @@ export const parse = (
     default:
       return undefined;
   }
+};
+
+const parseBtw = (options: ReadonlyArray<CommandOption> | undefined): BtwCommand => {
+  if (options?.length !== 1) return { kind: "malformedBtw" };
+  const question = options[0];
+  if (
+    question?.name !== "question" ||
+    question.type !== ApplicationCommandOptionTypes.String ||
+    typeof question.value !== "string" ||
+    question.options !== undefined ||
+    question.value.trim().length === 0
+  ) {
+    return { kind: "malformedBtw" };
+  }
+  return { kind: "btw", question: question.value.trim() };
 };
 
 const parseBind = (options: ReadonlyArray<CommandOption> | undefined): BindCommand => {

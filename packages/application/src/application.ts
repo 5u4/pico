@@ -225,18 +225,18 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const scope = yield* Effect.scope;
-  interface ActiveOperation {
-    readonly kind: "ordinary" | "captured";
-    readonly finished: Deferred.Deferred<void>;
-  }
+  type Operation =
+    | { readonly kind: "ordinary" | "captured" }
+    | { readonly kind: "btw"; readonly cancelled: Deferred.Deferred<void> };
+  type ActiveOperation = Operation & { readonly finished: Deferred.Deferred<void> };
   const activeOperations = new Map<Chat.ChatId, Set<ActiveOperation>>();
   const trackOperation = <A, E, R>(
     chatId: Chat.ChatId,
-    kind: ActiveOperation["kind"],
+    request: Operation,
     effect: Effect.Effect<A, E, R>,
   ) => {
     const finished = Deferred.makeUnsafe<void>();
-    const operation: ActiveOperation = { kind, finished };
+    const operation: ActiveOperation = { ...request, finished };
     const operations = activeOperations.get(chatId) ?? new Set<ActiveOperation>();
     operations.add(operation);
     activeOperations.set(chatId, operations);
@@ -645,6 +645,14 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
             workspaceId: chat.workspaceId,
           }),
         );
+        for (const operation of activeOperations.get(chatId) ?? []) {
+          if (operation.kind !== "btw") continue;
+          yield* Deferred.succeed(operation.cancelled, undefined);
+        }
+        for (const operation of activeOperations.get(chatId) ?? []) {
+          if (operation.kind !== "btw") continue;
+          yield* Deferred.await(operation.finished);
+        }
         yield* runtime
           .close(chatId)
           .pipe(Effect.mapError(failure("Chat archived, but runtime close failed")));
@@ -717,7 +725,10 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
           Effect.mapError(failure("Failed to send message")),
         );
         yield* Effect.uninterruptible(
-          trackOperation(chatId, "ordinary", completed).pipe(Effect.exit, Effect.forkIn(scope)),
+          trackOperation(chatId, { kind: "ordinary" }, completed).pipe(
+            Effect.exit,
+            Effect.forkIn(scope),
+          ),
         );
         return delivery.kind === "started"
           ? ({ kind: "started", completed } satisfies MessageDelivery<ApplicationError>)
@@ -729,6 +740,39 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
       }),
     );
   });
+  const askBtw = Effect.fn("Application.askBtw")(function* (
+    chatId: Chat.ChatId,
+    question: string,
+  ): Effect.fn.Return<string, ApplicationError | ChatClosed> {
+    return yield* Effect.scoped(
+      Effect.gen(function* () {
+        const operationScope = yield* Effect.scope;
+        const cancelled = yield* Deferred.make<void>();
+        const operation = yield* serialized(
+          chatId,
+          Effect.gen(function* () {
+            yield* ensureChatOpen(chatId, "Failed to ask side question");
+            return yield* Effect.uninterruptible(
+              trackOperation(
+                chatId,
+                { kind: "btw", cancelled },
+                runtime
+                  .askBtw(chatId, question)
+                  .pipe(
+                    Effect.mapError(failure("Failed to ask side question")),
+                    Effect.raceFirst(
+                      Deferred.await(cancelled).pipe(Effect.andThen(Effect.interrupt)),
+                    ),
+                  ),
+              ).pipe(Effect.forkIn(operationScope)),
+            );
+          }),
+        );
+        return yield* Fiber.join(operation);
+      }),
+    );
+  });
+
   const runScheduled = Effect.fn("Application.runScheduled")(function* (
     chatId: Chat.ChatId,
     runId: Schedule.ScheduleRunId,
@@ -745,7 +789,7 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
             return yield* Effect.uninterruptible(
               trackOperation(
                 chatId,
-                "captured",
+                { kind: "captured" },
                 runtime
                   .sendCaptured(chatId, runId, prompt, onEvent)
                   .pipe(Effect.mapError(failure("Failed to run scheduled prompt"))),
@@ -834,6 +878,7 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
     transcript,
     closeChat,
     sendMessage,
+    askBtw,
     abort,
     contextUsage,
     shake,
