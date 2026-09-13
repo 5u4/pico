@@ -13,7 +13,8 @@ import * as Logger from "effect/Logger";
 import * as Option from "effect/Option";
 import * as Redacted from "effect/Redacted";
 import * as TestClock from "effect/testing/TestClock";
-import { type DiscordInputBot, type DiscordMessage, install } from "./discord-input.ts";
+import { type DiscordInputBot, install } from "./discord-input.ts";
+import type { DiscordMessage } from "./discord-prompt.ts";
 
 const workspaceId = Workspace.WorkspaceId.make("018f47a0-0000-7000-8000-000000000001");
 const chatId = Chat.ChatId.make("018f47a0-0000-7000-8000-000000000002");
