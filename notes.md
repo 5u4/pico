@@ -86,6 +86,8 @@
   - archived_at: ms integer; nullable
 - a guild workspace in Discord is a channel
 - a guild chat in Discord is a thread; DMs use the shared bot chat instead
+  - Discord creates the thread before pico persists the chat. Chat setup and opening-message failures therefore reply directly to that thread, even without a chat binding.
+  - these replies identify the failed stage without exposing raw errors. Pure interruption stays quiet. Failed notification delivery is logged separately without retrying.
 - when creating the chat, write workspace.default_cwd to chat.cwd
   - when workspace.default_cwd is changed, chat.cwd remains the same
   - each new chat uses the complete workspace configuration read during creation, even if a bind finishes before chat creation completes
