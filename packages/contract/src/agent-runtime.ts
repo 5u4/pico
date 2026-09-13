@@ -5,6 +5,7 @@ import type { AgentEventEnvelope } from "./agent-event.ts";
 import type { AgentPrompt, AgentTranscript } from "./agent-message.ts";
 import type { ChatId } from "./chat-model.ts";
 import type { AgentError } from "./errors.ts";
+import type { ReplyTarget } from "./reply-target.ts";
 import type { ScheduleRunId } from "./schedule.ts";
 
 export type ShakeMode = "elide" | "images" | "thinking";
@@ -46,6 +47,8 @@ export interface CapturedAgentRun {
   readonly finalAssistantText: string;
 }
 
+export type AgentTurnResult = Omit<CapturedAgentRun, "runId">;
+
 export type MessageDelivery<E = AgentError> =
   | { readonly kind: "started"; readonly completed: Effect.Effect<void, E> }
   | {
@@ -74,7 +77,20 @@ export class AgentRuntime extends Context.Service<
       runId: ScheduleRunId,
       prompt: AgentPrompt,
       onEvent: (event: AgentEventEnvelope["event"]) => Effect.Effect<void, AgentError>,
+      replyTarget?: ReplyTarget,
     ) => Effect.Effect<CapturedAgentRun, AgentError>;
+    // Application captures a whole bot turn for its operation-local reply destination.
+    readonly sendTurn: (
+      chatId: ChatId,
+      prompt: AgentPrompt,
+      onEvent: (event: AgentEventEnvelope["event"]) => Effect.Effect<void, AgentError>,
+      replyTarget?: ReplyTarget,
+    ) => Effect.Effect<AgentTurnResult, AgentError>;
+    // Application rotates only while the pool owns an idle, completed physical session.
+    readonly rotate: (
+      chatId: ChatId,
+      commit: (handoff: string) => Effect.Effect<void, AgentError>,
+    ) => Effect.Effect<void, AgentError>;
     readonly deliver: (chatId: ChatId, content: string) => Effect.Effect<void, AgentError>;
 
     readonly publish: (chatId: ChatId, content: string) => Effect.Effect<void, AgentError>;

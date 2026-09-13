@@ -91,6 +91,8 @@ describe("discord attachments", () => {
           },
         } satisfies DiscordInputBot;
         const application = Application.of({
+          getOrCreateBotChat: () => Effect.die("unexpected bot chat creation"),
+          sendBotMessage: () => Effect.die("unexpected bot message"),
           askBtw: () => Effect.die("unexpected side question"),
           createWorkspace: () => Effect.die("unexpected explicit workspace creation"),
           getOrCreateWorkspaceByBinding: () =>
@@ -272,6 +274,8 @@ describe("discord attachments", () => {
           },
         } satisfies DiscordInputBot;
         const application = Application.of({
+          getOrCreateBotChat: () => Effect.die("unexpected bot chat creation"),
+          sendBotMessage: () => Effect.die("unexpected bot message"),
           askBtw: () => Effect.die("unexpected side question"),
           createWorkspace: () => Effect.die("unexpected explicit workspace creation"),
           getOrCreateWorkspaceByBinding: () => Effect.die("unexpected workspace creation"),

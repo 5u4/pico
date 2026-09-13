@@ -1,4 +1,5 @@
 /// <reference path="./markdown.d.ts" />
+import { BotSessions } from "@pico/contract/bot-session";
 import type * as Chat from "@pico/contract/chat-model";
 import { ChatRepository } from "@pico/contract/chat-repository";
 import { ChatSessionContext } from "@pico/contract/chat-session-context";
@@ -19,8 +20,9 @@ interface Options {
 const make = Effect.fn("ChatSessionContext.make")(function* (options: Options) {
   const chats = yield* ChatRepository;
   const workspaces = yield* WorkspaceRepository;
+  const bots = yield* BotSessions;
   return ChatSessionContext.of({
-    resolve: (chatId) => resolve(chats, workspaces, options, chatId),
+    resolve: (chatId) => resolve(chats, workspaces, bots, options, chatId),
   });
 });
 
@@ -39,6 +41,7 @@ const instructionsGuidance =
 const resolve = Effect.fn("ChatSessionContext.resolve")(function* (
   chats: ChatRepository["Service"],
   workspaces: WorkspaceRepository["Service"],
+  bots: BotSessions["Service"],
   { instructions, discordBotId }: Options,
   chatId: Chat.ChatId,
 ) {
@@ -57,10 +60,14 @@ const resolve = Effect.fn("ChatSessionContext.resolve")(function* (
     return yield* new AgentError({ message: "Chat workspace not found" });
   }
 
+  const bot = yield* bots
+    .findByChat(chatId)
+    .pipe(Effect.mapError(repositoryError("Failed to resolve bot session")));
   const binding = maybeWorkspace.value.binding;
-  const platform = binding?.platform ?? null;
-  const scope: InstructionsScope =
-    binding === null
+  const platform = Option.isSome(bot) ? bot.value.platform : (binding?.platform ?? null);
+  const scope: InstructionsScope = Option.isSome(bot)
+    ? { kind: "bot", botRoot: bot.value.botRoot }
+    : binding === null
       ? { kind: "global" }
       : {
           kind: "discord",
@@ -70,7 +77,10 @@ const resolve = Effect.fn("ChatSessionContext.resolve")(function* (
   const instructionsText = yield* instructions(scope).pipe(
     Effect.mapError((cause) => new AgentError({ message: cause.message })),
   );
-  const basePrompt = `${personaPrompt}\n\n${platformPrompts[platform ?? "web"]}`;
+  const basePrompt =
+    Option.isSome(bot) && platform === null
+      ? personaPrompt
+      : `${personaPrompt}\n\n${platformPrompts[platform ?? "web"]}`;
 
   return {
     chat,

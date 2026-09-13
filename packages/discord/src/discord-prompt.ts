@@ -8,7 +8,7 @@ import type * as HttpClientResponse from "effect/unstable/http/HttpClientRespons
 export interface DiscordMessage {
   readonly guildId?: bigint;
   readonly webhookId?: bigint;
-  readonly author: { readonly id: bigint };
+  readonly author: { readonly id: bigint; readonly bot?: boolean };
   readonly channelId: bigint;
   readonly id: bigint;
   readonly content: string;

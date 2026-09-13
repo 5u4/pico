@@ -67,6 +67,7 @@ describe("session pool capture", () => {
                     beginDispose: () => {},
                     dispose: async () => {},
                   },
+                  createHandoff: () => Promise.reject(new Error("unexpected handoff")),
                   askBtw: () => Promise.reject(new Error("unexpected side question")),
                   sendPrompt: async (value, onStarted): Promise<MessageDelivery> => {
                     if (value.text === "reject")
@@ -152,6 +153,7 @@ describe("session pool capture", () => {
                   beginDispose: () => {},
                   dispose: async () => {},
                 },
+                createHandoff: () => Promise.reject(new Error("unexpected handoff")),
                 askBtw: () => Promise.reject(new Error("unexpected side question")),
                 sendPrompt: async (value, onStarted): Promise<MessageDelivery> => {
                   if (value.text === "following") {
@@ -228,6 +230,7 @@ describe("session pool capture", () => {
                   beginDispose: () => {},
                   dispose: () => Promise.resolve(),
                 },
+                createHandoff: () => Promise.reject(new Error("unexpected handoff")),
                 askBtw: () => Promise.reject(new Error("unexpected side question")),
                 sendPrompt: (_value, onStarted) => {
                   onStarted?.();
@@ -305,6 +308,7 @@ describe("session pool capture", () => {
                   beginDispose: () => {},
                   dispose: () => Promise.resolve(),
                 },
+                createHandoff: () => Promise.reject(new Error("unexpected handoff")),
                 askBtw: () => Promise.reject(new Error("unexpected side question")),
                 sendPrompt: (_value, onStarted) => {
                   onStarted?.();
@@ -354,7 +358,6 @@ describe("session pool capture", () => {
         emitEvent({ type: "title-changed", title: "Delayed title" });
         completeCapture();
         const result = yield* Fiber.join(capture);
-        yield* pool.drain();
         assert.deepStrictEqual(capturedTypes, ["run-started", "run-finished"]);
         assert.deepStrictEqual(
           result.events.map((event) => event.type),
@@ -393,6 +396,7 @@ describe("session pool capture", () => {
                   beginDispose: () => {},
                   dispose: () => Promise.resolve(),
                 },
+                createHandoff: () => Promise.reject(new Error("unexpected handoff")),
                 askBtw: () => Promise.reject(new Error("unexpected side question")),
                 sendPrompt: (_value, onStarted) => {
                   sends += 1;
@@ -503,6 +507,7 @@ describe("session pool capture", () => {
                   beginDispose: () => {},
                   dispose: () => Promise.resolve(),
                 },
+                createHandoff: () => Promise.reject(new Error("unexpected handoff")),
                 askBtw: () => Promise.reject(new Error("unexpected side question")),
                 sendPrompt: (_value, onStarted) => {
                   sends += 1;
@@ -582,6 +587,7 @@ describe("session pool capture", () => {
                     beginDispose: () => {},
                     dispose: () => Promise.resolve(),
                   },
+                  createHandoff: () => Promise.reject(new Error("unexpected handoff")),
                   askBtw: () => Promise.reject(new Error("unexpected side question")),
                   sendPrompt: (value, onStarted) => {
                     if (value.text === "reject") return Promise.reject(rejected);

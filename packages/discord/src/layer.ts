@@ -1,7 +1,10 @@
 import type { DiscordConfig } from "@pico/config/config";
+import { discordBotRoot } from "@pico/config/root";
 import type { AgentEventEnvelope } from "@pico/contract/agent-event";
 import type * as Chat from "@pico/contract/chat-model";
+import type { PicoRoot } from "@pico/contract/config";
 import { EventRouter } from "@pico/contract/event-router";
+import { ReplyDelivery } from "@pico/contract/reply-target";
 import { type CreateApplicationCommand, createBot, GatewayIntents, MessageFlags } from "discordeno";
 import * as Effect from "effect/Effect";
 import * as FiberSet from "effect/FiberSet";
@@ -18,6 +21,11 @@ import * as DiscordInput from "./discord-input.ts";
 import * as DiscordOutput from "./discord-output.ts";
 
 export { DiscordError };
+
+export interface DiscordOptions {
+  readonly picoRoot: PicoRoot;
+  readonly onAuthenticated: (botId: string) => void;
+}
 
 export interface DiscordStartupBot {
   readonly id?: bigint;
@@ -94,6 +102,7 @@ export const openBot = Effect.fn("Discord.openBot")(function* (
         botId: bot.id?.toString(),
         configuredGuildCount: allowedGuildIds.length,
         joinedGuildCount: joinedGuildIds.size,
+        directMessages: "enabled",
       }),
     );
     return bot;
@@ -188,7 +197,7 @@ export const sdkLoggerFactory =
 
 const start = Effect.fn("Discord.start")(function* (
   config: DiscordConfig,
-  onAuthenticated: (botId: string) => void,
+  options: DiscordOptions,
 ) {
   const eventRouter = yield* EventRouter;
   const httpClient = yield* HttpClient.HttpClient;
@@ -224,7 +233,10 @@ const start = Effect.fn("Discord.start")(function* (
           },
         },
         intents:
-          GatewayIntents.Guilds | GatewayIntents.GuildMessages | GatewayIntents.MessageContent,
+          GatewayIntents.Guilds |
+          GatewayIntents.GuildMessages |
+          GatewayIntents.DirectMessages |
+          GatewayIntents.MessageContent,
         desiredProperties: {
           attachment: {
             contentType: true,
@@ -250,6 +262,7 @@ const start = Effect.fn("Discord.start")(function* (
           },
           user: {
             id: true,
+            toggles: true,
           },
           interaction: {
             channelId: true,
@@ -267,52 +280,53 @@ const start = Effect.fn("Discord.start")(function* (
   });
   const joinedGuildIds = new Set<string>();
   bot.events.ready = ({ guilds, user }) => {
-    onAuthenticated(user.id.toString());
+    options.onAuthenticated(user.id.toString());
     for (const guildId of guilds) joinedGuildIds.add(guildId.toString());
   };
   type InputMessage = Parameters<NonNullable<typeof bot.events.messageCreate>>[0];
   type InputInteraction = Parameters<NonNullable<typeof bot.events.interactionCreate>>[0];
 
+  const outputClient: DiscordOutput.DiscordOutputClient = {
+    send: (threadId, message) =>
+      promiseBoundary("send-message", () =>
+        bot.helpers.sendMessage(threadId, {
+          content: message.content,
+          allowedMentions,
+          ...(message.silent ? { flags: MessageFlags.SuppressNotifications } : {}),
+          ...(message.replyTo === undefined
+            ? {}
+            : { messageReference: { messageId: message.replyTo, failIfNotExists: false } }),
+        }),
+      ).pipe(Effect.map((sent) => sent.id)),
+    edit: (threadId, messageId, content) =>
+      promiseBoundary("edit-message", () =>
+        bot.helpers.editMessage(threadId, messageId, { content, allowedMentions }),
+      ).pipe(Effect.asVoid),
+    renameThread: (threadId, title) =>
+      promiseBoundary("rename-thread", () =>
+        bot.helpers.editChannel(threadId, { name: title }),
+      ).pipe(Effect.asVoid),
+    triggerTyping: (threadId) =>
+      promiseBoundary("trigger-typing", () => bot.helpers.triggerTypingIndicator(threadId)),
+  };
   const resolveThreadId = yield* DiscordInput.install<InputMessage, InputInteraction>(
     bot,
     config,
     () => eventRouter.drain(),
     httpClient,
+    { botRoot: yield* discordBotRoot(options.picoRoot, bot.id.toString()), outputClient },
   );
-  const scope = yield* Scope.Scope;
-  const dispatch = DiscordOutput.make(
-    {
-      send: (threadId, message) =>
-        promiseBoundary("send-message", () =>
-          bot.helpers.sendMessage(threadId, {
-            content: message.content,
-            allowedMentions,
-            ...(message.silent ? { flags: MessageFlags.SuppressNotifications } : {}),
-          }),
-        ).pipe(Effect.map((sent) => sent.id)),
-      edit: (threadId, messageId, content) =>
-        promiseBoundary("edit-message", () =>
-          bot.helpers.editMessage(threadId, messageId, { content, allowedMentions }),
-        ).pipe(Effect.asVoid),
-      renameThread: (threadId, title) =>
-        promiseBoundary("rename-thread", () =>
-          bot.helpers.editChannel(threadId, { name: title }),
-        ).pipe(Effect.asVoid),
-      triggerTyping: (threadId) =>
-        promiseBoundary("trigger-typing", () => bot.helpers.triggerTypingIndicator(threadId)),
-    },
-    scope,
-    { showToolCalls: config.showToolCalls, showThinking: config.showThinking },
-  );
+  const dispatch = DiscordOutput.make(outputClient, yield* Scope.Scope, config);
 
   yield* pumpOutput(eventRouter, resolveThreadId, dispatch);
 
   yield* openBot(bot, config, joinedGuildIds);
+  return DiscordOutput.makeReplyDelivery(outputClient);
 });
 
 // Daemon starts Discord and receives the authenticated bot identity on READY.
-export const layer = (config: DiscordConfig, onAuthenticated: (botId: string) => void) =>
-  Layer.effectDiscard(start(config, onAuthenticated)).pipe(
+export const layer = (config: DiscordConfig, options: DiscordOptions) =>
+  Layer.effect(ReplyDelivery, start(config, options)).pipe(
     Layer.provide(
       FetchHttpClient.layer.pipe(
         Layer.provide(Layer.succeed(FetchHttpClient.RequestInit, { redirect: "error" })),

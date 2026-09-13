@@ -5,6 +5,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
+import { discordBotRoot } from "./root.ts";
 
 const DiscordId = Schema.String.check(Schema.isPattern(/^[0-9]+$/), Schema.isTrimmed());
 const decodeDiscordId = Schema.decodeUnknownEffect(DiscordId);
@@ -21,7 +22,12 @@ export const make = Effect.fn("Instructions.make")(function* (root: PicoRoot) {
     const sources = [
       { path: path.join(agentsDir, "instructions.md"), heading: "Global instructions" },
     ];
-    if (scope.kind === "discord") {
+    if (scope.kind === "bot") {
+      sources.push({
+        path: path.join(scope.botRoot, "instructions.md"),
+        heading: "Bot instructions",
+      });
+    } else if (scope.kind === "discord") {
       const channelId = yield* decodeDiscordId(scope.channelId).pipe(
         Effect.mapError(
           () =>
@@ -31,16 +37,11 @@ export const make = Effect.fn("Instructions.make")(function* (root: PicoRoot) {
         ),
       );
       if (scope.botId !== null) {
-        const botId = yield* decodeDiscordId(scope.botId).pipe(
-          Effect.mapError(
-            () =>
-              new ConfigError({
-                message: "Invalid Discord bot ID for instructions",
-              }),
-          ),
+        const botRoot = yield* discordBotRoot(root, scope.botId).pipe(
+          Effect.provideService(Path.Path, path),
         );
         sources.push({
-          path: path.join(agentsDir, "discord", "bots", botId, "instructions.md"),
+          path: path.join(botRoot, "instructions.md"),
           heading: "Discord bot instructions",
         });
       }

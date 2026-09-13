@@ -79,6 +79,8 @@ describe("discord input", () => {
         } satisfies DiscordInputBot;
 
         const application = Application.of({
+          getOrCreateBotChat: () => Effect.die("unexpected bot chat creation"),
+          sendBotMessage: () => Effect.die("unexpected bot message"),
           askBtw: () => Effect.die("unexpected side question"),
           createWorkspace: () => Effect.die("unexpected explicit workspace creation"),
           getOrCreateWorkspaceByBinding: () =>
@@ -188,6 +190,8 @@ describe("discord input", () => {
           },
         } satisfies DiscordInputBot;
         const application = Application.of({
+          getOrCreateBotChat: () => Effect.die("unexpected bot chat creation"),
+          sendBotMessage: () => Effect.die("unexpected bot message"),
           askBtw: () => Effect.die("unexpected side question"),
           createWorkspace: () => Effect.die("unexpected explicit workspace creation"),
           getOrCreateWorkspaceByBinding: () => Effect.die("unexpected workspace creation"),
@@ -315,6 +319,8 @@ describe("discord input", () => {
           },
         } satisfies DiscordInputBot;
         const application = Application.of({
+          getOrCreateBotChat: () => Effect.die("unexpected bot chat creation"),
+          sendBotMessage: () => Effect.die("unexpected bot message"),
           askBtw: () => Effect.die("unexpected side question"),
           createWorkspace: () => Effect.die("unexpected workspace creation"),
           getOrCreateWorkspaceByBinding: () => Effect.die("unexpected workspace creation"),
@@ -455,6 +461,8 @@ describe("discord input", () => {
           },
         } satisfies DiscordInputBot;
         const application = Application.of({
+          getOrCreateBotChat: () => Effect.die("unexpected bot chat creation"),
+          sendBotMessage: () => Effect.die("unexpected bot message"),
           askBtw: () => Effect.die("unexpected side question"),
           createWorkspace: () => Effect.die("unexpected explicit workspace creation"),
           getOrCreateWorkspaceByBinding: () => Effect.die("unexpected workspace creation"),
@@ -549,6 +557,8 @@ describe("discord input", () => {
           },
         } satisfies DiscordInputBot;
         const application = Application.of({
+          getOrCreateBotChat: () => Effect.die("unexpected bot chat creation"),
+          sendBotMessage: () => Effect.die("unexpected bot message"),
           askBtw: () => Effect.die("unexpected side question"),
           createWorkspace: () => Effect.die("unexpected explicit workspace creation"),
           getOrCreateWorkspaceByBinding: () => Effect.die("unexpected workspace creation"),
@@ -644,6 +654,8 @@ describe("discord input", () => {
           },
         } satisfies DiscordInputBot;
         const application = Application.of({
+          getOrCreateBotChat: () => Effect.die("unexpected bot chat creation"),
+          sendBotMessage: () => Effect.die("unexpected bot message"),
           askBtw: () => Effect.die("unexpected side question"),
           createWorkspace: () => Effect.die("unexpected explicit workspace creation"),
           getOrCreateWorkspaceByBinding: () => Effect.die("unexpected workspace creation"),
@@ -762,6 +774,8 @@ describe("discord input", () => {
           },
         } satisfies DiscordInputBot;
         const application = Application.of({
+          getOrCreateBotChat: () => Effect.die("unexpected bot chat creation"),
+          sendBotMessage: () => Effect.die("unexpected bot message"),
           askBtw: () => Effect.die("unexpected side question"),
           createWorkspace: () => Effect.die("unexpected explicit workspace creation"),
           getOrCreateWorkspaceByBinding: () => Effect.die("unexpected workspace creation"),
@@ -870,6 +884,8 @@ describe("discord input", () => {
           },
         } satisfies DiscordInputBot;
         const application = Application.of({
+          getOrCreateBotChat: () => Effect.die("unexpected bot chat creation"),
+          sendBotMessage: () => Effect.die("unexpected bot message"),
           askBtw: () => Effect.die("unexpected side question"),
           createWorkspace: () => Effect.die("unexpected explicit workspace creation"),
           getOrCreateWorkspaceByBinding: () => Effect.die("unexpected workspace creation"),
@@ -960,6 +976,8 @@ describe("discord input", () => {
           },
         } satisfies DiscordInputBot;
         const application = Application.of({
+          getOrCreateBotChat: () => Effect.die("unexpected bot chat creation"),
+          sendBotMessage: () => Effect.die("unexpected bot message"),
           askBtw: () => Effect.die("unexpected side question"),
           createWorkspace: () => Effect.die("unexpected explicit workspace creation"),
           getOrCreateWorkspaceByBinding: () =>
@@ -1076,6 +1094,8 @@ describe("discord input", () => {
             },
           } satisfies DiscordInputBot;
           const application = Application.of({
+            getOrCreateBotChat: () => Effect.die("unexpected bot chat creation"),
+            sendBotMessage: () => Effect.die("unexpected bot message"),
             askBtw: () => Effect.die("unexpected side question"),
             createWorkspace: () => Effect.die("unexpected explicit workspace creation"),
             getOrCreateWorkspaceByBinding: () =>
@@ -1201,6 +1221,8 @@ describe("discord input", () => {
           },
         };
         const application = Application.of({
+          getOrCreateBotChat: () => Effect.die("unexpected bot chat creation"),
+          sendBotMessage: () => Effect.die("unexpected bot message"),
           askBtw: () => Effect.die("unexpected side question"),
           createWorkspace: () => Effect.die("unexpected workspace creation"),
           getOrCreateWorkspaceByBinding: () => Effect.die("unexpected workspace creation"),
@@ -1329,6 +1351,8 @@ describe("discord input", () => {
           },
         };
         const application = Application.of({
+          getOrCreateBotChat: () => Effect.die("unexpected bot chat creation"),
+          sendBotMessage: () => Effect.die("unexpected bot message"),
           askBtw: () => Effect.die("unexpected side question"),
           createWorkspace: () => Effect.die("unexpected workspace creation"),
           getOrCreateWorkspaceByBinding: () => Effect.die("unexpected workspace creation"),
@@ -1459,6 +1483,8 @@ describe("discord input", () => {
           },
         };
         const application = Application.of({
+          getOrCreateBotChat: () => Effect.die("unexpected bot chat creation"),
+          sendBotMessage: () => Effect.die("unexpected bot message"),
           askBtw: () => Effect.die("unexpected side question"),
           createWorkspace: () => Effect.die("unexpected workspace creation"),
           getOrCreateWorkspaceByBinding: () => Effect.die("unexpected workspace creation"),

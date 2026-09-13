@@ -14,6 +14,7 @@ import {
   PersistenceError,
 } from "@pico/contract/errors";
 import { EventRouter } from "@pico/contract/event-router";
+import { ReplyDelivery, type ReplyTarget } from "@pico/contract/reply-target";
 import { ScheduleError, ScheduleHostError, ScheduleRunHostService } from "@pico/contract/schedule";
 import * as DiscordLayer from "@pico/discord/layer";
 import * as EventRouterLayer from "@pico/event-router/layer";
@@ -178,26 +179,52 @@ const daemonLayer = (paths: PicoPaths, config: Config.PicoConfig) =>
         paths,
         schedules,
         browser: config.browser,
-      }).pipe(Layer.provide(Layer.merge(chatSessionContext, branchNaming)));
+      }).pipe(Layer.provide(Layer.mergeAll(chatSessionContext, branchNaming, persistence)));
       const core = Layer.merge(application, EventRouterLayer.layer).pipe(
         Layer.provide(agentRuntime),
       );
       const surfaces =
         discord === null
           ? core
-          : DiscordLayer.layer(discord.config, (id) => {
-              Deferred.doneUnsafe(discord.authenticated, Effect.succeed(id));
+          : DiscordLayer.layer(discord.config, {
+              picoRoot: paths.root,
+              onAuthenticated: (id) => {
+                Deferred.doneUnsafe(discord.authenticated, Effect.succeed(id));
+              },
             }).pipe(Layer.provideMerge(core));
       const scheduler = Layer.effectDiscard(
         Effect.gen(function* () {
           const host = yield* ScheduleRunHostService;
           const router = yield* EventRouter;
+          const replies = yield* Effect.serviceOption(ReplyDelivery);
+          const sendReply = (
+            chatId: Parameters<typeof host.deliver>[0],
+            target: ReplyTarget | undefined,
+            content: string,
+          ) =>
+            target === undefined
+              ? router.drain()
+              : Option.isNone(replies)
+                ? Effect.fail(
+                    new ScheduleHostError({
+                      message: "The scheduled reply destination is unavailable",
+                    }),
+                  )
+                : replies.value
+                    .send(chatId, target, content)
+                    .pipe(
+                      Effect.mapError((error) => new ScheduleHostError({ message: error.message })),
+                    );
           yield* schedules.start({
             ...host,
-            deliver: (chatId, content) =>
-              host.deliver(chatId, content).pipe(Effect.andThen(router.drain())),
-            publish: (chatId, content) =>
-              host.publish(chatId, content).pipe(Effect.andThen(router.drain())),
+            deliver: (chatId, content, target) =>
+              host
+                .deliver(chatId, content)
+                .pipe(Effect.andThen(sendReply(chatId, target, content))),
+            publish: (chatId, content, target) =>
+              host
+                .publish(chatId, content)
+                .pipe(Effect.andThen(sendReply(chatId, target, content))),
           });
         }),
       ).pipe(Layer.provide(surfaces));

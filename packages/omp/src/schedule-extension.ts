@@ -5,7 +5,7 @@ import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 
 interface Options {
-  readonly caller: Schedule.ScheduleCaller;
+  readonly caller: () => Schedule.ScheduleCaller;
   readonly schedules: Schedule.Schedules["Service"];
   readonly runEffect: typeof Effect.runPromise;
 }
@@ -80,15 +80,17 @@ export const make =
     const Type = api.typebox.Type;
     const execute = <A>(
       operation: OperationContext["operation"],
-      effect: Effect.Effect<A, Schedule.ScheduleError>,
+      action: (caller: Schedule.ScheduleCaller) => Effect.Effect<A, Schedule.ScheduleError>,
       id?: string,
-    ) =>
-      executeScheduleOperation(effect, {
-        caller,
+    ) => {
+      const operationCaller = caller();
+      return executeScheduleOperation(action(operationCaller), {
+        caller: operationCaller,
         operation,
         runEffect,
         ...(id === undefined ? {} : { scheduleId: Schedule.ScheduleId.make(id) }),
       });
+    };
     const scheduleId = Type.String({
       pattern:
         "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-7[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$",
@@ -136,8 +138,7 @@ export const make =
         { additionalProperties: false },
       ),
       execute: (_toolCallId, params) =>
-        execute(
-          "create",
+        execute("create", (caller) =>
           schedules.create(caller, {
             ...params,
             sourceDirectory: AbsolutePath.make(params.sourceDirectory),
@@ -152,7 +153,7 @@ export const make =
         "List schedules owned by the current workspace, including invalid external edits.",
       approval: "read",
       parameters: Type.Object({}, { additionalProperties: false }),
-      execute: () => execute("list", schedules.list(caller)),
+      execute: () => execute("list", (caller) => schedules.list(caller)),
     });
 
     api.registerTool({
@@ -165,7 +166,7 @@ export const make =
       execute: (_toolCallId, params) =>
         execute(
           "get",
-          schedules.get(caller, Schedule.ScheduleId.make(params.scheduleId)),
+          (caller) => schedules.get(caller, Schedule.ScheduleId.make(params.scheduleId)),
           params.scheduleId,
         ),
     });
@@ -189,7 +190,11 @@ export const make =
       ),
       execute: (_toolCallId, params) => {
         const { scheduleId: id, ...input } = params;
-        return execute("update", schedules.update(caller, Schedule.ScheduleId.make(id), input), id);
+        return execute(
+          "update",
+          (caller) => schedules.update(caller, Schedule.ScheduleId.make(id), input),
+          id,
+        );
       },
     });
 
@@ -204,7 +209,8 @@ export const make =
         const id = Schedule.ScheduleId.make(params.scheduleId);
         return execute(
           "remove",
-          schedules.remove(caller, id).pipe(Effect.as({ scheduleId: id, deleted: true })),
+          (caller) =>
+            schedules.remove(caller, id).pipe(Effect.as({ scheduleId: id, deleted: true })),
           id,
         );
       },

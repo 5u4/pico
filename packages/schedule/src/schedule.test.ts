@@ -349,6 +349,290 @@ describe("Schedules", () => {
     }).pipe(Effect.provide(platformLayer), Effect.scoped),
   );
 
+  it.effect("keeps reply destinations across updates, restarts, and nested schedules", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-schedule-origin-" });
+      const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
+      const cwd = AbsolutePath.make(root);
+      const latestCaller: Schedule.ScheduleCaller = {
+        ...caller,
+        replyTarget: {
+          platform: "discord",
+          conversationId: "latest-conversation",
+          messageId: "latest-message",
+        },
+      };
+      const origins: ReadonlyArray<{
+        readonly name: string;
+        readonly caller: Schedule.ScheduleCaller;
+      }> = [
+        {
+          name: "first",
+          caller: {
+            ...caller,
+            replyTarget: {
+              platform: "discord",
+              conversationId: "first-conversation",
+              messageId: "first-message",
+            },
+          },
+        },
+        {
+          name: "second",
+          caller: {
+            ...caller,
+            replyTarget: {
+              platform: "discord",
+              conversationId: "second-conversation",
+              messageId: "second-message",
+            },
+          },
+        },
+        { name: "regular", caller },
+      ];
+      const attempts = yield* Queue.unbounded<{
+        readonly content: string;
+        readonly acknowledge: Deferred.Deferred<void>;
+      }>();
+      const mailboxes = new Map<string, Array<string>>();
+      const send: Schedule.ScheduleRunHost["deliver"] = (targetChatId, content, replyTarget) =>
+        Effect.gen(function* () {
+          const acknowledge = yield* Deferred.make<void>();
+          yield* Queue.offer(attempts, { content, acknowledge });
+          yield* Deferred.await(acknowledge);
+          const destination =
+            replyTarget === undefined
+              ? targetChatId
+              : `${replyTarget.platform}/${replyTarget.conversationId}/${replyTarget.messageId}`;
+          const messages = mailboxes.get(destination) ?? [];
+          messages.push(content);
+          mailboxes.set(destination, messages);
+        });
+      const schedules = yield* open(schedulesDir);
+      let pending: Array<{
+        readonly content: string;
+        readonly origin: Schedule.ScheduleCaller;
+        readonly nestedSource: AbsolutePath;
+        readonly view: Schedule.ReadyScheduleView;
+      }> = [];
+      yield* TestClock.setTime(1_000);
+      for (const origin of origins) {
+        const view = yield* schedules.create(origin.caller, {
+          name: origin.name,
+          enabled: true,
+          target: { kind: "current-chat" },
+          trigger: { kind: "once", at: 1_000 },
+          sourceDirectory: yield* prepareSource({ "prompt.md": origin.name }),
+        });
+        if (view.kind !== "ready") return yield* Effect.die("Schedule was not created");
+        pending.push({
+          content: origin.name,
+          origin: origin.caller,
+          nestedSource: yield* prepareSource({
+            "script.js": `process.stdout.write(JSON.stringify({agent:false,content:${JSON.stringify(`nested ${origin.name}`)}}));`,
+          }),
+          view,
+        });
+      }
+
+      for (const agent of [true, false]) {
+        const scheduledFor = agent ? 1_000 : 2_000;
+        yield* TestClock.setTime(scheduledFor);
+        const updater = yield* make(schedulesDir);
+        for (const [index, item] of pending.entries()) {
+          const view = yield* updater.update(latestCaller, item.view.id, {
+            name: `${item.content} updated later`,
+          });
+          if (view.kind !== "ready") return yield* Effect.die("Schedule update failed");
+          yield* updater.update(latestCaller, view.id, { enabled: false });
+          yield* updater.update(latestCaller, view.id, { enabled: true });
+          pending[index] = { ...item, view };
+        }
+        const restarted = yield* make(schedulesDir);
+        const children: typeof pending = [];
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            yield* restarted.start({
+              prepare: (target) => Effect.succeed({ chatId: target.chatId, workspaceId, cwd }),
+              deliver: send,
+              publish: send,
+              runPrompt: (targetChatId, runId, prompt, _onEvent, replyTarget) =>
+                Effect.gen(function* () {
+                  const parent = pending.find((item) => item.content === prompt.text);
+                  if (!agent || parent === undefined) {
+                    return yield* Effect.die("Unexpected scheduled prompt");
+                  }
+                  const content = `nested ${parent.content}`;
+                  const view = yield* restarted.create(
+                    {
+                      workspaceId,
+                      chatId: targetChatId,
+                      ...(replyTarget === undefined ? {} : { replyTarget }),
+                    },
+                    {
+                      name: content,
+                      enabled: true,
+                      target: { kind: "current-chat" },
+                      trigger: { kind: "once", at: 2_000 },
+                      sourceDirectory: parent.nestedSource,
+                    },
+                  );
+                  if (view.kind !== "ready") return yield* Effect.die("Nested schedule failed");
+                  children.push({ ...parent, content, view });
+                  return {
+                    runId,
+                    outcome: "completed",
+                    events: [],
+                    finalAssistantText: prompt.text,
+                  } satisfies CapturedAgentRun;
+                }).pipe(
+                  Effect.mapError(
+                    (error) => new Schedule.ScheduleHostError({ message: error.message }),
+                  ),
+                ),
+            });
+            for (let index = 0; index < pending.length; index++) {
+              const attempt = yield* Queue.take(attempts);
+              const item = pending.find((candidate) => candidate.content === attempt.content);
+              if (item === undefined) return yield* Effect.die("Unexpected scheduled delivery");
+              const runDirectory = path.join(
+                schedulesDir,
+                "runs",
+                item.view.id,
+                `scheduled-${scheduledFor}-${item.view.definition.revision}`,
+              );
+              const runFile = path.join(runDirectory, "run.json");
+              const waiting = yield* decodeRun(yield* fileSystem.readFileString(runFile));
+              assert.notStrictEqual(waiting.state.kind, "finished");
+              const snapshot = yield* decodeDefinition(
+                yield* fileSystem.readFileString(
+                  path.join(runDirectory, "input", "definition.json"),
+                ),
+              );
+              assert.deepStrictEqual(snapshot.replyTarget, item.origin.replyTarget);
+              yield* Deferred.succeed(attempt.acknowledge, undefined);
+              const finished = yield* awaitFinished(fileSystem, runFile);
+              assert.deepStrictEqual(
+                finished.state.kind === "finished" && finished.state.outcome,
+                agent
+                  ? { kind: "completed", finalAssistantText: item.content }
+                  : { kind: "published", content: item.content },
+              );
+            }
+          }),
+        );
+        pending = children;
+      }
+      assert.deepStrictEqual(
+        mailboxes,
+        new Map([
+          ["discord/first-conversation/first-message", ["first", "nested first"]],
+          ["discord/second-conversation/second-message", ["second", "nested second"]],
+          [chatId, ["regular", "nested regular"]],
+        ]),
+      );
+    }).pipe(Effect.provide(platformLayer), Effect.scoped),
+  );
+
+  it.effect("records target sender failures as publish failures for both reminder paths", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const origin: Schedule.ScheduleCaller = {
+        ...caller,
+        replyTarget: {
+          platform: "discord",
+          conversationId: "unreachable-origin",
+          messageId: "original-message",
+        },
+      };
+      for (const agent of [true, false]) {
+        const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-schedule-send-" });
+        const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
+        const cwd = AbsolutePath.make(root);
+        const attempted = yield* Deferred.make<Schedule.ScheduleCaller["replyTarget"]>();
+        const reject = yield* Deferred.make<void>();
+        const send: Schedule.ScheduleRunHost["deliver"] = (_chatId, _content, replyTarget) =>
+          Deferred.succeed(attempted, replyTarget).pipe(
+            Effect.andThen(Deferred.await(reject)),
+            Effect.andThen(
+              Effect.fail(
+                new Schedule.ScheduleHostError({
+                  message: "Destination unavailable",
+                }),
+              ),
+            ),
+          );
+        yield* TestClock.setTime(1_000);
+        const schedules = yield* open(schedulesDir);
+        const created = yield* schedules.create(origin, {
+          name: "unreachable reminder",
+          enabled: true,
+          target: { kind: "current-chat" },
+          trigger: { kind: "once", at: 1_000 },
+          sourceDirectory: yield* prepareSource(
+            agent
+              ? { "prompt.md": "reminder" }
+              : {
+                  "script.js":
+                    'process.stdout.write(JSON.stringify({agent:false,content:"reminder"}));',
+                },
+          ),
+        });
+        if (created.kind !== "ready") return yield* Effect.die("Schedule was not created");
+        const updated = yield* schedules.update(
+          {
+            ...caller,
+            replyTarget: {
+              platform: "discord",
+              conversationId: "later-conversation",
+              messageId: "later-message",
+            },
+          },
+          created.id,
+          { name: "updated unreachable reminder" },
+        );
+        if (updated.kind !== "ready") return yield* Effect.die("Schedule update failed");
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const restarted = yield* make(schedulesDir);
+            yield* restarted.start({
+              prepare: () => Effect.succeed({ chatId, workspaceId, cwd }),
+              deliver: send,
+              publish: send,
+              runPrompt: (_chatId, runId) =>
+                Effect.succeed({
+                  runId,
+                  outcome: "completed",
+                  events: [],
+                  finalAssistantText: "reminder",
+                }),
+            });
+            assert.deepStrictEqual(yield* Deferred.await(attempted), origin.replyTarget);
+            const runFile = path.join(
+              schedulesDir,
+              "runs",
+              updated.id,
+              `scheduled-1000-${updated.definition.revision}`,
+              "run.json",
+            );
+            const waiting = yield* decodeRun(yield* fileSystem.readFileString(runFile));
+            assert.notStrictEqual(waiting.state.kind, "finished");
+            yield* Deferred.succeed(reject, undefined);
+            const finished = yield* awaitFinished(fileSystem, runFile);
+            assert.deepStrictEqual(finished.state.kind === "finished" && finished.state.outcome, {
+              kind: "failed",
+              stage: "publish",
+              message: "Destination unavailable",
+            });
+          }),
+        );
+      }
+    }).pipe(Effect.provide(platformLayer), Effect.scoped),
+  );
+
   it.effect("derives script behavior and agent input from source files and decisions", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;

@@ -1,5 +1,6 @@
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { AgentSessionStore, type CreateAgentSession } from "@pico/contract/agent-session-store";
+import { SessionJournal } from "@pico/contract/bot-session";
 import { AgentError } from "@pico/contract/errors";
 import type { AbsolutePath } from "@pico/contract/path";
 import * as Cause from "effect/Cause";
@@ -8,6 +9,7 @@ import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as Schema from "effect/Schema";
 
 import { agentError } from "./agent-error.ts";
 
@@ -106,7 +108,95 @@ export const make = Effect.fn("AgentSessionStore.make")(function* (sessionsDir: 
     );
   });
 
-  return AgentSessionStore.of({ create, remove });
+  const removePhysical = Effect.fn("AgentSessionStore.removePhysical")(function* (
+    journal: SessionJournal,
+  ) {
+    yield* Effect.all(
+      [
+        fileSystem.remove(journal.file, { force: true }),
+        fileSystem.remove(
+          path.join(path.dirname(journal.file), path.basename(journal.file, ".jsonl")),
+          { force: true, recursive: true },
+        ),
+      ],
+      { concurrency: "unbounded", discard: true },
+    ).pipe(Effect.mapError((error) => agentError("Failed to remove physical OMP session", error)));
+  });
+
+  const createPhysical = Effect.fn("AgentSessionStore.createPhysical")(function* (
+    botRoot: AbsolutePath,
+    cwd: AbsolutePath,
+  ) {
+    const directory = path.join(botRoot, "sessions");
+    let journal: SessionJournal | undefined;
+    return yield* Effect.gen(function* () {
+      yield* fileSystem.makeDirectory(directory, { recursive: true, mode: 0o700 });
+      return yield* Effect.acquireUseRelease(
+        Effect.try({
+          try: () => SessionManager.create(cwd, directory),
+          catch: (cause) => agentError("Failed to create physical OMP session", cause),
+        }),
+        (manager) =>
+          Effect.tryPromise({
+            try: async () => {
+              const physical = Schema.decodeUnknownSync(SessionJournal)({
+                id: manager.getSessionId(),
+                file: manager.getSessionFile(),
+              });
+              journal = physical;
+              await manager.ensureOnDisk();
+              return physical;
+            },
+            catch: (cause) => agentError("Failed to persist physical OMP session", cause),
+          }),
+        (manager, exit) =>
+          Effect.tryPromise({
+            try: () => manager.close(),
+            catch: (cause) => agentError("Failed to close physical OMP session", cause),
+          }).pipe(
+            Effect.catchCause((cause) =>
+              Exit.isSuccess(exit)
+                ? Effect.failCause(cause)
+                : Effect.logError(
+                    "Failed to close physical OMP journal after creation failure",
+                  ).pipe(
+                    Effect.annotateLogs({
+                      component: "omp",
+                      operation: "journal-cleanup",
+                      phase: "close",
+                      failureKind: Cause.hasDies(cause) ? "defect" : "operation",
+                    }),
+                  ),
+            ),
+          ),
+      );
+    }).pipe(
+      Effect.mapError((error) =>
+        error instanceof AgentError
+          ? error
+          : agentError("Failed to create physical OMP session", error),
+      ),
+      Effect.tapCause(() =>
+        journal === undefined
+          ? Effect.void
+          : removePhysical(journal).pipe(
+              Effect.catchCause((cause) =>
+                Effect.logError("Failed to remove unpublished physical OMP journal").pipe(
+                  Effect.annotateLogs({
+                    component: "omp",
+                    operation: "journal-cleanup",
+                    phase: "create-rollback",
+                    failureKind: Cause.hasDies(cause) ? "defect" : "operation",
+                  }),
+                ),
+              ),
+            ),
+      ),
+      Effect.uninterruptible,
+    );
+  });
+
+  return AgentSessionStore.of({ create, remove, createPhysical, removePhysical });
 });
 
 export const layer = (sessionsDir: AbsolutePath) =>

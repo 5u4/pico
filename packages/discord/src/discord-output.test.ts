@@ -2,16 +2,19 @@ import { assert, describe, it } from "@effect/vitest";
 import type { AgentEvent, AgentEventEnvelope } from "@pico/contract/agent-event";
 import type { AgentAssistantMessage } from "@pico/contract/agent-message";
 import * as Chat from "@pico/contract/chat-model";
+import { AgentError } from "@pico/contract/errors";
+import type { ReplyTarget } from "@pico/contract/reply-target";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Logger from "effect/Logger";
 import * as Scope from "effect/Scope";
 import * as TestClock from "effect/testing/TestClock";
-import { reportFailure } from "./discord-error.ts";
+import { promiseBoundary, reportFailure } from "./discord-error.ts";
 import {
   type DiscordOutputPolicy,
   make,
+  makeReplyDelivery,
   type RenderedMessage,
   renderAssistant,
 } from "./discord-output.ts";
@@ -57,6 +60,95 @@ const failed = (
 });
 
 describe("Discord output", () => {
+  it.effect(
+    "propagates scheduled reply failures without leaking SDK payloads or sending later chunks",
+    () =>
+      Effect.gen(function* () {
+        const attempted: Array<{ readonly channelId: bigint; readonly message: RenderedMessage }> =
+          [];
+        const delivery = makeReplyDelivery({
+          send: (channelId, message) =>
+            promiseBoundary("send-message", async () => {
+              attempted.push({ channelId, message });
+              if (attempted.length === 2) {
+                throw new Error("private-sdk-wrapper", {
+                  cause: { status: 503, body: '{"code":50013,"message":"private-response"}' },
+                });
+              }
+              return BigInt(attempted.length);
+            }),
+        });
+        const failure = yield* delivery
+          .send(
+            chatA,
+            { platform: "discord", conversationId: "101", messageId: "1001" },
+            "x".repeat(4_500),
+          )
+          .pipe(Effect.flip);
+
+        assert.instanceOf(failure, AgentError);
+        assert.include(failure.message, "503");
+        assert.include(failure.message, "50013");
+        assert.notInclude(JSON.stringify(failure), "private-");
+        assert.deepStrictEqual(attempted, [
+          {
+            channelId: 101n,
+            message: { content: "x".repeat(2_000), silent: false, replyTo: 1001n },
+          },
+          {
+            channelId: 101n,
+            message: { content: "x".repeat(2_000), silent: false, replyTo: 1001n },
+          },
+        ]);
+      }),
+  );
+
+  it.effect(
+    "rejects malformed scheduled destinations before transport and preserves full snowflake precision",
+    () =>
+      Effect.gen(function* () {
+        const sent: Array<{ readonly channelId: bigint; readonly message: RenderedMessage }> = [];
+        const delivery = makeReplyDelivery({
+          send: (channelId, message) =>
+            Effect.sync(() => {
+              sent.push({ channelId, message });
+              return 1n;
+            }),
+        });
+        const invalidTargets: ReplyTarget[] = [
+          { platform: "discord", conversationId: " ", messageId: "1" },
+          { platform: "discord", conversationId: "-1", messageId: "1" },
+          { platform: "discord", conversationId: "18446744073709551616", messageId: "1" },
+          { platform: "discord", conversationId: "1", messageId: "0" },
+          { platform: "discord", conversationId: "1", messageId: "1.5" },
+        ];
+        for (const target of invalidTargets) {
+          const failure = yield* delivery.send(chatA, target, "must not be sent").pipe(Effect.flip);
+          assert.instanceOf(failure, AgentError);
+        }
+        assert.deepStrictEqual(sent, []);
+        yield* delivery.send(
+          chatA,
+          {
+            platform: "discord",
+            conversationId: "18446744073709551615",
+            messageId: "1234567890123456789",
+          },
+          "exact destination",
+        );
+        assert.deepStrictEqual(sent, [
+          {
+            channelId: 18_446_744_073_709_551_615n,
+            message: {
+              content: "exact destination",
+              silent: false,
+              replyTo: 1_234_567_890_123_456_789n,
+            },
+          },
+        ]);
+      }),
+  );
+
   it("renders committed content in order with safe notification policy", () => {
     const rendered = renderAssistant(
       completed("stop", [
@@ -441,7 +533,8 @@ describe("Discord output", () => {
           sent[3]?.content.replace(/^\S+/u, "❌").slice(0, -1),
           sent[4]?.content.slice(0, -1),
         ]);
-        assert.deepStrictEqual(sent[6], { content: edited[3], silent: true });
+        assert.strictEqual(sent[6]?.content, edited[3]);
+        assert.strictEqual(sent[6]?.silent, true);
         assert.deepStrictEqual(sent[7], { content: "📖 Reading cancel.ts…", silent: true });
         assert.strictEqual(edited[6], "📖 Reading cancel.ts canceled.");
         assert.isAtMost(Array.from(sent[5]?.content ?? "").length, 500);
@@ -504,10 +597,8 @@ describe("Discord output", () => {
           }),
         );
         assert.strictEqual(sent.length, 2);
-        assert.deepStrictEqual(sent[1], {
-          content: sent[0]?.content.slice(0, -1),
-          silent: true,
-        });
+        assert.strictEqual(sent[1]?.content, sent[0]?.content.slice(0, -1));
+        assert.strictEqual(sent[1]?.silent, true);
       }),
     ),
   );
@@ -681,10 +772,8 @@ describe("Discord output", () => {
           }),
         );
         assert.strictEqual(sent.length, 2);
-        assert.deepStrictEqual(sent[1], {
-          content: sent[0]?.content.slice(0, -1),
-          silent: true,
-        });
+        assert.strictEqual(sent[1]?.content, sent[0]?.content.slice(0, -1));
+        assert.strictEqual(sent[1]?.silent, true);
         assert.deepStrictEqual(logs, []);
       }),
     ).pipe(Effect.provide(Logger.layer([logger])));

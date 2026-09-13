@@ -5,6 +5,7 @@ import { join } from "node:path";
 import * as BunCrypto from "@effect/platform-bun/BunCrypto";
 import * as BunFileSystem from "@effect/platform-bun/BunFileSystem";
 import * as BunPath from "@effect/platform-bun/BunPath";
+import { BotSessions } from "@pico/contract/bot-session";
 import { BranchNaming } from "@pico/contract/branch-naming";
 import { ChatId } from "@pico/contract/chat-model";
 import { ChatSessionContext } from "@pico/contract/chat-session-context";
@@ -16,6 +17,7 @@ import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import { agentError } from "../../src/agent-error.ts";
 
 const root = process.cwd();
@@ -85,6 +87,16 @@ const platform = Layer.mergeAll(
   BunCrypto.layer,
   BunFileSystem.layer,
   BunPath.layer,
+  Layer.succeed(BotSessions, {
+    findByChat: () => Effect.succeed(Option.none()),
+    findByWorkspace: () => Effect.die("Unexpected bot lookup"),
+    findByRoot: () => Effect.die("Unexpected bot lookup"),
+    create: () => Effect.die("Unexpected bot creation"),
+    setTurn: () => Effect.die("Unexpected bot turn"),
+    saveHandoff: () => Effect.die("Unexpected bot handoff"),
+    readHandoff: () => Effect.die("Unexpected bot handoff"),
+    rotate: () => Effect.die("Unexpected bot rotation"),
+  }),
   Layer.succeed(ChatSessionContext, {
     resolve: () => Effect.die("Close must not open a session"),
   }),

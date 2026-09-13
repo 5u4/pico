@@ -11,7 +11,10 @@ import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-sessi
 import type * as AgentEvent from "@pico/contract/agent-event";
 import * as AgentMessage from "@pico/contract/agent-message";
 import * as Chat from "@pico/contract/chat-model";
+import { AbsolutePath } from "@pico/contract/path";
+import type { ReplyTarget } from "@pico/contract/reply-target";
 import * as Schedule from "@pico/contract/schedule";
+import * as Workspace from "@pico/contract/workspace-model";
 import * as Cause from "effect/Cause";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
@@ -20,9 +23,11 @@ import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { open as openSchedules } from "../../schedule/src/schedule.ts";
 
 const importNative = async () => {
   const modules = await Promise.all([
@@ -41,6 +46,8 @@ const importNative = async () => {
     import("./session-pool.ts"),
     import("./agent-event.ts"),
     import("./layer.ts"),
+    import("@oh-my-pi/pi-coding-agent/extensibility/extensions/wrapper"),
+    import("./schedule-extension.ts"),
   ]);
   const [
     core,
@@ -58,6 +65,8 @@ const importNative = async () => {
     pool,
     normalized,
     adapter,
+    wrappers,
+    scheduleExtension,
   ] = modules;
   return {
     ...core,
@@ -74,8 +83,11 @@ const importNative = async () => {
     ...sender,
     ...pool,
     ...normalized,
+    ...wrappers,
+    makeScheduleExtension: scheduleExtension.make,
     makeSessionHandle: adapter.makeSessionHandle,
     makeBtw: adapter.makeBtw,
+    makeHandoff: adapter.makeHandoff,
   };
 };
 
@@ -268,6 +280,7 @@ const makePool = Effect.fn("NativePoolTest.make")(function* (
     readonly fileSystem?: FileSystem.FileSystem;
     readonly settlePersistence?: () => Promise<void>;
     readonly reopen?: () => Promise<AgentSession>;
+    readonly onOpenReplyTarget?: (getReplyTarget: () => ReplyTarget | undefined) => void;
   } = {},
 ) {
   const fileSystem = options.fileSystem ?? (yield* FileSystem.FileSystem);
@@ -276,8 +289,9 @@ const makePool = Effect.fn("NativePoolTest.make")(function* (
   let opened = false;
   return yield* native.makeSessionPool({
     factory: {
-      open: (_id, emit) =>
+      open: (_id, emit, getReplyTarget) =>
         Effect.promise(async () => {
+          options.onOpenReplyTarget?.(getReplyTarget);
           if (opened && options.reopen) session = await options.reopen();
           opened = true;
           const currentSession = session;
@@ -303,6 +317,7 @@ const makePool = Effect.fn("NativePoolTest.make")(function* (
             ),
             sendPrompt,
             askBtw: native.makeBtw(currentSession),
+            createHandoff: native.makeHandoff(currentSession),
             shake: () => Promise.reject(new Error("Shake is not part of ownership tests")),
             contextUsage: () => ({ kind: "unavailable" }),
             appendAssistantMessage: () =>
@@ -326,6 +341,155 @@ const assistantTexts = (events: ReadonlyArray<AgentEvent.AgentEvent>) =>
   );
 
 describe("native SessionPool ownership", () => {
+  it("captures each schedule tool origin and keeps definition routes across later turns", async () => {
+    const first = providerTurn("First DM complete");
+    const second = providerTurn("Scheduled continuation complete");
+    const ordinary = providerTurn("Ordinary turn complete");
+    const workspaceId = Workspace.WorkspaceId.make("018f47a0-0000-7000-8000-000000000002");
+    const firstTarget: ReplyTarget = {
+      platform: "discord",
+      conversationId: "first-dm",
+      messageId: "first-message",
+    };
+    const secondTarget: ReplyTarget = {
+      platform: "discord",
+      conversationId: "second-dm",
+      messageId: "second-message",
+    };
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem;
+          const directory = yield* fileSystem.makeTempDirectoryScoped({
+            prefix: "pico-native-schedule-origins-",
+          });
+          const schedules = yield* openSchedules(AbsolutePath.make(join(directory, "schedules")));
+          const sourceDirectory = AbsolutePath.make(join(directory, "source"));
+          yield* fileSystem.makeDirectory(sourceDirectory);
+          yield* fileSystem.writeFileString(
+            join(sourceDirectory, "prompt.md"),
+            "Continue the task.",
+          );
+          let getReplyTarget: () => ReplyTarget | undefined = () => undefined;
+          const caller = (): Schedule.ScheduleCaller => {
+            const replyTarget = getReplyTarget();
+            return {
+              chatId,
+              workspaceId,
+              ...(replyTarget === undefined ? {} : { replyTarget }),
+            };
+          };
+          const extension = native.makeScheduleExtension({
+            caller,
+            schedules,
+            runEffect: Effect.runPromise,
+          });
+          const input = {
+            name: "First destination",
+            enabled: false,
+            target: { kind: "current-chat" },
+            trigger: { kind: "once", at: 1_000 },
+            sourceDirectory,
+          } satisfies Schedule.CreateSchedule;
+          yield* Effect.promise(() =>
+            withSession(
+              [first, second, ordinary],
+              (session) =>
+                Effect.runPromise(
+                  Effect.scoped(
+                    Effect.gen(function* () {
+                      const pool = yield* makePool(session, {
+                        onOpenReplyTarget: (getter) => {
+                          getReplyTarget = getter;
+                        },
+                      });
+                      yield* pool.events.pipe(Stream.runDrain, Effect.forkChild);
+                      const runner = session.extensionRunner;
+                      if (runner === undefined) throw new Error("Schedule extension is missing");
+                      const execute = async (name: string, params: unknown) => {
+                        const tool = runner.getRegisteredTool(name);
+                        if (tool === undefined) throw new Error(`Missing schedule tool: ${name}`);
+                        const result = await native
+                          .wrapRegisteredTool(tool, runner)
+                          .execute(name, params);
+                        return Schema.decodeUnknownSync(Schedule.ScheduleView)(result.details);
+                      };
+                      const firstCapture = yield* pool
+                        .sendTurn(
+                          chatId,
+                          prompt("Create a schedule from the first DM"),
+                          () => Effect.void,
+                          firstTarget,
+                        )
+                        .pipe(Effect.forkChild);
+                      yield* Effect.promise(() => first.entered.promise);
+                      const firstCreated = yield* Effect.promise(() =>
+                        execute("schedule_create", input),
+                      );
+                      first.release.resolve();
+                      yield* Fiber.join(firstCapture);
+
+                      const secondCapture = yield* pool
+                        .sendCaptured(
+                          chatId,
+                          runId,
+                          prompt("Create another schedule from a scheduled DM continuation"),
+                          () => Effect.void,
+                          secondTarget,
+                        )
+                        .pipe(Effect.forkChild);
+                      yield* Effect.promise(() => second.entered.promise);
+                      const secondCreated = yield* Effect.promise(() =>
+                        execute("schedule_create", { ...input, name: "Second destination" }),
+                      );
+                      const updated = yield* Effect.promise(() =>
+                        execute("schedule_update", {
+                          scheduleId: firstCreated.id,
+                          name: "Renamed",
+                        }),
+                      );
+                      second.release.resolve();
+                      yield* Fiber.join(secondCapture);
+
+                      const admission = yield* pool.send(
+                        chatId,
+                        prompt("Create an ordinary schedule"),
+                      );
+                      yield* Effect.promise(() => ordinary.entered.promise);
+                      const ordinaryCreated = yield* Effect.promise(() =>
+                        execute("schedule_create", { ...input, name: "No destination" }),
+                      );
+                      ordinary.release.resolve();
+                      if (admission.kind !== "handled") yield* admission.completed;
+                      yield* pool.drain();
+
+                      if (updated.kind !== "ready")
+                        throw new Error("Updated schedule is not ready");
+                      expect(updated.definition.name).toBe("Renamed");
+                      const firstStored = yield* schedules.get(caller(), firstCreated.id);
+                      const secondStored = yield* schedules.get(caller(), secondCreated.id);
+                      const ordinaryStored = yield* schedules.get(caller(), ordinaryCreated.id);
+                      if (
+                        firstStored.kind !== "ready" ||
+                        secondStored.kind !== "ready" ||
+                        ordinaryStored.kind !== "ready"
+                      ) {
+                        throw new Error("Created schedules are not ready");
+                      }
+                      expect(firstStored.definition.replyTarget).toEqual(firstTarget);
+                      expect(secondStored.definition.replyTarget).toEqual(secondTarget);
+                      expect(ordinaryStored.definition.replyTarget).toBeUndefined();
+                    }).pipe(Effect.provide(platform)),
+                  ),
+                ),
+              extension,
+            ),
+          );
+        }).pipe(Effect.provide(platform)),
+      ),
+    );
+  }, 30_000);
+
   it("answers beside a pending main turn without steering, persisting, or emitting the aside", async () => {
     const main = providerTurn("Main answer");
     const side = providerTurn("Independent side answer");

@@ -7,7 +7,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
-import { open } from "./root.ts";
+import { discordBotRoot, open } from "./root.ts";
 
 const platformLayer = Layer.merge(BunFileSystem.layer, BunPath.layer);
 
@@ -51,5 +51,16 @@ describe("ConfigRoot.open", () => {
       assert.isFalse(yield* fileSystem.exists(path.join(paths.root, ".pico.lock")));
       assert.isFalse(yield* fileSystem.exists(paths.configFile));
     }).pipe(Effect.provide(platformLayer)),
+  );
+
+  it.effect("keeps bot storage inside the configured root and rejects path traversal", () =>
+    Effect.gen(function* () {
+      const root = PicoRoot.make("/tmp/pico-bot-root");
+      assert.strictEqual(
+        yield* discordBotRoot(root, "123"),
+        "/tmp/pico-bot-root/agents/discord/bots/123",
+      );
+      assert.instanceOf(yield* discordBotRoot(root, "../outside").pipe(Effect.flip), ConfigError);
+    }).pipe(Effect.provide(BunPath.layer)),
   );
 });

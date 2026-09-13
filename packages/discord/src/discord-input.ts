@@ -3,7 +3,12 @@ import type * as AgentMessage from "@pico/contract/agent-message";
 import type { ContextUsage, MessageDelivery, ShakeResult } from "@pico/contract/agent-runtime";
 import { Application, type CloseChatResult } from "@pico/contract/application";
 import type * as Chat from "@pico/contract/chat-model";
-import type { ApplicationError, WorkspaceBindingInvalid } from "@pico/contract/errors";
+import {
+  AgentError,
+  type ApplicationError,
+  type WorkspaceBindingInvalid,
+} from "@pico/contract/errors";
+import type { AbsolutePath } from "@pico/contract/path";
 import type * as Workspace from "@pico/contract/workspace-model";
 import {
   ButtonStyles,
@@ -29,6 +34,7 @@ import type * as HttpClient from "effect/unstable/http/HttpClient";
 import * as DiscordCommand from "./discord-command.ts";
 import { discordError, promiseBoundary, reportFailure } from "./discord-error.ts";
 import * as DiscordMarkdown from "./discord-markdown.ts";
+import * as DiscordOutput from "./discord-output.ts";
 import { type DiscordMessage, projectDiscordPrompt } from "./discord-prompt.ts";
 
 export interface DiscordChannel {
@@ -79,6 +85,10 @@ export interface DiscordInputBot<
       options: {
         readonly content: string;
         readonly allowedMentions: { readonly parse: []; readonly repliedUser: false };
+        readonly messageReference?: {
+          readonly messageId: bigint;
+          readonly failIfNotExists: false;
+        };
       },
     ) => Promise<unknown>;
     readonly editChannel: (
@@ -91,6 +101,11 @@ export interface DiscordInputBot<
       options: { readonly name: string; readonly autoArchiveDuration: 1_440 },
     ) => Promise<{ readonly id: bigint }>;
   };
+}
+
+export interface DiscordBotOptions {
+  readonly botRoot: AbsolutePath;
+  readonly outputClient: DiscordOutput.DiscordOutputClient;
 }
 
 const isThread = (type: ChannelTypes) =>
@@ -134,12 +149,14 @@ export const install = Effect.fn("DiscordInput.install")(function* <
   config: DiscordConfig,
   drainOutput: () => Effect.Effect<void> = () => Effect.void,
   httpClient?: HttpClient.HttpClient,
+  botOptions?: DiscordBotOptions,
 ) {
   const application = yield* Application;
   const crypto = yield* Crypto.Crypto;
   const scope = yield* Scope.Scope;
   const run = yield* FiberSet.makeRuntime();
   const allowedGuildIds = new Set(config.allowedGuildIds);
+  const directMessages = Semaphore.makeUnsafe(1);
   const workspaceIds = new Map<bigint, Workspace.WorkspaceId>();
   const chatIds = new Map<bigint, Chat.ChatId>();
   const threadIds = new Map<Chat.ChatId, bigint>();
@@ -322,6 +339,57 @@ export const install = Effect.fn("DiscordInput.install")(function* <
     );
     if (prompt === undefined) return;
 
+    if (message.guildId === undefined) {
+      const reply = (content: string) =>
+        promiseBoundary("reply-direct-message", () =>
+          bot.helpers.sendMessage(message.channelId, {
+            content,
+            allowedMentions,
+            messageReference: { messageId: message.id, failIfNotExists: false },
+          }),
+        );
+      if (botOptions === undefined) {
+        yield* reply("Direct messages are unavailable because bot storage is not configured.");
+        return;
+      }
+      const turnScope = yield* Scope.Scope;
+      const dispatch = DiscordOutput.make(botOptions.outputClient, turnScope, config, {
+        kind: "direct-message",
+        messageId: message.id,
+      });
+      yield* Effect.gen(function* () {
+        yield* Effect.annotateLogsScoped({ phase: "resolve-bot-chat" });
+        const chat = yield* application.getOrCreateBotChat({
+          botRoot: botOptions.botRoot,
+          platform: "discord",
+        });
+        yield* Effect.annotateLogsScoped({ phase: "send-bot-prompt", chatId: chat.id });
+        yield* application.sendBotMessage(
+          chat.id,
+          prompt,
+          (event) =>
+            dispatch(message.channelId, { chatId: chat.id, event }).pipe(
+              Effect.tapCause((cause) => reportFailure("deliver-bot-event", cause)),
+              Effect.mapError(() => new AgentError({ message: "Discord reply delivery failed" })),
+            ),
+          {
+            platform: "discord",
+            conversationId: message.channelId.toString(),
+            messageId: message.id.toString(),
+          },
+        );
+      }).pipe(
+        Effect.catchTags({
+          ApplicationError: (error) =>
+            reportFailure("bot-message-request", Cause.fail(error)).pipe(
+              Effect.andThen(reply("pico could not continue this conversation. Please try again.")),
+            ),
+          ChatClosed: () => reply("This bot conversation is closed."),
+        }),
+      );
+      return;
+    }
+
     const cachedChatId = chatIds.get(message.channelId);
     if (cachedChatId !== undefined) {
       return yield* sendMessageToChat(cachedChatId, prompt, message.channelId);
@@ -392,12 +460,15 @@ export const install = Effect.fn("DiscordInput.install")(function* <
 
   const handleMessage = Effect.fnUntraced(function* (message: Message) {
     if (
-      message.guildId === undefined ||
-      !allowedGuildIds.has(message.guildId.toString()) ||
+      (message.guildId !== undefined && !allowedGuildIds.has(message.guildId.toString())) ||
       message.webhookId !== undefined ||
+      message.author.bot === true ||
       message.author.id === bot.id
     ) {
       return;
+    }
+    if (message.guildId === undefined) {
+      return yield* directMessages.withPermit(Effect.scoped(processMessage(message)));
     }
     if (inputLocks.get(message.channelId)?.knownThread === true || chatIds.has(message.channelId)) {
       return yield* threadLock(message.channelId).withPermit(processMessage(message));
@@ -928,6 +999,15 @@ export const install = Effect.fn("DiscordInput.install")(function* <
 
     const response = Effect.scoped(
       Effect.gen(function* () {
+        if (interaction.guildId === undefined) {
+          yield* promiseBoundary("reply-unsupported-direct-command", () =>
+            interaction.respond({
+              content: "This command is only available in server channels and threads.",
+              allowedMentions,
+            }),
+          );
+          return;
+        }
         const channelId = interaction.channelId;
         const btwClosed =
           name === "btw" && channelId !== undefined

@@ -4,7 +4,7 @@ import * as Schedule from "@pico/contract/schedule";
 import * as Workspace from "@pico/contract/workspace-model";
 import * as Effect from "effect/Effect";
 import * as Logger from "effect/Logger";
-import { executeScheduleOperation, scheduleToolNames } from "./schedule-extension.ts";
+import { executeScheduleOperation } from "./schedule-extension.ts";
 
 const context = {
   operation: "get",
@@ -16,16 +16,6 @@ const context = {
 } satisfies Parameters<typeof executeScheduleOperation>[1];
 
 describe("schedule extension", () => {
-  it("exposes the complete session-local management set", () => {
-    assert.deepStrictEqual(Object.values(scheduleToolNames), [
-      "schedule_create",
-      "schedule_list",
-      "schedule_get",
-      "schedule_update",
-      "schedule_delete",
-    ]);
-  });
-
   it.effect("marks rejected schedule operations as tool errors", () =>
     Effect.gen(function* () {
       const result = yield* Effect.promise(() =>

@@ -67,6 +67,7 @@ describe("AgentRuntime", () => {
                 beginDispose: () => {},
                 dispose: async () => {},
               },
+              createHandoff: () => Promise.reject(new Error("unexpected handoff")),
               askBtw: () => Promise.reject(new Error("unexpected side question")),
               sendPrompt: async (): Promise<MessageDelivery> => ({
                 kind: "steered",
@@ -117,6 +118,7 @@ describe("AgentRuntime", () => {
                       Deferred.doneUnsafe(disposed, Effect.void);
                     },
                   },
+                  createHandoff: () => Promise.reject(new Error("unexpected handoff")),
                   askBtw: () => Promise.reject(new Error("unexpected side question")),
                   sendPrompt: async (value, onStarted): Promise<MessageDelivery> => {
                     submitted.push(value.text);
@@ -228,6 +230,7 @@ describe("AgentRuntime", () => {
                   return Promise.resolve();
                 },
               },
+              createHandoff: () => Promise.reject(new Error("unexpected handoff")),
               askBtw: () => Promise.reject(new Error("unexpected side question")),
               sendPrompt: (value) => {
                 if (value.text !== "acquire") {
@@ -343,6 +346,7 @@ describe("AgentRuntime", () => {
                 beginDispose: () => {},
                 dispose: () => Promise.resolve(),
               },
+              createHandoff: () => Promise.reject(new Error("unexpected handoff")),
               askBtw: () => Promise.reject(new Error("unexpected side question")),
               sendPrompt: () => {
                 sends += 1;
@@ -443,6 +447,7 @@ describe("AgentRuntime", () => {
                   return Promise.resolve();
                 },
               },
+              createHandoff: () => Promise.reject(new Error("unexpected handoff")),
               askBtw: () => Promise.reject(new Error("unexpected side question")),
               sendPrompt: () => Promise.resolve(admitted),
               shake: async (mode) => shakeResult(mode),
@@ -505,6 +510,7 @@ describe("AgentRuntime", () => {
                         return disposal;
                       },
                     },
+                    createHandoff: () => Promise.reject(new Error("unexpected handoff")),
                     askBtw: () => Promise.reject(new Error("unexpected side question")),
                     sendPrompt: () => Promise.resolve(admitted),
                     shake: async (mode) => shakeResult(mode),
@@ -576,6 +582,7 @@ describe("AgentRuntime", () => {
                   beginDispose: () => {},
                   dispose: () => Promise.resolve(),
                 },
+                createHandoff: () => Promise.reject(new Error("unexpected handoff")),
                 askBtw: () => Promise.reject(new Error("unexpected side question")),
                 sendPrompt: () => {
                   emit({ type: "notice", level: "info", message: "last" });
@@ -627,6 +634,7 @@ describe("AgentRuntime", () => {
                   beginDispose: () => {},
                   dispose: () => Promise.resolve(),
                 },
+                createHandoff: () => Promise.reject(new Error("unexpected handoff")),
                 askBtw: () => Promise.reject(new Error("unexpected side question")),
                 sendPrompt: async (_value, onStarted) => {
                   onStarted?.();
