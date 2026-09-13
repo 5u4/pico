@@ -4,7 +4,7 @@
 
 ## Install
 
-Install [Git](https://git-scm.com/downloads) and [Bun](https://bun.sh/docs/installation) 1.3.14 or newer.
+Install [Git](https://git-scm.com/downloads) and [Bun](https://bun.sh/docs/installation).
 
 In a macOS or Linux terminal:
 

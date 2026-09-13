@@ -21,10 +21,16 @@ export interface BrowserOwner {
     | { readonly kind: "main" }
     | { readonly kind: "child"; readonly sessionId: string };
 }
+const PendingMode = Schema.Struct({
+  mode: Schema.Literals(["headless", "headed"]),
+  cdpUrl: Schema.String,
+});
+const Cdp = Schema.Struct({ cdpUrl: Schema.String });
 const Manifest = Schema.Struct({
   chatId: Schema.String,
   session: Schema.String.check(Schema.isPattern(/^[a-f0-9]{24}$/)),
   mode: Schema.Literals(["headless", "headed"]),
+  pendingMode: Schema.optionalKey(PendingMode),
 });
 const Info = Schema.Struct({
   browserLaunched: Schema.Boolean,
@@ -55,6 +61,7 @@ type Entry = {
   readonly chatId: string;
   readonly session: string;
   mode: "headless" | "headed";
+  pendingMode: typeof PendingMode.Type | undefined;
   state: "available" | "closing";
   generation: number;
   queue: Promise<void>;
@@ -89,7 +96,12 @@ export const makeBrowserManager = async ({
     try {
       await writeFile(
         candidate,
-        JSON.stringify({ chatId: entry.chatId, session: entry.session, mode: entry.mode }),
+        JSON.stringify({
+          chatId: entry.chatId,
+          session: entry.session,
+          mode: entry.mode,
+          pendingMode: entry.pendingMode,
+        }),
         { mode: 0o600 },
       );
       await rename(candidate, manifestPath(entry));
@@ -97,10 +109,23 @@ export const makeBrowserManager = async ({
       await rm(candidate, { force: true });
     }
   };
+  const reconcileMode = async (entry: Entry, browserConnected: boolean, signal?: AbortSignal) => {
+    if (!entry.pendingMode) return;
+    // An interrupted restart can finish in the daemon. Observe its browser identity; do not replay it.
+    if (browserConnected) {
+      const { cdpUrl } = Schema.decodeUnknownSync(Cdp)(
+        await sendBrowserCommand(home, entry.session, { action: "cdp_url" }, signal),
+      );
+      if (cdpUrl !== entry.pendingMode.cdpUrl) entry.mode = entry.pendingMode.mode;
+    }
+    entry.pendingMode = undefined;
+    await persist(entry);
+  };
   const makeEntry = (chatId: string, session: string, mode: Entry["mode"]): Entry => ({
     chatId,
     session,
     mode,
+    pendingMode: undefined,
     state: "available",
     generation: 0,
     queue: Promise.resolve(),
@@ -112,7 +137,9 @@ export const makeBrowserManager = async ({
       JSON.parse(await readFile(join(ownerDirectory, file), "utf8")),
     );
     if (file !== `${saved.session}.json`) throw new Error("Invalid browser owner manifest");
-    entries.set(saved.session, makeEntry(saved.chatId, saved.session, saved.mode));
+    const entry = makeEntry(saved.chatId, saved.session, saved.mode);
+    entry.pendingMode = saved.pendingMode;
+    entries.set(saved.session, entry);
   }
   // This queue serializes local waits. A cancelled or timed-out native command may still be running.
   const enqueue = <A>(entry: Entry, operation: () => Promise<A>): Promise<A> => {
@@ -323,9 +350,20 @@ export const makeBrowserManager = async ({
           if (!(error instanceof BrowserUnavailable)) throw error;
         }
         check();
+        // Native dialogs block the identity query until they are handled.
+        if (operation.op !== "dialog") {
+          await reconcileMode(current, browserConnected, signal);
+          check();
+        }
         try {
           if (!browserConnected)
-            await launchBrowser(home, current.session, current.mode === "headed", idleTimeoutMs);
+            await launchBrowser(
+              home,
+              current.session,
+              current.mode === "headed",
+              idleTimeoutMs,
+              signal,
+            );
           check();
         } catch (error) {
           if (ownerClosed()) await closeEntry(current);
@@ -335,6 +373,12 @@ export const makeBrowserManager = async ({
           if (current.mode !== operation.mode) {
             await checkpoint(current, false, signal);
             check();
+            const { cdpUrl } = Schema.decodeUnknownSync(Cdp)(
+              await sendBrowserCommand(home, current.session, { action: "cdp_url" }, signal),
+            );
+            current.pendingMode = { mode: operation.mode, cdpUrl };
+            await persist(current);
+            check();
             revoke(current);
             try {
               await launchBrowser(
@@ -342,8 +386,10 @@ export const makeBrowserManager = async ({
                 current.session,
                 operation.mode === "headed",
                 idleTimeoutMs,
+                signal,
               );
               current.mode = operation.mode;
+              current.pendingMode = undefined;
               await persist(current);
               check();
             } catch (error) {
@@ -417,6 +463,10 @@ export const makeBrowserManager = async ({
             signal,
           );
           check();
+          if (operation.op === "dialog") {
+            await reconcileMode(current, browserConnected, signal);
+            check();
+          }
           content.push(text(result ?? null));
         }
         const viewerUrl = await expose(current, signal);

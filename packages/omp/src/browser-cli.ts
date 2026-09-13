@@ -75,7 +75,12 @@ export const prepareBrowserHome = async (root: string) => {
 };
 export type BrowserHome = Awaited<ReturnType<typeof prepareBrowserHome>>;
 
-export const runBrowserLauncher = async (home: BrowserHome, args: readonly string[]) => {
+export const runBrowserLauncher = async (
+  home: BrowserHome,
+  args: readonly string[],
+  signal?: AbortSignal,
+) => {
+  if (signal?.aborted) throw new Error("Browser launch cancelled before dispatch");
   const launcher = join(
     dirname(fileURLToPath(import.meta.resolve("agent-browser/package.json"))),
     "bin",
@@ -96,21 +101,92 @@ export const runBrowserLauncher = async (home: BrowserHome, args: readonly strin
     {
       cwd: home.directory,
       env: home.environment,
+      detached: signal !== undefined,
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
     },
   );
-  const [exitCode, stdout, stderr] = await Promise.all([
-    child.exited,
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-  ]);
-  if (exitCode !== 0)
-    throw new Error(
-      `Browser launcher failed. Run pico browser install for this root. ${stderr.trim() || stdout.trim()}`,
-    );
-  return stdout;
+  const stdoutReader = child.stdout.getReader();
+  const stderrReader = child.stderr.getReader();
+  const readers = [stdoutReader, stderrReader];
+  const readOutput = async (reader: typeof stdoutReader) => {
+    const decoder = new TextDecoder();
+    let output = "";
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) return output + decoder.decode();
+      output += decoder.decode(value, { stream: true });
+    }
+  };
+  const killGroup = (termination: NodeJS.Signals) => {
+    try {
+      process.kill(-child.pid, termination);
+    } catch (error) {
+      if (!(error instanceof Error && "code" in error && error.code === "ESRCH")) throw error;
+    }
+  };
+  let cancellation: Promise<void> | undefined;
+  let cleanupError: unknown;
+  const cancel = () => {
+    if (cancellation) return;
+    cancellation = (async () => {
+      const pipes = Promise.allSettled(readers.map((reader) => reader.cancel()));
+      try {
+        if (process.platform === "win32") {
+          const killer = Bun.spawn(["taskkill.exe", "/PID", String(child.pid), "/T", "/F"], {
+            stdin: "ignore",
+            stdout: "ignore",
+            stderr: "ignore",
+            timeout: 1_000,
+            killSignal: "SIGKILL",
+          });
+          if ((await killer.exited) !== 0 && child.exitCode === null)
+            throw new Error("Failed to terminate browser launcher tree");
+        } else {
+          // The npm wrapper and native client share this group; the daemon calls setsid().
+          killGroup("SIGTERM");
+          await Bun.sleep(250);
+          killGroup("SIGKILL");
+        }
+      } finally {
+        child.kill("SIGKILL");
+        await child.exited;
+        await pipes;
+      }
+    })().catch((error: unknown) => {
+      cleanupError = error;
+    });
+  };
+  signal?.addEventListener("abort", cancel, { once: true });
+  try {
+    const [exit, stdout, stderr] = await Promise.allSettled([
+      child.exited,
+      readOutput(stdoutReader),
+      readOutput(stderrReader),
+    ]);
+    signal?.removeEventListener("abort", cancel);
+    await cancellation;
+    if (cancellation) {
+      const error = new Error(
+        "Browser launch cancelled; the native startup outcome is uncertain. The browser may still start or change mode; inspect the session before retrying.",
+      );
+      if (cleanupError !== undefined)
+        throw new AggregateError([error, cleanupError], error.message);
+      throw error;
+    }
+    if (exit.status === "rejected") throw exit.reason;
+    if (stdout.status === "rejected") throw stdout.reason;
+    if (stderr.status === "rejected") throw stderr.reason;
+    if (exit.value !== 0)
+      throw new Error(
+        `Browser launcher failed. Run pico browser install for this root. ${stderr.value.trim() || stdout.value.trim()}`,
+      );
+    return stdout.value;
+  } finally {
+    signal?.removeEventListener("abort", cancel);
+    for (const reader of readers) reader.releaseLock();
+  }
 };
 
 export const launchBrowser = async (
@@ -118,22 +194,27 @@ export const launchBrowser = async (
   session: string,
   headed: boolean,
   idleTimeoutMs: number,
+  signal?: AbortSignal,
 ) => {
-  const output = await runBrowserLauncher(home, [
-    "--session",
-    session,
-    "--restore",
-    session,
-    "--restore-save",
-    "auto",
-    "--headed",
-    String(headed),
-    "--idle-timeout",
-    String(idleTimeoutMs),
-    "--json",
-    "get",
-    "url",
-  ]);
+  const output = await runBrowserLauncher(
+    home,
+    [
+      "--session",
+      session,
+      "--restore",
+      session,
+      "--restore-save",
+      "auto",
+      "--headed",
+      String(headed),
+      "--idle-timeout",
+      String(idleTimeoutMs),
+      "--json",
+      "get",
+      "url",
+    ],
+    signal,
+  );
   const response = decodeResponse(JSON.parse(output));
   if (!response.success) throw new Error(response.error ?? "Browser launch failed");
 };
