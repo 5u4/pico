@@ -14,6 +14,7 @@ import * as Schedule from "@pico/contract/schedule";
 import type { GitWorktree } from "@pico/contract/worktree";
 import * as Persistence from "@pico/persistence/layer";
 import * as Cause from "effect/Cause";
+import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -22,6 +23,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as Scheduler from "effect/Scheduler";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 import * as ApplicationLayer from "./application.ts";
@@ -51,7 +53,217 @@ const assertApplicationError = (
   assert.strictEqual(error.reason, reason);
 };
 
+const makeScheduledDeliveryFixture = Effect.fn("makeScheduledDeliveryFixture")(function* () {
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const directory = yield* fileSystem.makeTempDirectoryScoped({
+    prefix: "pico-scheduled-delivery-",
+  });
+  const cwd = AbsolutePath.make(path.join(directory, "workspace"));
+  yield* fileSystem.makeDirectory(cwd);
+  const persistence = Persistence.layer(AbsolutePath.make(path.join(directory, "store.db")));
+  const sendStarted = yield* Deferred.make<void>();
+  const releaseSend = yield* Deferred.make<void>();
+  const order: string[] = [];
+  const runtime = Layer.effect(
+    AgentRuntime,
+    Effect.gen(function* () {
+      const chats = yield* ChatRepository;
+      return AgentRuntime.of({
+        availableModels: () => Effect.die("unexpected model catalog read"),
+        switchModel: () => Effect.die("unexpected model switch"),
+        askBtw: () => Effect.die("unexpected side question"),
+        events: Stream.empty,
+        drain: () => Effect.void,
+        transcript: () => Effect.die("unexpected transcript read"),
+        send: () => Effect.die("unexpected ordinary send"),
+        sendCaptured: () => Effect.die("unexpected captured run"),
+        deliver: (_chatId, content) =>
+          Effect.sync(() => {
+            order.push(`deliver:${content}`);
+          }),
+        publish: (_chatId, content) =>
+          Effect.sync(() => {
+            order.push(`publish:${content}`);
+          }),
+        close: (chatId) =>
+          Effect.gen(function* () {
+            const chat = Option.getOrThrow(yield* chats.findById(chatId).pipe(Effect.orDie));
+            assert.isNotNull(chat.archivedAt);
+            order.push("runtime-close");
+          }),
+        abort: () => Effect.die("unexpected abort"),
+        contextUsage: () => Effect.die("unexpected context read"),
+        shake: () => Effect.die("unexpected shake"),
+      });
+    }),
+  ).pipe(Layer.provide(persistence));
+  const sessions = Layer.succeed(
+    AgentSessionStore,
+    AgentSessionStore.of({
+      create: () => Effect.void,
+      remove: () => Effect.die("unexpected session removal"),
+    }),
+  );
+  const git: GitWorktree = {
+    validate: () => Effect.die("unexpected git validation"),
+    create: () => Effect.die("unexpected worktree creation"),
+    inspectChat: () => Effect.succeed({ kind: "not-managed" }),
+    renameChatBranch: () => Effect.die("unexpected branch rename"),
+    removeChat: () => Effect.die("unexpected worktree removal"),
+  };
+  const services = yield* Layer.build(
+    ApplicationLayer.layer(git).pipe(
+      Layer.provideMerge(persistence),
+      Layer.provide(runtime),
+      Layer.provide(sessions),
+      Layer.provide(BunCrypto.layer),
+    ),
+  );
+  yield* Effect.addFinalizer(() => Deferred.succeed(releaseSend, undefined));
+  const application = Context.get(services, Application);
+  const chats = Context.get(services, ChatRepository);
+  const adapter: Schedule.SchedulePlatform = {
+    platform: "discord",
+    resolveTarget: () => Effect.die("unexpected target lookup"),
+    validateTarget: () => Effect.void,
+    createThread: () => Effect.die("unexpected thread creation"),
+    deleteThread: () => Effect.die("unexpected thread deletion"),
+    send: ({ chatId, content }) =>
+      Effect.gen(function* () {
+        for (const chunk of [1, 2]) {
+          const chat = Option.getOrThrow(yield* chats.findById(chatId).pipe(Effect.orDie));
+          assert.isNull(chat.archivedAt);
+          order.push(`send:${content}:${chunk}`);
+          if (content === "A" && chunk === 1) {
+            yield* Deferred.succeed(sendStarted, undefined);
+            yield* Deferred.await(releaseSend);
+          }
+        }
+      }),
+  };
+  const host = Context.get(services, Schedule.ScheduleRunHostFactory)(adapter);
+  const workspace = yield* application.createWorkspace({
+    name: "scheduled-delivery",
+    platform: "discord",
+    externalId: "1.10",
+    defaultCwd: cwd,
+    worktree: null,
+  });
+  const chat = yield* application.createChat({
+    workspaceId: workspace.id,
+    externalId: "thread-1",
+  });
+  return { application, chats, host, workspace, chat, order, sendStarted, releaseSend };
+});
+
 describe("Chat close", () => {
+  it.effect(
+    "serializes scheduled Discord publish and deliver across all chunks without blocking other chats",
+    () =>
+      Effect.gen(function* () {
+        const { application, host, workspace, chat, order, sendStarted, releaseSend } =
+          yield* makeScheduledDeliveryFixture();
+        const otherChat = yield* application.createChat({
+          workspaceId: workspace.id,
+          externalId: "thread-2",
+        });
+        const publishing = yield* host
+          .publish(chat.id, "A")
+          .pipe(Effect.forkScoped({ startImmediately: true }));
+        yield* Deferred.await(sendStarted);
+        const delivering = yield* host
+          .deliver(chat.id, "B")
+          .pipe(Effect.forkScoped({ startImmediately: true }));
+        const otherDelivery = yield* host
+          .publish(otherChat.id, "C")
+          .pipe(Effect.forkScoped({ startImmediately: true }));
+
+        assert.deepStrictEqual(otherDelivery.pollUnsafe(), Exit.void);
+        assert.isUndefined(delivering.pollUnsafe());
+        assert.deepStrictEqual(order, [
+          "publish:A",
+          "send:A:1",
+          "publish:C",
+          "send:C:1",
+          "send:C:2",
+        ]);
+
+        yield* Deferred.succeed(releaseSend, undefined);
+        yield* Fiber.join(publishing);
+        yield* Fiber.join(delivering);
+        assert.deepStrictEqual(order, [
+          "publish:A",
+          "send:A:1",
+          "publish:C",
+          "send:C:1",
+          "send:C:2",
+          "send:A:2",
+          "deliver:B",
+          "send:B:1",
+          "send:B:2",
+        ]);
+      }).pipe(
+        Effect.provideService(Scheduler.PreventSchedulerYield, true),
+        Effect.provide(platformLayer),
+      ),
+  );
+
+  it.effect("waits for all scheduled Discord chunks before archiving and closing a chat", () =>
+    Effect.gen(function* () {
+      const { application, chats, host, chat, order, sendStarted, releaseSend } =
+        yield* makeScheduledDeliveryFixture();
+      const sending = yield* host
+        .publish(chat.id, "A")
+        .pipe(Effect.forkScoped({ startImmediately: true }));
+      yield* Deferred.await(sendStarted);
+      const closing = yield* application
+        .closeChat(chat.id, { allowDirtyWorktree: false })
+        .pipe(Effect.forkScoped({ startImmediately: true }));
+
+      assert.isUndefined(closing.pollUnsafe());
+      assert.isNull(Option.getOrThrow(yield* chats.findById(chat.id)).archivedAt);
+      assert.deepStrictEqual(order, ["publish:A", "send:A:1"]);
+
+      yield* Deferred.succeed(releaseSend, undefined);
+      yield* Fiber.join(sending);
+      assert.deepStrictEqual(yield* Fiber.join(closing), { kind: "closed" });
+      assert.isNotNull(Option.getOrThrow(yield* chats.findById(chat.id)).archivedAt);
+      assert.deepStrictEqual(order, ["publish:A", "send:A:1", "send:A:2", "runtime-close"]);
+      assert.instanceOf(
+        yield* host.deliver(chat.id, "late").pipe(Effect.flip),
+        Schedule.ScheduleHostError,
+      );
+      assert.deepStrictEqual(order, ["publish:A", "send:A:1", "send:A:2", "runtime-close"]);
+    }).pipe(
+      Effect.provideService(Scheduler.PreventSchedulerYield, true),
+      Effect.provide(platformLayer),
+    ),
+  );
+
+  it.effect("allows the next scheduled Discord delivery after interrupting a platform send", () =>
+    Effect.gen(function* () {
+      const { host, chat, order, sendStarted, releaseSend } = yield* makeScheduledDeliveryFixture();
+      const sending = yield* host
+        .publish(chat.id, "A")
+        .pipe(Effect.forkScoped({ startImmediately: true }));
+      yield* Deferred.await(sendStarted);
+      yield* Fiber.interrupt(sending);
+      const result = yield* Fiber.await(sending);
+      assert.isTrue(Exit.isFailure(result) && Cause.hasInterruptsOnly(result.cause));
+
+      const nextDelivery = yield* host
+        .deliver(chat.id, "B")
+        .pipe(Effect.forkScoped({ startImmediately: true }));
+      assert.deepStrictEqual(nextDelivery.pollUnsafe(), Exit.void);
+      yield* Deferred.succeed(releaseSend, undefined);
+      assert.deepStrictEqual(order, ["publish:A", "send:A:1", "deliver:B", "send:B:1", "send:B:2"]);
+    }).pipe(
+      Effect.provideService(Scheduler.PreventSchedulerYield, true),
+      Effect.provide(platformLayer),
+    ),
+  );
+
   it.effect(
     "admits normal input during a side question and cancels the side before chat disposal",
     () =>
