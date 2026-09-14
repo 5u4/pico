@@ -60,6 +60,9 @@ export const openBot = Effect.fn("Discord.openBot")(function* (
       }),
     );
     yield* promiseBoundary("start-bot", () => bot.start());
+    yield* promiseBoundary("clear-global-commands", () =>
+      bot.helpers.upsertGlobalApplicationCommands([]),
+    );
     const allowedGuildIdSet = new Set(config.allowedGuildIds);
     const allowedGuildIds = Array.from(allowedGuildIdSet);
     const missingGuildIds = allowedGuildIds.filter((guildId) => !joinedGuildIds.has(guildId));
@@ -72,9 +75,6 @@ export const openBot = Effect.fn("Discord.openBot")(function* (
       );
     }
 
-    yield* promiseBoundary("clear-global-commands", () =>
-      bot.helpers.upsertGlobalApplicationCommands([]),
-    );
     yield* Effect.forEach(allowedGuildIds, (guildId) =>
       promiseBoundary(
         "register-guild-commands",

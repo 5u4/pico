@@ -152,7 +152,7 @@
   - a nonblank `secrets/discord_bot_token` enables Discord when the `[discord]` section is present. `allowed_guild = []` starts the connection but admits no conversations.
   - guild messages still require a listed guild; `default_cwd` remains a required absolute path for new guild workspaces
   - Discord accepts guild messages only. Guild-less messages and interactions, own messages, other bots, and webhooks are ignored before prompt or attachment processing.
-  - startup clears global commands and registers commands only in allowed guilds.
+  - startup clears global commands before validating guild membership, so a missing configured guild cannot leave obsolete DM commands behind. Guild commands register only after validation.
   - Discord chats use the ordinary `<picoRoot>/sessions/<chatId>.jsonl` journal.
 - phases
   - spike critical parts, define packages

@@ -112,14 +112,27 @@ describe("Discord startup", () => {
     }),
   );
 
-  it.effect("fails missing allowed guilds and cleans up the connected bot", () =>
+  it.effect("clears stale global commands even when an allowed guild is missing", () =>
     Effect.gen(function* () {
       const harness = makeBot(["1", "3"]);
-      const exit = yield* Effect.exit(
-        Effect.scoped(openBot(harness.bot, config, harness.collectedGuildIds)),
+      let globalCommands: Array<CreateApplicationCommand> = [
+        { name: "context", description: "Show context usage" },
+      ];
+      const bot: DiscordStartupBot = {
+        ...harness.bot,
+        helpers: {
+          ...harness.bot.helpers,
+          upsertGlobalApplicationCommands: async (commands) => {
+            globalCommands = commands;
+          },
+        },
+      };
+      const failure = yield* Effect.flip(
+        Effect.scoped(openBot(bot, config, harness.collectedGuildIds)),
       );
 
-      assert.isTrue(Exit.isFailure(exit));
+      assert.strictEqual(failure.operation, "validate-guild-membership");
+      assert.deepStrictEqual(globalCommands, []);
       assert.deepStrictEqual(harness.calls, [{ kind: "start" }, { kind: "shutdown" }]);
     }),
   );
