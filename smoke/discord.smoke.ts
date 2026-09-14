@@ -109,7 +109,7 @@ const smoke = Effect.fn("Discord.smoke")(function* () {
           pico.helpers.getGuildApplicationCommands(guildId),
         ]),
       );
-      assert.strictEqual(globalCommands.length, 0);
+      assert.deepStrictEqual(globalCommands.map(({ name }) => name).sort(), ["context", "shake"]);
       const abortCommand = guildCommands.find((command) => command.name === "abort");
       assert.strictEqual(abortCommand?.type, ApplicationCommandTypes.ChatInput);
 
