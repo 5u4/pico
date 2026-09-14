@@ -164,7 +164,8 @@ describe("frontend state over WebSocket", () => {
           id: WorkspaceId.make("018f47a0-0000-7000-8000-000000000003"),
           name: "Project",
           defaultCwd: AbsolutePath.make("/tmp/project"),
-          binding: null,
+          platform: "web",
+          externalId: null,
           worktree: null,
           createdAt: 1,
         };
@@ -215,7 +216,8 @@ describe("frontend state over WebSocket", () => {
         id: WorkspaceId.make("018f47a0-0000-7000-8000-000000000003"),
         name: "Project",
         defaultCwd: AbsolutePath.make("/tmp/project"),
-        binding: null,
+        platform: "web",
+        externalId: null,
         worktree: null,
         createdAt: 1,
       };

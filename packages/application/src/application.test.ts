@@ -219,7 +219,8 @@ describe("Application", () => {
             yield* application
               .createWorkspace({
                 name: "invalid",
-                binding: null,
+                platform: "web",
+                externalId: null,
                 defaultCwd: invalidCwd,
                 worktree: null,
               })
@@ -232,7 +233,8 @@ describe("Application", () => {
         yield* TestClock.setTime(1_000);
         const regularWorkspace = yield* application.createWorkspace({
           name: "regular",
-          binding: null,
+          platform: "web",
+          externalId: null,
           defaultCwd,
           worktree: null,
         });
@@ -255,7 +257,8 @@ describe("Application", () => {
         yield* TestClock.setTime(3_000);
         const worktreeWorkspace = yield* application.createWorkspace({
           name: "worktree",
-          binding: null,
+          platform: "web",
+          externalId: null,
           defaultCwd,
           worktree: { branch: "main", prefix: "chat/" },
         });
@@ -283,7 +286,8 @@ describe("Application", () => {
         yield* TestClock.setTime(5_000);
         const discordWorkspace = yield* application.createWorkspace({
           name: "discord",
-          binding: { platform: "discord", externalId: "1.10" },
+          platform: "discord",
+          externalId: "1.10",
           defaultCwd,
           worktree: null,
         });
@@ -617,7 +621,8 @@ describe("Application", () => {
         const chats = yield* ChatRepository;
         const direct = yield* application.createWorkspace({
           name: "direct",
-          binding: null,
+          platform: "web",
+          externalId: null,
           defaultCwd: directCwd,
           worktree: null,
         });
@@ -637,7 +642,8 @@ describe("Application", () => {
 
         const worktree = yield* application.createWorkspace({
           name: "worktree",
-          binding: null,
+          platform: "web",
+          externalId: null,
           defaultCwd: repositoryCwd,
           worktree: { branch: "main", prefix: "chat/" },
         });

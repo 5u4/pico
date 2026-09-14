@@ -23,9 +23,10 @@ sign-off before breaking it.
 These words mean one thing each in prompts, docs, type names, and table names.
 
 - **environment** — the machine running pico.
-- **platform** — where a UI lives: pico's own surfaces, Discord, Telegram, and others.
-- **binding** — a workspace's link to a foreign platform, `{ platform, externalId }`. Absent means
-  pico owns the UI.
+- **platform**. A workspace's owning UI, independent of the client currently viewing it. Every
+  workspace has an explicit platform.
+- **binding**. A workspace's foreign-platform identity, `{ platform, externalId }`. Workspaces
+  store these fields directly; pico-owned platforms have a null external ID, not a null platform.
 - **workspace** — a named place with a default cwd. A Discord channel is one.
 - **chat** — one conversation record inside a workspace. A Discord thread is one.
 

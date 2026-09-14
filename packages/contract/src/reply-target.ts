@@ -6,7 +6,7 @@ import type { AgentError } from "./errors.ts";
 import { WorkspacePlatform } from "./workspace-model.ts";
 
 export const ReplyTarget = Schema.Struct({
-  platform: WorkspacePlatform,
+  platform: WorkspacePlatform.pick(["discord"]),
   conversationId: Schema.NonEmptyString,
   messageId: Schema.NonEmptyString,
 });

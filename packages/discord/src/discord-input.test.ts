@@ -99,7 +99,8 @@ describe("discord input", () => {
               return {
                 id: workspaceId,
                 name: "general",
-                binding: { platform: "discord", externalId: "1.10" },
+                platform: "discord",
+                externalId: "1.10",
                 defaultCwd,
                 worktree: null,
                 createdAt: 0,
@@ -379,7 +380,8 @@ describe("discord input", () => {
           yield* workspaces.create({
             ...storedWorkspace,
             id: commandWorkspaceId,
-            binding: { platform: "discord", externalId: "1.30" },
+            platform: "discord",
+            externalId: "1.30",
           });
           yield* chats.create({
             id: failingChatId,
@@ -403,7 +405,8 @@ describe("discord input", () => {
             {
               ...storedWorkspace,
               id: commandWorkspaceId,
-              binding: { platform: "discord", externalId: "1.30" },
+              platform: "discord",
+              externalId: "1.30",
             },
           );
         }),
@@ -884,7 +887,8 @@ describe("discord input", () => {
         let workspace: Workspace.Workspace = {
           id: workspaceId,
           name: "general",
-          binding: { platform: "discord", externalId: "1.10" },
+          platform: "discord",
+          externalId: "1.10",
           defaultCwd,
           worktree: null,
           createdAt: 0,
@@ -998,7 +1002,8 @@ describe("discord input", () => {
         const workspace: Workspace.Workspace = {
           id: workspaceId,
           name: "general",
-          binding: { platform: "discord", externalId: "1.10" },
+          platform: "discord",
+          externalId: "1.10",
           defaultCwd,
           worktree: null,
           createdAt: 0,
@@ -1124,7 +1129,8 @@ describe("discord input", () => {
             Effect.succeed({
               id: workspaceId,
               name: "general",
-              binding: { platform: "discord", externalId: "1.10" },
+              platform: "discord",
+              externalId: "1.10",
               defaultCwd,
               worktree: null,
               createdAt: 0,
@@ -1251,7 +1257,8 @@ describe("discord input", () => {
               Effect.succeed({
                 id: workspaceId,
                 name: "general",
-                binding: { platform: "discord", externalId: "1.10" },
+                platform: "discord",
+                externalId: "1.10",
                 defaultCwd,
                 worktree: null,
                 createdAt: 0,

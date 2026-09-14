@@ -121,7 +121,7 @@ try {
     BunFileSystem.layer,
     BunPath.layer,
     Layer.succeed(ChatSessionContext, {
-      resolve: () => Effect.succeed({ chat, platform: null, appendSystemPrompt: "" }),
+      resolve: () => Effect.succeed({ chat, platform: "web", appendSystemPrompt: "" }),
     }),
     Layer.succeed(BranchNaming, {
       handle: () => {

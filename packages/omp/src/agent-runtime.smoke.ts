@@ -58,7 +58,7 @@ const smoke = Effect.fn("AgentRuntime.smoke")(function* () {
       resolve: () =>
         Effect.succeed({
           chat: resolvedChat,
-          platform: null,
+          platform: "web",
           appendSystemPrompt: "You are pico, a personal agent assistant.",
         }),
     }),
@@ -90,7 +90,8 @@ const smoke = Effect.fn("AgentRuntime.smoke")(function* () {
     yield* workspaces.create({
       id: workspaceId,
       name: "OMP smoke",
-      binding: null,
+      platform: "web",
+      externalId: null,
       defaultCwd: cwd,
       worktree: null,
       createdAt: 0,

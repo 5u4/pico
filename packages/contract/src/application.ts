@@ -2,6 +2,7 @@ import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
 import type * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
+import * as Struct from "effect/Struct";
 import type { AgentPrompt, AgentTranscript } from "./agent-message.ts";
 import type {
   ContextUsage,
@@ -14,21 +15,12 @@ import type {
 } from "./agent-runtime.ts";
 import type { Chat, ChatId } from "./chat-model.ts";
 import type { ApplicationError, ChatClosed, GitError, WorkspaceBindingInvalid } from "./errors.ts";
-import { AbsolutePath } from "./path.ts";
-import {
-  type Workspace,
-  WorkspaceBinding,
-  WorkspaceId,
-  type WorkspacePlatform,
-  WorktreeSettings,
-} from "./workspace-model.ts";
+import { Workspace, WorkspaceBinding, WorkspaceId, WorktreeSettings } from "./workspace-model.ts";
 
-export const CreateWorkspace = Schema.Struct({
-  name: Schema.NonEmptyString,
-  binding: Schema.NullOr(WorkspaceBinding),
-  defaultCwd: AbsolutePath,
-  worktree: Schema.NullOr(WorktreeSettings),
-});
+export const CreateWorkspace = Schema.Union([
+  Workspace.members[0].mapFields(Struct.omit(["id", "createdAt"])),
+  Workspace.members[1].mapFields(Struct.omit(["id", "createdAt"])),
+]);
 export type CreateWorkspace = typeof CreateWorkspace.Type;
 
 export const WorkspaceBindingConfiguration = Schema.Union([
@@ -76,7 +68,7 @@ export class Application extends Context.Service<
 
     /** Platform adapters call this when first resolving a channel's workspace. */
     readonly getOrCreateWorkspaceByBinding: (
-      input: Omit<CreateWorkspace, "binding"> & { readonly binding: WorkspaceBinding },
+      input: Extract<CreateWorkspace, { readonly externalId: string }>,
     ) => Effect.Effect<Workspace, ApplicationError>;
 
     readonly bindWorkspace: (
@@ -90,12 +82,12 @@ export class Application extends Context.Service<
 
     readonly createChat: (input: CreateChat) => Effect.Effect<Chat, ApplicationError>;
     readonly findWorkspaceByPlatformId: (
-      platform: WorkspacePlatform,
+      platform: WorkspaceBinding["platform"],
       workspaceExternalId: string,
     ) => Effect.Effect<Option.Option<Workspace>, ApplicationError>;
 
     readonly findChatByPlatformId: (
-      platform: WorkspacePlatform,
+      platform: WorkspaceBinding["platform"],
       workspaceExternalId: string,
       chatExternalId: string,
     ) => Effect.Effect<Option.Option<Chat>, ApplicationError>;

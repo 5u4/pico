@@ -8,7 +8,7 @@ export default Effect.gen(function* () {
     CREATE TABLE workspaces (
       id TEXT PRIMARY KEY NOT NULL,
       name TEXT NOT NULL CHECK (length(name) > 0),
-      platform TEXT,
+      platform TEXT NOT NULL,
       external_id TEXT,
       default_cwd TEXT NOT NULL CHECK (length(default_cwd) > 0),
       worktree_branch TEXT,
@@ -17,11 +17,14 @@ export default Effect.gen(function* () {
         CHECK (created_at BETWEEN 0 AND 9007199254740991),
 
       CONSTRAINT workspaces_platform
-        CHECK (platform IS NULL OR platform = 'discord'),
-      CONSTRAINT workspaces_binding_pair
+        CHECK (platform IN ('web', 'desktop', 'mobile', 'discord', 'telegram', 'slack', 'teams')),
+      CONSTRAINT workspaces_external_identity_kind
         CHECK (
-          (platform IS NULL AND external_id IS NULL) OR
-          (platform IS NOT NULL AND external_id IS NOT NULL AND length(external_id) > 0)
+          (platform IN ('web', 'desktop', 'mobile') AND external_id IS NULL) OR
+          (
+            platform IN ('discord', 'telegram', 'slack', 'teams') AND
+            external_id IS NOT NULL AND length(external_id) > 0
+          )
         ),
       CONSTRAINT workspaces_worktree_pair
         CHECK (

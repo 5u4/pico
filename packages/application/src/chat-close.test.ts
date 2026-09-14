@@ -122,7 +122,8 @@ describe("Chat close", () => {
           const application = yield* Application;
           const workspace = yield* application.createWorkspace({
             name: "btw",
-            binding: null,
+            platform: "web",
+            externalId: null,
             defaultCwd: cwd,
             worktree: { branch: "main", prefix: "chat/" },
           });
@@ -276,7 +277,8 @@ describe("Chat close", () => {
         yield* TestClock.setTime(1_000);
         const workspace = yield* application.createWorkspace({
           name: "close",
-          binding: null,
+          platform: "web",
+          externalId: null,
           defaultCwd,
           worktree: null,
         });
@@ -452,7 +454,8 @@ describe("Chat close", () => {
         const chats = yield* ChatRepository;
         const workspace = yield* application.createWorkspace({
           name: "scheduled-close",
-          binding: null,
+          platform: "web",
+          externalId: null,
           defaultCwd,
           worktree: { branch: "main", prefix: "chat/" },
         });
@@ -584,7 +587,8 @@ describe("Chat close", () => {
         const chats = yield* ChatRepository;
         const workspace = yield* application.createWorkspace({
           name: "worktree",
-          binding: null,
+          platform: "web",
+          externalId: null,
           defaultCwd,
           worktree: { branch: "main", prefix: "chat/" },
         });

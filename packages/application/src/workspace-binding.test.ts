@@ -143,10 +143,8 @@ describe("Workspace binding", () => {
           },
         });
         assert.strictEqual(freshWorktree.name, "worktree channel");
-        assert.deepStrictEqual(freshWorktree.binding, {
-          platform: "discord",
-          externalId: "9007199254740993.20",
-        });
+        assert.strictEqual(freshWorktree.platform, "discord");
+        assert.strictEqual(freshWorktree.externalId, "9007199254740993.20");
         assert.strictEqual(freshWorktree.defaultCwd, secondCwd);
         assert.deepStrictEqual(freshWorktree.worktree, { branch: "main", prefix: "fresh/" });
 
@@ -399,7 +397,7 @@ describe("Workspace binding", () => {
           });
           const messageCreation = application.getOrCreateWorkspaceByBinding({
             name: "message",
-            binding,
+            ...binding,
             defaultCwd,
             worktree: null,
           });

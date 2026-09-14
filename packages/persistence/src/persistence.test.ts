@@ -33,7 +33,8 @@ const worktreeCwd = AbsolutePath.make("/tmp/pico/worktrees/chat");
 const regularWorkspace: Workspace.Workspace = {
   id: regularWorkspaceId,
   name: "regular",
-  binding: null,
+  platform: "web",
+  externalId: null,
   defaultCwd: cwdA,
   worktree: null,
   createdAt: 1,
@@ -42,7 +43,8 @@ const regularWorkspace: Workspace.Workspace = {
 const secondWorkspace: Workspace.Workspace = {
   id: secondWorkspaceId,
   name: "second",
-  binding: null,
+  platform: "web",
+  externalId: null,
   defaultCwd: cwdA,
   worktree: null,
   createdAt: 2,
@@ -51,7 +53,8 @@ const secondWorkspace: Workspace.Workspace = {
 const worktreeWorkspace: Workspace.Workspace = {
   id: worktreeWorkspaceId,
   name: "worktree",
-  binding: { platform: "discord", externalId: "9007199254740993.10" },
+  platform: "discord",
+  externalId: "9007199254740993.10",
   defaultCwd: cwdA,
   worktree: { branch: "main", prefix: "chat/" },
   createdAt: 3,
@@ -160,10 +163,10 @@ describe("Persistence.layer", () => {
           platform: "discord",
           externalId: "9007199254740993.20",
         });
-        const firstCandidate = { ...regularWorkspace, binding };
+        const firstCandidate = { ...regularWorkspace, ...binding };
         const secondCandidate = {
           ...worktreeWorkspace,
-          binding,
+          ...binding,
           defaultCwd: cwdB,
         };
 
@@ -204,7 +207,8 @@ describe("Persistence.layer", () => {
             yield* Effect.flip(
               workspaces.getOrCreateByBinding({
                 ...winner,
-                binding: { platform: "discord", externalId: "9007199254740993.30" },
+                platform: "discord",
+                externalId: "9007199254740993.30",
               }),
             ),
             PersistenceError,
@@ -555,8 +559,8 @@ describe("Persistence.layer", () => {
         assert.include(chat.message, "invalid stored row");
         assert.notInclude(chat.message, "private-relative-path");
         const workspace = yield* workspaces.findById(regularWorkspaceId).pipe(Effect.flip);
+        assert.instanceOf(workspace, PersistenceError);
         assert.include(workspace.message, "workspace.findById");
-        assert.include(workspace.message, "binding column pair");
         assert.notInclude(workspace.message, "private-external-id");
       }).pipe(Effect.provide(layer(storeFile)), Effect.scoped);
     }).pipe(Effect.provide(platformLayer)),

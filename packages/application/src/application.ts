@@ -190,9 +190,7 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
   );
 
   const getOrCreateWorkspaceByBinding = Effect.fn("Application.getOrCreateWorkspaceByBinding")(
-    function* (
-      input: Omit<CreateWorkspace, "binding"> & { readonly binding: Workspace.WorkspaceBinding },
-    ) {
+    function* (input: Extract<CreateWorkspace, { readonly externalId: string }>) {
       const id = Workspace.WorkspaceId.make(yield* crypto.randomUUIDv7);
       const createdAt = yield* Clock.currentTimeMillis;
       return yield* workspaces.getOrCreateByBinding({ ...input, id, createdAt });
@@ -276,7 +274,7 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
     const configuration = yield* resolveConfiguration(input.configuration);
     const existing = yield* getOrCreateWorkspaceByBinding({
       name: input.workspaceName,
-      binding: input.binding,
+      ...input.binding,
       ...configuration,
     });
     if (
@@ -431,7 +429,7 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
   });
 
   const findWorkspaceByPlatformId = Effect.fn("Application.findWorkspaceByPlatformId")(
-    function* (platform: Workspace.WorkspacePlatform, workspaceExternalId: string) {
+    function* (platform: Workspace.WorkspaceBinding["platform"], workspaceExternalId: string) {
       return yield* workspaces.findByBinding({ platform, externalId: workspaceExternalId });
     },
     Effect.mapError(failure("Failed to find workspace")),
@@ -439,7 +437,7 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
 
   const findChatByPlatformId = Effect.fn("Application.findChatByPlatformId")(
     function* (
-      platform: Workspace.WorkspacePlatform,
+      platform: Workspace.WorkspaceBinding["platform"],
       workspaceExternalId: string,
       chatExternalId: string,
     ) {
@@ -467,9 +465,9 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
           message: "Chat workspace not found",
         });
       }
-      if (workspace.value.binding === null) return Option.none<ChatPlatformBinding>();
+      if (workspace.value.externalId === null) return Option.none<ChatPlatformBinding>();
       return Option.some({
-        platform: workspace.value.binding.platform,
+        platform: workspace.value.platform,
         externalId: chat.value.externalId,
       });
     },

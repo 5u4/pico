@@ -42,11 +42,13 @@ const makeChat = (
 
 const makeWorkspace = (
   id: Workspace.WorkspaceId,
-  binding: Workspace.WorkspaceBinding | null,
+  identity:
+    | Pick<Extract<Workspace.Workspace, { readonly externalId: null }>, "platform" | "externalId">
+    | Workspace.WorkspaceBinding,
 ): Workspace.Workspace => ({
   id,
   name: "workspace",
-  binding,
+  ...identity,
   defaultCwd: cwd,
   worktree: null,
   createdAt: 1,
@@ -214,14 +216,16 @@ describe("ChatSessionContext", () => {
           const workspaces = yield* WorkspaceRepository;
           const chats = yield* ChatRepository;
           const resolver = yield* ChatSessionContext;
-          yield* workspaces.create(makeWorkspace(workspaceId, null));
+          yield* workspaces.create(
+            makeWorkspace(workspaceId, { platform: "web", externalId: null }),
+          );
           yield* workspaces.create(
             makeWorkspace(missingWorkspaceId, { platform: "discord", externalId: "1.456" }),
           );
           yield* chats.create(makeChat(chatId, workspaceId, "456"));
           yield* chats.create(makeChat(secondChatId, missingWorkspaceId, null));
           const global = yield* resolver.resolve(chatId);
-          assert.strictEqual(global.platform, null);
+          assert.strictEqual(global.platform, "web");
           assert.include(global.appendSystemPrompt, "GLOBAL_ONLY");
           assert.notInclude(global.appendSystemPrompt, "CHANNEL_ONLY");
           assert.notInclude(global.appendSystemPrompt, "AUTHENTICATED_BOT");
