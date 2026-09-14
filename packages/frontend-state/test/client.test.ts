@@ -1,3 +1,5 @@
+import { Database } from "bun:sqlite";
+import * as BunFileSystem from "@effect/platform-bun/BunFileSystem";
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import { assert, describe, it } from "@effect/vitest";
 import type { AgentEventEnvelope } from "@pico/contract/agent-event";
@@ -8,14 +10,18 @@ import {
 } from "@pico/contract/agent-message";
 import { Application } from "@pico/contract/application";
 import { ChatId } from "@pico/contract/chat-model";
+import { ChatRepository } from "@pico/contract/chat-repository";
 import { ApplicationError, ChatClosed } from "@pico/contract/errors";
 import { EventRouter } from "@pico/contract/event-router";
 import { AbsolutePath } from "@pico/contract/path";
 import { type Workspace, WorkspaceId } from "@pico/contract/workspace-model";
+import { WorkspaceRepository } from "@pico/contract/workspace-repository";
 import * as RpcServer from "@pico/rpc/server";
+import type {} from "bun";
 import * as Cause from "effect/Cause";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
@@ -26,10 +32,20 @@ import * as HttpServer from "effect/unstable/http/HttpServer";
 import * as AsyncResult from "effect/unstable/reactivity/AsyncResult";
 import type * as Atom from "effect/unstable/reactivity/Atom";
 import * as AtomRegistry from "effect/unstable/reactivity/AtomRegistry";
+import * as Persistence from "../../persistence/src/layer.ts";
 import { type LiveChat, make } from "../src/client.ts";
 
 const firstChat = ChatId.make("018f47a0-0000-7000-8000-000000000001");
 const secondChat = ChatId.make("018f47a0-0000-7000-8000-000000000002");
+const webWorkspace: Workspace = {
+  id: WorkspaceId.make("018f47a0-0000-7000-8000-000000000003"),
+  name: "Project",
+  defaultCwd: AbsolutePath.make("/tmp/project"),
+  platform: "web",
+  externalId: null,
+  worktree: null,
+  createdAt: 1,
+};
 const message = { role: "user", content: [{ type: "text", text: "same" }], timestamp: 1 } as const;
 const prompt = (text: string) => AgentPrompt.make({ text, attachments: [] });
 const assistant = (text: string, timestamp: number): AgentAssistantMessage => ({
@@ -58,6 +74,32 @@ const fixture = Effect.fnUntraced(function* (
     >,
 ) {
   const opened = yield* Queue.unbounded<Route>();
+  const storeFile = yield* Deferred.make<AbsolutePath>();
+  const persistence = Layer.unwrap(
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const directory = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-frontend-" });
+      const path = AbsolutePath.make(`${directory}/store.db`);
+      yield* Deferred.succeed(storeFile, path);
+      return Persistence.layer(path);
+    }),
+  ).pipe(Layer.provide(BunFileSystem.layer));
+  const ownership = Layer.effectDiscard(
+    Effect.gen(function* () {
+      const workspaces = yield* WorkspaceRepository;
+      const chats = yield* ChatRepository;
+      yield* workspaces.create(webWorkspace);
+      for (const id of [firstChat, secondChat]) {
+        yield* chats.create({
+          id,
+          workspaceId: webWorkspace.id,
+          cwd: webWorkspace.defaultCwd,
+          externalId: null,
+          createdAt: 1,
+        });
+      }
+    }),
+  ).pipe(Layer.provideMerge(persistence));
   const application = Application.of({
     listWorkspaces: () => Effect.die("unexpected workspace list"),
     listChats: () => Effect.die("unexpected chat list"),
@@ -97,11 +139,15 @@ const fixture = Effect.fnUntraced(function* (
   });
   const layer = HttpRouter.serve(RpcServer.routes).pipe(
     Layer.provide(
-      Layer.merge(Layer.succeed(Application, application), Layer.succeed(EventRouter, router)),
+      Layer.mergeAll(
+        Layer.succeed(Application, application),
+        Layer.succeed(EventRouter, router),
+        ownership,
+      ),
     ),
     Layer.provideMerge(NodeHttpServer.layerTest),
   );
-  return { opened, layer };
+  return { opened, layer, storeFile: Deferred.await(storeFile) };
 });
 
 const endpoint = Effect.gen(function* () {
@@ -160,15 +206,7 @@ describe("frontend state over WebSocket", () => {
     "activates the connection after an initial list rejection and allows a successful retry",
     () =>
       Effect.gen(function* () {
-        const workspace: Workspace = {
-          id: WorkspaceId.make("018f47a0-0000-7000-8000-000000000003"),
-          name: "Project",
-          defaultCwd: AbsolutePath.make("/tmp/project"),
-          platform: "web",
-          externalId: null,
-          worktree: null,
-          createdAt: 1,
-        };
+        const workspace = webWorkspace;
         const rejection = new ApplicationError({ reason: "operation", message: "Read failed" });
         let reads = 0;
         const server = yield* fixture({
@@ -212,15 +250,7 @@ describe("frontend state over WebSocket", () => {
   );
   it.live("retains workspace lists through refresh failures and fences superseded reads", () =>
     Effect.gen(function* () {
-      const workspace: Workspace = {
-        id: WorkspaceId.make("018f47a0-0000-7000-8000-000000000003"),
-        name: "Project",
-        defaultCwd: AbsolutePath.make("/tmp/project"),
-        platform: "web",
-        externalId: null,
-        worktree: null,
-        createdAt: 1,
-      };
+      const workspace = webWorkspace;
       const latest = { ...workspace, name: "Renamed project" };
       const requests = yield* Queue.unbounded<{
         readonly reply: Deferred.Deferred<readonly Workspace[], ApplicationError>;
@@ -493,6 +523,59 @@ describe("frontend state over WebSocket", () => {
           yield* Deferred.await(secondRoute.closed);
         }).pipe(Effect.scoped, Effect.provide(server.layer));
       }),
+  );
+
+  it.live("retains partial content and rejects actions when Events ownership lookup fails", () =>
+    Effect.gen(function* () {
+      let sends = 0;
+      const server = yield* fixture({
+        transcript: () => Effect.succeed([]),
+        sendMessage: () =>
+          Effect.sync(() => {
+            sends += 1;
+            return { kind: "handled" } as const;
+          }),
+        abort: () => Effect.void,
+      });
+      yield* Effect.gen(function* () {
+        const state = make({ url: yield* endpoint });
+        const registry = yield* registryInScope;
+        registry.mount(state.live(firstChat));
+        const route = yield* Queue.take(server.opened);
+        yield* Queue.offerAll(route.queue, [
+          { chatId: firstChat, event: { type: "run-started" } },
+          { chatId: firstChat, event: { type: "text-delta", contentIndex: 0, text: "keep me" } },
+        ]);
+        yield* waitFor(
+          registry,
+          state.live(firstChat),
+          (value) => value.blocks.get(0)?.text === "keep me",
+        );
+        const storeFile = yield* server.storeFile;
+        const database = yield* Effect.acquireRelease(
+          Effect.sync(() => new Database(storeFile)),
+          (database) => Effect.sync(() => database.close()),
+        );
+        yield* Effect.sync(() => database.run("DROP TABLE workspaces"));
+        yield* Queue.offer(route.queue, {
+          chatId: secondChat,
+          event: { type: "notice", level: "info", message: "must not reach the client" },
+        });
+        yield* waitFor(registry, state.connection, (value) => value.kind === "unavailable");
+        const connection = registry.get(state.connection);
+        if (connection.kind !== "unavailable")
+          return yield* Effect.die("Expected unavailable connection");
+        const error = Option.getOrThrow(Cause.findErrorOption(connection.cause));
+        assert.instanceOf(error, ApplicationError);
+        assert.strictEqual(error.reason, "operation");
+        assert.strictEqual(registry.get(state.live(firstChat)).blocks.get(0)?.text, "keep me");
+        assert.strictEqual(registry.get(state.live(firstChat)).run.kind, "unknown");
+        registry.set(state.send(firstChat), prompt("do not send"));
+        yield* waitFor(registry, state.send(firstChat), AsyncResult.isFailure);
+        assert.strictEqual(sends, 0);
+        yield* Deferred.await(route.closed);
+      }).pipe(Effect.scoped, Effect.provide(server.layer));
+    }),
   );
 
   it.live("starts concurrent sends before any atom is mounted", () =>
