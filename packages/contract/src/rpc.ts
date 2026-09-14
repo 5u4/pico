@@ -47,6 +47,7 @@ export const PicoRpcs = RpcGroup.make(
   Rpc.make("Events", {
     payload: Schema.Void,
     success: AgentEvent.AgentEventEnvelope,
+    error: Errors.ApplicationError,
     stream: true,
   }),
 );

@@ -1,10 +1,15 @@
 import { Application } from "@pico/contract/application";
+import type { ChatId } from "@pico/contract/chat-model";
+import { ChatRepository } from "@pico/contract/chat-repository";
 import { ApplicationError, ChatClosed, WorkspaceBindingInvalid } from "@pico/contract/errors";
 import { EventRouter } from "@pico/contract/event-router";
 import { PicoRpcs } from "@pico/contract/rpc";
+import type { WorkspaceId, WorkspacePlatform } from "@pico/contract/workspace-model";
+import { WorkspaceRepository } from "@pico/contract/workspace-repository";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
 import * as RpcSerialization from "effect/unstable/rpc/RpcSerialization";
 import * as RpcServer from "effect/unstable/rpc/RpcServer";
@@ -13,10 +18,13 @@ const handlers = PicoRpcs.toLayer(
   Effect.gen(function* () {
     const application = yield* Application;
     const eventRouter = yield* EventRouter;
+    const workspaces = yield* WorkspaceRepository;
+    const chats = yield* ChatRepository;
 
     return PicoRpcs.of({
       ListWorkspaces: (_, { requestId }) =>
         application.listWorkspaces().pipe(
+          Effect.map((items) => items.filter((workspace) => workspace.platform === "web")),
           Effect.tapCause(reportFailure),
           Effect.annotateLogs({
             component: "rpc",
@@ -25,7 +33,8 @@ const handlers = PicoRpcs.toLayer(
           }),
         ),
       ListChats: ({ workspaceId }, { requestId }) =>
-        application.listChats(workspaceId).pipe(
+        requireWebWorkspace(workspaces, workspaceId).pipe(
+          Effect.andThen(() => application.listChats(workspaceId)),
           Effect.tapCause(reportFailure),
           Effect.annotateLogs({
             component: "rpc",
@@ -35,7 +44,15 @@ const handlers = PicoRpcs.toLayer(
           }),
         ),
       CreateWorkspace: (input, { requestId }) =>
-        application.createWorkspace(input).pipe(
+        (input.platform === "web"
+          ? application.createWorkspace(input)
+          : Effect.fail(
+              new ApplicationError({
+                reason: "invalid-state",
+                message: "Only web workspaces can be created through RPC",
+              }),
+            )
+        ).pipe(
           Effect.tapCause(reportFailure),
           Effect.annotateLogs({
             component: "rpc",
@@ -44,7 +61,8 @@ const handlers = PicoRpcs.toLayer(
           }),
         ),
       CreateChat: (input, { requestId }) =>
-        application.createChat(input).pipe(
+        requireWebWorkspace(workspaces, input.workspaceId).pipe(
+          Effect.andThen(() => application.createChat(input)),
           Effect.tapCause(reportFailure),
           Effect.annotateLogs({
             component: "rpc",
@@ -54,7 +72,8 @@ const handlers = PicoRpcs.toLayer(
           }),
         ),
       Transcript: ({ chatId }, { requestId }) =>
-        application.transcript(chatId).pipe(
+        requireWebChat(workspaces, chats, chatId).pipe(
+          Effect.andThen(() => application.transcript(chatId)),
           Effect.tapCause(reportFailure),
           Effect.annotateLogs({
             component: "rpc",
@@ -64,7 +83,8 @@ const handlers = PicoRpcs.toLayer(
           }),
         ),
       SendMessage: ({ chatId, prompt }, { requestId }) =>
-        application.sendMessage(chatId, prompt).pipe(
+        requireWebChat(workspaces, chats, chatId).pipe(
+          Effect.andThen(() => application.sendMessage(chatId, prompt)),
           Effect.flatMap((delivery) =>
             delivery.kind === "handled" ? Effect.void : delivery.completed,
           ),
@@ -77,7 +97,8 @@ const handlers = PicoRpcs.toLayer(
           }),
         ),
       Abort: ({ chatId }, { requestId }) =>
-        application.abort(chatId).pipe(
+        requireWebChat(workspaces, chats, chatId).pipe(
+          Effect.andThen(() => application.abort(chatId)),
           Effect.tapCause(reportFailure),
           Effect.annotateLogs({
             component: "rpc",
@@ -87,7 +108,7 @@ const handlers = PicoRpcs.toLayer(
           }),
         ),
       Events: (_, { requestId }) =>
-        Stream.unwrap(eventRouter.open(() => true).pipe(Effect.map((route) => route.events))).pipe(
+        Stream.unwrap(openWebEvents(eventRouter, workspaces, chats)).pipe(
           Stream.tapCause((cause) =>
             reportFailure(cause).pipe(
               Effect.annotateLogs({
@@ -102,11 +123,82 @@ const handlers = PicoRpcs.toLayer(
   }),
 );
 
-/** Daemon composition installs these routes on its shared HTTP listener. */
+/** Daemon composition installs these Web-only routes on its shared HTTP listener. */
 export const routes = RpcServer.layerHttp({ group: PicoRpcs, path: "/rpc" }).pipe(
   Layer.provide(handlers),
   Layer.provide(RpcSerialization.layerJson),
 );
+
+const requireWebWorkspace = Effect.fn("Rpc.requireWebWorkspace")(function* (
+  workspaces: WorkspaceRepository["Service"],
+  workspaceId: WorkspaceId,
+) {
+  const workspace = yield* workspaces.findById(workspaceId).pipe(
+    Effect.mapError(
+      () =>
+        new ApplicationError({
+          reason: "operation",
+          message: "Failed to resolve workspace ownership",
+        }),
+    ),
+  );
+  if (Option.isNone(workspace) || workspace.value.platform !== "web") {
+    return yield* new ApplicationError({ reason: "not-found", message: "Workspace not found" });
+  }
+});
+
+const readChatPlatform = Effect.fn("Rpc.readChatPlatform")(
+  function* (
+    workspaces: WorkspaceRepository["Service"],
+    chats: ChatRepository["Service"],
+    chatId: ChatId,
+  ) {
+    const chat = yield* chats.findById(chatId);
+    if (Option.isNone(chat)) return Option.none<WorkspacePlatform>();
+    const workspace = yield* workspaces.findById(chat.value.workspaceId);
+    return Option.map(workspace, (value) => value.platform);
+  },
+  Effect.mapError(
+    () =>
+      new ApplicationError({
+        reason: "operation",
+        message: "Failed to resolve chat ownership",
+      }),
+  ),
+);
+
+const requireWebChat = Effect.fn("Rpc.requireWebChat")(function* (
+  workspaces: WorkspaceRepository["Service"],
+  chats: ChatRepository["Service"],
+  chatId: ChatId,
+) {
+  const platform = yield* readChatPlatform(workspaces, chats, chatId);
+  if (Option.isNone(platform) || platform.value !== "web") {
+    return yield* new ApplicationError({ reason: "not-found", message: "Chat not found" });
+  }
+});
+
+const openWebEvents = Effect.fn("Rpc.openWebEvents")(function* (
+  eventRouter: EventRouter["Service"],
+  workspaces: WorkspaceRepository["Service"],
+  chats: ChatRepository["Service"],
+) {
+  const platforms = new Map<ChatId, WorkspacePlatform>();
+  const canReadChat = Effect.fn("Rpc.canReadChat")(function* (chatId: ChatId) {
+    const cached = platforms.get(chatId);
+    if (cached !== undefined) return cached === "web";
+    const platform = yield* readChatPlatform(workspaces, chats, chatId);
+    if (Option.isNone(platform)) return false;
+    if (platforms.size === 256) {
+      const oldest = platforms.keys().next();
+      if (!oldest.done) platforms.delete(oldest.value);
+    }
+    platforms.set(chatId, platform.value);
+    return platform.value === "web";
+  });
+  const route = yield* eventRouter.open(() => true);
+  return route.events.pipe(Stream.filterEffect(({ chatId }) => canReadChat(chatId)));
+});
 
 const reportFailure = (cause: Cause.Cause<unknown>) => {
   const operational = cause.reasons.some((reason) => {

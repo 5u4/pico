@@ -185,7 +185,8 @@ const daemonLayer = (paths: PicoPaths, config: Config.PicoConfig) =>
         discordBotId,
       }).pipe(Layer.provide(persistence));
       const application = ApplicationLayer.layer(gitWorktree).pipe(
-        Layer.provide(Layer.merge(persistence, AgentSessionStoreLayer.layer(paths.sessionsDir))),
+        Layer.provide(AgentSessionStoreLayer.layer(paths.sessionsDir)),
+        Layer.provideMerge(persistence),
       );
       const agentRuntime = AgentRuntimeLayer.layer({
         paths,

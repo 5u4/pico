@@ -25,7 +25,10 @@ export type { LiveBlock, LiveChat, LiveRun, LiveTool, PendingContent } from "./c
 export type Connection =
   | { readonly kind: "opening" }
   | { readonly kind: "active" }
-  | { readonly kind: "unavailable"; readonly cause: Cause.Cause<RpcClientError> };
+  | {
+      readonly kind: "unavailable";
+      readonly cause: Cause.Cause<ApplicationError | RpcClientError>;
+    };
 
 type Client = Effect.Success<ReturnType<typeof RpcClient.make>>;
 interface ChatRecord {
@@ -271,7 +274,7 @@ export const make = ({ url }: { readonly url: string }) => {
   ) => {
     const lane = Atom.make<{
       readonly pending: number;
-      readonly result: AsyncResult.AsyncResult<void, Error | RpcClientError>;
+      readonly result: AsyncResult.AsyncResult<void, Error | ApplicationError | RpcClientError>;
     }>({ pending: 0, result: AsyncResult.initial() }).pipe(Atom.keepAlive);
     const trigger = Atom.fn<Input>()(
       (input, get) => {
@@ -294,8 +297,14 @@ export const make = ({ url }: { readonly url: string }) => {
                       waiting,
                     })
                   : Exit.isFailure(exit)
-                    ? AsyncResult.failure<void, Error | RpcClientError>(exit.cause, { waiting })
-                    : AsyncResult.success<void, Error | RpcClientError>(undefined, { waiting });
+                    ? AsyncResult.failure<void, Error | ApplicationError | RpcClientError>(
+                        exit.cause,
+                        { waiting },
+                      )
+                    : AsyncResult.success<void, Error | ApplicationError | RpcClientError>(
+                        undefined,
+                        { waiting },
+                      );
                 return { pending, result };
               });
               lifecycle.refresh(chatId);
