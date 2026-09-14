@@ -10,7 +10,7 @@ import { Application, type CloseChatResult } from "@pico/contract/application";
 import type * as Chat from "@pico/contract/chat-model";
 import { AgentError, ApplicationError, type WorkspaceBindingInvalid } from "@pico/contract/errors";
 import type { AbsolutePath } from "@pico/contract/path";
-import type * as Workspace from "@pico/contract/workspace-model";
+import * as Workspace from "@pico/contract/workspace-model";
 import {
   ButtonStyles,
   ChannelTypes,
@@ -143,6 +143,9 @@ const closeConfirmationTtl = 5 * 60 * 1_000;
 const btwResponseDeadline = "10 minutes";
 const closedMessage = "This chat is closed. Start a new thread to continue.";
 const decodeThreadId = Schema.decodeUnknownEffect(Schema.BigIntFromString);
+const encodeWorkspaceExternalId = Schema.encodeSync(Workspace.DiscordWorkspaceExternalId);
+const workspaceExternalId = (guildId: bigint, channelId: bigint) =>
+  encodeWorkspaceExternalId([guildId.toString(), ".", channelId.toString()]);
 
 export const install = Effect.fn("DiscordInput.install")(function* <
   Message extends DiscordMessage,
@@ -238,8 +241,7 @@ export const install = Effect.fn("DiscordInput.install")(function* <
       name: name ?? `Discord channel ${channelId.toString()}`,
       binding: {
         platform: "discord",
-        externalId: channelId.toString(),
-        guildId: guildId.toString(),
+        externalId: workspaceExternalId(guildId, channelId),
       },
       defaultCwd: config.defaultCwd,
       worktree: null,
@@ -284,11 +286,11 @@ export const install = Effect.fn("DiscordInput.install")(function* <
 
     const chat = yield* application.findChatByPlatformId(
       "discord",
-      thread.parentId.toString(),
+      workspaceExternalId(thread.guildId, thread.parentId),
       thread.threadId.toString(),
     );
     if (Option.isNone(chat)) return Option.none<Chat.ChatId>();
-    yield* resolveWorkspace(thread.parentId, thread.guildId);
+    workspaceIds.set(thread.parentId, chat.value.workspaceId);
     cacheChat(thread.threadId, chat.value.id);
     yield* Effect.annotateLogsScoped({
       chatId: chat.value.id,
@@ -483,12 +485,12 @@ export const install = Effect.fn("DiscordInput.install")(function* <
       yield* Effect.annotateLogsScoped({ phase: "resolve-chat", threadId: channel.id.toString() });
       const chat = yield* application.findChatByPlatformId(
         "discord",
-        channel.parentId.toString(),
+        workspaceExternalId(message.guildId, channel.parentId),
         channel.id.toString(),
       );
       if (Option.isNone(chat)) return;
 
-      yield* resolveWorkspace(channel.parentId, message.guildId);
+      workspaceIds.set(channel.parentId, chat.value.workspaceId);
       cacheChat(channel.id, chat.value.id);
       yield* Effect.annotateLogsScoped({ workspaceId: chat.value.workspaceId });
       return yield* sendMessageToChat(chat.value.id, prompt, message.channelId);
@@ -642,8 +644,7 @@ export const install = Effect.fn("DiscordInput.install")(function* <
         const workspace = yield* application.bindWorkspace({
           binding: {
             platform: "discord",
-            externalId: channel.id.toString(),
-            guildId: guildId.toString(),
+            externalId: workspaceExternalId(guildId, channel.id),
           },
           workspaceName: channel.name ?? channel.id.toString(),
           configuration: { kind: "direct", cwd: command.cwd },
@@ -656,8 +657,7 @@ export const install = Effect.fn("DiscordInput.install")(function* <
         const workspace = yield* application.bindWorkspace({
           binding: {
             platform: "discord",
-            externalId: channel.id.toString(),
-            guildId: guildId.toString(),
+            externalId: workspaceExternalId(guildId, channel.id),
           },
           workspaceName: channel.name ?? channel.id.toString(),
           configuration: {

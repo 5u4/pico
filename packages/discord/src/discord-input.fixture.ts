@@ -20,7 +20,7 @@ export const defaultCwd = AbsolutePath.make("/tmp/pico-discord-input");
 export const boundWorkspace: Workspace.Workspace = {
   id: workspaceId,
   name: "general",
-  binding: { platform: "discord", externalId: "10", guildId: "1" },
+  binding: { platform: "discord", externalId: "1.10" },
   defaultCwd,
   worktree: null,
   createdAt: 0,

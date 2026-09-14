@@ -102,7 +102,7 @@ describe("discord attachments", () => {
             Effect.succeed({
               id: workspaceId,
               name: "general",
-              binding: { platform: "discord", externalId: "10" },
+              binding: { platform: "discord", externalId: "1.10" },
               defaultCwd,
               worktree: null,
               createdAt: 0,

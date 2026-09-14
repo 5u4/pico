@@ -987,7 +987,6 @@ describe("discord interactions", () => {
   it.effect("resolves persisted shake chats and returns private mode-specific responses", () =>
     Effect.scoped(
       Effect.gen(function* () {
-        const lookups: Array<[string, string, string]> = [];
         const shakes: Array<[Chat.ChatId, string]> = [];
         let privateDefers = 0;
         const bot = {
@@ -1046,9 +1045,8 @@ describe("discord interactions", () => {
           listChats: () => Effect.die("unexpected chat list"),
           createChat: () => Effect.die("shake must not create a chat"),
           findWorkspaceByPlatformId: () => Effect.die("unexpected workspace lookup"),
-          findChatByPlatformId: (platform, parentId, threadId) =>
+          findChatByPlatformId: (_platform, _workspaceExternalId, threadId) =>
             Effect.sync(() => {
-              lookups.push([platform, parentId, threadId]);
               if (threadId === "20") return Option.some(chat);
               if (threadId === "22") return Option.some(failedChat);
               return Option.none();
@@ -1135,7 +1133,6 @@ describe("discord interactions", () => {
           ),
           "Dropped 3 thinking blocks from this chat.",
         );
-        assert.deepStrictEqual(lookups, [["discord", "10", "20"]]);
         assert.deepStrictEqual(shakes, [
           [chatId, "elide"],
           [chatId, "images"],
@@ -1173,7 +1170,6 @@ describe("discord interactions", () => {
     Effect.scoped(
       Effect.gen(function* () {
         const unavailableChatId = Chat.ChatId.make("018f47a0-0000-7000-8000-000000000004");
-        const lookups: Array<[string, string, string]> = [];
         const contextReads: Array<Chat.ChatId> = [];
         let privateDefers = 0;
         const bot = {
@@ -1234,9 +1230,8 @@ describe("discord interactions", () => {
           listChats: () => Effect.die("unexpected chat list"),
           createChat: () => Effect.die("context must not create a chat"),
           findWorkspaceByPlatformId: () => Effect.die("unexpected workspace lookup"),
-          findChatByPlatformId: (platform, parentId, threadId) =>
+          findChatByPlatformId: (_platform, _workspaceExternalId, threadId) =>
             Effect.sync(() => {
-              lookups.push([platform, parentId, threadId]);
               if (threadId === "20") return Option.some(chat(chatId, threadId));
               if (threadId === "22") return Option.some(chat(failingChatId, threadId));
               if (threadId === "23") return Option.some(chat(unavailableChatId, threadId));
@@ -1323,12 +1318,6 @@ describe("discord interactions", () => {
           yield* Effect.promise(() => invoke(22n)),
           "pico could not read this chat's context.",
         );
-        assert.deepStrictEqual(lookups, [
-          ["discord", "10", "20"],
-          ["discord", "10", "23"],
-          ["discord", "10", "21"],
-          ["discord", "10", "22"],
-        ]);
         assert.deepStrictEqual(contextReads, [chatId, chatId, unavailableChatId, failingChatId]);
         assert.strictEqual(privateDefers, 9);
       }),

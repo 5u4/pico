@@ -287,7 +287,7 @@ describe("Application", () => {
         yield* TestClock.setTime(5_000);
         const discordWorkspace = yield* application.createWorkspace({
           name: "discord",
-          binding: { platform: "discord", externalId: "channel-1" },
+          binding: { platform: "discord", externalId: "1.10" },
           defaultCwd,
           worktree: null,
         });
@@ -313,23 +313,21 @@ describe("Application", () => {
         assert.deepStrictEqual(yield* application.listChats(worktreeWorkspace.id), [worktreeChat]);
 
         assert.deepStrictEqual(
-          Option.getOrThrow(yield* application.findWorkspaceByPlatformId("discord", "channel-1")),
+          Option.getOrThrow(yield* application.findWorkspaceByPlatformId("discord", "1.10")),
           discordWorkspace,
         );
         assert.isTrue(
-          Option.isNone(yield* application.findWorkspaceByPlatformId("discord", "missing")),
+          Option.isNone(yield* application.findWorkspaceByPlatformId("discord", "1.99")),
         );
         assert.deepStrictEqual(
-          Option.getOrThrow(
-            yield* application.findChatByPlatformId("discord", "channel-1", "thread-1"),
-          ),
+          Option.getOrThrow(yield* application.findChatByPlatformId("discord", "1.10", "thread-1")),
           discordChat,
         );
         assert.isTrue(
-          Option.isNone(yield* application.findChatByPlatformId("discord", "channel-1", "missing")),
+          Option.isNone(yield* application.findChatByPlatformId("discord", "1.10", "missing")),
         );
         assert.isTrue(
-          Option.isNone(yield* application.findChatByPlatformId("discord", "missing", "thread-1")),
+          Option.isNone(yield* application.findChatByPlatformId("discord", "1.99", "thread-1")),
         );
         assert.deepStrictEqual(
           Option.getOrThrow(yield* application.findChatPlatformBinding(discordChat.id)),

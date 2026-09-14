@@ -144,8 +144,8 @@ describe("ChatSessionContext", () => {
         const { instructions, put, repositories } = yield* fixture;
         yield* put("instructions.md", "GLOBAL_CONVENTION");
         yield* put("discord/bots/123/instructions.md", "BOT_CONVENTION");
-        yield* put("discord/channels/456/instructions.md", "CHANNEL_CONVENTION");
-        yield* put("discord/channels/789/instructions.md", "WRONG_THREAD_CONVENTION");
+        yield* put("discord/channels/9007199254740995/instructions.md", "CHANNEL_CONVENTION");
+        yield* put("discord/channels/9007199254740997/instructions.md", "WRONG_THREAD_CONVENTION");
         const context = SessionContext.layer({
           instructions,
           discordBotId: Effect.succeed("123"),
@@ -158,11 +158,10 @@ describe("ChatSessionContext", () => {
           yield* workspaces.create(
             makeWorkspace(workspaceId, {
               platform: "discord",
-              externalId: "456",
-              guildId: "9007199254740993",
+              externalId: "9007199254740993.9007199254740995",
             }),
           );
-          yield* chats.create(makeChat(chatId, workspaceId, "789"));
+          yield* chats.create(makeChat(chatId, workspaceId, "9007199254740997"));
           yield* chats.create(makeChat(secondChatId, workspaceId, null));
           const direct = yield* resolver.resolve(chatId);
           const scheduled = yield* resolver.resolve(secondChatId);
@@ -170,12 +169,16 @@ describe("ChatSessionContext", () => {
           assert.deepStrictEqual(identityFrom(direct.appendSystemPrompt), {
             workspaceId,
             chatId,
-            discord: { channelId: "456", threadId: "789", guildId: "9007199254740993" },
+            discord: {
+              channelId: "9007199254740995",
+              threadId: "9007199254740997",
+              guildId: "9007199254740993",
+            },
           });
           assert.deepStrictEqual(identityFrom(scheduled.appendSystemPrompt), {
             workspaceId,
             chatId: secondChatId,
-            discord: { channelId: "456", guildId: "9007199254740993" },
+            discord: { channelId: "9007199254740995", guildId: "9007199254740993" },
           });
           for (const resolved of [direct, scheduled]) {
             assert.include(resolved.appendSystemPrompt, "GLOBAL_CONVENTION");
@@ -192,7 +195,10 @@ describe("ChatSessionContext", () => {
             );
           }
 
-          yield* put("discord/channels/456/instructions.md", "UPDATED_CHANNEL_CONVENTION");
+          yield* put(
+            "discord/channels/9007199254740995/instructions.md",
+            "UPDATED_CHANNEL_CONVENTION",
+          );
           assert.include(
             (yield* resolver.resolve(chatId)).appendSystemPrompt,
             "UPDATED_CHANNEL_CONVENTION",
@@ -226,7 +232,7 @@ describe("ChatSessionContext", () => {
           const resolver = yield* ChatSessionContext;
           yield* workspaces.create(makeWorkspace(workspaceId, null));
           yield* workspaces.create(
-            makeWorkspace(missingWorkspaceId, { platform: "discord", externalId: "456" }),
+            makeWorkspace(missingWorkspaceId, { platform: "discord", externalId: "1.456" }),
           );
           yield* chats.create(makeChat(chatId, workspaceId, "456"));
           yield* chats.create(makeChat(secondChatId, missingWorkspaceId, null));
@@ -262,7 +268,7 @@ describe("ChatSessionContext", () => {
         const chats = yield* ChatRepository;
         const resolver = yield* ChatSessionContext;
         yield* workspaces.create(
-          makeWorkspace(workspaceId, { platform: "discord", externalId: "456" }),
+          makeWorkspace(workspaceId, { platform: "discord", externalId: "1.456" }),
         );
         yield* chats.create(makeChat(chatId, workspaceId, null));
         const resolved = yield* resolver.resolve(chatId);
@@ -272,7 +278,7 @@ describe("ChatSessionContext", () => {
         assert.deepStrictEqual(identityFrom(resolved.appendSystemPrompt), {
           workspaceId,
           chatId,
-          discord: { channelId: "456" },
+          discord: { channelId: "456", guildId: "1" },
         });
 
         yield* fileSystem.remove(channelFile);
@@ -283,6 +289,23 @@ describe("ChatSessionContext", () => {
         assert.notInclude(error.message, channelFile);
         assert.include(error.message, cause.reason._tag);
       }).pipe(Effect.provide(context));
+    }).pipe(Effect.provide(platformLayer)),
+  );
+
+  it.effect("rejects malformed persisted Discord addresses before constructing model context", () =>
+    Effect.gen(function* () {
+      for (const externalId of ["456", ".456", "1.", "1.2.3", "-1.456", "1.channel", "1.456\n"]) {
+        const error = yield* resolve(
+          chatId,
+          chatLayer(() => Effect.succeed(Option.some(makeChat(chatId, workspaceId, "789")))),
+          workspaceLayer(() =>
+            Effect.succeed(
+              Option.some(makeWorkspace(workspaceId, { platform: "discord", externalId })),
+            ),
+          ),
+        ).pipe(Effect.flip);
+        assert.instanceOf(error, AgentError);
+      }
     }).pipe(Effect.provide(platformLayer)),
   );
 

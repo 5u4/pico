@@ -51,7 +51,7 @@ const secondWorkspace: Workspace.Workspace = {
 const worktreeWorkspace: Workspace.Workspace = {
   id: worktreeWorkspaceId,
   name: "worktree",
-  binding: { platform: "discord", externalId: "channel-1", guildId: "9007199254740993" },
+  binding: { platform: "discord", externalId: "9007199254740993.10" },
   defaultCwd: cwdA,
   worktree: { branch: "main", prefix: "chat/" },
   createdAt: 3,
@@ -158,7 +158,7 @@ describe("Persistence.layer", () => {
         const storeFile = AbsolutePath.make(path.join(temporaryDirectory, "store.db"));
         const binding = Workspace.WorkspaceBinding.make({
           platform: "discord",
-          externalId: "concurrent-channel",
+          externalId: "9007199254740993.20",
         });
         const firstCandidate = { ...regularWorkspace, binding };
         const secondCandidate = {
@@ -200,25 +200,16 @@ describe("Persistence.layer", () => {
             }),
             changed,
           );
-          const observed = yield* workspaces.getOrCreateByBinding({
-            ...loser,
-            binding: { ...binding, guildId: "9007199254740993" },
-          });
-          assert.deepStrictEqual(observed, {
-            ...changed,
-            binding: { ...binding, guildId: "9007199254740993" },
-          });
-          assert.deepStrictEqual(yield* workspaces.getOrCreateByBinding(loser), observed);
           assert.instanceOf(
             yield* Effect.flip(
               workspaces.getOrCreateByBinding({
                 ...winner,
-                binding: { platform: "discord", externalId: "different-channel" },
+                binding: { platform: "discord", externalId: "9007199254740993.30" },
               }),
             ),
             PersistenceError,
           );
-          return observed;
+          return changed;
         }).pipe(Effect.provide(layer(storeFile)), Effect.scoped);
 
         yield* Effect.gen(function* () {
@@ -253,13 +244,16 @@ describe("Persistence.layer", () => {
         );
         assert.deepStrictEqual(
           Option.getOrThrow(
-            yield* workspaces.findByBinding({ platform: "discord", externalId: "channel-1" }),
+            yield* workspaces.findByBinding({
+              platform: "discord",
+              externalId: "9007199254740993.10",
+            }),
           ),
           worktreeWorkspace,
         );
         assert.isTrue(
           Option.isNone(
-            yield* workspaces.findByBinding({ platform: "discord", externalId: "missing" }),
+            yield* workspaces.findByBinding({ platform: "discord", externalId: "1.99" }),
           ),
         );
         assert.isTrue(Option.isNone(yield* workspaces.findById(missingWorkspaceId)));
@@ -275,7 +269,7 @@ describe("Persistence.layer", () => {
         assert.include(duplicate.message, "workspace.create");
         assert.include(duplicate.message, "UniqueViolation");
         assert.match(duplicate.message, /SQLite code \d+/);
-        assert.notInclude(duplicate.message, "channel-1");
+        assert.notInclude(duplicate.message, "9007199254740993.10");
         assert.notInclude(duplicate.message, duplicateBinding.name);
         assert.instanceOf(
           yield* Effect.flip(workspaces.create(regularWorkspace)),
@@ -448,7 +442,10 @@ describe("Persistence.layer", () => {
         assert.strictEqual(Option.getOrThrow(yield* chats.findById(chatId(3))).archivedAt, 100);
         assert.deepStrictEqual(
           Option.getOrThrow(
-            yield* workspaces.findByBinding({ platform: "discord", externalId: "channel-1" }),
+            yield* workspaces.findByBinding({
+              platform: "discord",
+              externalId: "9007199254740993.10",
+            }),
           ),
           worktreeWorkspace,
         );
