@@ -7,15 +7,26 @@ export interface WorkspaceSummary {
 export interface ChatSummary {
   readonly id: string;
   readonly title: string;
-  readonly preview: string;
-  readonly updatedLabel: string;
-  readonly activity: "idle" | "running" | "failed" | "unknown";
 }
 
-export type ChatListStatus =
+export type ListStatus =
   | { readonly kind: "pending"; readonly label: string }
   | { readonly kind: "empty"; readonly label: string }
   | { readonly kind: "error"; readonly label: string };
+
+export interface WorkspaceGroup {
+  readonly workspace: WorkspaceSummary;
+  readonly expanded: boolean;
+  readonly chats: readonly ChatSummary[];
+  readonly status?: ListStatus | undefined;
+}
+
+export interface NavigationPresentation {
+  readonly groups: readonly WorkspaceGroup[];
+  readonly status?: ListStatus | undefined;
+  readonly activeWorkspaceId: string | null;
+  readonly activeChatId: string | null;
+}
 
 export type AssistantBlock =
   | {

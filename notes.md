@@ -34,6 +34,9 @@
 - workspace is like folder
 - chat is like file; one chat = one omp session
 - one workspace can have multiple chats
+- Web opens a new-chat draft in the last selected workspace. That preference belongs to the browser origin, so a different daemon port does not inherit it.
+- Opening New chat does not create a stored conversation. The first send creates it; a failed send keeps the created chat for retry.
+- Unsent Web drafts survive workspace switches within the page, not a browser reload. The disconnected-page Reload action exposes drafts for copying before discarding them.
 - put interface / effect types / abstractions in @pico/contract
 - for other components, draw clear boundary (both packages and files); a clear boundary fundation would make future development easier and precise
 - pico root is the important params; this makes smoke/integration testing easier

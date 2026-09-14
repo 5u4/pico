@@ -1,56 +1,43 @@
-import { ChatCircleIcon, PlusIcon, SparkleIcon, XIcon } from "@phosphor-icons/react";
+import {
+  CaretDownIcon,
+  CaretRightIcon,
+  FolderSimpleIcon,
+  PencilSimpleLineIcon,
+  PlusIcon,
+  SparkleIcon,
+  XIcon,
+} from "@phosphor-icons/react";
+import { useId } from "react";
 import { Button } from "../components/ui/button.tsx";
-import type { ChatListStatus, ChatSummary, WorkspaceSummary } from "./chat-model.ts";
+import type { NavigationPresentation } from "./chat-model.ts";
 
 export interface WorkspaceSidebarProps {
-  readonly workspace: WorkspaceSummary;
-  readonly chats: readonly ChatSummary[];
-  readonly activeChatId: string | null;
-  readonly chatListStatus?: ChatListStatus | undefined;
-  readonly newChatPending?: boolean | undefined;
-  readonly onWorkspaceChange?: (() => void) | undefined;
-  readonly onChatsRetry?: (() => void) | undefined;
-  readonly onChatSelect: (chatId: string) => void;
-  readonly onNewChat: () => void;
+  readonly navigation: NavigationPresentation;
+  readonly onWorkspaceToggle: (workspaceId: string) => void;
+  readonly onWorkspaceRetry: () => void;
+  readonly onChatsRetry: (workspaceId: string) => void;
+  readonly onChatSelect: (workspaceId: string, chatId: string) => void;
+  readonly onNewChat: (workspaceId?: string) => void;
+  readonly onAddWorkspace?: (() => void) | undefined;
   readonly onClose: () => void;
 }
 
-const activityClasses = {
-  idle: "bg-subtle",
-  running: "bg-accent",
-  failed: "bg-danger",
-  unknown: "bg-subtle",
-} satisfies Record<ChatSummary["activity"], string>;
-
-const activityLabels = {
-  idle: "Idle",
-  running: "Running",
-  failed: "Needs attention",
-  unknown: "Status unknown",
-} satisfies Record<ChatSummary["activity"], string>;
-
 export function WorkspaceSidebar({
-  workspace,
-  chats,
-  activeChatId,
-  chatListStatus,
-  newChatPending,
-  onWorkspaceChange,
+  navigation,
+  onWorkspaceToggle,
+  onWorkspaceRetry,
   onChatsRetry,
   onChatSelect,
   onNewChat,
+  onAddWorkspace,
   onClose,
 }: WorkspaceSidebarProps) {
+  const id = useId();
   return (
     <aside className="flex h-full min-h-0 w-full flex-col border-r border-border bg-sidebar">
-      <div className="flex min-h-14 shrink-0 items-center gap-3 border-b border-border px-4 py-2">
-        <span className="grid size-8 place-items-center rounded-control bg-foreground text-panel">
-          <SparkleIcon aria-hidden="true" size={17} weight="fill" />
-        </span>
-        <div className="min-w-0 flex-1">
-          <p className="break-words text-title font-semibold">{workspace.name}</p>
-          <p className="break-all text-meta text-muted">{workspace.contextLabel}</p>
-        </div>
+      <div className="flex min-h-14 shrink-0 items-center gap-2.5 px-4 py-2">
+        <SparkleIcon aria-hidden="true" size={22} weight="fill" />
+        <span className="flex-1 text-title font-semibold tracking-tight">pico</span>
         <Button
           aria-label="Close sidebar"
           className="md:hidden"
@@ -62,73 +49,110 @@ export function WorkspaceSidebar({
         </Button>
       </div>
 
-      <div className="px-3 py-3">
+      <div className="shrink-0 px-2 pb-5 pt-1">
         <Button
-          className="w-full"
-          disabled={newChatPending}
-          onClick={onNewChat}
-          size="small"
-          tone="secondary"
+          className="w-full justify-start px-3"
+          disabled={navigation.groups.length === 0 && !onAddWorkspace}
+          onClick={() => onNewChat()}
+          tone="ghost"
         >
-          <PlusIcon aria-hidden="true" size={16} />
+          <PencilSimpleLineIcon aria-hidden="true" size={18} />
           New chat
         </Button>
-        {onWorkspaceChange && (
-          <Button className="mt-2 w-full" onClick={onWorkspaceChange} size="small" tone="ghost">
-            Switch workspace
-          </Button>
-        )}
       </div>
 
-      <nav aria-label="Chats" className="min-h-0 flex-1 overflow-y-auto px-2 pb-4">
-        <p className="px-2 pb-2 pt-1 text-meta font-semibold uppercase tracking-wide text-subtle">
-          Recent
-        </p>
-        {chatListStatus && (
-          <div className="px-2 pb-3 text-label text-muted">
-            <p role={chatListStatus.kind === "error" ? "alert" : "status"}>
-              {chatListStatus.label}
+      <nav
+        aria-label="Workspaces"
+        className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-2 pb-4"
+      >
+        <div className="mb-1 flex min-h-8 items-center gap-2 pl-3 pr-1">
+          <h2 className="flex-1 text-meta font-medium text-subtle">Workspaces</h2>
+          {onAddWorkspace && (
+            <Button aria-label="Add workspace" onClick={onAddWorkspace} size="icon" tone="ghost">
+              <PlusIcon aria-hidden="true" size={16} />
+            </Button>
+          )}
+        </div>
+        {navigation.status && (
+          <div className="px-3 py-2 text-label text-muted">
+            <p role={navigation.status.kind === "error" ? "alert" : "status"}>
+              {navigation.status.label}
             </p>
-            {chatListStatus.kind === "error" && onChatsRetry && (
-              <Button className="mt-2" onClick={onChatsRetry} size="small" tone="secondary">
-                Retry chats
+            {navigation.status.kind === "error" && (
+              <Button className="mt-2" onClick={onWorkspaceRetry} size="small" tone="secondary">
+                Retry workspaces
               </Button>
             )}
           </div>
         )}
         <ul className="space-y-1">
-          {chats.map((chat) => {
-            const active = chat.id === activeChatId;
+          {navigation.groups.map(({ workspace, expanded, chats, status }) => {
+            const active = workspace.id === navigation.activeWorkspaceId;
+            const listId = `${id}-${workspace.id}`;
             return (
-              <li key={chat.id}>
-                <button
-                  aria-current={active ? "page" : undefined}
-                  className={`group flex w-full gap-3 rounded-control px-3 py-2.5 text-left transition-colors duration-feedback ease-feedback ${
-                    active
-                      ? "bg-panel text-foreground"
-                      : "text-muted hover:bg-surface-hover hover:text-foreground"
-                  }`}
-                  onClick={() => onChatSelect(chat.id)}
-                  type="button"
-                >
-                  <ChatCircleIcon aria-hidden="true" className="mt-0.5 shrink-0" size={17} />
-                  <span className="min-w-0 flex-1">
-                    <span className="flex items-center gap-2">
-                      <span className="min-w-0 flex-1 break-words text-label font-medium">
-                        {chat.title}
-                      </span>
-                      <span
-                        aria-label={activityLabels[chat.activity]}
-                        className={`size-1.5 shrink-0 rounded-round ${activityClasses[chat.activity]}`}
-                        role="img"
-                      />
-                    </span>
-                    <span className="mt-1 block break-all text-meta text-muted">
-                      {chat.preview}
-                    </span>
-                    <span className="mt-1 block text-meta text-subtle">{chat.updatedLabel}</span>
-                  </span>
-                </button>
+              <li key={workspace.id}>
+                <div className="group flex items-center gap-0.5">
+                  <button
+                    aria-controls={listId}
+                    aria-expanded={expanded}
+                    className={`flex min-h-10 min-w-0 flex-1 items-center gap-2 rounded-control px-2 text-left text-label hover:bg-surface-hover ${active ? "font-medium text-foreground" : "text-muted"}`}
+                    onClick={() => onWorkspaceToggle(workspace.id)}
+                    title={workspace.contextLabel}
+                    type="button"
+                  >
+                    {expanded ? (
+                      <CaretDownIcon aria-hidden="true" className="shrink-0" size={12} />
+                    ) : (
+                      <CaretRightIcon aria-hidden="true" className="shrink-0" size={12} />
+                    )}
+                    <FolderSimpleIcon aria-hidden="true" className="shrink-0" size={17} />
+                    <span className="truncate">{workspace.name}</span>
+                  </button>
+                  <Button
+                    aria-label={`New chat in ${workspace.name}`}
+                    className="size-9"
+                    onClick={() => onNewChat(workspace.id)}
+                    size="icon"
+                    tone="ghost"
+                  >
+                    <PlusIcon aria-hidden="true" size={15} />
+                  </Button>
+                </div>
+                <div hidden={!expanded} id={listId}>
+                  {status && (
+                    <div className="py-2 pl-10 pr-3 text-meta text-muted">
+                      <p role={status.kind === "error" ? "alert" : "status"}>{status.label}</p>
+                      {status.kind === "error" && (
+                        <Button
+                          className="mt-2"
+                          onClick={() => onChatsRetry(workspace.id)}
+                          size="small"
+                          tone="secondary"
+                        >
+                          Retry chats
+                        </Button>
+                      )}
+                    </div>
+                  )}
+                  <ul className="space-y-0.5">
+                    {chats.map((chat) => {
+                      const selected = chat.id === navigation.activeChatId;
+                      return (
+                        <li key={chat.id}>
+                          <button
+                            aria-current={selected ? "page" : undefined}
+                            className={`flex min-h-9 w-full items-center rounded-control py-1.5 pl-10 pr-3 text-left text-label ${selected ? "bg-surface-hover font-medium text-foreground" : "text-muted hover:bg-surface-hover hover:text-foreground"}`}
+                            onClick={() => onChatSelect(workspace.id, chat.id)}
+                            title={chat.title}
+                            type="button"
+                          >
+                            <span className="truncate">{chat.title}</span>
+                          </button>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </div>
               </li>
             );
           })}

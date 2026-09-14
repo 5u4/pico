@@ -36,23 +36,14 @@ const chats = [
   {
     id: "chat-navigation",
     title: "Responsive navigation",
-    preview: "Refine the mobile workspace drawer",
-    updatedLabel: "Recent",
-    activity: "idle",
   },
   {
     id: "chat-streaming",
     title: "Transcript states",
-    preview: "Render partial output honestly",
-    updatedLabel: "In progress",
-    activity: "running",
   },
   {
     id: "chat-errors",
     title: "Error recovery",
-    preview: "Keep completed context visible",
-    updatedLabel: "Needs review",
-    activity: "failed",
   },
 ] satisfies readonly ChatSummary[];
 
@@ -255,9 +246,6 @@ const stressChats = [
   {
     id: "chat-long-label",
     title: "A very long chat title that checks truncation without hiding navigation state",
-    preview: "Long preview copy confirms that the sidebar remains compact under pressure",
-    updatedLabel: "Archived",
-    activity: "idle",
   },
 ] satisfies readonly ChatSummary[];
 
