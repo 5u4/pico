@@ -110,6 +110,7 @@ describe("BranchNaming", () => {
           ChatRepository.of({
             listOpenByWorkspace: () => Effect.die("unexpected open chat list"),
             create: () => Effect.die("unexpected chat create"),
+            bindExternalId: () => Effect.die("unexpected chat binding"),
             archive: () => Effect.die("unexpected chat archive"),
             findById: (id) => Effect.succeed(Option.fromUndefinedOr(chats.get(id))),
             findByExternalId: () => Effect.die("unexpected external chat lookup"),
@@ -217,6 +218,7 @@ describe("BranchNaming", () => {
           ChatRepository.of({
             listOpenByWorkspace: () => Effect.die("unexpected open chat list"),
             create: () => Effect.die("unexpected chat create"),
+            bindExternalId: () => Effect.die("unexpected chat binding"),
             archive: () => Effect.die("unexpected chat archive"),
             findById: (id) =>
               Effect.sync(() => {
@@ -371,6 +373,7 @@ describe("BranchNaming", () => {
           ChatRepository.of({
             listOpenByWorkspace: () => Effect.die("unexpected open chat list"),
             create: () => Effect.die("unexpected chat create"),
+            bindExternalId: () => Effect.die("unexpected chat binding"),
             archive: () => Effect.die("unexpected chat archive"),
             findById: () =>
               repositoryFails

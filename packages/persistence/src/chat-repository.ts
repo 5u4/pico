@@ -19,6 +19,12 @@ const ArchiveChat = Schema.Struct({
   archivedAt: Schema.Natural,
 });
 
+const BindExternalId = Schema.Struct({
+  chatId: Chat.ChatId,
+  workspaceId: Workspace.WorkspaceId,
+  externalId: Schema.NonEmptyString,
+});
+
 const make = Effect.fn("ChatRepository.make")(function* () {
   const sql = yield* SqlClient.SqlClient;
 
@@ -68,6 +74,26 @@ const make = Effect.fn("ChatRepository.make")(function* () {
       UPDATE chats
       SET archived_at = COALESCE(archived_at, ${archivedAt})
       WHERE id = ${id}
+      RETURNING
+        id,
+        workspace_id AS "workspaceId",
+        cwd,
+        external_id AS "externalId",
+        created_at AS "createdAt",
+        archived_at AS "archivedAt"
+    `,
+  });
+
+  const updateExternalId = SqlSchema.findOneOption({
+    Request: BindExternalId,
+    Result: Chat.Chat,
+    execute: ({ chatId, workspaceId, externalId }) => sql`
+      UPDATE chats
+      SET external_id = ${externalId}
+      WHERE id = ${chatId}
+        AND workspace_id = ${workspaceId}
+        AND archived_at IS NULL
+        AND external_id IS NULL
       RETURNING
         id,
         workspace_id AS "workspaceId",
@@ -131,6 +157,13 @@ const make = Effect.fn("ChatRepository.make")(function* () {
     Effect.mapError(failure("chat.archive")),
   );
 
+  const bindExternalId = Effect.fn("ChatRepository.bindExternalId")(
+    function* (input: typeof BindExternalId.Type) {
+      return yield* updateExternalId(input);
+    },
+    Effect.mapError(failure("chat.bindExternalId")),
+  );
+
   const findById = Effect.fn("ChatRepository.findById")(
     function* (id: Chat.ChatId) {
       return yield* selectById(id);
@@ -145,7 +178,14 @@ const make = Effect.fn("ChatRepository.make")(function* () {
     Effect.mapError(failure("chat.findByExternalId")),
   );
 
-  return ChatRepository.of({ listOpenByWorkspace, create, archive, findById, findByExternalId });
+  return ChatRepository.of({
+    listOpenByWorkspace,
+    create,
+    archive,
+    bindExternalId,
+    findById,
+    findByExternalId,
+  });
 });
 
 export const layer = Layer.effect(ChatRepository, make());

@@ -24,6 +24,7 @@ import {
   chatId,
   platformLayer,
   prepareSource,
+  resolveTarget,
   workspaceId,
 } from "./schedule-test-fixtures.ts";
 import type { Storage } from "./storage.ts";
@@ -48,7 +49,7 @@ describe("run storage", () => {
           ),
       };
       const definition: Schedule.ScheduleDefinition = {
-        version: 1,
+        version: 2,
         revision: Schedule.ScheduleRevision.make("018f47a0-0000-7000-8000-000000000004"),
         name: "identity",
         ownerWorkspaceId: workspaceId,
@@ -114,8 +115,10 @@ describe("run storage", () => {
       const outside = path.join(root, "outside.txt");
       yield* fileSystem.writeFileString(outside, "unchanged");
       let scheduleId: Schedule.ScheduleId | undefined;
-      const schedules = yield* make(schedulesDir);
+      const schedules = yield* make(schedulesDir, resolveTarget);
       const host: Schedule.ScheduleRunHost = {
+        resolveTarget,
+        materialize: () => Effect.void,
         prepare: () => Effect.succeed({ chatId, workspaceId, cwd }),
         deliver: () => Effect.void,
         publish: () => Effect.void,
@@ -147,7 +150,7 @@ describe("run storage", () => {
       const created = yield* schedules.create(caller, {
         name: "symlink defense",
         enabled: true,
-        target: { kind: "current-chat" },
+        target: { kind: "chat", chatId: caller.chatId },
         trigger: { kind: "once", at: 1_000 },
         sourceDirectory: yield* prepareSource({ "prompt.md": "capture" }),
       });
@@ -196,7 +199,7 @@ describe("run storage", () => {
       };
       yield* bootstrap(storage);
       const definition: Schedule.ScheduleDefinition = {
-        version: 1,
+        version: 2,
         revision: Schedule.ScheduleRevision.make("018f47a0-0000-7000-8000-000000000048"),
         name: "append interruption",
         ownerWorkspaceId: workspaceId,

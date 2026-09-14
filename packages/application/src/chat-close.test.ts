@@ -273,7 +273,7 @@ describe("Chat close", () => {
 
       yield* Effect.gen(function* () {
         const application = yield* Application;
-        const scheduleHost = yield* Schedule.ScheduleRunHostService;
+        const scheduleHost = (yield* Schedule.ScheduleRunHostFactory)(null);
         yield* TestClock.setTime(1_000);
         const workspace = yield* application.createWorkspace({
           name: "close",
@@ -450,7 +450,7 @@ describe("Chat close", () => {
       };
       yield* Effect.gen(function* () {
         const application = yield* Application;
-        const host = yield* Schedule.ScheduleRunHostService;
+        const host = (yield* Schedule.ScheduleRunHostFactory)(null);
         const chats = yield* ChatRepository;
         const workspace = yield* application.createWorkspace({
           name: "scheduled-close",

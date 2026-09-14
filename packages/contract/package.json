@@ -21,8 +21,7 @@
     "./agent-event": "./src/agent-event.ts",
     "./event-router": "./src/event-router.ts",
     "./agent-runtime": "./src/agent-runtime.ts",
-    "./schedule": "./src/schedule.ts",
-    "./reply-target": "./src/reply-target.ts"
+    "./schedule": "./src/schedule.ts"
   },
   "dependencies": {
     "effect": "catalog:"

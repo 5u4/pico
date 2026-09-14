@@ -309,7 +309,7 @@ const makeFactory = (
   handleBranchNaming: BranchNamingHandler,
   browsers: AgentBrowserManager | undefined,
 ): SessionFactory => ({
-  open: Effect.fn("OmpSession.open")(function* (chatId, emit, getReplyTarget) {
+  open: Effect.fn("OmpSession.open")(function* (chatId, emit) {
     const runEffect = Effect.runPromiseWith(yield* Effect.context<never>());
     const { chat, platform, appendSystemPrompt } = yield* chatSessionContext.resolve(chatId);
     const sessionFile = path.join(sessionsDir, `${chat.id}.jsonl`);
@@ -370,14 +370,7 @@ const makeFactory = (
                 }),
               ]),
           makeScheduleExtension({
-            caller: () => {
-              const replyTarget = getReplyTarget();
-              return {
-                chatId: chat.id,
-                workspaceId: chat.workspaceId,
-                ...(replyTarget === undefined ? {} : { replyTarget }),
-              };
-            },
+            caller: () => ({ chatId: chat.id, workspaceId: chat.workspaceId }),
             runEffect,
             schedules,
           }),

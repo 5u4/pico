@@ -11,6 +11,7 @@ import { ChatRepository } from "@pico/contract/chat-repository";
 import { ApplicationError, ChatClosed } from "@pico/contract/errors";
 import { EventRouter } from "@pico/contract/event-router";
 import { AbsolutePath } from "@pico/contract/path";
+import * as Schedule from "@pico/contract/schedule";
 import * as Workspace from "@pico/contract/workspace-model";
 import { WorkspaceRepository } from "@pico/contract/workspace-repository";
 import * as Persistence from "@pico/persistence/layer";
@@ -41,7 +42,7 @@ import {
   startedDelivery,
   workspaceId,
 } from "./discord-input.fixture.ts";
-import { type DiscordInputBot, install } from "./discord-input.ts";
+import { type DiscordChannel, type DiscordInputBot, install } from "./discord-input.ts";
 import * as DiscordOutput from "./discord-output.ts";
 import { pumpOutput } from "./layer.ts";
 
@@ -55,6 +56,210 @@ const pngBytes = Uint8Array.from(
 );
 
 describe("discord input", () => {
+  it.effect(
+    "resolves allowed schedule targets and creates valid public threads without adopting unknown threads",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const channels = new Map<bigint, DiscordChannel>([
+            [10n, { id: 10n, guildId: 1n, type: ChannelTypes.GuildText, name: "general" }],
+            [11n, { id: 11n, guildId: 1n, type: ChannelTypes.GuildText, name: "other" }],
+            [12n, { id: 12n, guildId: 2n, type: ChannelTypes.GuildText }],
+            [13n, { id: 13n, guildId: 1n, type: ChannelTypes.GuildVoice }],
+            [
+              20n,
+              {
+                id: 20n,
+                guildId: 1n,
+                parentId: 10n,
+                type: ChannelTypes.PublicThread,
+                archived: false,
+                locked: false,
+              },
+            ],
+            [
+              21n,
+              {
+                id: 21n,
+                guildId: 1n,
+                parentId: 10n,
+                type: ChannelTypes.PublicThread,
+                archived: true,
+                locked: false,
+              },
+            ],
+            [
+              22n,
+              {
+                id: 22n,
+                guildId: 1n,
+                parentId: 10n,
+                type: ChannelTypes.PublicThread,
+                archived: false,
+                locked: false,
+              },
+            ],
+            [
+              23n,
+              {
+                id: 23n,
+                guildId: 1n,
+                parentId: 11n,
+                type: ChannelTypes.PublicThread,
+                archived: false,
+                locked: false,
+              },
+            ],
+          ]);
+          const createdThreads: Array<
+            Parameters<DiscordInputBot["helpers"]["startThreadWithoutMessage"]>
+          > = [];
+          const deletedThreads: bigint[] = [];
+          const bot: DiscordInputBot = {
+            id: 999n,
+            events: {},
+            helpers: {
+              addReaction: async () => undefined,
+              deleteOwnReaction: async () => undefined,
+              getChannel: async (id) => {
+                const channel = channels.get(id);
+                if (channel === undefined) throw new Error("Unknown channel");
+                return channel;
+              },
+              sendMessage: async () => {
+                throw new Error("Resolution must not publish");
+              },
+              editChannel: async () => {
+                throw new Error("Resolution must not edit");
+              },
+              startThreadWithMessage: async () => {
+                throw new Error("Schedules have no source message");
+              },
+              startThreadWithoutMessage: async (...args) => {
+                assert.match(args[1].name, /\S/u);
+                assert.isAtMost(args[1].name.length, 100);
+                assert.strictEqual(args[1].type, ChannelTypes.PublicThread);
+                createdThreads.push(args);
+                return { id: 30n };
+              },
+              deleteChannel: async (id) => {
+                deletedThreads.push(id);
+              },
+            },
+          };
+          const chat: Chat.Chat = {
+            id: chatId,
+            workspaceId,
+            externalId: "20",
+            cwd: defaultCwd,
+            createdAt: 0,
+            archivedAt: null,
+          };
+          let registrations = 0;
+          const unused = () => Effect.die("Unexpected application operation");
+          const application = Application.of({
+            listWorkspaces: unused,
+            createWorkspace: unused,
+            bindWorkspace: unused,
+            listChats: unused,
+            createChat: unused,
+            findWorkspaceByPlatformId: unused,
+            findChatPlatformBinding: unused,
+            transcript: unused,
+            closeChat: unused,
+            sendMessage: unused,
+            askBtw: unused,
+            abort: unused,
+            contextUsage: unused,
+            availableModels: unused,
+            switchModel: unused,
+            shake: unused,
+            getOrCreateWorkspaceByBinding: (input) =>
+              Effect.sync(() => {
+                registrations++;
+                assert.strictEqual(input.externalId, "1.10");
+                return boundWorkspace;
+              }),
+            findChatByPlatformId: (_platform, workspaceExternalId, chatExternalId) =>
+              Effect.succeed(
+                workspaceExternalId === "1.10" && chatExternalId === "20"
+                  ? Option.some(chat)
+                  : Option.none(),
+              ),
+          });
+          const { schedule } = yield* install(bot, config).pipe(
+            Effect.provideService(Application, application),
+            Effect.provide(BunCrypto.layer),
+          );
+          assert.deepStrictEqual(
+            yield* schedule.resolveTarget({
+              kind: "external-workspace",
+              platform: "discord",
+              externalId: "10",
+            }),
+            { kind: "workspace", workspaceId },
+          );
+          assert.deepStrictEqual(
+            yield* schedule.resolveTarget({
+              kind: "external-chat",
+              platform: "discord",
+              externalId: "20",
+            }),
+            { kind: "chat", chatId },
+          );
+          assert.deepStrictEqual(createdThreads, []);
+          for (const externalId of ["12", "13", "20", "999", "10.0"]) {
+            assert.instanceOf(
+              yield* schedule
+                .resolveTarget({ kind: "external-workspace", platform: "discord", externalId })
+                .pipe(Effect.flip),
+              Schedule.ScheduleHostError,
+            );
+          }
+          for (const externalId of ["10", "21", "22", "23", "999"]) {
+            assert.instanceOf(
+              yield* schedule
+                .resolveTarget({ kind: "external-chat", platform: "discord", externalId })
+                .pipe(Effect.flip),
+              Schedule.ScheduleHostError,
+            );
+          }
+          assert.strictEqual(registrations, 1);
+          assert.instanceOf(
+            yield* schedule
+              .validateTarget({
+                kind: "chat",
+                workspaceExternalId: "1.11",
+                chatExternalId: "20",
+              })
+              .pipe(Effect.flip),
+            Schedule.ScheduleHostError,
+          );
+          assert.strictEqual(
+            yield* schedule.createThread({ workspaceExternalId: "1.10", title: "x".repeat(150) }),
+            "30",
+          );
+          assert.deepStrictEqual(createdThreads, [
+            [
+              10n,
+              {
+                name: "x".repeat(100),
+                autoArchiveDuration: 1_440,
+                type: ChannelTypes.PublicThread,
+              },
+            ],
+          ]);
+          assert.strictEqual(
+            yield* schedule.createThread({ workspaceExternalId: "1.10", title: "   " }),
+            "30",
+          );
+          assert.strictEqual(createdThreads.length, 2);
+          yield* schedule.deleteThread("30");
+          assert.deepStrictEqual(deletedThreads, [30n]);
+        }),
+      ),
+  );
+
   it.effect("owns channel creation, caching, ordering, and the output lookup", () =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -79,6 +284,12 @@ describe("discord input", () => {
             },
             sendMessage: async () => undefined,
             editChannel: async () => undefined,
+            startThreadWithoutMessage: async () => {
+              throw new Error("unexpected schedule");
+            },
+            deleteChannel: async () => {
+              throw new Error("unexpected schedule cleanup");
+            },
             startThreadWithMessage: async (_channelId, _messageId, options) => {
               order.push("create-thread");
               assert.strictEqual(options.name, "hello from pico");
@@ -146,6 +357,7 @@ describe("discord input", () => {
           closeChat: () => Effect.die("unexpected chat close"),
         });
         resolveThreadId = yield* install(bot, config).pipe(
+          Effect.map((installed) => installed.resolveThreadId),
           Effect.provideService(Application, application),
           Effect.provide(BunCrypto.layer),
         );
@@ -227,6 +439,12 @@ describe("discord input", () => {
               },
               sendMessage: async () => undefined,
               editChannel: async () => undefined,
+              startThreadWithoutMessage: async () => {
+                throw new Error("unexpected schedule");
+              },
+              deleteChannel: async () => {
+                throw new Error("unexpected schedule cleanup");
+              },
               startThreadWithMessage: async () => {
                 throw new Error("cold output must not create Discord threads");
               },
@@ -283,7 +501,7 @@ describe("discord input", () => {
             shake: () => Effect.die("unexpected chat shake"),
             closeChat: () => Effect.die("unexpected chat close"),
           });
-          const resolveThreadId = yield* install(bot, config).pipe(
+          const { resolveThreadId } = yield* install(bot, config).pipe(
             Effect.provideService(Application, application),
             Effect.provide(BunCrypto.layer),
           );
@@ -443,6 +661,12 @@ describe("discord input", () => {
             editChannel: async () => {
               throw new Error("abort must not archive the thread");
             },
+            startThreadWithoutMessage: async () => {
+              throw new Error("unexpected schedule");
+            },
+            deleteChannel: async () => {
+              throw new Error("unexpected schedule cleanup");
+            },
             startThreadWithMessage: async () => {
               throw new Error("abort must not create a thread");
             },
@@ -587,6 +811,12 @@ describe("discord input", () => {
               order.push("archive");
               archived = true;
             },
+            startThreadWithoutMessage: async () => {
+              throw new Error("unexpected schedule");
+            },
+            deleteChannel: async () => {
+              throw new Error("unexpected schedule cleanup");
+            },
             startThreadWithMessage: async () => {
               throw new Error("unexpected thread creation");
             },
@@ -685,6 +915,12 @@ describe("discord input", () => {
             }),
             sendMessage: async () => undefined,
             editChannel: async () => undefined,
+            startThreadWithoutMessage: async () => {
+              throw new Error("unexpected schedule");
+            },
+            deleteChannel: async () => {
+              throw new Error("unexpected schedule cleanup");
+            },
             startThreadWithMessage: async () => {
               throw new Error("unexpected thread creation");
             },
@@ -784,6 +1020,12 @@ describe("discord input", () => {
             }),
             sendMessage: async () => undefined,
             editChannel: async () => undefined,
+            startThreadWithoutMessage: async () => {
+              throw new Error("unexpected schedule");
+            },
+            deleteChannel: async () => {
+              throw new Error("unexpected schedule cleanup");
+            },
             startThreadWithMessage: async () => {
               throw new Error("unexpected thread creation");
             },
@@ -907,6 +1149,12 @@ describe("discord input", () => {
             }),
             sendMessage: async () => undefined,
             editChannel: async () => undefined,
+            startThreadWithoutMessage: async () => {
+              throw new Error("unexpected schedule");
+            },
+            deleteChannel: async () => {
+              throw new Error("unexpected schedule cleanup");
+            },
             startThreadWithMessage: async () => {
               throw new Error("unexpected thread creation");
             },
@@ -1022,6 +1270,12 @@ describe("discord input", () => {
             }),
             sendMessage: async () => undefined,
             editChannel: async () => undefined,
+            startThreadWithoutMessage: async () => {
+              throw new Error("unexpected schedule");
+            },
+            deleteChannel: async () => {
+              throw new Error("unexpected schedule cleanup");
+            },
             startThreadWithMessage: async () => ({ id: 20n }),
           },
         } satisfies DiscordInputBot;
@@ -1114,6 +1368,12 @@ describe("discord input", () => {
             }),
             sendMessage: async () => undefined,
             editChannel: async () => undefined,
+            startThreadWithoutMessage: async () => {
+              throw new Error("unexpected schedule");
+            },
+            deleteChannel: async () => {
+              throw new Error("unexpected schedule cleanup");
+            },
             startThreadWithMessage: async (_parentId, messageId) => ({
               id: messageId === 11n ? 20n : 21n,
             }),
@@ -1244,6 +1504,12 @@ describe("discord input", () => {
                 await releaseFailureReply.promise;
               },
               editChannel: async () => undefined,
+              startThreadWithoutMessage: async () => {
+                throw new Error("unexpected schedule");
+              },
+              deleteChannel: async () => {
+                throw new Error("unexpected schedule cleanup");
+              },
               startThreadWithMessage: async () => ({ id: 20n }),
             },
           } satisfies DiscordInputBot;
@@ -1379,6 +1645,12 @@ describe("discord input", () => {
             },
             sendMessage: async () => undefined,
             editChannel: async () => undefined,
+            startThreadWithoutMessage: async () => {
+              throw new Error("unexpected schedule");
+            },
+            deleteChannel: async () => {
+              throw new Error("unexpected schedule cleanup");
+            },
             startThreadWithMessage: async () => {
               throw new Error("unexpected thread creation");
             },
@@ -1511,6 +1783,12 @@ describe("discord input", () => {
             }),
             sendMessage: () => Promise.reject({ status: 403, body: "private-reply" }),
             editChannel: async () => undefined,
+            startThreadWithoutMessage: async () => {
+              throw new Error("unexpected schedule");
+            },
+            deleteChannel: async () => {
+              throw new Error("unexpected schedule cleanup");
+            },
             startThreadWithMessage: async () => {
               throw new Error("unexpected thread creation");
             },
@@ -1645,6 +1923,12 @@ describe("discord input", () => {
             }),
             sendMessage: async () => undefined,
             editChannel: async () => undefined,
+            startThreadWithoutMessage: async () => {
+              throw new Error("unexpected schedule");
+            },
+            deleteChannel: async () => {
+              throw new Error("unexpected schedule cleanup");
+            },
             startThreadWithMessage: async () => {
               throw new Error("unexpected thread creation");
             },

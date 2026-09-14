@@ -26,10 +26,28 @@ export interface LoadedSchedule {
 }
 
 const ownerSchema = Schema.fromJsonString(
-  Schema.Struct({ version: Schema.Literal(1), ownerWorkspaceId: Schema.String }),
+  Schema.Struct({ version: Schema.Literals([1, 2]), ownerWorkspaceId: Schema.String }),
 );
 
-const definitionJson = Schema.fromJsonString(Schedule.ScheduleDefinition);
+const legacyDefinition = Schema.Struct({
+  ...Schedule.ScheduleDefinition.fields,
+  version: Schema.Literal(1),
+  replyTarget: Schema.optional(
+    Schema.Struct({
+      platform: Schema.Literal("discord"),
+      conversationId: Schema.NonEmptyString,
+      messageId: Schema.NonEmptyString,
+    }),
+  ),
+});
+const storedDefinition = Schema.Union([Schedule.ScheduleDefinition, legacyDefinition]);
+const definitionJson = Schema.fromJsonString(storedDefinition);
+
+const currentDefinition = (stored: typeof storedDefinition.Type): Schedule.ScheduleDefinition => {
+  if (stored.version === 2) return stored;
+  const { version: _version, replyTarget: _replyTarget, ...definition } = stored;
+  return { ...definition, version: 2 };
+};
 
 const updateTransactionJson = Schema.fromJsonString(
   Schema.Struct({
@@ -57,9 +75,12 @@ const decodeReplaceTransaction = Schema.decodeUnknownOption(replaceTransactionJs
   onExcessProperty: "error",
 });
 
-export const decodeDefinition = Schema.decodeUnknownEffect(definitionJson, {
+const decodeStoredDefinition = Schema.decodeUnknownEffect(definitionJson, {
   onExcessProperty: "error",
 });
+
+export const decodeDefinition = (source: string) =>
+  decodeStoredDefinition(source).pipe(Effect.map(currentDefinition));
 
 const decodeOwner = Schema.decodeUnknownOption(ownerSchema);
 
@@ -347,8 +368,7 @@ export const loadSchedule = Effect.fn("Schedules.loadSchedule")(function* (
     const definition = yield* decodeDefinition(metaSource).pipe(
       Effect.mapError(() => invalid("Invalid schedule metadata")),
     );
-    yield* inspectSource(storage, directory, true);
-    return {
+    const loaded = {
       view: {
         kind: "ready",
         id,
@@ -359,6 +379,8 @@ export const loadSchedule = Effect.fn("Schedules.loadSchedule")(function* (
       ownerWorkspaceId: definition.ownerWorkspaceId,
       directory,
     } satisfies LoadedSchedule;
+    yield* inspectSource(storage, directory, true);
+    return loaded;
   }).pipe(Effect.result);
 
   if (Result.isSuccess(loaded)) return loaded.success;

@@ -13,8 +13,13 @@ export class ChatRepository extends Context.Service<
       workspaceId: WorkspaceId,
     ) => Effect.Effect<readonly Chat[], PersistenceError>;
 
-    // Application calls this after it provisions the chat's external resources.
     readonly create: (chat: NewChat) => Effect.Effect<Chat, PersistenceError>;
+
+    readonly bindExternalId: (input: {
+      readonly chatId: ChatId;
+      readonly workspaceId: WorkspaceId;
+      readonly externalId: string;
+    }) => Effect.Effect<Option.Option<Chat>, PersistenceError>;
 
     readonly archive: (
       id: ChatId,

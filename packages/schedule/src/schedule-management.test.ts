@@ -17,6 +17,7 @@ import {
   decodeScriptResult,
   platformLayer,
   prepareSource,
+  resolveTarget,
   workspaceId,
 } from "./schedule-test-fixtures.ts";
 
@@ -30,13 +31,13 @@ describe("schedule management", () => {
         const path = yield* Path.Path;
         const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-schedules-open-" });
         const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
-        const schedules = yield* open(schedulesDir);
+        const schedules = yield* open(schedulesDir, resolveTarget);
 
         assert.deepStrictEqual(yield* schedules.list(caller), []);
         const created = yield* schedules.create(caller, {
           name: "ready before start",
           enabled: false,
-          target: { kind: "current-chat" },
+          target: { kind: "chat", chatId: caller.chatId },
           trigger: { kind: "once", at: 1_000 },
           sourceDirectory: yield* prepareSource({ "prompt.md": "ship it" }),
         });
@@ -51,7 +52,7 @@ describe("schedule management", () => {
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-schedule-owner-" });
-      const schedules = yield* open(AbsolutePath.make(path.join(root, "schedules")));
+      const schedules = yield* open(AbsolutePath.make(path.join(root, "schedules")), resolveTarget);
       const destinationCaller = { ...caller, workspaceId: otherWorkspaceId };
       const created = yield* schedules.create(caller, {
         name: "owned here",
@@ -96,7 +97,7 @@ describe("schedule management", () => {
           prefix: "pico-schedule-storage-",
         });
         const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
-        const schedules = yield* open(schedulesDir);
+        const schedules = yield* open(schedulesDir, resolveTarget);
         const script = 'import { content } from "./lib/helper.js";process.stdout.write(content);';
         const helper = 'export const content = "original";';
         const asset = new Uint8Array([0, 255, 128, 10]);
@@ -119,7 +120,7 @@ describe("schedule management", () => {
         const created = yield* schedules.create(caller, {
           name: "editable",
           enabled: false,
-          target: { kind: "current-chat" },
+          target: { kind: "chat", chatId: caller.chatId },
           trigger: { kind: "once", at: 10_000 },
           sourceDirectory,
           scriptTimeoutMs: 5_000,
@@ -202,11 +203,11 @@ describe("schedule management", () => {
       const path = yield* Path.Path;
       const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-timeout-reset-" });
       const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
-      const schedules = yield* open(schedulesDir);
+      const schedules = yield* open(schedulesDir, resolveTarget);
       const created = yield* schedules.create(caller, {
         name: "custom timeout",
         enabled: false,
-        target: { kind: "current-chat" },
+        target: { kind: "chat", chatId: caller.chatId },
         trigger: { kind: "once", at: 1_000 },
         sourceDirectory: yield* prepareSource({
           "script.js": 'process.stdout.write(JSON.stringify({agent:false,content:"default"}));',
@@ -234,6 +235,8 @@ describe("schedule management", () => {
       yield* TestClock.setTime(1_000);
       const published = yield* Queue.unbounded<string>();
       yield* schedules.start({
+        resolveTarget,
+        materialize: () => Effect.void,
         prepare: () => Effect.succeed({ chatId, workspaceId, cwd: AbsolutePath.make(root) }),
         deliver: () => Effect.die("Script must publish without OMP"),
         publish: (_chatId, content) => Queue.offer(published, content).pipe(Effect.asVoid),
@@ -255,11 +258,11 @@ describe("schedule management", () => {
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-schedule-invalid-" });
-      const schedules = yield* open(AbsolutePath.make(path.join(root, "schedules")));
+      const schedules = yield* open(AbsolutePath.make(path.join(root, "schedules")), resolveTarget);
       const created = yield* schedules.create(caller, {
         name: "editable",
         enabled: true,
-        target: { kind: "current-chat" },
+        target: { kind: "chat", chatId: caller.chatId },
         trigger: { kind: "once", at: 10_000 },
         sourceDirectory: yield* prepareSource({ "prompt.md": "Run the update." }),
       });
@@ -328,11 +331,11 @@ describe("schedule management", () => {
       const path = yield* Path.Path;
       const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-schedule-conflict-" });
       const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
-      const schedules = yield* open(schedulesDir);
+      const schedules = yield* open(schedulesDir, resolveTarget);
       const created = yield* schedules.create(caller, {
         name: "conflicted",
         enabled: false,
-        target: { kind: "current-chat" },
+        target: { kind: "chat", chatId: caller.chatId },
         trigger: { kind: "once", at: 10_000 },
         sourceDirectory: yield* prepareSource({ "prompt.md": "Retain both definitions." }),
       });
@@ -365,11 +368,11 @@ describe("schedule management", () => {
         prefix: "pico-schedule-repair-cron-",
       });
       const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
-      const schedules = yield* open(schedulesDir);
+      const schedules = yield* open(schedulesDir, resolveTarget);
       const created = yield* schedules.create(caller, {
         name: "repair cron",
         enabled: false,
-        target: { kind: "current-chat" },
+        target: { kind: "chat", chatId: caller.chatId },
         trigger: { kind: "once", at: 10_000 },
         sourceDirectory: yield* prepareSource({ "prompt.md": "Check the schedule." }),
         scriptTimeoutMs: 5_000,
@@ -409,7 +412,7 @@ describe("schedule management", () => {
         revision: repaired.definition.revision,
       });
       assert.notStrictEqual(repaired.definition.revision, created.definition.revision);
-      const restarted = yield* open(schedulesDir);
+      const restarted = yield* open(schedulesDir, resolveTarget);
       assert.deepStrictEqual(yield* restarted.get(caller, created.id), repaired);
     }).pipe(Effect.provide(platformLayer), Effect.scoped),
   );

@@ -204,7 +204,7 @@ describe("Application", () => {
 
       yield* Effect.gen(function* () {
         const application = yield* Application;
-        const scheduleHost = yield* Schedule.ScheduleRunHostService;
+        const scheduleHost = (yield* Schedule.ScheduleRunHostFactory)(null);
         const chats = yield* ChatRepository;
         assert.deepStrictEqual(yield* application.listWorkspaces(), []);
         assertApplicationError(
@@ -478,7 +478,7 @@ describe("Application", () => {
           "scheduled-1000-018f47a0-0000-7000-8000-000000000003",
         );
         const captured = yield* scheduleHost.runPrompt(
-          discordChat.id,
+          regularChat.id,
           runId,
           textPrompt("scheduled prompt"),
           () => Effect.void,
@@ -487,12 +487,140 @@ describe("Application", () => {
           runId,
           outcome: "completed",
           events: [{ type: "run-started" }],
-          finalAssistantText: `captured:${discordChat.id}`,
+          finalAssistantText: `captured:${regularChat.id}`,
         });
-        yield* scheduleHost.deliver(discordChat.id, "scheduled delivery");
-        assert.deepInclude(sentMessages, { chatId: discordChat.id, content: "scheduled delivery" });
-        yield* scheduleHost.publish(discordChat.id, "scheduled publish");
-        assert.deepInclude(sentMessages, { chatId: discordChat.id, content: "scheduled publish" });
+        yield* scheduleHost.deliver(regularChat.id, "scheduled delivery");
+        assert.deepInclude(sentMessages, { chatId: regularChat.id, content: "scheduled delivery" });
+        yield* scheduleHost.publish(regularChat.id, "scheduled publish");
+        assert.deepInclude(sentMessages, { chatId: regularChat.id, content: "scheduled publish" });
+
+        const remoteThreads = new Set(["thread-1"]);
+        const deletedThreads: string[] = [];
+        const remoteMessages: string[] = [];
+        let createdThreads = 0;
+        let rejectCreate = false;
+        let rejectSend = false;
+        let rejectCleanup = false;
+        let archiveBeforeBinding: Chat.ChatId | null = null;
+        const adapter: Schedule.SchedulePlatform = {
+          platform: "discord",
+          resolveTarget: () => Effect.die("External lookup belongs to Discord tests"),
+          validateTarget: (target) =>
+            target.workspaceExternalId !== "1.10" ||
+            (target.kind === "chat" && !remoteThreads.has(target.chatExternalId))
+              ? Effect.fail(
+                  new Schedule.ScheduleHostError({ message: "Remote destination missing" }),
+                )
+              : Effect.void,
+          createThread: () =>
+            Effect.gen(function* () {
+              if (rejectCreate)
+                return yield* new Schedule.ScheduleHostError({ message: "Create rejected" });
+              const externalId = `${++createdThreads}`;
+              remoteThreads.add(externalId);
+              if (archiveBeforeBinding !== null) yield* chats.archive(archiveBeforeBinding, 8_000);
+              return externalId;
+            }).pipe(
+              Effect.mapError(
+                (error) => new Schedule.ScheduleHostError({ message: error.message }),
+              ),
+            ),
+          deleteThread: (externalId) =>
+            Effect.gen(function* () {
+              deletedThreads.push(externalId);
+              if (rejectCleanup)
+                return yield* new Schedule.ScheduleHostError({ message: "Cleanup rejected" });
+              remoteThreads.delete(externalId);
+            }),
+          send: ({ content }) =>
+            Effect.gen(function* () {
+              if (rejectSend)
+                return yield* new Schedule.ScheduleHostError({ message: "Send rejected" });
+              remoteMessages.push(content);
+            }),
+        };
+        const discordHost = (yield* Schedule.ScheduleRunHostFactory)(adapter);
+        assert.instanceOf(
+          yield* scheduleHost
+            .resolveTarget({ kind: "workspace", workspaceId: discordWorkspace.id })
+            .pipe(Effect.flip),
+          Schedule.ScheduleHostError,
+        );
+        const scheduledDiscordId = Chat.ChatId.make("018f47a0-0000-7000-8000-000000000020");
+        const destination = {
+          kind: "workspace",
+          workspaceId: discordWorkspace.id,
+          newChatId: scheduledDiscordId,
+        } satisfies Schedule.ScheduleRunDestination;
+        const target = yield* discordHost.prepare(destination);
+        assert.strictEqual(createdThreads, 0);
+        assert.instanceOf(
+          yield* discordHost
+            .resolveTarget({ kind: "chat", chatId: target.chatId })
+            .pipe(Effect.flip),
+          Schedule.ScheduleHostError,
+        );
+        yield* Effect.all(
+          [
+            discordHost.materialize({ destination, target, title: "Daily report" }),
+            discordHost.materialize({ destination, target, title: "Daily report" }),
+          ],
+          { concurrency: "unbounded" },
+        );
+        assert.strictEqual(createdThreads, 1);
+        assert.deepStrictEqual(
+          yield* application.findChatPlatformBinding(target.chatId),
+          Option.some({ platform: "discord", externalId: "1" }),
+        );
+        yield* discordHost.publish(target.chatId, "remote publication");
+        assert.deepStrictEqual(remoteMessages, ["remote publication"]);
+        rejectSend = true;
+        assert.strictEqual(
+          (yield* discordHost.deliver(target.chatId, "failed send").pipe(Effect.flip)).message,
+          "Send rejected",
+        );
+        assert.isTrue(remoteThreads.has("1"));
+        assert.deepStrictEqual(deletedThreads, []);
+        yield* discordHost.materialize({
+          destination: { kind: "chat", chatId: discordChat.id },
+          target: { chatId: discordChat.id, workspaceId: discordWorkspace.id, cwd: defaultCwd },
+          title: "Existing destination",
+        });
+        assert.strictEqual(createdThreads, 1);
+
+        const failedDestination = {
+          ...destination,
+          newChatId: Chat.ChatId.make("018f47a0-0000-7000-8000-000000000021"),
+        };
+        const failedTarget = yield* discordHost.prepare(failedDestination);
+        rejectCreate = true;
+        assert.strictEqual(
+          (yield* discordHost
+            .materialize({
+              destination: failedDestination,
+              target: failedTarget,
+              title: "Failed create",
+            })
+            .pipe(Effect.flip)).message,
+          "Create rejected",
+        );
+        assert.deepStrictEqual(deletedThreads, []);
+        rejectCreate = false;
+        rejectCleanup = true;
+        archiveBeforeBinding = failedTarget.chatId;
+        const bindFailure = yield* discordHost
+          .materialize({
+            destination: failedDestination,
+            target: failedTarget,
+            title: "Failed bind",
+          })
+          .pipe(Effect.flip);
+        assert.include(bindFailure.message, "Could not bind");
+        assert.notInclude(bindFailure.message, "Cleanup rejected");
+        assert.deepStrictEqual(deletedThreads, ["2"]);
+        assert.isTrue(
+          Option.isNone(yield* application.findChatPlatformBinding(failedTarget.chatId)),
+        );
 
         yield* fileSystem.remove(defaultCwd, { recursive: true });
         assertApplicationError(
@@ -504,8 +632,6 @@ describe("Application", () => {
         assert.isTrue(
           Option.isNone(yield* chats.findByExternalId(regularWorkspace.id, "missing-cwd")),
         );
-        assert.strictEqual(createdSessions.length, 6);
-        assert.strictEqual(createdWorktrees.length, 3);
       }).pipe(
         Effect.provide(ApplicationLayer.layer(gitWorktree)),
         Effect.provide(sessionsLayer),

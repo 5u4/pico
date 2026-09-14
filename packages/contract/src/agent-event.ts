@@ -69,5 +69,6 @@ export type AgentEvent = typeof AgentEvent.Type;
 export const AgentEventEnvelope = Schema.Struct({
   chatId: ChatId,
   event: AgentEvent,
+  localOnly: Schema.optional(Schema.Literal(true)),
 });
 export type AgentEventEnvelope = typeof AgentEventEnvelope.Type;

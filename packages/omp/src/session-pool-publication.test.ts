@@ -40,113 +40,107 @@ const shakeResult = (mode: ShakeMode): ShakeResult => {
 };
 
 describe("session pool publication", () => {
-  it.effect("persists scheduled publications before emitting them", () =>
-    Effect.scoped(
-      Effect.gen(function* () {
-        const fileSystem = yield* FileSystem.FileSystem;
-        const path = yield* Path.Path;
-        const sessionsDir = yield* fileSystem.makeTempDirectoryScoped({
-          prefix: "pico-omp-publish-",
-        });
-        const sessionFile = path.join(sessionsDir, `${chatId}.jsonl`);
-        const liveMessages: Array<Parameters<OpenedSession["appendAssistantMessage"]>[0]> = [];
-        const publicationOrder: Array<string> = [];
-        const factory: SessionFactory = {
-          open: () =>
-            Effect.promise(async () => {
-              const manager = await OmpSessionManager.SessionManager.open(
-                sessionFile,
-                sessionsDir,
-                undefined,
-                { initialCwd: sessionsDir, suppressBreadcrumb: true },
-              );
-              return {
-                session: {
-                  isStreaming: false,
-                  waitForIdle: async () => {},
-                  settleInFlightMessagePersistence: () => Promise.resolve(),
-                  abort: () => Promise.resolve(),
-                  beginDispose: () => manager.seal(),
-                  dispose: async () => {
-                    await manager.close();
-                    manager.releaseRetainedEntries();
+  it.effect(
+    "persists local-only scheduled publications and still notifies transcript subscribers",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const sessionsDir = yield* fileSystem.makeTempDirectoryScoped({
+            prefix: "pico-omp-publish-",
+          });
+          const sessionFile = path.join(sessionsDir, `${chatId}.jsonl`);
+          const liveMessages: Array<Parameters<OpenedSession["appendAssistantMessage"]>[0]> = [];
+          const publicationOrder: Array<string> = [];
+          const factory: SessionFactory = {
+            open: () =>
+              Effect.promise(async () => {
+                const manager = await OmpSessionManager.SessionManager.open(
+                  sessionFile,
+                  sessionsDir,
+                  undefined,
+                  { initialCwd: sessionsDir, suppressBreadcrumb: true },
+                );
+                return {
+                  session: {
+                    isStreaming: false,
+                    waitForIdle: async () => {},
+                    settleInFlightMessagePersistence: () => Promise.resolve(),
+                    abort: () => Promise.resolve(),
+                    beginDispose: () => manager.seal(),
+                    dispose: async () => {
+                      await manager.close();
+                      manager.releaseRetainedEntries();
+                    },
                   },
-                },
-                askBtw: () => Promise.reject(new Error("unexpected side question")),
-                switchModel: () => Promise.reject(new Error("unexpected model switch")),
-                flush: async () => {
-                  await manager.ensureOnDisk();
-                  await manager.flush();
-                },
-                sendPrompt: () => Promise.resolve(admitted),
-                shake: async (mode) => shakeResult(mode),
-                appendAssistantMessage: async (message) => {
-                  manager.appendMessage(message);
-                  liveMessages.push(message);
-                  await manager.flush();
-                  publicationOrder.push("persisted");
-                },
-                contextUsage: () => ({ kind: "unavailable" }),
-                unsubscribe: () => {},
-              } satisfies OpenedSession;
-            }),
-        };
-        const pool = yield* makeSessionPool({
-          factory,
-          loadTranscript: () =>
-            Effect.promise(() => OmpSessionLoader.loadSessionMessagesReadOnly(sessionFile)).pipe(
-              Effect.map(normalizeTranscript),
+                  askBtw: () => Promise.reject(new Error("unexpected side question")),
+                  switchModel: () => Promise.reject(new Error("unexpected model switch")),
+                  flush: async () => {
+                    await manager.ensureOnDisk();
+                    await manager.flush();
+                  },
+                  sendPrompt: () => Promise.resolve(admitted),
+                  shake: async (mode) => shakeResult(mode),
+                  appendAssistantMessage: async (message) => {
+                    manager.appendMessage(message);
+                    liveMessages.push(message);
+                    await manager.flush();
+                    publicationOrder.push("persisted");
+                  },
+                  contextUsage: () => ({ kind: "unavailable" }),
+                  unsubscribe: () => {},
+                } satisfies OpenedSession;
+              }),
+          };
+          const pool = yield* makeSessionPool({
+            factory,
+            loadTranscript: () =>
+              Effect.promise(() => OmpSessionLoader.loadSessionMessagesReadOnly(sessionFile)).pipe(
+                Effect.map(normalizeTranscript),
+              ),
+          });
+          const delivered = yield* pool.events.pipe(
+            Stream.take(3),
+            Stream.tap(({ event }) =>
+              Effect.sync(() => {
+                publicationOrder.push(event.type);
+              }),
             ),
-        });
-        const delivered = yield* pool.events.pipe(
-          Stream.take(3),
-          Stream.tap(({ event }) =>
-            Effect.sync(() => {
-              publicationOrder.push(event.type);
-            }),
-          ),
-          Stream.runCollect,
-          Effect.forkChild,
-        );
+            Stream.runCollect,
+            Effect.forkChild,
+          );
 
-        yield* pool.publish(chatId, "durable publication");
-        const envelopes = yield* Fiber.join(delivered);
-        assert.deepStrictEqual(
-          envelopes.map(({ event }) => event.type),
-          ["run-started", "message-settled", "run-finished"],
-        );
-        assert.deepStrictEqual(publicationOrder, [
-          "persisted",
-          "run-started",
-          "message-settled",
-          "run-finished",
-        ]);
-        const liveMessage = liveMessages[0];
-        if (liveMessage === undefined) return yield* Effect.die("Publication missed live context");
-        assert.strictEqual(liveMessage.provider, "pico");
-        assert.strictEqual(liveMessage.model, "schedule");
-        assert.deepStrictEqual(liveMessage.usage, {
-          input: 0,
-          output: 0,
-          cacheRead: 0,
-          cacheWrite: 0,
-          totalTokens: 0,
-          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-        });
+          yield* pool.publish(chatId, "durable publication", true);
+          const envelopes = yield* Fiber.join(delivered);
+          assert.deepStrictEqual(
+            envelopes.map(({ event }) => event.type),
+            ["run-started", "message-settled", "run-finished"],
+          );
+          assert.isTrue(envelopes.every((envelope) => envelope.localOnly === true));
+          assert.deepStrictEqual(publicationOrder, [
+            "persisted",
+            "run-started",
+            "message-settled",
+            "run-finished",
+          ]);
+          const liveMessage = liveMessages[0];
+          if (liveMessage === undefined)
+            return yield* Effect.die("Publication missed live context");
 
-        yield* pool.close(chatId);
-        const transcript = yield* pool.transcript(chatId);
-        const published = transcript[0];
-        if (published === undefined) return yield* Effect.die("Publication missed transcript");
-        assert.deepInclude(published, {
-          role: "assistant",
-          status: "completed",
-          stopReason: "stop",
-          content: [{ type: "text", text: "durable publication" }],
-          model: "schedule",
-        });
-      }),
-    ).pipe(Effect.provide(platformLayer)),
+          yield* pool.close(chatId);
+          const transcript = yield* pool.transcript(chatId);
+          const published = transcript[0];
+          if (published === undefined) return yield* Effect.die("Publication missed transcript");
+          assert.deepInclude(published, {
+            role: "assistant",
+            status: "completed",
+            stopReason: "stop",
+            content: [{ type: "text", text: "durable publication" }],
+            model: "schedule",
+          });
+        }),
+      ).pipe(Effect.provide(platformLayer)),
   );
 
   it.effect("delivers one persisted agent response without appending it again", () =>

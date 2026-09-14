@@ -21,18 +21,20 @@ Schedules stay owned and managed by the workspace that created them. Supply one 
 
 | Target | Execution destination |
 | --- | --- |
-| `{ kind: "current-chat" }` | The calling chat. |
-| `{ kind: "current-workspace" }` | The calling workspace. |
 | `{ kind: "chat", chatId }` | The selected existing chat. |
 | `{ kind: "workspace", workspaceId }` | The selected workspace. |
+| `{ kind: "external-chat", platform: "discord", externalId }` | An existing open Pico-bound Discord thread. |
+| `{ kind: "external-workspace", platform: "discord", externalId }` | A Discord text channel. |
 
-Use Pico UUIDv7 IDs for `chatId` and `workspaceId`, not Discord IDs. Scripts and the agent use the destination chat's workspace and working directory, not the owner's context.
+Use Pico UUIDv7 IDs for `chatId` and `workspaceId`. Use a Discord thread ID for `external-chat` or a channel ID for `external-workspace`. Creation and retargeting resolve these selectors to canonical Pico IDs. An omitted update target keeps the current destination. Scripts and the agent use the destination chat's workspace and working directory, not the owner's context.
 
-Workspace targets create a new local chat per run, even if the script skips. Selecting a UUID does not create an external recipient or a Discord thread.
+Workspace targets prepare a new local chat and its working directory per run, even when the script skips. Native web, desktop, and mobile destinations stay local. Discord workspace targets create a public thread named after the schedule only when the run publishes text or starts the agent. A skipped run or an invalid agent decision creates no Discord thread.
 
-On creation or an update that supplies `target`, convenience selectors save that operation's caller reply, or clear it when absent. Explicit selectors clear saved caller replies, even when the ID matches the current context. Updates that omit `target` preserve the saved reply.
+Discord text channels must belong to an allowed guild. Unregistered channels use Discord's configured default working directory; existing channel configuration is preserved. Existing-chat selectors reuse a live, open Pico-bound thread in its expected channel. Unknown, archived, mismatched, unsupported, or unavailable destinations fail without adoption or fallback. Pico IDs and external IDs follow the same delivery rules.
 
-Claimed runs retain their frozen destination and reply. Missing workspaces and missing or archived chats fail before execution, without a fallback.
+Results go only to the explicit destination, never to a saved caller reply. Discord sends are acknowledged; creation, binding, and send failures appear in run history. After binding, a later failure preserves the chat and thread. If binding fails, Pico attempts to remove only the new unbound thread.
+
+Claimed runs retain their frozen destination even after a target update. Restart interrupts unfinished runs rather than resuming delivery.
 
 ## Create a schedule
 
@@ -61,6 +63,8 @@ You can repair an invalid cron expression and resume in one update by supplying 
 Set `enabled` to `false` to pause or `true` to resume. This moves the directory between `disabled/<id>` and `enabled/<id>`. Call `schedule_get` again after a state change before editing files, rather than reusing the old path.
 
 Changing `name`, `target`, `trigger`, or `scriptTimeoutMs` creates a new metadata revision. Changing only `enabled` preserves the revision.
+
+Pico reads v1 metadata as a reply-free v2 model while preserving the canonical target, owner, and revision. Routine reads leave `meta.json` untouched. The next metadata revision persists v2 without the legacy `replyTarget`. Source files and immutable run history remain unchanged and readable.
 
 ## Write script.js
 

@@ -12,7 +12,7 @@ const chatId = Chat.ChatId.make("018f47a0-0000-7000-8000-000000000002");
 const workspaceId = Workspace.WorkspaceId.make("018f47a0-0000-7000-8000-000000000003");
 const sourceDirectory = AbsolutePath.make("/tmp/pico-schedule-source");
 const definition = {
-  version: 1,
+  version: 2,
   revision,
   name: "nightly review",
   ownerWorkspaceId: workspaceId,
@@ -45,7 +45,7 @@ describe("schedule contract", () => {
     const common = {
       name: "nightly review",
       enabled: true,
-      target: { kind: "current-workspace" },
+      target: { kind: "workspace", workspaceId },
       trigger: { kind: "cron", expression: "0 9 * * 1", timeZone: "America/Los_Angeles" },
     } satisfies Pick<Schedule.CreateSchedule, "name" | "enabled" | "target" | "trigger">;
     const input = {
@@ -73,7 +73,7 @@ describe("schedule contract", () => {
       { enabled: false },
       {
         name: "weekly review",
-        target: { kind: "current-chat" },
+        target: { kind: "chat", chatId },
         trigger: { kind: "once", at: 1_735_689_600_000 },
       },
       { scriptTimeoutMs: Schedule.MAX_SCRIPT_TIMEOUT_MS },
@@ -85,10 +85,12 @@ describe("schedule contract", () => {
     assert.throws(() => decodeUpdate({ enabled: null }));
   });
 
-  it("validates explicit Pico target IDs for creation and retargeting", () => {
+  it("validates all explicit destination selectors for creation and retargeting", () => {
     for (const target of [
       { kind: "chat", chatId },
       { kind: "workspace", workspaceId },
+      { kind: "external-chat", platform: "discord", externalId: "123456789012345678" },
+      { kind: "external-workspace", platform: "discord", externalId: "234567890123456789" },
     ] satisfies ReadonlyArray<Schedule.ScheduleTargetInput>) {
       assert.deepStrictEqual(decodeUpdate({ target }).target, target);
       assert.deepStrictEqual(
@@ -108,6 +110,11 @@ describe("schedule contract", () => {
       { kind: "chat", workspaceId },
       { kind: "workspace", chatId },
       { kind: "current-chat", chatId },
+      { kind: "current-chat" },
+      { kind: "current-workspace" },
+      { kind: "external-chat", platform: "slack", externalId: "123" },
+      { kind: "external-workspace", platform: "discord", externalId: "" },
+      { kind: "external-chat", platform: "discord", externalId: "123", chatId },
       { kind: "chat", chatId, workspaceId },
     ]) {
       assert.throws(() => decodeUpdate({ target }));
@@ -130,7 +137,7 @@ describe("schedule contract", () => {
       decodeCreate({
         name: "default timeout",
         enabled: false,
-        target: { kind: "current-chat" },
+        target: { kind: "chat", chatId },
         trigger: { kind: "once", at: 1 },
         sourceDirectory,
         scriptTimeoutMs: null,
@@ -213,7 +220,7 @@ describe("schedule contract", () => {
         decodeCreate({
           name: "invalid timeout",
           enabled: true,
-          target: { kind: "current-chat" },
+          target: { kind: "chat", chatId },
           trigger: { kind: "once", at: 1 },
           sourceDirectory,
           scriptTimeoutMs,

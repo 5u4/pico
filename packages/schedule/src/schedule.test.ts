@@ -35,6 +35,7 @@ import {
   permissionDenied,
   platformLayer,
   prepareSource,
+  resolveTarget,
   type ScheduleLog,
   textPrompt,
   workspaceId,
@@ -59,9 +60,11 @@ describe("Schedules", () => {
         const path = yield* Path.Path;
         const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-schedules-start-" });
         const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
-        const schedules = yield* make(schedulesDir);
+        const schedules = yield* make(schedulesDir, resolveTarget);
         const cwd = AbsolutePath.make(root);
         yield* schedules.start({
+          resolveTarget,
+          materialize: () => Effect.void,
           prepare: () => Effect.succeed({ chatId, workspaceId, cwd }),
           deliver: () => Effect.void,
           publish: () => Effect.void,
@@ -84,8 +87,10 @@ describe("Schedules", () => {
         const cwd = AbsolutePath.make(path.join(root, "workspace"));
         yield* fileSystem.makeDirectory(cwd);
         const published = yield* Queue.unbounded<string>();
-        const schedules = yield* make(schedulesDir);
+        const schedules = yield* make(schedulesDir, resolveTarget);
         const host: Schedule.ScheduleRunHost = {
+          resolveTarget,
+          materialize: () => Effect.void,
           prepare: () => Effect.succeed({ chatId, workspaceId, cwd }),
           deliver: () => Effect.die("script-only schedules must not deliver agent output"),
           publish: (_targetChatId, content) => Queue.offer(published, content).pipe(Effect.asVoid),
@@ -97,7 +102,7 @@ describe("Schedules", () => {
         const created = yield* schedules.create(caller, {
           name: "one shot",
           enabled: true,
-          target: { kind: "current-chat" },
+          target: { kind: "chat", chatId: caller.chatId },
           trigger: { kind: "once", at: 1_000 },
           sourceDirectory: yield* prepareSource({
             "script.js":
@@ -193,7 +198,7 @@ describe("Schedules", () => {
             ? Effect.fail(permissionDenied("copyFile", from))
             : fileSystem.copyFile(from, to),
       });
-      const schedules = yield* open(schedulesDir).pipe(
+      const schedules = yield* open(schedulesDir, resolveTarget).pipe(
         Effect.provideService(FileSystem.FileSystem, failingFileSystem),
       );
       const created: Array<Schedule.ReadyScheduleView> = [];
@@ -201,7 +206,7 @@ describe("Schedules", () => {
         const view = yield* schedules.create(caller, {
           name,
           enabled: true,
-          target: { kind: "current-chat" },
+          target: { kind: "chat", chatId: caller.chatId },
           trigger: { kind: "once", at: 1_000 },
           sourceDirectory: yield* prepareSource({
             "script.js":
@@ -221,6 +226,8 @@ describe("Schedules", () => {
       const publishedEvents = yield* Queue.unbounded<void>();
       yield* TestClock.setTime(1_000);
       yield* schedules.start({
+        resolveTarget,
+        materialize: () => Effect.void,
         prepare: () => Effect.succeed({ chatId, workspaceId, cwd: AbsolutePath.make(root) }),
         deliver: () => Effect.die("Script must publish without OMP"),
         publish: (_chatId, content) =>
@@ -276,8 +283,10 @@ describe("Schedules", () => {
       const cwd = AbsolutePath.make(root);
       const invoked = yield* Deferred.make<void>();
       const delivered = yield* Deferred.make<string>();
-      const schedules = yield* make(schedulesDir);
+      const schedules = yield* make(schedulesDir, resolveTarget);
       const host: Schedule.ScheduleRunHost = {
+        resolveTarget,
+        materialize: () => Effect.void,
         prepare: () => Effect.succeed({ chatId, workspaceId, cwd }),
         deliver: (_target, content) => Deferred.succeed(delivered, content).pipe(Effect.asVoid),
         publish: () => Effect.die("agent output must not be persisted twice"),
@@ -312,7 +321,7 @@ describe("Schedules", () => {
       const created = yield* schedules.create(caller, {
         name: "hourly",
         enabled: false,
-        target: { kind: "current-chat" },
+        target: { kind: "chat", chatId: caller.chatId },
         trigger: { kind: "cron", expression: "0 * * * *", timeZone: "UTC" },
         sourceDirectory: yield* prepareSource({ "prompt.md": "Inspect the workspace." }),
       });
@@ -345,315 +354,18 @@ describe("Schedules", () => {
     }).pipe(Effect.provide(platformLayer), Effect.scoped),
   );
 
-  it.effect("keeps reply destinations across updates, restarts, and nested schedules", () =>
-    Effect.gen(function* () {
-      const fileSystem = yield* FileSystem.FileSystem;
-      const path = yield* Path.Path;
-      const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-schedule-origin-" });
-      const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
-      const cwd = AbsolutePath.make(root);
-      const latestCaller: Schedule.ScheduleCaller = {
-        ...caller,
-        replyTarget: {
-          platform: "discord",
-          conversationId: "latest-conversation",
-          messageId: "latest-message",
-        },
-      };
-      const origins: ReadonlyArray<{
-        readonly name: string;
-        readonly caller: Schedule.ScheduleCaller;
-      }> = [
-        {
-          name: "first",
-          caller: {
-            ...caller,
-            replyTarget: {
-              platform: "discord",
-              conversationId: "first-conversation",
-              messageId: "first-message",
-            },
-          },
-        },
-        {
-          name: "second",
-          caller: {
-            ...caller,
-            replyTarget: {
-              platform: "discord",
-              conversationId: "second-conversation",
-              messageId: "second-message",
-            },
-          },
-        },
-        { name: "regular", caller },
-      ];
-      const attempts = yield* Queue.unbounded<{
-        readonly content: string;
-        readonly acknowledge: Deferred.Deferred<void>;
-      }>();
-      const mailboxes = new Map<string, Array<string>>();
-      const send: Schedule.ScheduleRunHost["deliver"] = (targetChatId, content, replyTarget) =>
-        Effect.gen(function* () {
-          const acknowledge = yield* Deferred.make<void>();
-          yield* Queue.offer(attempts, { content, acknowledge });
-          yield* Deferred.await(acknowledge);
-          const destination =
-            replyTarget === undefined
-              ? targetChatId
-              : `${replyTarget.platform}/${replyTarget.conversationId}/${replyTarget.messageId}`;
-          const messages = mailboxes.get(destination) ?? [];
-          messages.push(content);
-          mailboxes.set(destination, messages);
-        });
-      const schedules = yield* open(schedulesDir);
-      let pending: Array<{
-        readonly content: string;
-        readonly origin: Schedule.ScheduleCaller;
-        readonly nestedSource: AbsolutePath;
-        readonly view: Schedule.ReadyScheduleView;
-      }> = [];
-      yield* TestClock.setTime(1_000);
-      for (const origin of origins) {
-        const view = yield* schedules.create(origin.caller, {
-          name: origin.name,
-          enabled: true,
-          target: { kind: "current-chat" },
-          trigger: { kind: "once", at: 1_000 },
-          sourceDirectory: yield* prepareSource({ "prompt.md": origin.name }),
-        });
-        if (view.kind !== "ready") return yield* Effect.die("Schedule was not created");
-        pending.push({
-          content: origin.name,
-          origin: origin.caller,
-          nestedSource: yield* prepareSource({
-            "script.js": `process.stdout.write(JSON.stringify({agent:false,content:${JSON.stringify(`nested ${origin.name}`)}}));`,
-          }),
-          view,
-        });
-      }
-
-      for (const agent of [true, false]) {
-        const scheduledFor = agent ? 1_000 : 2_000;
-        yield* TestClock.setTime(scheduledFor);
-        const updater = yield* make(schedulesDir);
-        for (const [index, item] of pending.entries()) {
-          const view = yield* updater.update(latestCaller, item.view.id, {
-            name: `${item.content} updated later`,
-          });
-          if (view.kind !== "ready") return yield* Effect.die("Schedule update failed");
-          yield* updater.update(latestCaller, view.id, { enabled: false });
-          yield* updater.update(latestCaller, view.id, { enabled: true });
-          pending[index] = { ...item, view };
-        }
-        const restarted = yield* make(schedulesDir);
-        const children: typeof pending = [];
-        yield* Effect.scoped(
-          Effect.gen(function* () {
-            yield* restarted.start({
-              prepare: () => Effect.succeed({ chatId, workspaceId, cwd }),
-              deliver: send,
-              publish: send,
-              runPrompt: (targetChatId, runId, prompt, _onEvent, replyTarget) =>
-                Effect.gen(function* () {
-                  const parent = pending.find((item) => item.content === prompt.text);
-                  if (!agent || parent === undefined) {
-                    return yield* Effect.die("Unexpected scheduled prompt");
-                  }
-                  const content = `nested ${parent.content}`;
-                  const view = yield* restarted.create(
-                    {
-                      workspaceId,
-                      chatId: targetChatId,
-                      ...(replyTarget === undefined ? {} : { replyTarget }),
-                    },
-                    {
-                      name: content,
-                      enabled: true,
-                      target: { kind: "current-chat" },
-                      trigger: { kind: "once", at: 2_000 },
-                      sourceDirectory: parent.nestedSource,
-                    },
-                  );
-                  if (view.kind !== "ready") return yield* Effect.die("Nested schedule failed");
-                  children.push({ ...parent, content, view });
-                  return {
-                    runId,
-                    outcome: "completed",
-                    events: [],
-                    finalAssistantText: prompt.text,
-                  } satisfies CapturedAgentRun;
-                }).pipe(
-                  Effect.mapError(
-                    (error) => new Schedule.ScheduleHostError({ message: error.message }),
-                  ),
-                ),
-            });
-            for (let index = 0; index < pending.length; index++) {
-              const attempt = yield* Queue.take(attempts);
-              const item = pending.find((candidate) => candidate.content === attempt.content);
-              if (item === undefined) return yield* Effect.die("Unexpected scheduled delivery");
-              const runDirectory = path.join(
-                schedulesDir,
-                "runs",
-                item.view.id,
-                `scheduled-${scheduledFor}-${item.view.definition.revision}`,
-              );
-              const runFile = path.join(runDirectory, "run.json");
-              const waiting = yield* decodeRun(yield* fileSystem.readFileString(runFile));
-              assert.notStrictEqual(waiting.state.kind, "finished");
-              const snapshot = yield* decodeDefinition(
-                yield* fileSystem.readFileString(
-                  path.join(runDirectory, "input", "definition.json"),
-                ),
-              );
-              assert.deepStrictEqual(snapshot.replyTarget, item.origin.replyTarget);
-              yield* Deferred.succeed(attempt.acknowledge, undefined);
-              const finished = yield* awaitFinished(fileSystem, runFile);
-              assert.deepStrictEqual(
-                finished.state.kind === "finished" && finished.state.outcome,
-                agent
-                  ? { kind: "completed", finalAssistantText: item.content }
-                  : { kind: "published", content: item.content },
-              );
-            }
-          }),
-        );
-        pending = children;
-      }
-      assert.deepStrictEqual(
-        mailboxes,
-        new Map([
-          ["discord/first-conversation/first-message", ["first", "nested first"]],
-          ["discord/second-conversation/second-message", ["second", "nested second"]],
-          [chatId, ["regular", "nested regular"]],
-        ]),
-      );
-    }).pipe(Effect.provide(platformLayer), Effect.scoped),
-  );
-
-  it.effect("replaces origin delivery policy whenever a target is selected", () =>
-    Effect.gen(function* () {
-      const fileSystem = yield* FileSystem.FileSystem;
-      const path = yield* Path.Path;
-      const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-schedule-retarget-" });
-      const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
-      const origin: Schedule.ScheduleCaller = {
-        ...caller,
-        replyTarget: { platform: "discord", conversationId: "original", messageId: "1" },
-      };
-      const replacement: Schedule.ScheduleCaller = {
-        ...caller,
-        replyTarget: { platform: "discord", conversationId: "replacement", messageId: "2" },
-      };
-      const mailboxes = new Map<string, Array<string>>();
-      const expected = new Map<string, Array<string>>();
-      const schedules = yield* open(schedulesDir);
-      yield* TestClock.setTime(1_000);
-      yield* schedules.start({
-        prepare: (destination) =>
-          Effect.succeed({
-            chatId: destination.kind === "chat" ? destination.chatId : destination.newChatId,
-            workspaceId,
-            cwd: AbsolutePath.make(root),
-          }),
-        deliver: () => Effect.die("Script-only schedules must not deliver agent output"),
-        publish: (_chatId, content, replyTarget) =>
-          Effect.sync(() => {
-            const address = replyTarget?.conversationId ?? "local";
-            const messages = mailboxes.get(address) ?? [];
-            messages.push(content);
-            mailboxes.set(address, messages);
-          }),
-        runPrompt: () => Effect.die("Script-only schedules must not invoke OMP"),
-      });
-      const selections: ReadonlyArray<{
-        readonly name: string;
-        readonly target: Schedule.ScheduleTargetInput;
-        readonly caller: Schedule.ScheduleCaller;
-        readonly mailbox: string;
-      }> = [
-        {
-          name: "explicit same chat",
-          target: { kind: "chat", chatId },
-          caller: origin,
-          mailbox: "local",
-        },
-        {
-          name: "explicit workspace",
-          target: { kind: "workspace", workspaceId },
-          caller: origin,
-          mailbox: "local",
-        },
-        {
-          name: "new caller reply",
-          target: { kind: "current-chat" },
-          caller: replacement,
-          mailbox: "replacement",
-        },
-        {
-          name: "caller without reply",
-          target: { kind: "current-workspace" },
-          caller,
-          mailbox: "local",
-        },
-      ];
-      for (const operation of ["create", "update"]) {
-        for (const selection of selections) {
-          const content = `${operation} ${selection.name}`;
-          let view = yield* schedules.create(operation === "create" ? selection.caller : origin, {
-            name: content,
-            enabled: false,
-            target: operation === "create" ? selection.target : { kind: "current-chat" },
-            trigger: { kind: "once", at: 1_000 },
-            sourceDirectory: yield* prepareSource({
-              "script.js": `process.stdout.write(JSON.stringify({agent:false,content:${JSON.stringify(content)}}));`,
-            }),
-          });
-          if (operation === "update") {
-            view = yield* schedules.update(selection.caller, view.id, { target: selection.target });
-          }
-          if (view.kind !== "ready") return yield* Effect.die("Selected target was rejected");
-          yield* schedules.update(caller, view.id, { enabled: true });
-          yield* awaitFinished(
-            fileSystem,
-            path.join(
-              schedulesDir,
-              "runs",
-              view.id,
-              `scheduled-1000-${view.definition.revision}`,
-              "run.json",
-            ),
-          );
-          const messages = expected.get(selection.mailbox) ?? [];
-          messages.push(content);
-          expected.set(selection.mailbox, messages);
-          assert.deepStrictEqual(mailboxes, expected);
-        }
-      }
-    }).pipe(Effect.provide(platformLayer), Effect.scoped),
-  );
-
   it.effect("records target sender failures as publish failures for both reminder paths", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const origin: Schedule.ScheduleCaller = {
-        ...caller,
-        replyTarget: {
-          platform: "discord",
-          conversationId: "unreachable-origin",
-          messageId: "original-message",
-        },
-      };
       for (const agent of [true, false]) {
         const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-schedule-send-" });
         const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
         const cwd = AbsolutePath.make(root);
-        const attempted = yield* Deferred.make<Schedule.ScheduleCaller["replyTarget"]>();
+        const attempted = yield* Deferred.make<void>();
         const reject = yield* Deferred.make<void>();
-        const send: Schedule.ScheduleRunHost["deliver"] = (_chatId, _content, replyTarget) =>
-          Deferred.succeed(attempted, replyTarget).pipe(
+        const send: Schedule.ScheduleRunHost["deliver"] = () =>
+          Deferred.succeed(attempted, undefined).pipe(
             Effect.andThen(Deferred.await(reject)),
             Effect.andThen(
               Effect.fail(
@@ -664,11 +376,11 @@ describe("Schedules", () => {
             ),
           );
         yield* TestClock.setTime(1_000);
-        const schedules = yield* open(schedulesDir);
-        const created = yield* schedules.create(origin, {
+        const schedules = yield* open(schedulesDir, resolveTarget);
+        const created = yield* schedules.create(caller, {
           name: "unreachable reminder",
           enabled: true,
-          target: { kind: "current-chat" },
+          target: { kind: "chat", chatId: caller.chatId },
           trigger: { kind: "once", at: 1_000 },
           sourceDirectory: yield* prepareSource(
             agent
@@ -680,23 +392,16 @@ describe("Schedules", () => {
           ),
         });
         if (created.kind !== "ready") return yield* Effect.die("Schedule was not created");
-        const updated = yield* schedules.update(
-          {
-            ...caller,
-            replyTarget: {
-              platform: "discord",
-              conversationId: "later-conversation",
-              messageId: "later-message",
-            },
-          },
-          created.id,
-          { name: "updated unreachable reminder" },
-        );
+        const updated = yield* schedules.update(caller, created.id, {
+          name: "updated unreachable reminder",
+        });
         if (updated.kind !== "ready") return yield* Effect.die("Schedule update failed");
         yield* Effect.scoped(
           Effect.gen(function* () {
-            const restarted = yield* make(schedulesDir);
+            const restarted = yield* make(schedulesDir, resolveTarget);
             yield* restarted.start({
+              resolveTarget,
+              materialize: () => Effect.void,
               prepare: () => Effect.succeed({ chatId, workspaceId, cwd }),
               deliver: send,
               publish: send,
@@ -708,7 +413,7 @@ describe("Schedules", () => {
                   finalAssistantText: "reminder",
                 }),
             });
-            assert.deepStrictEqual(yield* Deferred.await(attempted), origin.replyTarget);
+            yield* Deferred.await(attempted);
             const runFile = path.join(
               schedulesDir,
               "runs",
@@ -742,8 +447,14 @@ describe("Schedules", () => {
       const cwd = AbsolutePath.make(root);
       const requests = new Map<Schedule.ScheduleRunId, Agent.AgentPrompt>();
       let deliveries = 0;
-      const schedules = yield* make(schedulesDir);
+      const materialized = new Set<string>();
+      const schedules = yield* make(schedulesDir, resolveTarget);
       const host: Schedule.ScheduleRunHost = {
+        resolveTarget,
+        materialize: ({ title }) =>
+          Effect.sync(() => {
+            materialized.add(title);
+          }),
         prepare: () => Effect.succeed({ chatId, workspaceId, cwd }),
         deliver: () =>
           Effect.sync(() => {
@@ -766,7 +477,7 @@ describe("Schedules", () => {
       const skip = yield* schedules.create(caller, {
         name: "skip",
         enabled: true,
-        target: { kind: "current-chat" },
+        target: { kind: "chat", chatId: caller.chatId },
         trigger: { kind: "once", at: 1_000 },
         sourceDirectory: yield* prepareSource({
           "script.js": "process.stdout.write(JSON.stringify({agent:false}))",
@@ -775,7 +486,7 @@ describe("Schedules", () => {
       const composed = yield* schedules.create(caller, {
         name: "composed",
         enabled: true,
-        target: { kind: "current-chat" },
+        target: { kind: "chat", chatId: caller.chatId },
         trigger: { kind: "once", at: 1_000 },
         sourceDirectory: yield* prepareSource({
           "script.js":
@@ -786,7 +497,7 @@ describe("Schedules", () => {
       const scriptOnly = yield* schedules.create(caller, {
         name: "script only",
         enabled: true,
-        target: { kind: "current-chat" },
+        target: { kind: "chat", chatId: caller.chatId },
         trigger: { kind: "once", at: 1_000 },
         sourceDirectory: yield* prepareSource({
           "script.js": 'process.stdout.write(JSON.stringify({agent:true,content:"script input"}))',
@@ -795,7 +506,7 @@ describe("Schedules", () => {
       const storedPrompt = yield* schedules.create(caller, {
         name: "stored prompt",
         enabled: true,
-        target: { kind: "current-chat" },
+        target: { kind: "chat", chatId: caller.chatId },
         trigger: { kind: "once", at: 1_000 },
         sourceDirectory: yield* prepareSource({
           "script.js": "process.stdout.write(JSON.stringify({agent:true}))",
@@ -805,7 +516,7 @@ describe("Schedules", () => {
       const missingInput = yield* schedules.create(caller, {
         name: "missing input",
         enabled: true,
-        target: { kind: "current-chat" },
+        target: { kind: "chat", chatId: caller.chatId },
         trigger: { kind: "once", at: 1_000 },
         sourceDirectory: yield* prepareSource({
           "script.js": "process.stdout.write(JSON.stringify({agent:true}))",
@@ -841,6 +552,7 @@ describe("Schedules", () => {
       const scriptOnlyRun = yield* finishedRun(scriptOnly);
       const storedPromptRun = yield* finishedRun(storedPrompt);
       const missingInputRun = yield* finishedRun(missingInput);
+      assert.deepStrictEqual(materialized, new Set(["composed", "script only", "stored prompt"]));
 
       assert.deepStrictEqual(skipRun.state.kind === "finished" && skipRun.state.outcome, {
         kind: "skipped",
@@ -872,9 +584,11 @@ describe("Schedules", () => {
         const prepareStarted = yield* Deferred.make<void>();
         const releasePrepare = yield* Deferred.make<void>();
         const published = yield* Queue.unbounded<string>();
-        const schedules = yield* open(schedulesDir);
+        const schedules = yield* open(schedulesDir, resolveTarget);
         yield* TestClock.setTime(1_000);
         yield* schedules.start({
+          resolveTarget,
+          materialize: () => Effect.void,
           prepare: () =>
             Deferred.succeed(prepareStarted, undefined).pipe(
               Effect.andThen(Deferred.await(releasePrepare)),
@@ -891,7 +605,7 @@ describe("Schedules", () => {
         const created = yield* schedules.create(caller, {
           name: "snapshot",
           enabled: true,
-          target: { kind: "current-chat" },
+          target: { kind: "chat", chatId: caller.chatId },
           trigger: { kind: "once", at: 1_000 },
           sourceDirectory: yield* prepareSource(
             {
@@ -986,154 +700,144 @@ describe("Schedules", () => {
       }).pipe(Effect.provide(platformLayer), Effect.scoped),
   );
 
-  it.effect(
-    "freezes in-flight destinations and replies without disabling a retargeted revision",
-    () =>
-      Effect.gen(function* () {
-        const fileSystem = yield* FileSystem.FileSystem;
-        const path = yield* Path.Path;
-        const root = yield* fileSystem.makeTempDirectoryScoped({
-          prefix: "pico-schedule-revision-",
-        });
-        const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
-        const cwd = AbsolutePath.make(path.join(root, "owner"));
-        const destinationCwd = AbsolutePath.make(path.join(root, "destination"));
-        const destinationWorkspaceId = Workspace.WorkspaceId.make(
-          "018f47a0-0000-7000-8000-000000000099",
-        );
-        yield* fileSystem.makeDirectory(cwd);
-        yield* fileSystem.makeDirectory(destinationCwd);
-        const origin: Schedule.ScheduleCaller = {
-          ...caller,
-          replyTarget: { platform: "discord", conversationId: "original", messageId: "1" },
-        };
-        const prepareStarted = yield* Deferred.make<void>();
-        const releasePrepare = yield* Deferred.make<void>();
-        const schedules = yield* make(schedulesDir);
-        const host: Schedule.ScheduleRunHost = {
-          prepare: (destination) =>
-            Effect.gen(function* () {
-              yield* Deferred.succeed(prepareStarted, undefined);
-              yield* Deferred.await(releasePrepare);
-              if (destination.kind !== "workspace") {
-                return yield* Effect.die("Expected a workspace destination");
-              }
-              return {
-                chatId: destination.newChatId,
-                workspaceId: destination.workspaceId,
-                cwd: destination.workspaceId === workspaceId ? cwd : destinationCwd,
-              };
-            }),
-          deliver: (_chatId, content, replyTarget) =>
-            fileSystem
-              .writeFileString(
-                path.join(root, `${replyTarget?.conversationId ?? "local"}.txt`),
-                content,
-              )
-              .pipe(
-                Effect.mapError(
-                  (error) => new Schedule.ScheduleHostError({ message: error.message }),
-                ),
-              ),
-          publish: () => Effect.void,
-          runPrompt: (_target, runId) =>
-            Effect.succeed({
-              runId,
-              outcome: "completed",
-              events: [],
-              finalAssistantText: "old run",
-            }),
-        };
-
-        yield* TestClock.setTime(1_000);
-        yield* schedules.start(host);
-        const created = yield* schedules.create(origin, {
-          name: "old once",
-          enabled: true,
-          target: { kind: "current-workspace" },
-          trigger: { kind: "once", at: 1_000 },
-          sourceDirectory: yield* prepareSource({
-            "prompt.md": "old prompt",
-            "script.js":
-              'await Bun.write("ran.txt",process.env.PICO_WORKSPACE_ID);process.stdout.write(JSON.stringify({agent:true}));',
+  it.effect("freezes in-flight destinations without disabling a retargeted revision", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "pico-schedule-revision-",
+      });
+      const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
+      const cwd = AbsolutePath.make(path.join(root, "owner"));
+      const destinationCwd = AbsolutePath.make(path.join(root, "destination"));
+      const destinationWorkspaceId = Workspace.WorkspaceId.make(
+        "018f47a0-0000-7000-8000-000000000099",
+      );
+      yield* fileSystem.makeDirectory(cwd);
+      yield* fileSystem.makeDirectory(destinationCwd);
+      const prepareStarted = yield* Deferred.make<void>();
+      const releasePrepare = yield* Deferred.make<void>();
+      const schedules = yield* make(schedulesDir, resolveTarget);
+      const host: Schedule.ScheduleRunHost = {
+        resolveTarget,
+        materialize: () => Effect.void,
+        prepare: (destination) =>
+          Effect.gen(function* () {
+            yield* Deferred.succeed(prepareStarted, undefined);
+            yield* Deferred.await(releasePrepare);
+            if (destination.kind !== "workspace") {
+              return yield* Effect.die("Expected a workspace destination");
+            }
+            return {
+              chatId: destination.newChatId,
+              workspaceId: destination.workspaceId,
+              cwd: destination.workspaceId === workspaceId ? cwd : destinationCwd,
+            };
           }),
-        });
-        assert.strictEqual(created.kind, "ready");
-        if (created.kind !== "ready") return;
-        yield* TestClock.adjust("30 seconds");
-        yield* Deferred.await(prepareStarted);
+        deliver: (targetChatId, content) =>
+          fileSystem
+            .writeFileString(path.join(root, `${targetChatId}.txt`), content)
+            .pipe(
+              Effect.mapError(
+                (error) => new Schedule.ScheduleHostError({ message: error.message }),
+              ),
+            ),
+        publish: () => Effect.void,
+        runPrompt: (_target, runId) =>
+          Effect.succeed({
+            runId,
+            outcome: "completed",
+            events: [],
+            finalAssistantText: "old run",
+          }),
+      };
 
-        yield* fileSystem.writeFileString(
-          path.join(created.sourceDirectory, "prompt.md"),
-          "new prompt",
-        );
-        const replaced = yield* schedules.update(caller, created.id, {
-          name: "new cron",
-          trigger: { kind: "cron", expression: "* * * * *", timeZone: "UTC" },
-          target: { kind: "workspace", workspaceId: destinationWorkspaceId },
-        });
-        assert.strictEqual(replaced.kind, "ready");
-        if (replaced.kind !== "ready") return;
-        assert.notStrictEqual(replaced.definition.revision, created.definition.revision);
-        yield* Deferred.succeed(releasePrepare, undefined);
+      yield* TestClock.setTime(1_000);
+      yield* schedules.start(host);
+      const created = yield* schedules.create(caller, {
+        name: "old once",
+        enabled: true,
+        target: { kind: "workspace", workspaceId: caller.workspaceId },
+        trigger: { kind: "once", at: 1_000 },
+        sourceDirectory: yield* prepareSource({
+          "prompt.md": "old prompt",
+          "script.js":
+            'await Bun.write("ran.txt",process.env.PICO_WORKSPACE_ID);process.stdout.write(JSON.stringify({agent:true}));',
+        }),
+      });
+      assert.strictEqual(created.kind, "ready");
+      if (created.kind !== "ready") return;
+      yield* TestClock.adjust("30 seconds");
+      yield* Deferred.await(prepareStarted);
 
-        const runFile = path.join(
+      yield* fileSystem.writeFileString(
+        path.join(created.sourceDirectory, "prompt.md"),
+        "new prompt",
+      );
+      const replaced = yield* schedules.update(caller, created.id, {
+        name: "new cron",
+        trigger: { kind: "cron", expression: "* * * * *", timeZone: "UTC" },
+        target: { kind: "workspace", workspaceId: destinationWorkspaceId },
+      });
+      assert.strictEqual(replaced.kind, "ready");
+      if (replaced.kind !== "ready") return;
+      assert.notStrictEqual(replaced.definition.revision, created.definition.revision);
+      yield* Deferred.succeed(releasePrepare, undefined);
+
+      const runFile = path.join(
+        schedulesDir,
+        "runs",
+        created.id,
+        `scheduled-1000-${created.definition.revision}`,
+        "run.json",
+      );
+      const originalRun = yield* awaitFinished(fileSystem, runFile);
+      assert.strictEqual(yield* fileSystem.readFileString(path.join(cwd, "ran.txt")), workspaceId);
+      assert.isFalse(yield* fileSystem.exists(path.join(destinationCwd, "ran.txt")));
+      assert.strictEqual(
+        yield* fileSystem.readFileString(
+          path.join(root, `${originalRun.plannedTarget.chatId}.txt`),
+        ),
+        "old run",
+      );
+      assert.strictEqual(originalRun.plannedTarget.ownerWorkspaceId, workspaceId);
+      const snapshotFile = path.join(path.dirname(runFile), "input", "definition.json");
+      const snapshotBefore = yield* fileSystem.readFileString(snapshotFile);
+      const frozen = yield* decodeDefinition(snapshotBefore);
+      assert.deepStrictEqual(frozen.target, { kind: "workspace", workspaceId });
+      assert.isTrue(yield* fileSystem.exists(path.join(schedulesDir, "enabled", created.id)));
+      const current = yield* schedules.get(caller, created.id);
+      assert.strictEqual(current.kind, "ready");
+      if (current.kind === "ready") {
+        assert.strictEqual(current.definition.revision, replaced.definition.revision);
+        assert.strictEqual(current.definition.trigger.kind, "cron");
+      }
+      yield* TestClock.adjust("30 seconds");
+      const nextRun = yield* awaitFinished(
+        fileSystem,
+        path.join(
           schedulesDir,
           "runs",
           created.id,
-          `scheduled-1000-${created.definition.revision}`,
+          `scheduled-60000-${replaced.definition.revision}`,
           "run.json",
-        );
-        const originalRun = yield* awaitFinished(fileSystem, runFile);
-        assert.strictEqual(
-          yield* fileSystem.readFileString(path.join(cwd, "ran.txt")),
-          workspaceId,
-        );
-        assert.isFalse(yield* fileSystem.exists(path.join(destinationCwd, "ran.txt")));
-        assert.strictEqual(
-          yield* fileSystem.readFileString(path.join(root, "original.txt")),
-          "old run",
-        );
-        assert.isFalse(yield* fileSystem.exists(path.join(root, "local.txt")));
-        assert.strictEqual(originalRun.plannedTarget.ownerWorkspaceId, workspaceId);
-        const snapshotFile = path.join(path.dirname(runFile), "input", "definition.json");
-        const snapshotBefore = yield* fileSystem.readFileString(snapshotFile);
-        const frozen = yield* decodeDefinition(snapshotBefore);
-        assert.deepStrictEqual(frozen.target, { kind: "workspace", workspaceId });
-        assert.deepStrictEqual(frozen.replyTarget, origin.replyTarget);
-        assert.isTrue(yield* fileSystem.exists(path.join(schedulesDir, "enabled", created.id)));
-        const current = yield* schedules.get(caller, created.id);
-        assert.strictEqual(current.kind, "ready");
-        if (current.kind === "ready") {
-          assert.strictEqual(current.definition.revision, replaced.definition.revision);
-          assert.strictEqual(current.definition.trigger.kind, "cron");
-        }
-        yield* TestClock.adjust("30 seconds");
-        const nextRun = yield* awaitFinished(
-          fileSystem,
-          path.join(
-            schedulesDir,
-            "runs",
-            created.id,
-            `scheduled-60000-${replaced.definition.revision}`,
-            "run.json",
-          ),
-        );
-        assert.strictEqual(
-          yield* fileSystem.readFileString(path.join(destinationCwd, "ran.txt")),
-          destinationWorkspaceId,
-        );
-        assert.strictEqual(
-          yield* fileSystem.readFileString(path.join(root, "local.txt")),
-          "old run",
-        );
-        assert.strictEqual(nextRun.plannedTarget.ownerWorkspaceId, workspaceId);
-        assert.notStrictEqual(nextRun.plannedTarget.chatId, originalRun.plannedTarget.chatId);
-        assert.strictEqual(yield* fileSystem.readFileString(snapshotFile), snapshotBefore);
-        const restarted = yield* make(schedulesDir);
-        yield* restarted.start(host);
-        assert.isTrue(yield* fileSystem.exists(path.join(schedulesDir, "enabled", created.id)));
-      }).pipe(Effect.provide(platformLayer), Effect.scoped),
+        ),
+      );
+      assert.strictEqual(
+        yield* fileSystem.readFileString(path.join(destinationCwd, "ran.txt")),
+        destinationWorkspaceId,
+      );
+      assert.strictEqual(
+        yield* fileSystem.readFileString(path.join(root, `${nextRun.plannedTarget.chatId}.txt`)),
+        "old run",
+      );
+      assert.strictEqual(nextRun.plannedTarget.ownerWorkspaceId, workspaceId);
+      assert.notStrictEqual(nextRun.plannedTarget.chatId, originalRun.plannedTarget.chatId);
+      assert.strictEqual(yield* fileSystem.readFileString(snapshotFile), snapshotBefore);
+      const restarted = yield* make(schedulesDir, resolveTarget);
+      yield* restarted.start(host);
+      assert.isTrue(yield* fileSystem.exists(path.join(schedulesDir, "enabled", created.id)));
+    }).pipe(Effect.provide(platformLayer), Effect.scoped),
   );
 
   it.effect("continues scheduling after a scan failure", () =>
@@ -1144,8 +848,10 @@ describe("Schedules", () => {
       const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
       const cwd = AbsolutePath.make(root);
       const invoked = yield* Deferred.make<void>();
-      const schedules = yield* make(schedulesDir);
+      const schedules = yield* make(schedulesDir, resolveTarget);
       const host: Schedule.ScheduleRunHost = {
+        resolveTarget,
+        materialize: () => Effect.void,
         prepare: () => Effect.succeed({ chatId, workspaceId, cwd }),
         deliver: () => Effect.void,
         publish: () => Effect.void,
@@ -1172,7 +878,7 @@ describe("Schedules", () => {
       const created = yield* schedules.create(caller, {
         name: "after scan failure",
         enabled: true,
-        target: { kind: "current-chat" },
+        target: { kind: "chat", chatId: caller.chatId },
         trigger: { kind: "once", at: 30_000 },
         sourceDirectory: yield* prepareSource({ "prompt.md": "still alive" }),
       });
@@ -1202,12 +908,14 @@ describe("Schedules", () => {
       });
       const logs = yield* captureLogs();
       yield* Effect.gen(function* () {
-        const schedules = yield* open(schedulesDir).pipe(
+        const schedules = yield* open(schedulesDir, resolveTarget).pipe(
           Effect.provideService(FileSystem.FileSystem, failingFileSystem),
         );
         const published = yield* Queue.unbounded<string>();
         yield* TestClock.setTime(1_000);
         yield* schedules.start({
+          resolveTarget,
+          materialize: () => Effect.void,
           prepare: () => Effect.succeed({ chatId, workspaceId, cwd: AbsolutePath.make(root) }),
           deliver: () => Effect.die("Script must publish without OMP"),
           publish: (_chatId, content) => Queue.offer(published, content).pipe(Effect.asVoid),
@@ -1216,7 +924,7 @@ describe("Schedules", () => {
         const created = yield* schedules.create(caller, {
           name: "original",
           enabled: false,
-          target: { kind: "current-chat" },
+          target: { kind: "chat", chatId: caller.chatId },
           trigger: { kind: "once", at: 1_000 },
           sourceDirectory: yield* prepareSource({
             "script.js":
@@ -1294,8 +1002,10 @@ describe("Schedules", () => {
       });
       yield* Effect.gen(function* () {
         const delivered = yield* Deferred.make<void>();
-        const schedules = yield* make(schedulesDir);
+        const schedules = yield* make(schedulesDir, resolveTarget);
         const host: Schedule.ScheduleRunHost = {
+          resolveTarget,
+          materialize: () => Effect.void,
           prepare: () => Effect.succeed({ chatId, workspaceId, cwd }),
           deliver: () => Deferred.succeed(delivered, undefined).pipe(Effect.asVoid),
           publish: () => Effect.die("Agent schedules must deliver their final response"),
@@ -1312,7 +1022,7 @@ describe("Schedules", () => {
         const created = yield* schedules.create(caller, {
           name: "disable retry",
           enabled: true,
-          target: { kind: "current-chat" },
+          target: { kind: "chat", chatId: caller.chatId },
           trigger: { kind: "once", at: 1_000 },
           sourceDirectory: yield* prepareSource({ "prompt.md": "complete once" }),
         });
@@ -1375,8 +1085,10 @@ describe("Schedules", () => {
         },
       });
       yield* Effect.gen(function* () {
-        const schedules = yield* make(schedulesDir);
+        const schedules = yield* make(schedulesDir, resolveTarget);
         const host: Schedule.ScheduleRunHost = {
+          resolveTarget,
+          materialize: () => Effect.void,
           prepare: () => Effect.succeed({ chatId, workspaceId, cwd }),
           deliver: () => Effect.die("Protocol failures must not deliver output"),
           publish: () => Effect.die("Protocol failures must not publish output"),
@@ -1387,7 +1099,7 @@ describe("Schedules", () => {
         const created = yield* schedules.create(caller, {
           name: "phase retention",
           enabled: true,
-          target: { kind: "current-chat" },
+          target: { kind: "chat", chatId: caller.chatId },
           trigger: { kind: "once", at: 1_000 },
           sourceDirectory: yield* prepareSource({ "prompt.md": "unused" }),
         });
@@ -1428,7 +1140,7 @@ describe("Schedules", () => {
       };
       const id = Schedule.ScheduleId.make("018f47a0-0000-7000-8000-000000000061");
       const definition: Schedule.ScheduleDefinition = {
-        version: 1,
+        version: 2,
         revision: Schedule.ScheduleRevision.make("018f47a0-0000-7000-8000-000000000062"),
         name: "original",
         ownerWorkspaceId: workspaceId,
@@ -1577,13 +1289,13 @@ describe("Schedules", () => {
               })
             : fileSystem.rename(from, to),
       });
-      const schedules = yield* open(schedulesDir).pipe(
+      const schedules = yield* open(schedulesDir, resolveTarget).pipe(
         Effect.provideService(FileSystem.FileSystem, gatedFileSystem),
       );
       yield* schedules.create(caller, {
         name: "publication handoff",
         enabled: true,
-        target: { kind: "current-chat" },
+        target: { kind: "chat", chatId: caller.chatId },
         trigger: { kind: "once", at: 1_000 },
         sourceDirectory: yield* prepareSource({ "prompt.md": "Do not execute." }),
       });
@@ -1591,6 +1303,8 @@ describe("Schedules", () => {
       yield* TestClock.setTime(1_000);
       const operation = yield* schedules
         .start({
+          resolveTarget,
+          materialize: () => Effect.void,
           prepare: () => Effect.succeed({ chatId, workspaceId, cwd: AbsolutePath.make(root) }),
           deliver: () => Effect.void,
           publish: () => Effect.void,
@@ -1643,7 +1357,7 @@ describe("Schedules", () => {
       const firstId = Schedule.ScheduleId.make("018f47a0-0000-7000-8000-000000000071");
       const secondId = Schedule.ScheduleId.make("018f47a0-0000-7000-8000-000000000072");
       const firstDefinition: Schedule.ScheduleDefinition = {
-        version: 1,
+        version: 2,
         revision: Schedule.ScheduleRevision.make("018f47a0-0000-7000-8000-000000000073"),
         name: "first",
         ownerWorkspaceId: workspaceId,
@@ -1695,8 +1409,10 @@ describe("Schedules", () => {
       });
 
       yield* Effect.gen(function* () {
-        const schedules = yield* make(schedulesDir);
+        const schedules = yield* make(schedulesDir, resolveTarget);
         const host: Schedule.ScheduleRunHost = {
+          resolveTarget,
+          materialize: () => Effect.void,
           prepare: () => Effect.die("Claimed runs must not dispatch after the scan fails"),
           deliver: () => Effect.die("Claimed runs must not dispatch after the scan fails"),
           publish: () => Effect.die("Claimed runs must not dispatch after the scan fails"),
@@ -1731,7 +1447,7 @@ describe("Schedules", () => {
       const firstId = Schedule.ScheduleId.make("018f47a0-0000-7000-8000-000000000081");
       const secondId = Schedule.ScheduleId.make("018f47a0-0000-7000-8000-000000000082");
       const firstDefinition: Schedule.ScheduleDefinition = {
-        version: 1,
+        version: 2,
         revision: Schedule.ScheduleRevision.make("018f47a0-0000-7000-8000-000000000083"),
         name: "first missed",
         ownerWorkspaceId: workspaceId,
@@ -1785,8 +1501,10 @@ describe("Schedules", () => {
       });
 
       yield* Effect.gen(function* () {
-        const schedules = yield* make(schedulesDir);
+        const schedules = yield* make(schedulesDir, resolveTarget);
         const host: Schedule.ScheduleRunHost = {
+          resolveTarget,
+          materialize: () => Effect.void,
           prepare: () => Effect.die("Missed runs must not dispatch"),
           deliver: () => Effect.die("Missed runs must not dispatch"),
           publish: () => Effect.die("Missed runs must not dispatch"),
@@ -1822,9 +1540,11 @@ describe("Schedules", () => {
       });
       yield* Effect.scoped(
         Effect.gen(function* () {
-          const schedules = yield* make(schedulesDir);
+          const schedules = yield* make(schedulesDir, resolveTarget);
           yield* TestClock.setTime(1_000);
           yield* schedules.start({
+            resolveTarget,
+            materialize: () => Effect.void,
             prepare: () =>
               Effect.fail(new Schedule.ScheduleHostError({ message: "private target detail" })),
             deliver: () => Effect.die("Failed targets cannot deliver"),
@@ -1834,7 +1554,7 @@ describe("Schedules", () => {
           const created = yield* schedules.create(caller, {
             name: "private schedule name",
             enabled: true,
-            target: { kind: "current-chat" },
+            target: { kind: "chat", chatId: caller.chatId },
             trigger: { kind: "once", at: 1_000 },
             sourceDirectory: yield* prepareSource({ "prompt.md": "private prompt" }),
           });
@@ -1876,9 +1596,11 @@ describe("Schedules", () => {
         const logs = yield* captureLogs();
         yield* Effect.scoped(
           Effect.gen(function* () {
-            const schedules = yield* make(schedulesDir);
+            const schedules = yield* make(schedulesDir, resolveTarget);
             yield* TestClock.setTime(1_000);
             yield* schedules.start({
+              resolveTarget,
+              materialize: () => Effect.void,
               prepare: () => Effect.die(new Error("private SDK payload")),
               deliver: () => Effect.die("Failed targets cannot deliver"),
               publish: () => Effect.die("Failed targets cannot publish"),
@@ -1887,7 +1609,7 @@ describe("Schedules", () => {
             const created = yield* schedules.create(caller, {
               name: "defect",
               enabled: true,
-              target: { kind: "current-chat" },
+              target: { kind: "chat", chatId: caller.chatId },
               trigger: { kind: "once", at: 1_000 },
               sourceDirectory: yield* prepareSource({ "prompt.md": "private prompt" }),
             });
@@ -1928,9 +1650,11 @@ describe("Schedules", () => {
         const started = yield* Deferred.make<void>();
         const created = yield* Effect.scoped(
           Effect.gen(function* () {
-            const schedules = yield* make(schedulesDir);
+            const schedules = yield* make(schedulesDir, resolveTarget);
             yield* TestClock.setTime(1_000);
             yield* schedules.start({
+              resolveTarget,
+              materialize: () => Effect.void,
               prepare: () => Effect.succeed({ chatId, workspaceId, cwd: AbsolutePath.make(root) }),
               deliver: () => Effect.die("Cancelled runs cannot deliver"),
               publish: () => Effect.die("Cancelled runs cannot publish"),
@@ -1951,7 +1675,7 @@ describe("Schedules", () => {
             const created = yield* schedules.create(caller, {
               name: mode,
               enabled: true,
-              target: { kind: "current-chat" },
+              target: { kind: "chat", chatId: caller.chatId },
               trigger: { kind: "once", at: 1_000 },
               sourceDirectory: yield* prepareSource({ "prompt.md": "private cancellation prompt" }),
             });
@@ -2008,11 +1732,11 @@ describe("Schedules", () => {
       });
       yield* Effect.scoped(
         Effect.gen(function* () {
-          const schedules = yield* open(schedulesDir);
+          const schedules = yield* open(schedulesDir, resolveTarget);
           const created = yield* schedules.create(caller, {
             name: "invalid definition",
             enabled: false,
-            target: { kind: "current-chat" },
+            target: { kind: "chat", chatId: caller.chatId },
             trigger: { kind: "once", at: 1_000 },
             sourceDirectory: yield* prepareSource({ "prompt.md": "private prompt" }),
           });
@@ -2022,6 +1746,8 @@ describe("Schedules", () => {
           const validSource = yield* fileSystem.readFileString(metadata);
           yield* fileSystem.writeFileString(metadata, '{"private":"invalid metadata"}');
           yield* schedules.start({
+            resolveTarget,
+            materialize: () => Effect.void,
             prepare: () => Effect.die("Disabled schedules cannot execute"),
             deliver: () => Effect.die("Disabled schedules cannot execute"),
             publish: () => Effect.die("Disabled schedules cannot execute"),

@@ -103,8 +103,22 @@ export const make =
         "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-7[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$",
     });
     const target = Type.Union([
-      Type.Object({ kind: Type.Literal("current-chat") }, { additionalProperties: false }),
-      Type.Object({ kind: Type.Literal("current-workspace") }, { additionalProperties: false }),
+      Type.Object(
+        {
+          kind: Type.Literal("external-chat"),
+          platform: Type.Literal("discord"),
+          externalId: Type.String({ minLength: 1 }),
+        },
+        { additionalProperties: false },
+      ),
+      Type.Object(
+        {
+          kind: Type.Literal("external-workspace"),
+          platform: Type.Literal("discord"),
+          externalId: Type.String({ minLength: 1 }),
+        },
+        { additionalProperties: false },
+      ),
       Type.Object({ kind: Type.Literal("chat"), chatId: uuidV7 }, { additionalProperties: false }),
       Type.Object(
         { kind: Type.Literal("workspace"), workspaceId: uuidV7 },

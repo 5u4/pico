@@ -4,6 +4,11 @@ import type { ContextUsage, MessageDelivery, ShakeResult } from "@pico/contract/
 import { Application, type CloseChatResult } from "@pico/contract/application";
 import type * as Chat from "@pico/contract/chat-model";
 import { ApplicationError, type WorkspaceBindingInvalid } from "@pico/contract/errors";
+import {
+  ScheduleHostError,
+  type SchedulePlatform,
+  type ScheduleTarget,
+} from "@pico/contract/schedule";
 import * as Workspace from "@pico/contract/workspace-model";
 import {
   ButtonStyles,
@@ -39,6 +44,8 @@ export interface DiscordChannel {
   readonly type: ChannelTypes;
   readonly parentId?: bigint;
   readonly name?: string;
+  readonly archived?: boolean;
+  readonly locked?: boolean;
 }
 
 export interface DiscordInteraction {
@@ -92,6 +99,15 @@ export interface DiscordInputBot<
       messageId: bigint,
       options: { readonly name: string; readonly autoArchiveDuration: 1_440 },
     ) => Promise<{ readonly id: bigint }>;
+    readonly startThreadWithoutMessage: (
+      channelId: bigint,
+      options: {
+        readonly name: string;
+        readonly autoArchiveDuration: 1_440;
+        readonly type: ChannelTypes.PublicThread;
+      },
+    ) => Promise<{ readonly id: bigint }>;
+    readonly deleteChannel: (channelId: bigint) => Promise<unknown>;
   };
 }
 
@@ -130,6 +146,18 @@ const decodeThreadId = Schema.decodeUnknownEffect(Schema.BigIntFromString);
 const encodeWorkspaceExternalId = Schema.encodeSync(Workspace.DiscordWorkspaceExternalId);
 const workspaceExternalId = (guildId: bigint, channelId: bigint) =>
   encodeWorkspaceExternalId([guildId.toString(), ".", channelId.toString()]);
+const decodeWorkspaceExternalId = Schema.decodeUnknownEffect(Workspace.DiscordWorkspaceExternalId);
+const decodeScheduleId = Schema.decodeUnknownEffect(
+  Schema.String.check(Schema.isPattern(/^[1-9][0-9]{0,19}$/u)).pipe(
+    Schema.decodeTo(
+      Schema.BigIntFromString.check(
+        Schema.isBetweenBigInt({ minimum: 1n, maximum: 18_446_744_073_709_551_615n }),
+      ),
+    ),
+  ),
+);
+const scheduleFailure = (error: { readonly message: string }) =>
+  new ScheduleHostError({ message: error.message });
 
 export const install = Effect.fn("DiscordInput.install")(function* <
   Message extends DiscordMessage,
@@ -229,6 +257,115 @@ export const install = Effect.fn("DiscordInput.install")(function* <
     workspaceIds.set(channelId, workspace.id);
     return workspace.id;
   });
+
+  const scheduleChannel = Effect.fn("Discord.scheduleChannel")(function* (externalId: string) {
+    const id = yield* decodeScheduleId(externalId);
+    const channel = yield* promiseBoundary("resolve-schedule-channel", () =>
+      bot.helpers.getChannel(id),
+    );
+    if (
+      channel.id !== id ||
+      channel.guildId === undefined ||
+      !allowedGuildIds.has(channel.guildId.toString())
+    ) {
+      return yield* new ScheduleHostError({
+        message: "Discord schedule destination is not in an allowed guild",
+      });
+    }
+    return channel;
+  }, Effect.mapError(scheduleFailure));
+
+  const scheduleWorkspace = Effect.fn("Discord.scheduleWorkspace")(function* (externalId: string) {
+    const [guildId, , channelId] = yield* decodeWorkspaceExternalId(externalId);
+    const channel = yield* scheduleChannel(channelId);
+    if (channel.guildId?.toString() !== guildId || channel.type !== ChannelTypes.GuildText) {
+      return yield* new ScheduleHostError({
+        message: "Discord schedule workspace must be its bound text channel",
+      });
+    }
+    return channel;
+  }, Effect.mapError(scheduleFailure));
+
+  const scheduleThread = Effect.fn("Discord.scheduleThread")(function* (externalId: string) {
+    const thread = yield* scheduleChannel(externalId);
+    if (
+      !isThread(thread.type) ||
+      thread.parentId === undefined ||
+      thread.guildId === undefined ||
+      thread.archived !== false ||
+      thread.locked !== false
+    ) {
+      return yield* new ScheduleHostError({
+        message: "Discord schedule chat must be an open thread",
+      });
+    }
+    const binding = workspaceExternalId(thread.guildId, thread.parentId);
+    yield* scheduleWorkspace(binding);
+    return { thread, binding };
+  });
+
+  const validateTarget: SchedulePlatform["validateTarget"] = Effect.fn(
+    "Discord.validateScheduleTarget",
+  )(function* (input) {
+    if (input.kind === "workspace") {
+      yield* scheduleWorkspace(input.workspaceExternalId);
+      return;
+    }
+    const { binding } = yield* scheduleThread(input.chatExternalId);
+    if (binding !== input.workspaceExternalId) {
+      return yield* new ScheduleHostError({
+        message: "Discord schedule thread belongs to another workspace",
+      });
+    }
+  });
+
+  const resolveTarget: SchedulePlatform["resolveTarget"] = Effect.fn(
+    "Discord.resolveScheduleTarget",
+  )(function* (input) {
+    if (input.kind === "external-workspace") {
+      const channel = yield* scheduleChannel(input.externalId);
+      if (channel.type !== ChannelTypes.GuildText || channel.guildId === undefined) {
+        return yield* new ScheduleHostError({
+          message: "Discord schedule workspace must be a text channel",
+        });
+      }
+      return {
+        kind: "workspace",
+        workspaceId: yield* resolveWorkspace(channel.id, channel.guildId, channel.name),
+      } satisfies ScheduleTarget;
+    }
+    const { thread, binding } = yield* scheduleThread(input.externalId);
+    const chat = yield* application.findChatByPlatformId("discord", binding, thread.id.toString());
+    if (Option.isNone(chat) || chat.value.archivedAt !== null) {
+      return yield* new ScheduleHostError({
+        message: "Discord schedule thread has no open Pico chat binding",
+      });
+    }
+    return { kind: "chat", chatId: chat.value.id } satisfies ScheduleTarget;
+  }, Effect.mapError(scheduleFailure));
+
+  const createThread: SchedulePlatform["createThread"] = Effect.fn("Discord.createScheduleThread")(
+    function* (input) {
+      const channel = yield* scheduleWorkspace(input.workspaceExternalId);
+      const thread = yield* promiseBoundary("create-schedule-thread", () =>
+        bot.helpers.startThreadWithoutMessage(channel.id, {
+          name: threadName(input.title) || "Scheduled task",
+          autoArchiveDuration: 1_440,
+          type: ChannelTypes.PublicThread,
+        }),
+      );
+      return thread.id.toString();
+    },
+    Effect.mapError(scheduleFailure),
+  );
+
+  const deleteThread: SchedulePlatform["deleteThread"] = Effect.fn("Discord.deleteScheduleThread")(
+    function* (externalId) {
+      const id = yield* decodeScheduleId(externalId);
+      yield* promiseBoundary("delete-schedule-thread", () => bot.helpers.deleteChannel(id));
+    },
+    Effect.mapError(scheduleFailure),
+  );
 
   // Effect.fn restores Context on return, so request helpers must stay in the terminal log scope.
   const resolveCommandThread = Effect.fnUntraced(function* (interaction: Interaction) {
@@ -1143,5 +1280,14 @@ export const install = Effect.fn("DiscordInput.install")(function* <
     run(response);
   };
 
-  return resolveThreadId;
+  return {
+    resolveThreadId,
+    schedule: {
+      platform: "discord",
+      resolveTarget,
+      validateTarget,
+      createThread,
+      deleteThread,
+    } satisfies Omit<SchedulePlatform, "send">,
+  };
 });
