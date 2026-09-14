@@ -1,6 +1,12 @@
 import type * as AgentEvent from "@pico/contract/agent-event";
 import type * as AgentMessage from "@pico/contract/agent-message";
-import { AgentRuntime, type MessageDelivery, type ShakeMode } from "@pico/contract/agent-runtime";
+import {
+  AgentRuntime,
+  type MessageDelivery,
+  type ModelRef,
+  type ModelTarget,
+  type ShakeMode,
+} from "@pico/contract/agent-runtime";
 import { AgentSessionStore } from "@pico/contract/agent-session-store";
 import {
   Application,
@@ -470,7 +476,7 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
       Effect.gen(function* () {
         const handoffPath = yield* bots.saveHandoff(source, handoff);
         yield* Effect.acquireUseRelease(
-          sessions.createPhysical(source.botRoot, chat.cwd),
+          sessions.createPhysical(source.botRoot, chat.cwd, source.journal),
           (journal) => bots.rotate(source, journal, handoffPath),
           (journal, exit) =>
             Exit.isFailure(exit)
@@ -954,6 +960,53 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
     );
   });
 
+  const availableModels = Effect.fn("Application.availableModels")(function* (target: ModelTarget) {
+    if (target.kind === "chat") {
+      yield* ensureChatOpen(target.chatId, "Failed to list chat models");
+    } else {
+      if (!path.isAbsolute(target.bot.botRoot)) {
+        return yield* new ApplicationError({
+          reason: "invalid-state",
+          message: "Bot root must be an absolute path",
+        });
+      }
+      const botRoot = AbsolutePath.make(path.normalize(target.bot.botRoot));
+      const existing = yield* bots
+        .findByRoot(botRoot)
+        .pipe(Effect.mapError(failure("Failed to list bot models")));
+      if (Option.isSome(existing)) {
+        if (existing.value.platform !== target.bot.platform) {
+          return yield* new ApplicationError({
+            reason: "conflict",
+            message: "Bot root belongs to another platform",
+          });
+        }
+        yield* ensureChatOpen(existing.value.chatId, "Failed to list bot models");
+        target = { kind: "chat", chatId: existing.value.chatId };
+      } else {
+        target = { kind: "bot", bot: { ...target.bot, botRoot } };
+      }
+    }
+    return yield* runtime
+      .availableModels(target)
+      .pipe(Effect.mapError(failure("Failed to list available models")));
+  });
+
+  const switchModel = Effect.fn("Application.switchModel")(function* (
+    chatId: Chat.ChatId,
+    model: ModelRef,
+  ) {
+    return yield* serialized(
+      chatId,
+      Effect.gen(function* () {
+        yield* ensureChatOpen(chatId, "Failed to switch chat model");
+        return yield* runtime
+          .switchModel(chatId, model)
+          .pipe(Effect.mapError(failure("Failed to switch chat model")));
+      }),
+    );
+  });
+
   const shake = Effect.fn("Application.shake")(function* (chatId: Chat.ChatId, mode: ShakeMode) {
     return yield* serialized(
       chatId,
@@ -984,6 +1037,8 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
     askBtw,
     abort,
     contextUsage,
+    availableModels,
+    switchModel,
     shake,
   });
   const scheduleHost = Schedule.ScheduleRunHostService.of({

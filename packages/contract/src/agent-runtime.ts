@@ -3,10 +3,24 @@ import type * as Effect from "effect/Effect";
 import type * as Stream from "effect/Stream";
 import type { AgentEventEnvelope } from "./agent-event.ts";
 import type { AgentPrompt, AgentTranscript } from "./agent-message.ts";
+import type { BotDescriptor } from "./bot-session.ts";
 import type { ChatId } from "./chat-model.ts";
 import type { AgentError } from "./errors.ts";
 import type { ReplyTarget } from "./reply-target.ts";
 import type { ScheduleRunId } from "./schedule.ts";
+
+export interface ModelRef {
+  readonly provider: string;
+  readonly id: string;
+}
+
+export interface ModelInfo extends ModelRef {
+  readonly name: string;
+}
+
+export type ModelTarget =
+  | { readonly kind: "chat"; readonly chatId: ChatId }
+  | { readonly kind: "bot"; readonly bot: BotDescriptor };
 
 export type ShakeMode = "elide" | "images" | "thinking";
 
@@ -100,6 +114,14 @@ export class AgentRuntime extends Context.Service<
     readonly abort: (chatId: ChatId) => Effect.Effect<void, AgentError>;
 
     readonly contextUsage: (chatId: ChatId) => Effect.Effect<ContextUsage, AgentError>;
+
+    /** Application calls this for model discovery without opening a session. */
+    readonly availableModels: (
+      target: ModelTarget,
+    ) => Effect.Effect<readonly ModelInfo[], AgentError>;
+
+    /** Application calls this to persist a temporary model choice in one chat. */
+    readonly switchModel: (chatId: ChatId, model: ModelRef) => Effect.Effect<ModelInfo, AgentError>;
 
     readonly shake: (chatId: ChatId, mode: ShakeMode) => Effect.Effect<ShakeResult, AgentError>;
   }

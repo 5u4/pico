@@ -71,6 +71,8 @@ describe("Chat close", () => {
         const runtime = Layer.succeed(
           AgentRuntime,
           AgentRuntime.of({
+            availableModels: () => Effect.die("unexpected model catalog read"),
+            switchModel: () => Effect.die("unexpected model switch"),
             events: Stream.empty,
             drain: () => Effect.void,
             transcript: () => Effect.die("unexpected transcript read"),
@@ -201,6 +203,8 @@ describe("Chat close", () => {
         Effect.gen(function* () {
           const chats = yield* ChatRepository;
           return AgentRuntime.of({
+            availableModels: () => Effect.die("unexpected model catalog read"),
+            switchModel: () => Effect.die("unexpected model switch"),
             askBtw: () => Effect.die("unexpected side question"),
             events: Stream.empty,
             drain: () => Effect.void,
@@ -325,6 +329,16 @@ describe("Chat close", () => {
         );
         assert.instanceOf(yield* application.contextUsage(chat.id).pipe(Effect.flip), ChatClosed);
         assert.instanceOf(yield* application.shake(chat.id, "elide").pipe(Effect.flip), ChatClosed);
+        assert.instanceOf(
+          yield* application.availableModels({ kind: "chat", chatId: chat.id }).pipe(Effect.flip),
+          ChatClosed,
+        );
+        assert.instanceOf(
+          yield* application
+            .switchModel(chat.id, { provider: "openai", id: "gpt-4.1" })
+            .pipe(Effect.flip),
+          ChatClosed,
+        );
         yield* application.abort(chat.id);
         assert.strictEqual(aborts, 1);
         assert.deepStrictEqual(yield* application.transcript(chat.id), runtimeTranscript);
@@ -340,6 +354,18 @@ describe("Chat close", () => {
         );
         assertApplicationError(
           yield* application.shake(missingChatId, "elide").pipe(Effect.flip),
+          "not-found",
+        );
+        assertApplicationError(
+          yield* application
+            .availableModels({ kind: "chat", chatId: missingChatId })
+            .pipe(Effect.flip),
+          "not-found",
+        );
+        assertApplicationError(
+          yield* application
+            .switchModel(missingChatId, { provider: "openai", id: "gpt-4.1" })
+            .pipe(Effect.flip),
           "not-found",
         );
         assertApplicationError(
@@ -383,6 +409,8 @@ describe("Chat close", () => {
       const runtimeLayer = Layer.succeed(
         AgentRuntime,
         AgentRuntime.of({
+          availableModels: () => Effect.die("unexpected model catalog read"),
+          switchModel: () => Effect.die("unexpected model switch"),
           askBtw: () => Effect.die("unexpected side question"),
           events: Stream.empty,
           drain: () => Effect.void,
@@ -518,6 +546,8 @@ describe("Chat close", () => {
         Effect.gen(function* () {
           const chats = yield* ChatRepository;
           return AgentRuntime.of({
+            availableModels: () => Effect.die("unexpected model catalog read"),
+            switchModel: () => Effect.die("unexpected model switch"),
             askBtw: () => Effect.die("unexpected side question"),
             events: Stream.empty,
             drain: () => Effect.void,

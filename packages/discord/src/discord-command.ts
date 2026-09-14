@@ -68,6 +68,19 @@ export const applicationCommands = [
     ],
   },
   {
+    name: "switch",
+    description: "Choose the model for this chat",
+    options: [
+      {
+        name: "model",
+        description: "Model to use in this chat",
+        type: ApplicationCommandOptionTypes.String,
+        required: true,
+        autocomplete: true,
+      },
+    ],
+  },
+  {
     name: "btw",
     description: "Ask a side question without changing this chat's conversation",
     options: [
@@ -94,7 +107,7 @@ export const applicationCommands = [
 ] satisfies Array<CreateApplicationCommand>;
 
 export const directMessageCommands = applicationCommands
-  .filter(({ name }) => name === "context" || name === "shake")
+  .filter(({ name }) => name === "context" || name === "shake" || name === "switch")
   .map((command) => ({
     ...command,
     contexts: [DiscordInteractionContextType.BotDm],
@@ -105,6 +118,7 @@ export interface CommandOption {
   readonly name: string;
   readonly type: ApplicationCommandOptionTypes;
   readonly value?: string | number | boolean;
+  readonly focused?: boolean;
   readonly options?: ReadonlyArray<CommandOption>;
 }
 
@@ -129,10 +143,15 @@ export type BtwCommand =
   | { readonly kind: "btw"; readonly question: string }
   | { readonly kind: "malformedBtw" };
 
+export type SwitchCommand =
+  | { readonly kind: "switch"; readonly model: string }
+  | { readonly kind: "malformedSwitch" };
+
 export type Command =
   | BindCommand
   | ShakeCommand
   | BtwCommand
+  | SwitchCommand
   | { readonly kind: "abort" }
   | { readonly kind: "context" }
   | { readonly kind: "close" };
@@ -148,6 +167,8 @@ export const parse = (
       return parseShake(options);
     case "btw":
       return parseBtw(options);
+    case "switch":
+      return parseSwitch(options);
     case "abort":
       return { kind: "abort" };
     case "context":
@@ -172,6 +193,38 @@ const parseBtw = (options: ReadonlyArray<CommandOption> | undefined): BtwCommand
     return { kind: "malformedBtw" };
   }
   return { kind: "btw", question: question.value.trim() };
+};
+
+const modelOption = (options: ReadonlyArray<CommandOption> | undefined) => {
+  if (options?.length !== 1) return undefined;
+  const model = options[0];
+  if (
+    model?.name !== "model" ||
+    model.type !== ApplicationCommandOptionTypes.String ||
+    typeof model.value !== "string" ||
+    model.options !== undefined
+  ) {
+    return undefined;
+  }
+  return { value: model.value, focused: model.focused };
+};
+
+export const parseModelQuery = (options: ReadonlyArray<CommandOption> | undefined) => {
+  const model = modelOption(options);
+  return model?.focused === true ? model.value : undefined;
+};
+
+const parseSwitch = (options: ReadonlyArray<CommandOption> | undefined): SwitchCommand => {
+  const model = modelOption(options);
+  if (
+    model === undefined ||
+    model.focused === true ||
+    model.value.trim().length === 0 ||
+    model.value.length > 100
+  ) {
+    return { kind: "malformedSwitch" };
+  }
+  return { kind: "switch", model: model.value };
 };
 
 const parseBind = (options: ReadonlyArray<CommandOption> | undefined): BindCommand => {

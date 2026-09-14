@@ -1,6 +1,6 @@
 import * as BunCrypto from "@effect/platform-bun/BunCrypto";
 import { assert, describe, it } from "@effect/vitest";
-import type { ContextUsage } from "@pico/contract/agent-runtime";
+import type { ContextUsage, MessageDelivery } from "@pico/contract/agent-runtime";
 import { Application, type BindWorkspace } from "@pico/contract/application";
 import * as Chat from "@pico/contract/chat-model";
 import { ApplicationError, ChatClosed, WorkspaceBindingInvalid } from "@pico/contract/errors";
@@ -28,6 +28,9 @@ import {
   interaction,
   interactionHandlerFor,
   message,
+  modelOptions,
+  modelSuggestions,
+  privateCommandReply,
   workspaceId,
 } from "./discord-input.fixture.ts";
 import { type DiscordInputBot, type DiscordInteraction, install } from "./discord-input.ts";
@@ -46,10 +49,13 @@ const worktreeOptions = (repository: string, branch: string, prefix: string) => 
   },
 ];
 
-const installBtwInput = Effect.fn("test.installBtwInput")(function* (options: {
-  readonly askBtw: Application["Service"]["askBtw"];
+const installThreadInput = Effect.fn("test.installThreadInput")(function* (options: {
+  readonly askBtw?: Application["Service"]["askBtw"];
   readonly sendMessage?: Application["Service"]["sendMessage"];
   readonly closeChat?: Application["Service"]["closeChat"];
+  readonly availableModels?: Application["Service"]["availableModels"];
+  readonly switchModel?: Application["Service"]["switchModel"];
+  readonly getChannel?: DiscordInputBot["helpers"]["getChannel"];
   readonly editChannel?: DiscordInputBot["helpers"]["editChannel"];
   readonly drainOutput?: () => Effect.Effect<void>;
 }) {
@@ -59,12 +65,14 @@ const installBtwInput = Effect.fn("test.installBtwInput")(function* (options: {
     helpers: {
       addReaction: async () => undefined,
       deleteOwnReaction: async () => undefined,
-      getChannel: async (id) => ({
-        id,
-        guildId: 1n,
-        type: id === 10n ? ChannelTypes.GuildText : ChannelTypes.PublicThread,
-        parentId: 10n,
-      }),
+      getChannel:
+        options.getChannel ??
+        (async (id) => ({
+          id,
+          guildId: 1n,
+          type: id === 10n ? ChannelTypes.GuildText : ChannelTypes.PublicThread,
+          parentId: 10n,
+        })),
       sendMessage: async () => {
         throw new Error("btw must use its public interaction");
       },
@@ -79,6 +87,8 @@ const installBtwInput = Effect.fn("test.installBtwInput")(function* (options: {
     },
   };
   const application = Application.of({
+    availableModels: options.availableModels ?? (() => Effect.die("unexpected model discovery")),
+    switchModel: options.switchModel ?? (() => Effect.die("unexpected model switch")),
     getOrCreateBotChat: () => Effect.die("unexpected bot chat creation"),
     sendBotMessage: () => Effect.die("unexpected bot message"),
     listWorkspaces: () => Effect.die("unexpected workspace list"),
@@ -105,7 +115,7 @@ const installBtwInput = Effect.fn("test.installBtwInput")(function* (options: {
     transcript: () => Effect.die("btw must not read a separate transcript"),
     closeChat: options.closeChat ?? (() => Effect.die("unexpected close")),
     sendMessage: options.sendMessage ?? (() => Effect.die("btw must not send a main prompt")),
-    askBtw: options.askBtw,
+    askBtw: options.askBtw ?? (() => Effect.die("unexpected side question")),
     abort: () => Effect.die("btw must not abort the main request"),
     contextUsage: () => Effect.die("unexpected context read"),
     shake: () => Effect.die("unexpected shake"),
@@ -118,6 +128,162 @@ const installBtwInput = Effect.fn("test.installBtwInput")(function* (options: {
 });
 
 describe("discord interactions", () => {
+  it.effect(
+    "autocompletes a bound thread outside its input lock and changes only its current chat",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const incoming = yield* Deferred.make<void>();
+          const releaseInput = yield* Deferred.make<void>();
+          const laterModel = yield* Deferred.make<string>();
+          const selected = { provider: "native", id: "thread-model", name: "Thread model" };
+          let active = "original";
+          const bot = yield* installThreadInput({
+            availableModels: (target) =>
+              Effect.succeed(target.kind === "chat" && target.chatId === chatId ? [selected] : []),
+            switchModel: (id, model) =>
+              Effect.sync(() => {
+                if (id !== chatId) throw new Error("wrong chat selected");
+                active = `${model.provider}/${model.id}`;
+                return selected;
+              }),
+            sendMessage: (_id, prompt) =>
+              Effect.gen(function* () {
+                if (prompt.text === "first") {
+                  yield* Deferred.succeed(incoming, undefined);
+                  yield* Deferred.await(releaseInput);
+                } else {
+                  yield* Deferred.succeed(laterModel, active);
+                }
+                return { kind: "handled" } satisfies MessageDelivery<ApplicationError>;
+              }),
+          });
+          handlerFor(bot)(message({ channelId: 20n, content: "first" }));
+          yield* Deferred.await(incoming);
+          const suggestions = yield* modelSuggestions(
+            bot,
+            interaction({
+              channelId: 20n,
+              data: { name: "switch", options: modelOptions("thread", true) },
+            }),
+          );
+          assert.deepStrictEqual(
+            suggestions.map(({ value }) => value),
+            ["native/thread-model"],
+          );
+          yield* Deferred.succeed(releaseInput, undefined);
+          const reply = yield* privateCommandReply(
+            bot,
+            interaction({
+              channelId: 20n,
+              data: { name: "switch", options: modelOptions("native/thread-model") },
+            }),
+          );
+          assert.include(reply, "native/thread-model");
+          handlerFor(bot)(message({ channelId: 20n, content: "later" }));
+          assert.strictEqual(yield* Deferred.await(laterModel), "native/thread-model");
+        }),
+      ),
+  );
+
+  it.effect(
+    "keeps guild, fetched-channel and persisted-thread restrictions on model discovery and selection",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const model = { provider: "native", id: "model", name: "Model" };
+          let catalogReads = 0;
+          let switches = 0;
+          const bot = yield* installThreadInput({
+            getChannel: async (id) =>
+              id === 23n
+                ? { id, guildId: 1n, type: ChannelTypes.PublicThread }
+                : {
+                    id,
+                    guildId: id === 22n ? 2n : 1n,
+                    type: id === 10n ? ChannelTypes.GuildText : ChannelTypes.PublicThread,
+                    parentId: 10n,
+                  },
+            availableModels: () =>
+              Effect.sync(() => {
+                catalogReads += 1;
+                return [model];
+              }),
+            switchModel: () =>
+              Effect.sync(() => {
+                switches += 1;
+                return model;
+              }),
+          });
+          yield* modelSuggestions(
+            bot,
+            interaction({
+              channelId: 20n,
+              data: { name: "switch", options: modelOptions("", true) },
+            }),
+          );
+          for (const target of [
+            { guildId: 2n, channelId: 20n },
+            { guildId: 1n, channelId: 10n },
+            { guildId: 1n, channelId: 21n },
+            { guildId: 1n, channelId: 22n },
+            { guildId: 1n, channelId: 23n },
+          ]) {
+            assert.deepStrictEqual(
+              yield* modelSuggestions(
+                bot,
+                interaction({
+                  ...target,
+                  data: { name: "switch", options: modelOptions("", true) },
+                }),
+              ),
+              [],
+            );
+            yield* privateCommandReply(
+              bot,
+              interaction({
+                ...target,
+                data: { name: "switch", options: modelOptions("native/model") },
+              }),
+            );
+          }
+          assert.strictEqual(catalogReads, 1);
+          assert.strictEqual(switches, 0);
+        }),
+      ),
+  );
+
+  it.effect(
+    "privately reports rejected and closed thread switches without exposing native failures",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const model = { provider: "native", id: "model", name: "Model" };
+          let closed = false;
+          const bot = yield* installThreadInput({
+            availableModels: () => Effect.succeed([model]),
+            switchModel: () =>
+              closed
+                ? Effect.fail(new ChatClosed())
+                : Effect.fail(
+                    new ApplicationError({ reason: "invalid-state", message: "secret-provider" }),
+                  ),
+          });
+          const command = interaction({
+            channelId: 20n,
+            data: { name: "switch", options: modelOptions("native/model") },
+          });
+          const busyReply = yield* privateCommandReply(bot, command);
+          assert.notInclude(busyReply, "secret-provider");
+          assert.notInclude(busyReply, "native/model");
+          closed = true;
+          const closedReply = yield* privateCommandReply(bot, command);
+          assert.notInclude(closedReply, "native/model");
+          assert.notStrictEqual(closedReply, busyReply);
+        }),
+      ),
+  );
+
   it.effect("keeps long side questions and answers public while normal input continues", () =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -131,7 +297,7 @@ describe("discord interactions", () => {
         const answer = `${"Answer ".repeat(700)}last-answer-marker`;
         const publicMessages: Array<{ kind: "edit" | "followup"; content: string }> = [];
         let deferred = false;
-        const bot = yield* installBtwInput({
+        const bot = yield* installThreadInput({
           sendMessage: (_id, prompt) =>
             Deferred.succeed(prompt.text === "main" ? mainStarted : laterSent, undefined).pipe(
               Effect.as({ kind: "started", completed: Deferred.await(mainFinished) }),
@@ -205,7 +371,7 @@ describe("discord interactions", () => {
             const question = outcome === "answer" ? `Explain ${"x".repeat(2_200)}` : "Explain this";
             const answer = "The complete answer.";
             const order: string[] = [];
-            const bot = yield* installBtwInput({
+            const bot = yield* installThreadInput({
               askBtw: () =>
                 Deferred.succeed(asked, undefined).pipe(
                   Effect.andThen(
@@ -280,7 +446,7 @@ describe("discord interactions", () => {
         const closeReplied = yield* Deferred.make<void>();
         const releaseDefer = Promise.withResolvers<void>();
         const order: string[] = [];
-        const bot = yield* installBtwInput({
+        const bot = yield* installThreadInput({
           askBtw: () => Effect.fail(new ChatClosed()),
           closeChat: () =>
             Effect.sync(() => {
@@ -349,7 +515,7 @@ describe("discord interactions", () => {
         const deferrals: boolean[] = [];
         const publicFollowups: string[] = [];
         let asked = 0;
-        const bot = yield* installBtwInput({
+        const bot = yield* installThreadInput({
           askBtw: () =>
             Effect.sync(() => {
               asked += 1;
@@ -431,7 +597,7 @@ describe("discord interactions", () => {
           const settled = yield* Deferred.make<void>();
           const archived = yield* Deferred.make<void>();
           const logs: Array<ReturnType<typeof Logger.formatStructured.log>> = [];
-          const bot = yield* installBtwInput({
+          const bot = yield* installThreadInput({
             askBtw: (_id, question) => {
               if (question === "cancel") return Effect.interrupt;
               if (question === "closed") return Effect.fail(new ChatClosed());
@@ -510,7 +676,7 @@ describe("discord interactions", () => {
     Effect.scoped(
       Effect.gen(function* () {
         let asked = false;
-        const bot = yield* installBtwInput({
+        const bot = yield* installThreadInput({
           askBtw: () =>
             Effect.sync(() => {
               asked = true;
@@ -603,6 +769,8 @@ describe("discord interactions", () => {
           },
         } satisfies DiscordInputBot;
         const application = Application.of({
+          availableModels: () => Effect.die("unexpected model discovery"),
+          switchModel: () => Effect.die("unexpected model switch"),
           getOrCreateBotChat: () => Effect.die("unexpected bot chat creation"),
           sendBotMessage: () => Effect.die("unexpected bot message"),
           askBtw: () => Effect.die("unexpected side question"),
@@ -818,6 +986,8 @@ describe("discord interactions", () => {
         };
         const failedChat = { ...chat, id: failingChatId, externalId: "22" };
         const application = Application.of({
+          availableModels: () => Effect.die("unexpected model discovery"),
+          switchModel: () => Effect.die("unexpected model switch"),
           getOrCreateBotChat: () => Effect.die("unexpected bot chat creation"),
           sendBotMessage: () => Effect.die("unexpected bot message"),
           askBtw: () => Effect.die("unexpected side question"),
@@ -1004,6 +1174,8 @@ describe("discord interactions", () => {
           archivedAt: null,
         });
         const application = Application.of({
+          availableModels: () => Effect.die("unexpected model discovery"),
+          switchModel: () => Effect.die("unexpected model switch"),
           getOrCreateBotChat: () => Effect.die("unexpected bot chat creation"),
           sendBotMessage: () => Effect.die("unexpected bot message"),
           askBtw: () => Effect.die("unexpected side question"),
@@ -1151,6 +1323,8 @@ describe("discord interactions", () => {
           },
         } satisfies DiscordInputBot;
         const application = Application.of({
+          availableModels: () => Effect.die("unexpected model discovery"),
+          switchModel: () => Effect.die("unexpected model switch"),
           getOrCreateBotChat: () => Effect.die("unexpected bot chat creation"),
           sendBotMessage: () => Effect.die("unexpected bot message"),
           askBtw: () => Effect.die("unexpected side question"),
@@ -1302,6 +1476,8 @@ describe("discord interactions", () => {
           archivedAt: null,
         };
         const application = Application.of({
+          availableModels: () => Effect.die("unexpected model discovery"),
+          switchModel: () => Effect.die("unexpected model switch"),
           getOrCreateBotChat: () => Effect.die("unexpected bot chat creation"),
           sendBotMessage: () => Effect.die("unexpected bot message"),
           askBtw: () => Effect.die("unexpected side question"),

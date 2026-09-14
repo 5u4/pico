@@ -5,6 +5,7 @@ import type { ApplicationError } from "@pico/contract/errors";
 import { AbsolutePath } from "@pico/contract/path";
 import * as Workspace from "@pico/contract/workspace-model";
 import { ApplicationCommandOptionTypes, InteractionTypes } from "discordeno";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Redacted from "effect/Redacted";
 import type { DiscordInputBot, DiscordInteraction } from "./discord-input.ts";
@@ -63,6 +64,10 @@ export const bindOptions = (cwd: string) => [
   },
 ];
 
+export const modelOptions = (value: string, focused = false) => [
+  { name: "model", type: ApplicationCommandOptionTypes.String, value, focused },
+];
+
 export const interaction = (overrides: Partial<DiscordInteraction> = {}): DiscordInteraction => ({
   type: InteractionTypes.ApplicationCommand,
   guildId: 1n,
@@ -82,3 +87,51 @@ export const interactionHandlerFor = (bot: DiscordInputBot) => {
   if (handler === undefined) throw new Error("Discord interaction handler was not installed");
   return handler;
 };
+
+export const modelSuggestions = Effect.fn("test.modelSuggestions")(function* (
+  bot: DiscordInputBot,
+  command: DiscordInteraction,
+) {
+  const responded =
+    yield* Deferred.make<NonNullable<Parameters<DiscordInteraction["respond"]>[0]["choices"]>>();
+  interactionHandlerFor(bot)({
+    ...command,
+    type: InteractionTypes.ApplicationCommandAutocomplete,
+    defer: async () => {
+      throw new Error("autocomplete cannot defer");
+    },
+    edit: async () => {
+      throw new Error("autocomplete cannot edit a response");
+    },
+    respond: async (response) => {
+      assert.isUndefined(response.content);
+      assert.isUndefined(response.flags);
+      Deferred.doneUnsafe(responded, Effect.succeed(response.choices ?? []));
+    },
+  });
+  return yield* Deferred.await(responded);
+});
+
+export const privateCommandReply = Effect.fn("test.privateCommandReply")(function* (
+  bot: DiscordInputBot,
+  command: DiscordInteraction,
+) {
+  const edited = yield* Deferred.make<string>();
+  let deferred = false;
+  interactionHandlerFor(bot)({
+    ...command,
+    defer: async (isPrivate) => {
+      assert.isTrue(isPrivate);
+      deferred = true;
+    },
+    respond: async () => {
+      throw new Error("a command must defer before replying");
+    },
+    edit: async (response) => {
+      assert.isTrue(deferred);
+      assert.deepStrictEqual(response.allowedMentions, { parse: [], repliedUser: false });
+      Deferred.doneUnsafe(edited, Effect.succeed(response.content ?? ""));
+    },
+  });
+  return yield* Deferred.await(edited);
+});

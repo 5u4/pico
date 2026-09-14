@@ -91,6 +91,8 @@ describe("discord attachments", () => {
           },
         } satisfies DiscordInputBot;
         const application = Application.of({
+          availableModels: () => Effect.die("unexpected model discovery"),
+          switchModel: () => Effect.die("unexpected model switch"),
           getOrCreateBotChat: () => Effect.die("unexpected bot chat creation"),
           sendBotMessage: () => Effect.die("unexpected bot message"),
           askBtw: () => Effect.die("unexpected side question"),
@@ -276,6 +278,8 @@ describe("discord attachments", () => {
           },
         } satisfies DiscordInputBot;
         const application = Application.of({
+          availableModels: () => Effect.die("unexpected model discovery"),
+          switchModel: () => Effect.die("unexpected model switch"),
           getOrCreateBotChat: () => Effect.die("unexpected bot chat creation"),
           sendBotMessage: () => Effect.die("unexpected bot message"),
           askBtw: () => Effect.die("unexpected side question"),

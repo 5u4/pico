@@ -74,6 +74,11 @@ describe("session pool publication", () => {
                 },
                 createHandoff: () => Promise.reject(new Error("unexpected handoff")),
                 askBtw: () => Promise.reject(new Error("unexpected side question")),
+                switchModel: () => Promise.reject(new Error("unexpected model switch")),
+                flush: async () => {
+                  await manager.ensureOnDisk();
+                  await manager.flush();
+                },
                 sendPrompt: () => Promise.resolve(admitted),
                 shake: async (mode) => shakeResult(mode),
                 appendAssistantMessage: async (message) => {
@@ -198,6 +203,11 @@ describe("session pool publication", () => {
                   },
                   createHandoff: () => Promise.reject(new Error("unexpected handoff")),
                   askBtw: () => Promise.reject(new Error("unexpected side question")),
+                  switchModel: () => Promise.reject(new Error("unexpected model switch")),
+                  flush: async () => {
+                    await manager.ensureOnDisk();
+                    await manager.flush();
+                  },
                   sendPrompt: (_value, onStarted) => {
                     onStarted?.();
                     manager.appendMessage(assistantMessage);

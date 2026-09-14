@@ -25,6 +25,8 @@ const fixture = Effect.fn("RotationTest.fixture")(function* (
     readonly persistence?: () => Promise<void>;
     readonly askBtw?: OpenedSession["askBtw"];
     readonly shake?: OpenedSession["shake"];
+    readonly switchModel?: OpenedSession["switchModel"];
+    readonly flush?: OpenedSession["flush"];
     readonly appendAssistantMessage?: OpenedSession["appendAssistantMessage"];
     readonly loadTranscript?: Parameters<typeof makeSessionPool>[0]["loadTranscript"];
     readonly runCompletion?: Effect.Effect<void>;
@@ -72,6 +74,9 @@ const fixture = Effect.fn("RotationTest.fixture")(function* (
             askBtw: options.askBtw ?? (async () => journal),
             shake:
               options.shake ?? (async () => ({ mode: "images", imagesDropped: 1, tokensFreed: 0 })),
+            switchModel:
+              options.switchModel ?? (() => Promise.reject(new Error("unexpected model switch"))),
+            flush: options.flush ?? (async () => {}),
             contextUsage: () => ({ kind: "unavailable" }),
             appendAssistantMessage: options.appendAssistantMessage ?? (async () => {}),
             unsubscribe: () => {},
@@ -93,6 +98,24 @@ const fixture = Effect.fn("RotationTest.fixture")(function* (
 const unexpectedCommit = () => Effect.die("A rejected rotation must not commit");
 
 describe("session pool rotation", () => {
+  it.effect("keeps the old journal active when flushing rotation state fails", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        let failFlush = true;
+        const { pool, commit } = yield* fixture({
+          flush: async () => {
+            if (failFlush) throw new Error("disk unavailable");
+          },
+        });
+        assert.instanceOf(yield* pool.rotate(chatId, commit).pipe(Effect.flip), AgentError);
+        assert.strictEqual(yield* pool.askBtw(chatId, "active journal"), "old journal");
+        failFlush = false;
+        yield* pool.rotate(chatId, commit);
+        assert.strictEqual(yield* pool.askBtw(chatId, "active journal"), "new journal");
+      }),
+    ),
+  );
+
   it.effect("rejects capture ownership after terminal output until the sink settles", () =>
     Effect.scoped(
       Effect.gen(function* () {

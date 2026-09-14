@@ -69,6 +69,8 @@ describe("AgentRuntime", () => {
               },
               createHandoff: () => Promise.reject(new Error("unexpected handoff")),
               askBtw: () => Promise.reject(new Error("unexpected side question")),
+              switchModel: () => Promise.reject(new Error("unexpected model switch")),
+              flush: () => Promise.resolve(),
               sendPrompt: async (): Promise<MessageDelivery> => ({
                 kind: "steered",
                 consumed: Deferred.await(nativeConsumption),
@@ -120,6 +122,8 @@ describe("AgentRuntime", () => {
                   },
                   createHandoff: () => Promise.reject(new Error("unexpected handoff")),
                   askBtw: () => Promise.reject(new Error("unexpected side question")),
+                  switchModel: () => Promise.reject(new Error("unexpected model switch")),
+                  flush: () => Promise.resolve(),
                   sendPrompt: async (value, onStarted): Promise<MessageDelivery> => {
                     submitted.push(value.text);
                     if (submitted.length === 1) {
@@ -232,6 +236,8 @@ describe("AgentRuntime", () => {
               },
               createHandoff: () => Promise.reject(new Error("unexpected handoff")),
               askBtw: () => Promise.reject(new Error("unexpected side question")),
+              switchModel: () => Promise.reject(new Error("unexpected model switch")),
+              flush: () => Promise.resolve(),
               sendPrompt: (value) => {
                 if (value.text !== "acquire") {
                   emit({ type: "notice", level: "info", message: value.text });
@@ -348,6 +354,8 @@ describe("AgentRuntime", () => {
               },
               createHandoff: () => Promise.reject(new Error("unexpected handoff")),
               askBtw: () => Promise.reject(new Error("unexpected side question")),
+              switchModel: () => Promise.reject(new Error("unexpected model switch")),
+              flush: () => Promise.resolve(),
               sendPrompt: () => {
                 sends += 1;
                 return Promise.reject(
@@ -449,6 +457,8 @@ describe("AgentRuntime", () => {
               },
               createHandoff: () => Promise.reject(new Error("unexpected handoff")),
               askBtw: () => Promise.reject(new Error("unexpected side question")),
+              switchModel: () => Promise.reject(new Error("unexpected model switch")),
+              flush: () => Promise.resolve(),
               sendPrompt: () => Promise.resolve(admitted),
               shake: async (mode) => shakeResult(mode),
               appendAssistantMessage: () => Promise.resolve(),
@@ -512,6 +522,8 @@ describe("AgentRuntime", () => {
                     },
                     createHandoff: () => Promise.reject(new Error("unexpected handoff")),
                     askBtw: () => Promise.reject(new Error("unexpected side question")),
+                    switchModel: () => Promise.reject(new Error("unexpected model switch")),
+                    flush: () => Promise.resolve(),
                     sendPrompt: () => Promise.resolve(admitted),
                     shake: async (mode) => shakeResult(mode),
                     appendAssistantMessage: () => Promise.resolve(),
@@ -584,6 +596,8 @@ describe("AgentRuntime", () => {
                 },
                 createHandoff: () => Promise.reject(new Error("unexpected handoff")),
                 askBtw: () => Promise.reject(new Error("unexpected side question")),
+                switchModel: () => Promise.reject(new Error("unexpected model switch")),
+                flush: () => Promise.resolve(),
                 sendPrompt: () => {
                   emit({ type: "notice", level: "info", message: "last" });
                   return Promise.resolve(admitted);
@@ -636,6 +650,8 @@ describe("AgentRuntime", () => {
                 },
                 createHandoff: () => Promise.reject(new Error("unexpected handoff")),
                 askBtw: () => Promise.reject(new Error("unexpected side question")),
+                switchModel: () => Promise.reject(new Error("unexpected model switch")),
+                flush: () => Promise.resolve(),
                 sendPrompt: async (_value, onStarted) => {
                   onStarted?.();
                   emit({ type: "run-started" });

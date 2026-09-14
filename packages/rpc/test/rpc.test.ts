@@ -58,6 +58,8 @@ const unusedApplication = Application.of({
   sendMessage: () => Effect.die("unexpected message send"),
   abort: () => Effect.die("unexpected abort"),
   contextUsage: () => Effect.die("unexpected context read"),
+  availableModels: () => Effect.die("unexpected model discovery"),
+  switchModel: () => Effect.die("unexpected model switch"),
   shake: () => Effect.die("unexpected chat shake"),
   closeChat: () => Effect.die("unexpected chat close"),
 });

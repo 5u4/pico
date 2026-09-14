@@ -1,4 +1,7 @@
+import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { filterAvailableModelsByEnabledPatterns } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import * as OmpSettings from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { ModelInfo } from "@pico/contract/agent-runtime";
 import type { ExternalBrowser } from "@pico/contract/config";
 import type { AbsolutePath } from "@pico/contract/path";
 import type { WorkspacePlatform } from "@pico/contract/workspace-model";
@@ -9,6 +12,27 @@ const bundledSkillsDirectory = Bun.fileURLToPath(new URL("./skills", import.meta
 const agentBrowserSkillsDirectory = Bun.fileURLToPath(
   new URL("./agent-browser/skills", import.meta.url),
 );
+
+export const loadAvailableModels = Effect.fn("OmpSession.loadAvailableModels")(function* (
+  registry: ModelRegistry,
+  cwd: AbsolutePath,
+  agentDir?: AbsolutePath,
+) {
+  return yield* Effect.tryPromise({
+    try: async (): Promise<readonly ModelInfo[]> => {
+      const settings = await OmpSettings.Settings.loadReadOnly({
+        cwd,
+        ...(agentDir === undefined ? {} : { agentDir }),
+      });
+      return filterAvailableModelsByEnabledPatterns(
+        registry.getAvailable(),
+        settings.get("enabledModels") ?? [],
+        settings,
+      ).map(({ provider, id, name }) => ({ provider, id, name }));
+    },
+    catch: (cause) => agentError("Failed to list available OMP models", cause),
+  });
+});
 
 export const prepareSessionSettings = Effect.fn("OmpSession.prepareSettings")(function* (
   cwd: AbsolutePath,

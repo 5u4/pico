@@ -72,6 +72,8 @@ const fixture = Effect.fnUntraced(function* (
     findChatByPlatformId: () => Effect.die("unexpected chat lookup"),
     findChatPlatformBinding: () => Effect.die("unexpected chat binding lookup"),
     contextUsage: () => Effect.die("unexpected context read"),
+    availableModels: () => Effect.die("unexpected model discovery"),
+    switchModel: () => Effect.die("unexpected model switch"),
     shake: () => Effect.die("unexpected chat shake"),
     closeChat: () => Effect.die("unexpected chat close"),
     ...procedures,

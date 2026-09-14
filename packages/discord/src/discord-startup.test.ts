@@ -1,6 +1,7 @@
 import { assert, describe, it } from "@effect/vitest";
 import { AbsolutePath } from "@pico/contract/path";
 import {
+  ApplicationCommandOptionTypes,
   type CreateApplicationCommand,
   DiscordApplicationIntegrationType,
   DiscordInteractionContextType,
@@ -84,12 +85,28 @@ describe("Discord startup", () => {
           assert.deepStrictEqual(global?.commands.map(({ name }) => name).sort(), [
             "context",
             "shake",
+            "switch",
           ]);
           for (const command of global?.commands ?? []) {
             assert.deepStrictEqual(command.contexts, [DiscordInteractionContextType.BotDm]);
             assert.deepStrictEqual(command.integrationTypes, [
               DiscordApplicationIntegrationType.GuildInstall,
             ]);
+          }
+          for (const registration of harness.calls) {
+            if (registration.kind !== "global" && registration.kind !== "guild") continue;
+            if (registration.kind === "guild" && registration.guildId === "3") continue;
+            const command = registration.commands.find(({ name }) => name === "switch");
+            if (command === undefined || !("options" in command)) {
+              throw new Error("Expected a registered model picker");
+            }
+            assert.strictEqual(command?.options?.length, 1);
+            const option = command?.options?.[0];
+            assert.strictEqual(option?.name, "model");
+            assert.strictEqual(option?.type, ApplicationCommandOptionTypes.String);
+            assert.isTrue(option?.required);
+            assert.isTrue(option?.autocomplete);
+            assert.isUndefined(option?.choices);
           }
         }),
       );
