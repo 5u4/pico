@@ -16,6 +16,15 @@ export const chatId = Chat.ChatId.make("018f47a0-0000-7000-8000-000000000002");
 
 export const defaultCwd = AbsolutePath.make("/tmp/pico-discord-input");
 
+export const boundWorkspace: Workspace.Workspace = {
+  id: workspaceId,
+  name: "general",
+  binding: { platform: "discord", externalId: "10", guildId: "1" },
+  defaultCwd,
+  worktree: null,
+  createdAt: 0,
+};
+
 export const startedDelivery: MessageDelivery<ApplicationError> = {
   kind: "started",
   completed: Effect.void,

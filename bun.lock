@@ -108,6 +108,7 @@
       },
       "devDependencies": {
         "@effect/vitest": "catalog:",
+        "@pico/persistence": "workspace:*",
         "@types/mdast": "4.0.4",
         "vitest": "catalog:",
       },

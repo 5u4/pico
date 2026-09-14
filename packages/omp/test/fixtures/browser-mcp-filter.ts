@@ -133,7 +133,8 @@ try {
       rotate: () => Effect.die("Unexpected bot rotation"),
     }),
     Layer.succeed(ChatSessionContext, {
-      resolve: () => Effect.succeed({ chat, platform: null, appendSystemPrompt: "" }),
+      resolve: () =>
+        Effect.succeed({ chat, platform: null, appendSystemPrompt: "", formatTurnContext: null }),
     }),
     Layer.succeed(BranchNaming, {
       handle: () => {

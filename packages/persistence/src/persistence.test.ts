@@ -51,7 +51,7 @@ const secondWorkspace: Workspace.Workspace = {
 const worktreeWorkspace: Workspace.Workspace = {
   id: worktreeWorkspaceId,
   name: "worktree",
-  binding: { platform: "discord", externalId: "channel-1" },
+  binding: { platform: "discord", externalId: "channel-1", guildId: "9007199254740993" },
   defaultCwd: cwdA,
   worktree: { branch: "main", prefix: "chat/" },
   createdAt: 3,
@@ -200,6 +200,15 @@ describe("Persistence.layer", () => {
             }),
             changed,
           );
+          const observed = yield* workspaces.getOrCreateByBinding({
+            ...loser,
+            binding: { ...binding, guildId: "9007199254740993" },
+          });
+          assert.deepStrictEqual(observed, {
+            ...changed,
+            binding: { ...binding, guildId: "9007199254740993" },
+          });
+          assert.deepStrictEqual(yield* workspaces.getOrCreateByBinding(loser), observed);
           assert.instanceOf(
             yield* Effect.flip(
               workspaces.getOrCreateByBinding({
@@ -209,7 +218,7 @@ describe("Persistence.layer", () => {
             ),
             PersistenceError,
           );
-          return changed;
+          return observed;
         }).pipe(Effect.provide(layer(storeFile)), Effect.scoped);
 
         yield* Effect.gen(function* () {

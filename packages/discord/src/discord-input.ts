@@ -220,17 +220,30 @@ export const install = Effect.fn("DiscordInput.install")(function* <
     const threadId = yield* decodeThreadId(binding.value.externalId).pipe(
       Effect.mapError(() => discordError("decode-thread-binding", undefined)),
     );
-    cacheChat(threadId, chatId);
+    threadIds.set(chatId, threadId);
     return Option.some(threadId);
   });
 
-  const findWorkspace = Effect.fn("Discord.findWorkspace")(function* (channelId: bigint) {
+  const resolveWorkspace = Effect.fn("Discord.resolveWorkspace")(function* (
+    channelId: bigint,
+    guildId: bigint,
+    name?: string,
+  ) {
     const cached = workspaceIds.get(channelId);
-    if (cached !== undefined) return Option.some(cached);
+    if (cached !== undefined) return cached;
 
-    const workspace = yield* application.findWorkspaceByPlatformId("discord", channelId.toString());
-    if (Option.isSome(workspace)) workspaceIds.set(channelId, workspace.value.id);
-    return Option.map(workspace, (value) => value.id);
+    const workspace = yield* application.getOrCreateWorkspaceByBinding({
+      name: name ?? `Discord channel ${channelId.toString()}`,
+      binding: {
+        platform: "discord",
+        externalId: channelId.toString(),
+        guildId: guildId.toString(),
+      },
+      defaultCwd: config.defaultCwd,
+      worktree: null,
+    });
+    workspaceIds.set(channelId, workspace.id);
+    return workspace.id;
   });
 
   // Effect.fn restores Context on return, so request helpers must stay in the terminal log scope.
@@ -273,7 +286,7 @@ export const install = Effect.fn("DiscordInput.install")(function* <
       thread.threadId.toString(),
     );
     if (Option.isNone(chat)) return Option.none<Chat.ChatId>();
-    workspaceIds.set(thread.parentId, chat.value.workspaceId);
+    yield* resolveWorkspace(thread.parentId, thread.guildId);
     cacheChat(thread.threadId, chat.value.id);
     yield* Effect.annotateLogsScoped({
       chatId: chat.value.id,
@@ -436,7 +449,7 @@ export const install = Effect.fn("DiscordInput.install")(function* <
       );
       if (Option.isNone(chat)) return;
 
-      workspaceIds.set(channel.parentId, chat.value.workspaceId);
+      yield* resolveWorkspace(channel.parentId, message.guildId);
       cacheChat(channel.id, chat.value.id);
       yield* Effect.annotateLogsScoped({ workspaceId: chat.value.workspaceId });
       return yield* sendMessageToChat(chat.value.id, prompt, message.channelId);
@@ -445,21 +458,7 @@ export const install = Effect.fn("DiscordInput.install")(function* <
     if (channel.type !== ChannelTypes.GuildText) return;
 
     yield* Effect.annotateLogsScoped({ phase: "resolve-workspace" });
-    const maybeWorkspaceId = yield* findWorkspace(channel.id);
-    let workspaceId: Workspace.WorkspaceId;
-    if (Option.isSome(maybeWorkspaceId)) {
-      workspaceId = maybeWorkspaceId.value;
-    } else {
-      yield* Effect.annotateLogsScoped({ phase: "create-workspace" });
-      const workspace = yield* application.getOrCreateWorkspaceByBinding({
-        name: channel.name ?? `Discord channel ${channel.id}`,
-        binding: { platform: "discord", externalId: channel.id.toString() },
-        defaultCwd: config.defaultCwd,
-        worktree: null,
-      });
-      workspaceIds.set(channel.id, workspace.id);
-      workspaceId = workspace.id;
-    }
+    const workspaceId = yield* resolveWorkspace(channel.id, message.guildId, channel.name);
     yield* Effect.annotateLogsScoped({ phase: "create-thread", workspaceId });
     const thread = yield* promiseBoundary("create-thread", () =>
       bot.helpers.startThreadWithMessage(channel.id, message.id, {
@@ -602,7 +601,11 @@ export const install = Effect.fn("DiscordInput.install")(function* <
         return "Use /bind set with cwd, or /bind worktree with repository, branch, and prefix.";
       case "bindDirect": {
         const workspace = yield* application.bindWorkspace({
-          binding: { platform: "discord", externalId: channel.id.toString() },
+          binding: {
+            platform: "discord",
+            externalId: channel.id.toString(),
+            guildId: guildId.toString(),
+          },
           workspaceName: channel.name ?? channel.id.toString(),
           configuration: { kind: "direct", cwd: command.cwd },
         });
@@ -612,7 +615,11 @@ export const install = Effect.fn("DiscordInput.install")(function* <
       }
       case "bindWorktree": {
         const workspace = yield* application.bindWorkspace({
-          binding: { platform: "discord", externalId: channel.id.toString() },
+          binding: {
+            platform: "discord",
+            externalId: channel.id.toString(),
+            guildId: guildId.toString(),
+          },
           workspaceName: channel.name ?? channel.id.toString(),
           configuration: {
             kind: "worktree",

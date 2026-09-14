@@ -157,11 +157,14 @@ describe("Workspace binding", () => {
           externalId: "thread-old",
         });
         const repeated = yield* application.bindWorkspace({
-          binding,
+          binding: { ...binding, guildId: "9007199254740993" },
           workspaceName: "ignored rename",
           configuration: { kind: "direct", cwd: `${firstCwd}/.` },
         });
-        assert.deepStrictEqual(repeated, created);
+        assert.deepStrictEqual(repeated, {
+          ...created,
+          binding: { ...binding, guildId: "9007199254740993" },
+        });
 
         const rebound = yield* application.bindWorkspace({
           binding,

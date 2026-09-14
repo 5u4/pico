@@ -1,4 +1,5 @@
 import * as OmpModelRegistry from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import type { ExtensionFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { loadAllMCPConfigs } from "@oh-my-pi/pi-coding-agent/mcp/config";
 import * as OmpRuntimeInit from "@oh-my-pi/pi-coding-agent/modes/runtime-init";
 import * as OmpAgentRegistry from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
@@ -322,7 +323,8 @@ const makeFactory = (
 ): SessionFactory => ({
   open: Effect.fn("OmpSession.open")(function* (chatId, emit, getReplyTarget) {
     const runEffect = Effect.runPromiseWith(yield* Effect.context<never>());
-    const { chat, platform, appendSystemPrompt } = yield* chatSessionContext.resolve(chatId);
+    const { chat, platform, appendSystemPrompt, formatTurnContext } =
+      yield* chatSessionContext.resolve(chatId);
     const bot = yield* botSessions
       .findByChat(chatId)
       .pipe(Effect.mapError((error) => agentError("Failed to resolve active bot session", error)));
@@ -399,6 +401,22 @@ const makeFactory = (
                 loadAllMCPConfigs(cwd, { ...options, filterBrowser: true }),
             }),
         extensions: [
+          ...(formatTurnContext === null
+            ? []
+            : [
+                ((api) => {
+                  api.on("context", ({ messages }) => {
+                    const content = formatTurnContext(getReplyTarget());
+                    if (content === undefined) return;
+                    return {
+                      messages: [
+                        ...messages,
+                        { role: "developer", content, timestamp: Date.now() },
+                      ],
+                    };
+                  });
+                }) satisfies ExtensionFactory,
+              ]),
           ...(browsers === undefined
             ? []
             : [

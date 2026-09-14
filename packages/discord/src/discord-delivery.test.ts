@@ -68,7 +68,7 @@ const installInput = Effect.fn("test.installDeliveryInput")(function* (options: 
       Effect.succeed({
         id: workspaceId,
         name: "general",
-        binding: { platform: "discord", externalId: "10" },
+        binding: { platform: "discord", externalId: "10", guildId: "1" },
         defaultCwd: cwd,
         worktree: null,
         createdAt: 0,
