@@ -469,6 +469,33 @@ describe("native SessionPool ownership", () => {
     });
   });
 
+  it("reports an applied model when flushing its selection fails", async () => {
+    const turn = providerTurn("Continue with the selected model");
+    await withSession([turn], (session) =>
+      Effect.runPromise(
+        Effect.scoped(
+          Effect.gen(function* () {
+            const pool = yield* makePool(session);
+            vi.spyOn(session.sessionManager, "flush").mockRejectedValueOnce(
+              new Error("private-journal-path"),
+            );
+            const outcome = yield* pool
+              .switchModel(chatId, { provider: "openai", id: "gpt-4.1-mini" })
+              .pipe(Effect.exit);
+            expect(session.model?.id).toBe("gpt-4.1-mini");
+            const delivery = yield* pool.send(chatId, prompt("continue after the switch"));
+            yield* Effect.promise(() => turn.entered.promise);
+            turn.release.resolve();
+            if (delivery.kind !== "handled") yield* delivery.completed;
+            const reply = session.messages.findLast((message) => message.role === "assistant");
+            expect(reply?.role === "assistant" ? reply.model : undefined).toBe("gpt-4.1-mini");
+            expect(Exit.isSuccess(outcome)).toBe(true);
+          }).pipe(Effect.provide(platform)),
+        ),
+      ),
+    );
+  });
+
   it("rejects busy and stale model choices without changing the running model", async () => {
     const turn = providerTurn("Complete with the original model");
     await withSession([turn], (session) =>
