@@ -2,7 +2,6 @@ import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-
 import type * as AgentEvent from "@pico/contract/agent-event";
 import type * as AgentMessage from "@pico/contract/agent-message";
 import type {
-  AgentTurnResult,
   CapturedAgentRun,
   ContextUsage,
   MessageDelivery,
@@ -53,10 +52,8 @@ export interface SessionHandle {
 
 export interface OpenedSession {
   readonly session: SessionHandle;
-  readonly eventMode?: "captured";
   readonly sendPrompt: OmpPromptSender;
   readonly askBtw: (question: string, signal: AbortSignal) => Promise<string>;
-  readonly createHandoff: (signal: AbortSignal) => Promise<string>;
   readonly shake: (mode: ShakeMode, signal: AbortSignal) => Promise<ShakeResult>;
   readonly switchModel: (model: ModelRef) => Promise<ModelInfo>;
   readonly flush: () => Promise<void>;
@@ -99,16 +96,6 @@ export interface SessionPool {
     onEvent: (event: AgentEvent.AgentEvent) => Effect.Effect<void, AgentError>,
     replyTarget?: ReplyTarget,
   ) => Effect.Effect<CapturedAgentRun, AgentError>;
-  readonly sendTurn: (
-    chatId: Chat.ChatId,
-    prompt: AgentMessage.AgentPrompt,
-    onEvent: (event: AgentEvent.AgentEvent) => Effect.Effect<void, AgentError>,
-    replyTarget?: ReplyTarget,
-  ) => Effect.Effect<AgentTurnResult, AgentError>;
-  readonly rotate: (
-    chatId: Chat.ChatId,
-    commit: (handoff: string) => Effect.Effect<void, AgentError>,
-  ) => Effect.Effect<void, AgentError>;
   readonly deliver: (chatId: Chat.ChatId, content: string) => Effect.Effect<void>;
   readonly publish: (chatId: Chat.ChatId, content: string) => Effect.Effect<void, AgentError>;
 }
@@ -131,7 +118,7 @@ type LiveLifecycle = OpenLifecycle | ClosingLifecycle | ClosedLifecycle;
 type CaptureHandler = (event: AgentEvent.AgentEvent) => Effect.Effect<void>;
 interface ActiveCapture {
   readonly kind: "captured";
-  readonly runId: ScheduleRunId | undefined;
+  readonly runId: ScheduleRunId;
   readonly replyTarget: ReplyTarget | undefined;
   readonly onEvent: CaptureHandler;
   readonly released: Deferred.Deferred<void>;
@@ -170,7 +157,6 @@ interface LiveEntry {
   readonly session: SessionHandle;
   readonly sendPrompt: OmpPromptSender;
   readonly askBtw: (question: string, signal: AbortSignal) => Promise<string>;
-  readonly createHandoff: (signal: AbortSignal) => Promise<string>;
   readonly shake: OpenedSession["shake"];
   readonly switchModel: OpenedSession["switchModel"];
   readonly flush: OpenedSession["flush"];
@@ -447,12 +433,10 @@ const acquireEntry = Effect.fn("SessionPool.acquireEntry")(function* (
             yield* owner.onEvent(item.event);
             return;
           }
-          if (owner.runId === undefined) return;
         }
         if (owner?.kind === "ordinary" && item.event.type === "run-finished") {
           yield* settleOrdinaryRun(chatId, run, owner);
         }
-        if (opened.eventMode === "captured") return;
         yield* Queue.offer(output, { kind: "event", envelope: { chatId, event: item.event } });
       }),
     ),
@@ -483,7 +467,6 @@ const acquireEntry = Effect.fn("SessionPool.acquireEntry")(function* (
     session: opened.session,
     sendPrompt: opened.sendPrompt,
     askBtw: opened.askBtw,
-    createHandoff: opened.createHandoff,
     shake: opened.shake,
     switchModel: opened.switchModel,
     flush: opened.flush,
@@ -736,11 +719,11 @@ export const makeSessionPool = Effect.fn("SessionPool.make")(function* (
     );
     return yield* Deferred.await(admitted);
   });
-  const captureTurn = Effect.fn("AgentRuntime.captureTurn")(function* (
+  const sendCaptured = Effect.fn("AgentRuntime.sendCaptured")(function* (
     chatId: Chat.ChatId,
+    runId: ScheduleRunId,
     prompt: AgentMessage.AgentPrompt,
     onEvent: (event: AgentEvent.AgentEvent) => Effect.Effect<void, AgentError>,
-    runId?: ScheduleRunId,
     replyTarget?: ReplyTarget,
   ) {
     return yield* Effect.scoped(
@@ -851,10 +834,11 @@ export const makeSessionPool = Effect.fn("SessionPool.make")(function* (
                 yield* drainSessionEvents(entry);
                 if (sinkFailure !== undefined) return yield* Effect.failCause(sinkFailure);
                 return {
+                  runId,
                   outcome: captured,
                   events: [...capturedEvents],
                   finalAssistantText: assistantText,
-                } satisfies AgentTurnResult;
+                } satisfies CapturedAgentRun;
               }).pipe(
                 Effect.raceFirst(
                   Deferred.await(entry.closed).pipe(Effect.andThen(Effect.interrupt)),
@@ -921,102 +905,6 @@ export const makeSessionPool = Effect.fn("SessionPool.make")(function* (
           }),
         );
       }),
-    );
-  });
-
-  const sendCaptured = Effect.fn("AgentRuntime.sendCaptured")(function* (
-    chatId: Chat.ChatId,
-    runId: ScheduleRunId,
-    prompt: AgentMessage.AgentPrompt,
-    onEvent: (event: AgentEvent.AgentEvent) => Effect.Effect<void, AgentError>,
-    replyTarget?: ReplyTarget,
-  ) {
-    const result = yield* captureTurn(chatId, prompt, onEvent, runId, replyTarget);
-    return { ...result, runId } satisfies CapturedAgentRun;
-  });
-
-  const sendTurn = Effect.fn("AgentRuntime.sendTurn")(function* (
-    chatId: Chat.ChatId,
-    prompt: AgentMessage.AgentPrompt,
-    onEvent: (event: AgentEvent.AgentEvent) => Effect.Effect<void, AgentError>,
-    replyTarget?: ReplyTarget,
-  ) {
-    return yield* captureTurn(
-      chatId,
-      prompt,
-      (event) =>
-        onEvent(event).pipe(
-          Effect.andThen(Queue.offer(output, { kind: "event", envelope: { chatId, event } })),
-          Effect.asVoid,
-        ),
-      undefined,
-      replyTarget,
-    );
-  });
-
-  const rotate = Effect.fn("AgentRuntime.rotate")(function* (
-    chatId: Chat.ChatId,
-    commit: (handoff: string) => Effect.Effect<void, AgentError>,
-  ) {
-    yield* Effect.uninterruptibleMask((restore) =>
-      Effect.scoped(
-        Effect.gen(function* () {
-          const entry = yield* retain(sessions, chatId);
-          yield* entry.admission.withPermit(
-            Effect.gen(function* () {
-              if (MutableRef.get(entry.lifecycle).type !== "open") {
-                return yield* new AgentError({ message: "OMP session is closing" });
-              }
-              const requireIdle = Effect.suspend(() =>
-                MutableRef.get(entry.capture) !== null ||
-                MutableRef.get(entry.run) !== null ||
-                entry.operations.size !== 0 ||
-                entry.session.isStreaming
-                  ? Effect.fail(new AgentError({ message: "OMP session is busy" }))
-                  : Effect.void,
-              );
-              yield* requireIdle;
-              yield* boundary("Failed to settle OMP rotation persistence", () =>
-                entry.session.settleInFlightMessagePersistence(),
-              );
-              yield* drainSessionEvents(entry);
-              yield* requireIdle;
-              const controller = new AbortController();
-              let pending: Promise<string> | undefined;
-              const handoff = (yield* restore(
-                boundary("Failed to generate OMP session handoff", () => {
-                  pending = entry.createHandoff(controller.signal);
-                  return pending;
-                }),
-              ).pipe(
-                Effect.ensuring(
-                  Effect.gen(function* () {
-                    controller.abort();
-                    if (pending !== undefined) {
-                      const request = pending;
-                      yield* Effect.promise(() =>
-                        request.then(
-                          () => undefined,
-                          () => undefined,
-                        ),
-                      );
-                    }
-                  }),
-                ),
-              )).trim();
-              if (handoff.length === 0 || Buffer.byteLength(handoff, "utf8") > 16 * 1024) {
-                return yield* new AgentError({
-                  message: "OMP session handoff must be nonempty and at most 16 KiB",
-                });
-              }
-              yield* requireIdle;
-              yield* boundary("Failed to flush OMP rotation source", entry.flush);
-              yield* commit(handoff);
-              yield* closeEntry(entry).pipe(Effect.ensuring(invalidate(sessions, entry.key)));
-            }),
-          );
-        }),
-      ),
     );
   });
 
@@ -1206,8 +1094,6 @@ export const makeSessionPool = Effect.fn("SessionPool.make")(function* (
     send,
     askBtw,
     sendCaptured,
-    sendTurn,
-    rotate,
     deliver,
     publish,
     close,

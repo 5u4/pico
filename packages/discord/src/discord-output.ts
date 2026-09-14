@@ -29,10 +29,6 @@ export interface DiscordOutputPolicy {
   readonly showThinking: boolean;
 }
 
-type DiscordOutputDestination =
-  | { readonly kind: "thread" }
-  | { readonly kind: "direct-message"; readonly messageId: bigint };
-
 export interface DiscordOutputClient {
   readonly send: (threadId: bigint, message: RenderedMessage) => Effect.Effect<bigint, unknown>;
   readonly edit: (
@@ -280,17 +276,8 @@ export const make = (
   client: DiscordOutputClient,
   scope: Scope.Scope,
   policy: DiscordOutputPolicy,
-  destination: DiscordOutputDestination = { kind: "thread" },
 ) => {
   const states = new Map<Chat.ChatId, RunState>();
-  const send = (channelId: bigint, message: RenderedMessage) =>
-    client.send(
-      channelId,
-      destination.kind === "direct-message"
-        ? { ...message, replyTo: destination.messageId }
-        : message,
-    );
-
   const stateFor = (chatId: Chat.ChatId) => {
     const current = states.get(chatId);
     if (current !== undefined) return current;
@@ -333,13 +320,13 @@ export const make = (
     content: string,
   ) {
     if (messageId === undefined) {
-      yield* send(threadId, { content, silent: SILENT });
+      yield* client.send(threadId, { content, silent: SILENT });
       return;
     }
     yield* client.edit(threadId, messageId, content).pipe(
       Effect.catch((error) => {
         const edit = discordError("edit-message", error);
-        return send(threadId, { content, silent: SILENT }).pipe(
+        return client.send(threadId, { content, silent: SILENT }).pipe(
           Effect.mapError((failure) => {
             const delivery = discordError("send-message", failure);
             return new DiscordError({
@@ -422,7 +409,6 @@ export const make = (
         case "notice":
           return;
         case "title-changed":
-          if (destination.kind === "direct-message") return;
           yield* client
             .renameThread(threadId, event.title)
             .pipe(Effect.catchCause((cause) => reportFailure("rename-thread", cause, "warning")));
@@ -436,7 +422,7 @@ export const make = (
           );
           const tool: ToolState = { presentation, messageId: undefined };
           state.tools.set(event.toolCallId, tool);
-          tool.messageId = yield* send(threadId, {
+          tool.messageId = yield* client.send(threadId, {
             content: presentation.started,
             silent: SILENT,
           });
@@ -453,7 +439,7 @@ export const make = (
           if (terminal) state.terminalClaimed = true;
           const messages = renderAssistant(event.message, policy.showThinking);
           for (const [chunkIndex, message] of messages.entries()) {
-            yield* send(threadId, message).pipe(
+            yield* client.send(threadId, message).pipe(
               Effect.mapError(
                 (error) =>
                   new DiscordError({
@@ -471,7 +457,7 @@ export const make = (
           yield* flushTools(threadId, state);
           if (event.outcome === "completed" || state.terminalClaimed) return;
           state.terminalClaimed = true;
-          yield* send(threadId, {
+          yield* client.send(threadId, {
             content: event.outcome === "aborted" ? ABORTED_MESSAGE : FAILED_MESSAGE,
             silent: false,
           });

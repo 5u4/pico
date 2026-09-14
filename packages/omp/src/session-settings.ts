@@ -16,14 +16,10 @@ const agentBrowserSkillsDirectory = Bun.fileURLToPath(
 export const loadAvailableModels = Effect.fn("OmpSession.loadAvailableModels")(function* (
   registry: ModelRegistry,
   cwd: AbsolutePath,
-  agentDir?: AbsolutePath,
 ) {
   return yield* Effect.tryPromise({
     try: async (): Promise<readonly ModelInfo[]> => {
-      const settings = await OmpSettings.Settings.loadReadOnly({
-        cwd,
-        ...(agentDir === undefined ? {} : { agentDir }),
-      });
+      const settings = await OmpSettings.Settings.loadReadOnly({ cwd });
       return filterAvailableModelsByEnabledPatterns(
         registry.getAvailable(),
         settings.get("enabledModels") ?? [],
@@ -38,14 +34,9 @@ export const prepareSessionSettings = Effect.fn("OmpSession.prepareSettings")(fu
   cwd: AbsolutePath,
   platform: WorkspacePlatform | null,
   externalBrowser: ExternalBrowser,
-  botAgentDir?: AbsolutePath,
 ) {
   const settings = yield* Effect.tryPromise({
-    try: () =>
-      OmpSettings.Settings.loadIsolated({
-        cwd,
-        ...(botAgentDir === undefined ? {} : { agentDir: botAgentDir }),
-      }),
+    try: () => OmpSettings.Settings.loadIsolated({ cwd }),
     catch: (cause) => agentError("Failed to load OMP settings", cause),
   });
   return yield* Effect.try({
@@ -70,10 +61,6 @@ export const prepareSessionSettings = Effect.fn("OmpSession.prepareSettings")(fu
       }
       settings.override("skills.customDirectories", skillDirectories);
       settings.override("secrets.enabled", true);
-      if (botAgentDir !== undefined) {
-        settings.override("memory.backend", "local");
-        settings.override("compaction.enabled", true);
-      }
       if (platform === "discord") {
         settings.override("tui.renderMermaid", false);
       }

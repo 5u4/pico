@@ -93,8 +93,6 @@ describe("discord attachments", () => {
         const application = Application.of({
           availableModels: () => Effect.die("unexpected model discovery"),
           switchModel: () => Effect.die("unexpected model switch"),
-          getOrCreateBotChat: () => Effect.die("unexpected bot chat creation"),
-          sendBotMessage: () => Effect.die("unexpected bot message"),
           askBtw: () => Effect.die("unexpected side question"),
           listWorkspaces: () => Effect.die("unexpected workspace list"),
           createWorkspace: () => Effect.die("unexpected explicit workspace creation"),
@@ -224,6 +222,7 @@ describe("discord attachments", () => {
         });
         let resolveReply: ((reply: string) => void) | undefined;
         let fetchCount = 0;
+        let channelReads = 0;
         const png = pngBytes;
         const httpClient = HttpClient.make((request, url) => {
           fetchCount += 1;
@@ -262,11 +261,10 @@ describe("discord attachments", () => {
           helpers: {
             addReaction: async () => undefined,
             deleteOwnReaction: async () => undefined,
-            getChannel: async () => ({
-              id: 10n,
-              guildId: 1n,
-              type: ChannelTypes.GuildText,
-            }),
+            getChannel: async () => {
+              channelReads += 1;
+              return { id: 10n, guildId: 1n, type: ChannelTypes.GuildText };
+            },
             sendMessage: async (_channelId, options) => {
               replies.push(options.content);
               resolveReply?.(options.content);
@@ -280,8 +278,6 @@ describe("discord attachments", () => {
         const application = Application.of({
           availableModels: () => Effect.die("unexpected model discovery"),
           switchModel: () => Effect.die("unexpected model switch"),
-          getOrCreateBotChat: () => Effect.die("unexpected bot chat creation"),
-          sendBotMessage: () => Effect.die("unexpected bot message"),
           askBtw: () => Effect.die("unexpected side question"),
           listWorkspaces: () => Effect.die("unexpected workspace list"),
           createWorkspace: () => Effect.die("unexpected explicit workspace creation"),
@@ -307,8 +303,22 @@ describe("discord attachments", () => {
         );
         const handleMessage = handlerFor(bot);
         handleMessage(message({ guildId: 2n }));
+        const guildless = message({
+          attachments: [
+            {
+              filename: "image.png",
+              size: png.byteLength,
+              url: "https://cdn.discordapp.com/valid",
+            },
+          ],
+        });
+        Reflect.deleteProperty(guildless, "guildId");
+        handleMessage(guildless);
         yield* Effect.yieldNow;
         assert.deepStrictEqual(replies, []);
+        assert.strictEqual(fetchCount, 0);
+        assert.strictEqual(channelReads, 0);
+        assert.deepStrictEqual(logs, []);
 
         const invoke = (overrides: Partial<DiscordMessage>) =>
           new Promise<string>((resolve) => {

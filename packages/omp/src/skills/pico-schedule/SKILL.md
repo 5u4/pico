@@ -28,7 +28,7 @@ Schedules stay owned and managed by the workspace that created them. Supply one 
 
 Use Pico UUIDv7 IDs for `chatId` and `workspaceId`, not Discord IDs. Scripts and the agent use the destination chat's workspace and working directory, not the owner's context.
 
-Workspace targets create a new local chat per run, even if the script skips. Bot workspaces reuse their shared bot chat. Selecting a UUID does not create an external recipient or a Discord thread.
+Workspace targets create a new local chat per run, even if the script skips. Selecting a UUID does not create an external recipient or a Discord thread.
 
 On creation or an update that supplies `target`, convenience selectors save that operation's caller reply, or clear it when absent. Explicit selectors clear saved caller replies, even when the ID matches the current context. Updates that omit `target` preserve the saved reply.
 

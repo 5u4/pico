@@ -11,7 +11,6 @@ const decodeDiscordBotId = Schema.decodeUnknownEffect(
   Schema.String.check(Schema.isPattern(/^[0-9]+$/), Schema.isTrimmed()),
 );
 
-// Discord resolves its authenticated bot's storage before installing message handlers.
 export const discordBotRoot = Effect.fn("ConfigRoot.discordBotRoot")(function* (
   root: PicoRootType,
   botId: string,

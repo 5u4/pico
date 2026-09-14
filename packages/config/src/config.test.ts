@@ -161,30 +161,28 @@ describe("PicoConfig.load", () => {
       }).pipe(Effect.scoped, Effect.provide(platformLayer)),
   );
 
-  it.effect(
-    "enables direct messages with an empty guild allowlist while validating configuration",
-    () =>
-      Effect.gen(function* () {
-        const fileSystem = yield* FileSystem.FileSystem;
-        const path = yield* Path.Path;
-        const root = PicoRoot.make(
-          yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-dm-config-" }),
-        );
-        const paths = yield* open(root);
-        yield* fileSystem.makeDirectory(paths.secretsDir, { recursive: true });
-        const tokenFile = path.join(paths.secretsDir, "discord_bot_token");
-        yield* fileSystem.writeFileString(tokenFile, "token-value", { mode: 0o600 });
-        yield* fileSystem.writeFileString(paths.configFile, config("[]", root));
-        const discord = Option.getOrThrow((yield* load(paths)).discord);
-        assert.deepStrictEqual(discord.allowedGuildIds, []);
-        assert.strictEqual(Redacted.value(discord.token), "token-value");
-        yield* fileSystem.writeFileString(paths.configFile, config("[]", "relative"));
-        const invalidCwd = yield* load(paths).pipe(Effect.flip);
-        assert.instanceOf(invalidCwd, ConfigError);
-        assert.include(invalidCwd.message, "discord.default_cwd");
-        yield* fileSystem.writeFileString(tokenFile, "");
-        assert.isTrue(Option.isNone((yield* load(paths)).discord));
-      }).pipe(Effect.scoped, Effect.provide(platformLayer)),
+  it.effect("accepts an empty guild allowlist while validating Discord configuration", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = PicoRoot.make(
+        yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-discord-config-" }),
+      );
+      const paths = yield* open(root);
+      yield* fileSystem.makeDirectory(paths.secretsDir, { recursive: true });
+      const tokenFile = path.join(paths.secretsDir, "discord_bot_token");
+      yield* fileSystem.writeFileString(tokenFile, "token-value", { mode: 0o600 });
+      yield* fileSystem.writeFileString(paths.configFile, config("[]", root));
+      const discord = Option.getOrThrow((yield* load(paths)).discord);
+      assert.deepStrictEqual(discord.allowedGuildIds, []);
+      assert.strictEqual(Redacted.value(discord.token), "token-value");
+      yield* fileSystem.writeFileString(paths.configFile, config("[]", "relative"));
+      const invalidCwd = yield* load(paths).pipe(Effect.flip);
+      assert.instanceOf(invalidCwd, ConfigError);
+      assert.include(invalidCwd.message, "discord.default_cwd");
+      yield* fileSystem.writeFileString(tokenFile, "");
+      assert.isTrue(Option.isNone((yield* load(paths)).discord));
+    }).pipe(Effect.scoped, Effect.provide(platformLayer)),
   );
 
   it.effect("loads and validates browser lifetime without Discord credentials", () =>

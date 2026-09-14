@@ -60,6 +60,60 @@ const failed = (
 });
 
 describe("Discord output", () => {
+  it.effect("keeps stored reply routes independent of other deliveries and thread output", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const sent: Array<{ readonly channelId: bigint; readonly message: RenderedMessage }> = [];
+        const client = {
+          send: (channelId: bigint, message: RenderedMessage) =>
+            Effect.sync(() => {
+              sent.push({ channelId, message });
+              return BigInt(sent.length);
+            }),
+          edit: () => Effect.die("unexpected reply edit"),
+          renameThread: () => Effect.die("unexpected title"),
+          triggerTyping: () => Effect.void,
+        };
+        const delivery = makeReplyDelivery(client);
+        const dispatch = make(client, yield* Scope.Scope, hiddenPolicy);
+        const routeA: ReplyTarget = {
+          platform: "discord",
+          conversationId: "101",
+          messageId: "1001",
+        };
+        const routeB: ReplyTarget = {
+          platform: "discord",
+          conversationId: "202",
+          messageId: "2002",
+        };
+        yield* delivery.send(chatA, routeA, "scheduled A");
+        yield* delivery.send(chatA, routeB, "scheduled B");
+        yield* dispatch(
+          303n,
+          envelope(chatA, {
+            type: "message-settled",
+            message: completed("stop", [{ type: "text", text: "thread reply" }]),
+          }),
+        );
+        yield* delivery.send(chatA, routeA, "x".repeat(4_500));
+        assert.deepStrictEqual(sent, [
+          { channelId: 101n, message: { content: "scheduled A", silent: false, replyTo: 1001n } },
+          { channelId: 202n, message: { content: "scheduled B", silent: false, replyTo: 2002n } },
+          { channelId: 303n, message: { content: "thread reply", silent: false } },
+          {
+            channelId: 101n,
+            message: { content: "x".repeat(2_000), silent: false, replyTo: 1001n },
+          },
+          {
+            channelId: 101n,
+            message: { content: "x".repeat(2_000), silent: false, replyTo: 1001n },
+          },
+          { channelId: 101n, message: { content: "x".repeat(500), silent: false, replyTo: 1001n } },
+        ]);
+      }),
+    ),
+  );
+
   it.effect(
     "propagates scheduled reply failures without leaking SDK payloads or sending later chunks",
     () =>

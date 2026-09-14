@@ -109,21 +109,15 @@ const smoke = Effect.fn("Discord.smoke")(function* () {
           pico.helpers.getGuildApplicationCommands(guildId),
         ]),
       );
-      assert.deepStrictEqual(globalCommands.map(({ name }) => name).sort(), [
-        "context",
-        "shake",
-        "switch",
-      ]);
-      for (const commands of [globalCommands, guildCommands]) {
-        const switchCommand = commands.find(({ name }) => name === "switch");
-        assert.strictEqual(switchCommand?.type, ApplicationCommandTypes.ChatInput);
-        assert.strictEqual(switchCommand?.options?.length, 1);
-        const modelOption = switchCommand?.options?.[0];
-        assert.strictEqual(modelOption?.name, "model");
-        assert.strictEqual(modelOption?.type, ApplicationCommandOptionTypes.String);
-        assert.strictEqual(modelOption?.required, true);
-        assert.strictEqual(modelOption?.autocomplete, true);
-      }
+      assert.deepStrictEqual(globalCommands, []);
+      const switchCommand = guildCommands.find(({ name }) => name === "switch");
+      assert.strictEqual(switchCommand?.type, ApplicationCommandTypes.ChatInput);
+      assert.strictEqual(switchCommand?.options?.length, 1);
+      const modelOption = switchCommand?.options?.[0];
+      assert.strictEqual(modelOption?.name, "model");
+      assert.strictEqual(modelOption?.type, ApplicationCommandOptionTypes.String);
+      assert.strictEqual(modelOption?.required, true);
+      assert.strictEqual(modelOption?.autocomplete, true);
       const abortCommand = guildCommands.find((command) => command.name === "abort");
       assert.strictEqual(abortCommand?.type, ApplicationCommandTypes.ChatInput);
 

@@ -72,7 +72,6 @@ describe("session pool publication", () => {
                     manager.releaseRetainedEntries();
                   },
                 },
-                createHandoff: () => Promise.reject(new Error("unexpected handoff")),
                 askBtw: () => Promise.reject(new Error("unexpected side question")),
                 switchModel: () => Promise.reject(new Error("unexpected model switch")),
                 flush: async () => {
@@ -201,7 +200,6 @@ describe("session pool publication", () => {
                       manager.releaseRetainedEntries();
                     },
                   },
-                  createHandoff: () => Promise.reject(new Error("unexpected handoff")),
                   askBtw: () => Promise.reject(new Error("unexpected side question")),
                   switchModel: () => Promise.reject(new Error("unexpected model switch")),
                   flush: async () => {

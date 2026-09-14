@@ -15,7 +15,6 @@
     "./chat-model": "./src/chat-model.ts",
     "./chat-repository": "./src/chat-repository.ts",
     "./chat-session-context": "./src/chat-session-context.ts",
-    "./bot-session": "./src/bot-session.ts",
     "./instructions": "./src/instructions.ts",
     "./agent-message": "./src/agent-message.ts",
     "./agent-session-store": "./src/agent-session-store.ts",
