@@ -293,21 +293,34 @@ export const install = Effect.fn("DiscordInput.install")(function* <
     return Option.some(chat.id);
   });
 
+  const replyMessageFailure = Effect.fnUntraced(function* (
+    cause: Cause.Cause<unknown>,
+    threadId: bigint,
+    content: string,
+  ) {
+    yield* reportFailure("message-request", cause);
+    yield* promiseBoundary("reply-message-failure", () =>
+      bot.helpers.sendMessage(threadId, { content, allowedMentions }),
+    ).pipe(Effect.catchCause((replyCause) => reportFailure("reply-message-failure", replyCause)));
+    return undefined;
+  });
+
   const sendMessageToChat = Effect.fnUntraced(function* (
     chatId: Chat.ChatId,
     prompt: AgentMessage.AgentPrompt,
     channelId: bigint,
   ) {
     yield* Effect.annotateLogsScoped({ phase: "send-prompt", chatId });
-    return yield* application
-      .sendMessage(chatId, prompt)
-      .pipe(
-        Effect.catchTag("ChatClosed", () =>
-          promiseBoundary("reply-chat-closed", () =>
-            bot.helpers.sendMessage(channelId, { content: closedMessage, allowedMentions }),
-          ).pipe(Effect.as(undefined)),
+    return yield* application.sendMessage(chatId, prompt).pipe(
+      Effect.catchTag("ChatClosed", () =>
+        promiseBoundary("reply-chat-closed", () =>
+          bot.helpers.sendMessage(channelId, { content: closedMessage, allowedMentions }),
+        ).pipe(
+          Effect.catchCause((cause) => reportFailure("reply-chat-closed", cause)),
+          Effect.as(undefined),
         ),
-      );
+      ),
+    );
   });
 
   const processMessage = Effect.fnUntraced(function* (
@@ -458,16 +471,33 @@ export const install = Effect.fn("DiscordInput.install")(function* <
       }),
     );
     yield* Effect.annotateLogsScoped({ phase: "create-chat", threadId: thread.id.toString() });
-    return yield* threadLock(thread.id).withPermit(
-      Effect.gen(function* () {
-        const chat = yield* application.createChat({
-          workspaceId,
-          externalId: thread.id.toString(),
-        });
-        cacheChat(thread.id, chat.id);
-        return yield* sendMessageToChat(chat.id, prompt, message.channelId);
-      }),
-    );
+    let failureMessage = "pico could not start a chat in this thread.";
+    const delivery = yield* threadLock(thread.id)
+      .withPermit(
+        Effect.gen(function* () {
+          const chat = yield* application.createChat({
+            workspaceId,
+            externalId: thread.id.toString(),
+          });
+          cacheChat(thread.id, chat.id);
+          failureMessage = "pico could not submit your opening message.";
+          return yield* sendMessageToChat(chat.id, prompt, thread.id);
+        }),
+      )
+      .pipe(Effect.catchCause((cause) => replyMessageFailure(cause, thread.id, failureMessage)));
+    if (delivery === undefined || delivery.kind === "handled") return delivery;
+    return {
+      ...delivery,
+      completed: delivery.completed.pipe(
+        Effect.catchCause((cause) =>
+          replyMessageFailure(
+            cause,
+            thread.id,
+            "pico could not finish processing your opening message.",
+          ),
+        ),
+      ),
+    };
   });
 
   const handleMessage = Effect.fnUntraced(function* (message: Message) {

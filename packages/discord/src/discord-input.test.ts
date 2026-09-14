@@ -1078,6 +1078,9 @@ describe("discord input", () => {
           const releaseFirst = yield* Deferred.make<void>();
           const followupSent = yield* Deferred.make<void>();
           const interactionEdited = yield* Deferred.make<void>();
+          const failureReplyStarted = Promise.withResolvers<void>();
+          const releaseFailureReply = Promise.withResolvers<void>();
+          const replies: Array<{ readonly channelId: bigint; readonly content: string }> = [];
           const received: string[] = [];
           const contextPrompts: string[][] = [];
           let attachmentRequested = false;
@@ -1106,7 +1109,11 @@ describe("discord input", () => {
                 channelId === 10n
                   ? { id: 10n, guildId: 1n, type: ChannelTypes.GuildText, name: "general" }
                   : { id: 20n, guildId: 1n, type: ChannelTypes.PublicThread, parentId: 10n },
-              sendMessage: async () => undefined,
+              sendMessage: async (channelId, options) => {
+                replies.push({ channelId, content: options.content });
+                failureReplyStarted.resolve();
+                await releaseFailureReply.promise;
+              },
               editChannel: async () => undefined,
               startThreadWithMessage: async () => ({ id: 20n }),
             },
@@ -1147,7 +1154,7 @@ describe("discord input", () => {
                   yield* Deferred.await(releaseFirst);
                   return yield* new ApplicationError({
                     reason: "operation",
-                    message: "opening send failed",
+                    message: "private-opening-send-failure",
                   });
                 }
                 yield* Deferred.succeed(followupSent, undefined);
@@ -1207,6 +1214,13 @@ describe("discord input", () => {
           yield* Deferred.succeed(releaseFirst, undefined);
           yield* Deferred.await(followupSent);
           yield* Deferred.await(interactionEdited);
+          yield* Effect.promise(() => failureReplyStarted.promise);
+          assert.deepStrictEqual(
+            replies.map(({ channelId }) => channelId),
+            [20n],
+          );
+          assert.notInclude(replies[0]?.content ?? "", "private-opening-send-failure");
+          releaseFailureReply.resolve();
           assert.deepStrictEqual(received, ["opening", "follow-up"]);
           assert.deepStrictEqual(contextPrompts, [["opening", "follow-up"]]);
           assert.isTrue(attachmentRequested);

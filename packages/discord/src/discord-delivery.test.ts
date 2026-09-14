@@ -3,7 +3,7 @@ import { assert, describe, it } from "@effect/vitest";
 import type { MessageDelivery } from "@pico/contract/agent-runtime";
 import { Application } from "@pico/contract/application";
 import * as Chat from "@pico/contract/chat-model";
-import { ApplicationError } from "@pico/contract/errors";
+import { ApplicationError, ChatClosed } from "@pico/contract/errors";
 import { AbsolutePath } from "@pico/contract/path";
 import * as Workspace from "@pico/contract/workspace-model";
 import { ChannelTypes } from "discordeno";
@@ -12,8 +12,10 @@ import * as Effect from "effect/Effect";
 import * as Logger from "effect/Logger";
 import * as Option from "effect/Option";
 import * as Redacted from "effect/Redacted";
+import * as Scope from "effect/Scope";
 import * as TestClock from "effect/testing/TestClock";
 import { type DiscordInputBot, install } from "./discord-input.ts";
+import * as DiscordOutput from "./discord-output.ts";
 import type { DiscordMessage } from "./discord-prompt.ts";
 
 const workspaceId = Workspace.WorkspaceId.make("018f47a0-0000-7000-8000-000000000001");
@@ -39,6 +41,8 @@ const message = (id: bigint, channelId = 20n): DiscordMessage => ({
 const installInput = Effect.fn("test.installDeliveryInput")(function* (options: {
   readonly sendMessage: Application["Service"]["sendMessage"];
   readonly reactions: Pick<DiscordInputBot["helpers"], "addReaction" | "deleteOwnReaction">;
+  readonly createChat?: Application["Service"]["createChat"];
+  readonly reply?: DiscordInputBot["helpers"]["sendMessage"];
 }) {
   const bot: DiscordInputBot = {
     id: 999n,
@@ -49,7 +53,7 @@ const installInput = Effect.fn("test.installDeliveryInput")(function* (options: 
         channelId === 10n
           ? { id: 10n, guildId: 1n, type: ChannelTypes.GuildText, name: "general" }
           : { id: 20n, guildId: 1n, type: ChannelTypes.PublicThread, parentId: 10n },
-      sendMessage: async () => undefined,
+      sendMessage: options.reply ?? (async () => undefined),
       editChannel: async () => undefined,
       startThreadWithMessage: async () => ({ id: 20n }),
     },
@@ -60,21 +64,19 @@ const installInput = Effect.fn("test.installDeliveryInput")(function* (options: 
     askBtw: () => Effect.die("unexpected side question"),
     listWorkspaces: () => Effect.die("unexpected workspace list"),
     createWorkspace: () => Effect.die("unexpected explicit workspace creation"),
-    getOrCreateWorkspaceByBinding: () => Effect.die("unexpected workspace creation"),
+    getOrCreateWorkspaceByBinding: () =>
+      Effect.succeed({
+        id: workspaceId,
+        name: "general",
+        binding: { platform: "discord", externalId: "10" },
+        defaultCwd: cwd,
+        worktree: null,
+        createdAt: 0,
+      }),
     bindWorkspace: () => Effect.die("unexpected workspace binding"),
     listChats: () => Effect.die("unexpected chat list"),
-    createChat: () => Effect.succeed(chat),
-    findWorkspaceByPlatformId: () =>
-      Effect.succeed(
-        Option.some({
-          id: workspaceId,
-          name: "general",
-          binding: { platform: "discord", externalId: "10" },
-          defaultCwd: cwd,
-          worktree: null,
-          createdAt: 0,
-        }),
-      ),
+    createChat: options.createChat ?? (() => Effect.succeed(chat)),
+    findWorkspaceByPlatformId: () => Effect.succeed(Option.none()),
     findChatByPlatformId: () => Effect.succeed(Option.some(chat)),
     findChatPlatformBinding: () => Effect.die("unexpected chat binding lookup"),
     transcript: () => Effect.die("unexpected transcript read"),
@@ -97,20 +99,336 @@ const installInput = Effect.fn("test.installDeliveryInput")(function* (options: 
 });
 
 describe("Discord message delivery", () => {
+  it.effect("distinguishes chat setup, admission, and completion failures in thread replies", () =>
+    Effect.gen(function* () {
+      const failure = new ApplicationError({
+        reason: "operation",
+        message: "private-stage-failure",
+      });
+      const stages = ["creation", "admission", "completion"] as const;
+      const replies = yield* Effect.forEach(stages, (stage) =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const replied = Promise.withResolvers<string>();
+            const handle = yield* installInput({
+              createChat: () =>
+                stage === "creation" ? Effect.fail(failure) : Effect.succeed(chat),
+              sendMessage: () =>
+                stage === "admission"
+                  ? Effect.fail(failure)
+                  : Effect.succeed({ kind: "started", completed: Effect.fail(failure) }),
+              reply: async (_channelId, options) => {
+                replied.resolve(options.content);
+              },
+              reactions: {
+                addReaction: async () => undefined,
+                deleteOwnReaction: async () => undefined,
+              },
+            }).pipe(Effect.provide(Logger.layer([])));
+
+            handle(message(101n, 10n));
+            const content = yield* Effect.promise(() => replied.promise);
+            assert.notInclude(content, failure.message);
+            return content;
+          }),
+        ),
+      );
+      assert.strictEqual(new Set(replies).size, stages.length);
+    }),
+  );
+
+  for (const reason of ["operation", "invalid-state"] as const) {
+    it.effect(`notifies the new thread when chat creation fails with ${reason}`, () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const replied = Promise.withResolvers<void>();
+          const replies: Array<Parameters<DiscordInputBot["helpers"]["sendMessage"]>> = [];
+          const logs: Array<ReturnType<typeof Logger.formatStructured.log>> = [];
+          let admissions = 0;
+          const handle = yield* installInput({
+            createChat: () =>
+              Effect.fail(new ApplicationError({ reason, message: "private-chat-setup-error" })),
+            sendMessage: () =>
+              Effect.sync(() => {
+                admissions += 1;
+                return { kind: "handled" };
+              }),
+            reply: async (channelId, options) => {
+              replies.push([channelId, options]);
+              replied.resolve();
+            },
+            reactions: {
+              addReaction: async () => undefined,
+              deleteOwnReaction: async () => undefined,
+            },
+          }).pipe(
+            Effect.provide(
+              Logger.layer([
+                Logger.make((options) => logs.push(Logger.formatStructured.log(options))),
+              ]),
+            ),
+          );
+
+          handle(message(101n, 10n));
+          yield* Effect.promise(() => replied.promise);
+          assert.deepStrictEqual(
+            replies.map(([channelId]) => channelId),
+            [20n],
+          );
+          assert.strictEqual(admissions, 0);
+          assert.notInclude(JSON.stringify(replies.map(([, options]) => options)), "private-");
+          assert.deepStrictEqual(replies[0]?.[1].allowedMentions.parse, []);
+          assert.strictEqual(logs.length, reason === "operation" ? 1 : 0);
+          if (reason === "operation") {
+            assert.deepStrictEqual(
+              {
+                phase: logs[0]?.annotations.phase,
+                channelId: logs[0]?.annotations.channelId,
+                threadId: logs[0]?.annotations.threadId,
+                messageId: logs[0]?.annotations.messageId,
+              },
+              { phase: "create-chat", channelId: "10", threadId: "20", messageId: "101" },
+            );
+          }
+        }),
+      ),
+    );
+  }
+
+  it.effect("reports a failed thread notification independently without retrying or leaking", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const reported = Promise.withResolvers<void>();
+        const replies: Array<Parameters<DiscordInputBot["helpers"]["sendMessage"]>> = [];
+        const logs: Array<ReturnType<typeof Logger.formatStructured.log>> = [];
+        const handle = yield* installInput({
+          createChat: () => Effect.die(new Error("private-chat-defect")),
+          sendMessage: () => Effect.die("unexpected admission after chat failure"),
+          reply: async (channelId, options) => {
+            replies.push([channelId, options]);
+            throw new Error("private-discord-error", {
+              cause: { status: 503, body: '{"code":50013,"message":"private-discord-body"}' },
+            });
+          },
+          reactions: {
+            addReaction: async () => undefined,
+            deleteOwnReaction: async () => undefined,
+          },
+        }).pipe(
+          Effect.provide(
+            Logger.layer([
+              Logger.make((options) => {
+                const entry = Logger.formatStructured.log(options);
+                logs.push(entry);
+                if (entry.annotations.operation === "reply-message-failure") reported.resolve();
+              }),
+            ]),
+          ),
+        );
+
+        handle(message(101n, 10n));
+        yield* Effect.promise(() => reported.promise);
+        yield* TestClock.adjust("1 millis");
+        assert.deepStrictEqual(
+          replies.map(([channelId]) => channelId),
+          [20n],
+        );
+        assert.deepStrictEqual(
+          logs.map(({ annotations }) => ({
+            operation: annotations.operation,
+            channelId: annotations.channelId,
+            threadId: annotations.threadId,
+            status: annotations.status,
+          })),
+          [
+            {
+              operation: "message-request",
+              channelId: "10",
+              threadId: "20",
+              status: undefined,
+            },
+            {
+              operation: "reply-message-failure",
+              channelId: "10",
+              threadId: "20",
+              status: 503,
+            },
+          ],
+        );
+        assert.notInclude(JSON.stringify(logs), "private-");
+        assert.notInclude(JSON.stringify(replies.map(([, options]) => options)), "private-");
+      }),
+    ),
+  );
+
+  for (const failReply of [false, true]) {
+    it.effect(
+      `routes opening ChatClosed to the new thread${failReply ? " without retrying a failed reply" : ""}`,
+      () =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const observed = Promise.withResolvers<void>();
+            const channels: bigint[] = [];
+            const logs: Array<ReturnType<typeof Logger.formatStructured.log>> = [];
+            const handle = yield* installInput({
+              sendMessage: () => Effect.fail(new ChatClosed()),
+              reply: async (channelId) => {
+                channels.push(channelId);
+                if (failReply) throw { status: 403, body: "private-chat-closed-reply" };
+                observed.resolve();
+              },
+              reactions: {
+                addReaction: async () => undefined,
+                deleteOwnReaction: async () => undefined,
+              },
+            }).pipe(
+              Effect.provide(
+                Logger.layer([
+                  Logger.make((options) => {
+                    logs.push(Logger.formatStructured.log(options));
+                    observed.resolve();
+                  }),
+                ]),
+              ),
+            );
+
+            handle(message(101n, 10n));
+            yield* Effect.promise(() => observed.promise);
+            yield* TestClock.adjust("1 millis");
+            assert.deepStrictEqual(channels, [20n]);
+            assert.deepStrictEqual(
+              logs.map(({ annotations }) => annotations.operation),
+              failReply ? ["reply-chat-closed"] : [],
+            );
+            assert.notInclude(JSON.stringify(logs), "private-");
+          }),
+        ),
+    );
+  }
+
+  it.effect("keeps interrupted chat creation and opening completion quiet", () =>
+    Effect.gen(function* () {
+      const replies: bigint[] = [];
+      const logs: Array<ReturnType<typeof Logger.formatStructured.log>> = [];
+      for (const stage of ["creation", "completion"] as const) {
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const interrupted = yield* Deferred.make<void>();
+            const cancel = Effect.interrupt.pipe(
+              Effect.ensuring(Deferred.succeed(interrupted, undefined)),
+            );
+            const handle = yield* installInput({
+              createChat: () => (stage === "creation" ? cancel : Effect.succeed(chat)),
+              sendMessage: () => Effect.succeed({ kind: "started", completed: cancel }),
+              reply: async (channelId) => {
+                replies.push(channelId);
+              },
+              reactions: {
+                addReaction: async () => undefined,
+                deleteOwnReaction: async () => undefined,
+              },
+            }).pipe(
+              Effect.provide(
+                Logger.layer([
+                  Logger.make((options) => logs.push(Logger.formatStructured.log(options))),
+                ]),
+              ),
+            );
+            handle(message(101n, 10n));
+            yield* Deferred.await(interrupted);
+            yield* TestClock.adjust("1 millis");
+          }),
+        );
+      }
+      assert.deepStrictEqual(replies, []);
+      assert.deepStrictEqual(logs, []);
+    }),
+  );
+
+  it.effect("leaves normal agent terminal failures to event output", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const finished = yield* Deferred.make<void>();
+        const replies: bigint[] = [];
+        const rendered: Array<{ readonly channelId: bigint; readonly content: string }> = [];
+        const dispatch = DiscordOutput.make(
+          {
+            send: (channelId, output) =>
+              Effect.sync(() => {
+                rendered.push({ channelId, content: output.content });
+                return 1n;
+              }),
+            edit: () => Effect.void,
+            renameThread: () => Effect.void,
+            triggerTyping: () => Effect.void,
+          },
+          yield* Scope.Scope,
+          { showToolCalls: false, showThinking: false },
+        );
+        const handle = yield* installInput({
+          sendMessage: () =>
+            Effect.succeed({
+              kind: "started",
+              completed: Effect.gen(function* () {
+                yield* dispatch(20n, { chatId, event: { type: "run-started" } });
+                yield* dispatch(20n, {
+                  chatId,
+                  event: {
+                    type: "message-settled",
+                    message: {
+                      role: "assistant",
+                      status: "failed",
+                      stopReason: "error",
+                      message: "private-terminal-error",
+                      content: [],
+                      model: "test",
+                      timestamp: 0,
+                    },
+                  },
+                });
+                yield* dispatch(20n, {
+                  chatId,
+                  event: { type: "run-finished", outcome: "failed" },
+                });
+                yield* Deferred.succeed(finished, undefined);
+              }).pipe(Effect.orDie),
+            }),
+          reply: async (channelId) => {
+            replies.push(channelId);
+          },
+          reactions: {
+            addReaction: async () => undefined,
+            deleteOwnReaction: async () => undefined,
+          },
+        });
+
+        handle(message(101n, 10n));
+        yield* Deferred.await(finished);
+        yield* TestClock.adjust("1 millis");
+        assert.deepStrictEqual(replies, []);
+        assert.deepStrictEqual(
+          rendered.map(({ channelId }) => channelId),
+          [20n],
+        );
+        assert.notInclude(rendered[0]?.content ?? "", "private-terminal-error");
+      }),
+    ),
+  );
+
   it.effect("admits the next message before completion and retains the first failure context", () =>
     Effect.scoped(
       Effect.gen(function* () {
         const completionObserved = yield* Deferred.make<void>();
         const completion = yield* Deferred.make<void, ApplicationError>();
         const secondAdmitted = yield* Deferred.make<void>();
-        const reported = Promise.withResolvers<void>();
+        const replied = Promise.withResolvers<void>();
+        const replies: Array<{ readonly channelId: bigint; readonly content: string }> = [];
         const logs: Array<ReturnType<typeof Logger.formatStructured.log>> = [];
         const reactions: string[] = [];
         let admissions = 0;
         const logger = Logger.make((options) => {
           const entry = Logger.formatStructured.log(options);
           logs.push(entry);
-          if (entry.annotations.operation === "message-request") reported.resolve();
         });
         const handle = yield* installInput({
           sendMessage: () =>
@@ -127,6 +445,10 @@ describe("Discord message delivery", () => {
               yield* Deferred.succeed(secondAdmitted, undefined);
               return { kind: "handled" } satisfies MessageDelivery<ApplicationError>;
             }),
+          reply: async (channelId, options) => {
+            replies.push({ channelId, content: options.content });
+            replied.resolve();
+          },
           reactions: {
             addReaction: async (_channelId, _messageId, reaction) => {
               reactions.push(reaction);
@@ -145,9 +467,14 @@ describe("Discord message delivery", () => {
         assert.deepStrictEqual(reactions, []);
         yield* Deferred.fail(
           completion,
-          new ApplicationError({ reason: "operation", message: "Message send failed" }),
+          new ApplicationError({ reason: "operation", message: "private-completion-failure" }),
         );
-        yield* Effect.promise(() => reported.promise);
+        yield* Effect.promise(() => replied.promise);
+        assert.deepStrictEqual(
+          replies.map(({ channelId }) => channelId),
+          [20n],
+        );
+        assert.notInclude(replies[0]?.content ?? "", "private-completion-failure");
         assert.strictEqual(logs.length, 1);
         assert.deepStrictEqual(
           {
