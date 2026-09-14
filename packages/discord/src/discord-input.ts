@@ -335,7 +335,12 @@ export const install = Effect.fn("DiscordInput.install")(function* <
     const choices = yield* Fiber.join(request).pipe(
       Effect.timeout("2 seconds"),
       Effect.ensuring(Effect.sync(() => request.interruptUnsafe())),
-      Effect.catchCause(() => Effect.succeed([])),
+      Effect.catchTag("TimeoutError", () => Effect.succeed([])),
+      Effect.catchCause((cause) =>
+        Cause.hasInterruptsOnly(cause)
+          ? Effect.succeed([])
+          : reportFailure("autocomplete-models", cause).pipe(Effect.as([])),
+      ),
     );
     yield* promiseBoundary("autocomplete-models", () => interaction.respond({ choices }));
   });
@@ -1041,7 +1046,7 @@ export const install = Effect.fn("DiscordInput.install")(function* <
             Effect.catchTag("ChatClosed", () => Effect.succeed(closedMessage)),
             Effect.catchCause((cause) =>
               reportFailure("switch-model", cause).pipe(
-                Effect.as("pico could not switch this chat's model. Try again when it is idle."),
+                Effect.as("pico could not switch this chat's model. Please try again."),
               ),
             ),
           );

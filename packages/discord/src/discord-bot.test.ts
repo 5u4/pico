@@ -440,6 +440,7 @@ describe("Discord bot direct messages", () => {
           const releaseCleanup = yield* Deferred.make<void>();
           const cleanupFinished = yield* Deferred.make<void>();
           let slow = false;
+          const logs: Array<ReturnType<typeof Logger.formatStructured.log>> = [];
           const harness = yield* fixture({
             sendBotMessage: () => Effect.die("autocomplete must not prompt"),
             availableModels: () =>
@@ -455,23 +456,35 @@ describe("Discord bot direct messages", () => {
                 : Effect.fail(
                     new ApplicationError({ reason: "operation", message: "secret-provider" }),
                   ),
-          });
+          }).pipe(
+            Effect.provide(
+              Logger.layer([
+                Logger.make((options) => {
+                  logs.push(Logger.formatStructured.log(options));
+                }),
+              ]),
+            ),
+          );
           const command = directInteraction({
             data: { name: "switch", options: modelOptions("", true) },
           });
           assert.deepStrictEqual(yield* modelSuggestions(harness.bot, command), []);
+          assert.strictEqual(logs.length, 1);
+          assert.strictEqual(logs[0]?.annotations.operation, "autocomplete-models");
           const error = yield* privateCommandReply(
             harness.bot,
             directInteraction({ data: { name: "switch", options: modelOptions("one/model") } }),
           );
           assert.notInclude(error, "secret-provider");
           assert.deepStrictEqual(harness.resolvedRoots, []);
+          assert.strictEqual(logs.length, 2);
           slow = true;
           const suggestions = yield* modelSuggestions(harness.bot, command).pipe(Effect.forkChild);
           yield* Deferred.await(requested);
           yield* TestClock.adjust("2 seconds");
           assert.deepStrictEqual(yield* Fiber.join(suggestions), []);
           assert.deepStrictEqual(harness.resolvedRoots, []);
+          assert.strictEqual(logs.length, 2);
           yield* Deferred.succeed(releaseCleanup, undefined);
           yield* Deferred.await(cleanupFinished);
         }),
