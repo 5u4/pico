@@ -38,7 +38,7 @@ describe("OMP session settings", () => {
     testEffect(
       Effect.gen(function* () {
         const cwd = yield* makeProject(false);
-        const settings = yield* prepareSessionSettings(cwd, null, "off");
+        const settings = yield* prepareSessionSettings(cwd, "web", "off");
 
         assert.strictEqual(settings.get("tui.renderMermaid"), false);
       }),
@@ -49,7 +49,7 @@ describe("OMP session settings", () => {
     testEffect(
       Effect.gen(function* () {
         const cwd = yield* makeProject(true);
-        const settings = yield* prepareSessionSettings(cwd, null, "off");
+        const settings = yield* prepareSessionSettings(cwd, "web", "off");
 
         assert.strictEqual(settings.get("tui.renderMermaid"), true);
       }),
@@ -71,9 +71,9 @@ describe("OMP session settings", () => {
     testEffect(
       Effect.gen(function* () {
         const cwd = yield* makeProject(true);
-        const first = yield* prepareSessionSettings(cwd, null, "off");
+        const first = yield* prepareSessionSettings(cwd, "web", "off");
         first.override("tui.renderMermaid", false);
-        const second = yield* prepareSessionSettings(cwd, null, "off");
+        const second = yield* prepareSessionSettings(cwd, "web", "off");
 
         assert.notStrictEqual(first, second);
         assert.strictEqual(first.get("tui.renderMermaid"), false);
@@ -93,14 +93,14 @@ describe("OMP session settings", () => {
       Effect.gen(function* () {
         for (const nativeBrowser of [true, false]) {
           const cwd = yield* makeProject(true, nativeBrowser);
-          const off = yield* prepareSessionSettings(cwd, null, "off");
+          const off = yield* prepareSessionSettings(cwd, "web", "off");
           assert.strictEqual(off.get("browser.enabled"), nativeBrowser);
 
-          const enabled = yield* prepareSessionSettings(cwd, null, "agent-browser");
+          const enabled = yield* prepareSessionSettings(cwd, "web", "agent-browser");
           assert.strictEqual(enabled.get("browser.enabled"), false);
           assert.strictEqual(off.get("browser.enabled"), nativeBrowser);
 
-          const disabledAgain = yield* prepareSessionSettings(cwd, null, "off");
+          const disabledAgain = yield* prepareSessionSettings(cwd, "web", "off");
           assert.strictEqual(disabledAgain.get("browser.enabled"), nativeBrowser);
         }
       }),

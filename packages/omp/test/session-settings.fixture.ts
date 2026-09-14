@@ -59,7 +59,7 @@ for (const customNames of [
   ];
 
   for (const externalBrowser of ["off", "agent-browser", "agent-browser", "off"] as const) {
-    const settings = await Effect.runPromise(prepareSessionSettings(cwd, null, externalBrowser));
+    const settings = await Effect.runPromise(prepareSessionSettings(cwd, "web", externalBrowser));
     const { skills } = await loadSkills({ cwd, ...settings.getGroup("skills") });
     const discovered = await Promise.all(
       skills.map(async (skill) => ({ name: skill.name, filePath: await realpath(skill.filePath) })),

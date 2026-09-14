@@ -869,7 +869,7 @@ describe("discord interactions", () => {
               return Effect.succeed({
                 id: workspaceId,
                 name: "general",
-                binding: input.binding,
+                ...input.binding,
                 defaultCwd: AbsolutePath.make(input.configuration.cwd),
                 worktree: null,
                 createdAt: 0,
@@ -895,7 +895,7 @@ describe("discord interactions", () => {
             return Effect.succeed({
               id: workspaceId,
               name: "general",
-              binding: input.binding,
+              ...input.binding,
               defaultCwd: AbsolutePath.make(input.configuration.repository),
               worktree: input.configuration.settings,
               createdAt: 0,

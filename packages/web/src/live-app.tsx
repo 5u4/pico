@@ -241,7 +241,8 @@ function LiveRoute({ state }: { readonly state: State | null }) {
     const decoded = decodeWorkspace({
       name: input.name.trim(),
       defaultCwd: input.directory,
-      binding: null,
+      platform: "web",
+      externalId: null,
       worktree: null,
     });
     if (Option.isNone(decoded)) {

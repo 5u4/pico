@@ -30,9 +30,14 @@ export const layer = (options: Options) => Layer.effect(ChatSessionContext, make
 
 const personaPrompt = persona.trim();
 const platformPrompts = {
-  discord: "You are chatting with the user through Discord.",
   web: "You are chatting with the user through Pico Web.",
-} satisfies Record<Workspace.WorkspacePlatform | "web", string>;
+  desktop: "You are chatting with the user through Pico Desktop.",
+  mobile: "You are chatting with the user through Pico Mobile.",
+  discord: "You are chatting with the user through Discord.",
+  telegram: "You are chatting with the user through Telegram.",
+  slack: "You are chatting with the user through Slack.",
+  teams: "You are chatting with the user through Microsoft Teams.",
+} satisfies Record<Workspace.WorkspacePlatform, string>;
 
 const decodeDiscordWorkspaceExternalId = Schema.decodeUnknownEffect(
   Workspace.DiscordWorkspaceExternalId,
@@ -61,14 +66,14 @@ const resolve = Effect.fn("ChatSessionContext.resolve")(function* (
     return yield* new AgentError({ message: "Chat workspace not found" });
   }
 
-  const binding = maybeWorkspace.value.binding;
+  const workspace = maybeWorkspace.value;
   const discordAddress =
-    binding?.platform === "discord"
-      ? yield* decodeDiscordWorkspaceExternalId(binding.externalId).pipe(
+    workspace.platform === "discord"
+      ? yield* decodeDiscordWorkspaceExternalId(workspace.externalId).pipe(
           Effect.mapError(() => new AgentError({ message: "Invalid Discord workspace binding" })),
         )
       : null;
-  const platform = binding?.platform ?? null;
+  const platform = workspace.platform;
   const scope: InstructionsScope =
     discordAddress === null
       ? { kind: "global" }
@@ -93,7 +98,7 @@ const resolve = Effect.fn("ChatSessionContext.resolve")(function* (
         }
       : {}),
   });
-  const platformPrompt = `\n\n${platformPrompts[platform ?? "web"]}`;
+  const platformPrompt = `\n\n${platformPrompts[platform]}`;
   const basePrompt = `${personaPrompt}${platformPrompt}\n\nChat context\n${identity}`;
 
   return {

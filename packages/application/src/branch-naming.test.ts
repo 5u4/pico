@@ -38,7 +38,8 @@ describe("BranchNaming", () => {
           {
             id: directWorkspaceId,
             name: "direct",
-            binding: null,
+            platform: "web",
+            externalId: null,
             defaultCwd: directCwd,
             worktree: null,
             createdAt: 1,
@@ -49,7 +50,8 @@ describe("BranchNaming", () => {
           {
             id: worktreeWorkspaceId,
             name: "worktree",
-            binding: null,
+            platform: "web",
+            externalId: null,
             defaultCwd: directCwd,
             worktree: { branch: "main", prefix: "chat/" },
             createdAt: 1,
@@ -199,7 +201,8 @@ describe("BranchNaming", () => {
       let workspace: Workspace.Workspace = {
         id: firstWorkspaceId,
         name: "worktree",
-        binding: null,
+        platform: "web",
+        externalId: null,
         defaultCwd: AbsolutePath.make("/tmp/pico-repository"),
         worktree: { branch: "main", prefix: "chat/" },
         createdAt: 1,
@@ -347,7 +350,8 @@ describe("BranchNaming", () => {
       const workspace: Workspace.Workspace = {
         id: workspaceId,
         name: "worktree",
-        binding: null,
+        platform: "web",
+        externalId: null,
         defaultCwd: AbsolutePath.make("/tmp/pico-repository"),
         worktree: { branch: "main", prefix: "chat/" },
         createdAt: 1,

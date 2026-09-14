@@ -1,31 +1,32 @@
 import { PersistenceError } from "@pico/contract/errors";
-import { AbsolutePath } from "@pico/contract/path";
 import * as Workspace from "@pico/contract/workspace-model";
 import { WorkspaceRepository } from "@pico/contract/workspace-repository";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
+import * as Struct from "effect/Struct";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as SqlSchema from "effect/unstable/sql/SqlSchema";
 import { failure } from "./error.ts";
 
-const WorkspaceRow = Schema.Struct({
-  id: Workspace.WorkspaceId,
-  name: Schema.NonEmptyString,
-  platform: Schema.NullOr(Workspace.WorkspacePlatform),
-  externalId: Schema.NullOr(Schema.NonEmptyString),
-  defaultCwd: AbsolutePath,
-  worktreeBranch: Schema.NullOr(Schema.NonEmptyString),
-  worktreePrefix: Schema.NullOr(Schema.NonEmptyString),
-  createdAt: Schema.Natural,
-});
+const worktreeColumns = {
+  worktreeBranch: Schema.NullOr(Workspace.WorktreeSettings.fields.branch),
+  worktreePrefix: Schema.NullOr(Workspace.WorktreeSettings.fields.prefix),
+};
+const WorkspaceRow = Workspace.Workspace.mapMembers(([native, foreign]) => [
+  native.mapFields((fields) => ({
+    ...Struct.omit(fields, ["worktree"]),
+    ...worktreeColumns,
+  })),
+  foreign.mapFields((fields) => ({
+    ...Struct.omit(fields, ["worktree"]),
+    ...worktreeColumns,
+  })),
+]);
 type WorkspaceRow = typeof WorkspaceRow.Type;
 
-const BoundWorkspace = Schema.Struct({
-  ...Workspace.Workspace.fields,
-  binding: Workspace.WorkspaceBinding,
-});
+const BoundWorkspace = Workspace.Workspace.members[1];
 
 const ReplaceConfiguration = Schema.Struct({
   id: Workspace.WorkspaceId,
@@ -35,39 +36,19 @@ const ReplaceConfiguration = Schema.Struct({
 const decodeWorkspace = Effect.fn("WorkspaceRepository.decodeWorkspace")(function* (
   row: WorkspaceRow,
 ) {
-  let binding: Workspace.WorkspaceBinding | null;
-  if (row.platform === null && row.externalId === null) {
-    binding = null;
-  } else if (row.platform !== null && row.externalId !== null) {
-    binding = {
-      platform: row.platform,
-      externalId: row.externalId,
-    };
-  } else {
-    return yield* Effect.fail(
-      new PersistenceError({ message: "invalid stored workspace binding column pair" }),
-    );
-  }
-
+  const { worktreeBranch, worktreePrefix, ...workspace } = row;
   let worktree: Workspace.WorktreeSettings | null;
-  if (row.worktreeBranch === null && row.worktreePrefix === null) {
+  if (worktreeBranch === null && worktreePrefix === null) {
     worktree = null;
-  } else if (row.worktreeBranch !== null && row.worktreePrefix !== null) {
-    worktree = { branch: row.worktreeBranch, prefix: row.worktreePrefix };
+  } else if (worktreeBranch !== null && worktreePrefix !== null) {
+    worktree = { branch: worktreeBranch, prefix: worktreePrefix };
   } else {
     return yield* Effect.fail(
       new PersistenceError({ message: "invalid stored workspace worktree column pair" }),
     );
   }
 
-  return {
-    id: row.id,
-    name: row.name,
-    binding,
-    defaultCwd: row.defaultCwd,
-    worktree,
-    createdAt: row.createdAt,
-  };
+  return { ...workspace, worktree };
 });
 
 const make = Effect.fn("WorkspaceRepository.make")(function* () {
@@ -107,8 +88,8 @@ const make = Effect.fn("WorkspaceRepository.make")(function* () {
       ) VALUES (
         ${workspace.id},
         ${workspace.name},
-        ${workspace.binding?.platform ?? null},
-        ${workspace.binding?.externalId ?? null},
+        ${workspace.platform},
+        ${workspace.externalId},
         ${workspace.defaultCwd},
         ${workspace.worktree?.branch ?? null},
         ${workspace.worktree?.prefix ?? null},
@@ -141,8 +122,8 @@ const make = Effect.fn("WorkspaceRepository.make")(function* () {
       ) VALUES (
         ${workspace.id},
         ${workspace.name},
-        ${workspace.binding.platform},
-        ${workspace.binding.externalId},
+        ${workspace.platform},
+        ${workspace.externalId},
         ${workspace.defaultCwd},
         ${workspace.worktree?.branch ?? null},
         ${workspace.worktree?.prefix ?? null},
@@ -230,7 +211,7 @@ const make = Effect.fn("WorkspaceRepository.make")(function* () {
   const getOrCreateByBinding = Effect.fn("WorkspaceRepository.getOrCreateByBinding")(
     function* (workspace: typeof BoundWorkspace.Type) {
       yield* insertByBinding(workspace);
-      return yield* decodeWorkspace(yield* requireByBinding(workspace.binding));
+      return yield* decodeWorkspace(yield* requireByBinding(workspace));
     },
     sql.withTransaction,
     Effect.mapError(failure("Failed to get or create workspace")),

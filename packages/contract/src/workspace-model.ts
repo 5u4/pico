@@ -6,7 +6,15 @@ export const WorkspaceId = Schema.String.check(Schema.isUUID(7)).pipe(
 );
 export type WorkspaceId = typeof WorkspaceId.Type;
 
-export const WorkspacePlatform = Schema.Literals(["discord"]);
+export const WorkspacePlatform = Schema.Literals([
+  "web",
+  "desktop",
+  "mobile",
+  "discord",
+  "telegram",
+  "slack",
+  "teams",
+]);
 export type WorkspacePlatform = typeof WorkspacePlatform.Type;
 
 const DiscordSnowflake = Schema.String.check(Schema.isPattern(/^[0-9]+$/), Schema.isTrimmed());
@@ -18,7 +26,7 @@ export const DiscordWorkspaceExternalId = Schema.TemplateLiteralParser([
 ]);
 
 export const WorkspaceBinding = Schema.Struct({
-  platform: WorkspacePlatform,
+  platform: WorkspacePlatform.pick(["discord", "telegram", "slack", "teams"]),
   externalId: Schema.NonEmptyString,
 });
 export type WorkspaceBinding = typeof WorkspaceBinding.Type;
@@ -35,12 +43,22 @@ export const WorkspaceConfiguration = Schema.Struct({
 });
 export type WorkspaceConfiguration = typeof WorkspaceConfiguration.Type;
 
-export const Workspace = Schema.Struct({
+const workspaceFields = {
   id: WorkspaceId,
   name: Schema.NonEmptyString,
-  binding: Schema.NullOr(WorkspaceBinding),
-  defaultCwd: AbsolutePath,
-  worktree: Schema.NullOr(WorktreeSettings),
+  ...WorkspaceConfiguration.fields,
   createdAt: Schema.Natural,
-});
+};
+
+export const Workspace = Schema.Union([
+  Schema.Struct({
+    ...workspaceFields,
+    platform: WorkspacePlatform.pick(["web", "desktop", "mobile"]),
+    externalId: Schema.Null,
+  }),
+  Schema.Struct({
+    ...workspaceFields,
+    ...WorkspaceBinding.fields,
+  }),
+]);
 export type Workspace = typeof Workspace.Type;

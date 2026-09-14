@@ -6,7 +6,7 @@ import type { WorkspacePlatform } from "./workspace-model.ts";
 
 export interface ResolvedChatSessionContext {
   readonly chat: Chat;
-  readonly platform: WorkspacePlatform | null;
+  readonly platform: WorkspacePlatform;
   readonly appendSystemPrompt: string;
 }
 

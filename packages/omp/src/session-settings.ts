@@ -32,7 +32,7 @@ export const loadAvailableModels = Effect.fn("OmpSession.loadAvailableModels")(f
 
 export const prepareSessionSettings = Effect.fn("OmpSession.prepareSettings")(function* (
   cwd: AbsolutePath,
-  platform: WorkspacePlatform | null,
+  platform: WorkspacePlatform,
   externalBrowser: ExternalBrowser,
 ) {
   const settings = yield* Effect.tryPromise({

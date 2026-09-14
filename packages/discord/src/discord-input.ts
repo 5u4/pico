@@ -221,10 +221,8 @@ export const install = Effect.fn("DiscordInput.install")(function* <
 
     const workspace = yield* application.getOrCreateWorkspaceByBinding({
       name: name ?? `Discord channel ${channelId.toString()}`,
-      binding: {
-        platform: "discord",
-        externalId: workspaceExternalId(guildId, channelId),
-      },
+      platform: "discord",
+      externalId: workspaceExternalId(guildId, channelId),
       defaultCwd: config.defaultCwd,
       worktree: null,
     });

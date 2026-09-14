@@ -19,7 +19,7 @@ export class WorkspaceRepository extends Context.Service<
 
     /** Application calls this when resolving a platform binding that may already exist. */
     readonly getOrCreateByBinding: (
-      workspace: Omit<Workspace, "binding"> & { readonly binding: WorkspaceBinding },
+      workspace: Extract<Workspace, { readonly externalId: string }>,
     ) => Effect.Effect<Workspace, PersistenceError>;
 
     readonly findById: (
