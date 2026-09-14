@@ -88,6 +88,12 @@
 - a guild chat in Discord is a thread; DMs use the shared bot chat instead
   - Discord creates the thread before pico persists the chat. Chat setup and opening-message failures therefore reply directly to that thread, even without a chat binding.
   - these replies identify the failed stage without exposing raw errors. Pure interruption stays quiet. Failed notification delivery is logged separately without retrying.
+  - `/switch model:` uses Discord autocomplete in bound threads and bot DMs. Search by provider, model ID, or display name; Discord shows at most 25 matches per query.
+  - autocomplete reads OMP's authenticated, enabled model catalogue without opening a session or provisioning a DM chat. It bypasses turn queues and returns no choices if discovery exceeds two seconds.
+  - Discord owns picker formatting and selection parsing, application resolves the conversation, and OMP revalidates the choice before calling `setModelTemporary`. Confirmation is private.
+  - the selection belongs to the current logical chat, including the bot's shared DM chat, not OMP's global or project model defaults. Native journal entries preserve it through reopen and bot rotation without a second preference store.
+  - if the model changes but journal flush fails, the result is `persistence-unconfirmed`, not a rejected switch. Discord confirms the live model, warns that saving was not confirmed, and logs a safe warning. A failed flush does not prove the write was lost or roll back the live model.
+  - a busy thread rejects switching rather than changing an in-flight run. DM switches follow the existing whole-turn queue; autocomplete does not wait for that queue.
 - when creating the chat, write workspace.default_cwd to chat.cwd
   - when workspace.default_cwd is changed, chat.cwd remains the same
   - each new chat uses the complete workspace configuration read during creation, even if a bind finishes before chat creation completes
@@ -145,7 +151,7 @@
   - a nonblank `secrets/discord_bot_token` enables Discord when the `[discord]` section is present; `allowed_guild = []` enables DMs only, not guild messages
   - guild messages still require a listed guild; `default_cwd` remains a required absolute path for new guild workspaces
   - the gateway subscribes to direct messages; every non-bot sender intentionally shares one bot conversation and memory, with no owner restriction or per-user partition; own messages, other bots, and webhooks are ignored
-  - one DM queue preserves arrival order through attachment downloads, chat creation, and the complete reply; each reply targets the triggering message and channel, and guild/thread commands are unsupported in DMs
+  - one DM queue preserves arrival order through attachment downloads, chat creation, and the complete reply; each reply targets the triggering message and channel. Binding and thread-management commands are unavailable in DMs.
   - Discord resolves `<picoRoot>/agents/discord/bots/<botId>` as `botRoot`; application and OMP bot lifecycle code use that path without Discord-specific path rules
   - `<botRoot>/work` is the durable working directory and is never cleared on rotation; `<botRoot>/sessions` contains physical journals, `<botRoot>/omp` owns OMP local memory, and `<botRoot>/handoffs/<source-session-id>.md` bridges generations
   - one logical bot chat keeps a persisted pointer to the active physical session across restart; its workspace and chat have no Discord channel/thread binding

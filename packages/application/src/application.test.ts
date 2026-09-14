@@ -108,6 +108,8 @@ describe("Application", () => {
       const runtimeLayer = Layer.succeed(
         AgentRuntime,
         AgentRuntime.of({
+          availableModels: () => Effect.die("unexpected model catalog read"),
+          switchModel: () => Effect.die("unexpected model switch"),
           askBtw: () => Effect.die("unexpected side question"),
           events: Stream.empty,
           drain: () => Effect.void,
@@ -579,6 +581,8 @@ describe("Application", () => {
       const runtimeLayer = Layer.succeed(
         AgentRuntime,
         AgentRuntime.of({
+          availableModels: () => Effect.die("unexpected model catalog read"),
+          switchModel: () => Effect.die("unexpected model switch"),
           askBtw: () => Effect.die("unexpected side question"),
           events: Stream.empty,
           drain: () => Effect.void,

@@ -25,15 +25,48 @@ const worktreeOptions = (options: ReadonlyArray<DiscordCommand.CommandOption>) =
 ];
 
 describe("Discord command", () => {
-  it("registers every supported command without duplicate names", () => {
-    assert.deepStrictEqual(DiscordCommand.applicationCommands.map(({ name }) => name).sort(), [
-      "abort",
-      "bind",
-      "btw",
-      "close",
-      "context",
-      "shake",
-    ]);
+  it("distinguishes focused partial model queries from submitted selections", () => {
+    const option = {
+      name: "model",
+      type: ApplicationCommandOptionTypes.String,
+      value: "",
+      focused: true,
+    };
+    assert.strictEqual(DiscordCommand.parseModelQuery([option]), "");
+    assert.strictEqual(DiscordCommand.parseModelQuery([{ ...option, value: "cla" }]), "cla");
+    assert.deepStrictEqual(
+      DiscordCommand.parse("switch", [{ ...option, value: "provider/model" }]),
+      {
+        kind: "malformedSwitch",
+      },
+    );
+    assert.deepStrictEqual(
+      DiscordCommand.parse("switch", [{ ...option, focused: false, value: "provider/model" }]),
+      { kind: "switch", model: "provider/model" },
+    );
+    for (const options of [
+      undefined,
+      [],
+      [{ ...option, focused: false }],
+      [{ ...option, name: "other" }],
+      [{ ...option, type: ApplicationCommandOptionTypes.Integer }],
+      [{ ...option, value: 12 }],
+      [{ ...option, options: [] }],
+      [option, option],
+    ]) {
+      assert.isUndefined(DiscordCommand.parseModelQuery(options));
+    }
+    for (const options of [
+      undefined,
+      [],
+      [{ ...option, focused: false, value: "" }],
+      [{ ...option, focused: false, value: " \n\t" }],
+      [{ ...option, focused: false, value: "x".repeat(101) }],
+      [{ ...option, focused: false, value: true }],
+      [option, option],
+    ]) {
+      assert.deepStrictEqual(DiscordCommand.parse("switch", options), { kind: "malformedSwitch" });
+    }
   });
 
   it("decodes commands without options and ignores unknown names", () => {

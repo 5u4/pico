@@ -6,6 +6,9 @@ import type {
   CapturedAgentRun,
   ContextUsage,
   MessageDelivery,
+  ModelInfo,
+  ModelRef,
+  ModelSwitchResult,
   ShakeMode,
   ShakeResult,
 } from "@pico/contract/agent-runtime";
@@ -55,6 +58,8 @@ export interface OpenedSession {
   readonly askBtw: (question: string, signal: AbortSignal) => Promise<string>;
   readonly createHandoff: (signal: AbortSignal) => Promise<string>;
   readonly shake: (mode: ShakeMode, signal: AbortSignal) => Promise<ShakeResult>;
+  readonly switchModel: (model: ModelRef) => Promise<ModelInfo>;
+  readonly flush: () => Promise<void>;
   readonly contextUsage: () => ContextUsage;
   readonly appendAssistantMessage: (message: OmpAssistantMessage) => Promise<void>;
   readonly unsubscribe: () => void;
@@ -83,6 +88,10 @@ export interface SessionPool {
   readonly abort: (chatId: Chat.ChatId) => Effect.Effect<void, AgentError>;
   readonly contextUsage: (chatId: Chat.ChatId) => Effect.Effect<ContextUsage, AgentError>;
   readonly shake: (chatId: Chat.ChatId, mode: ShakeMode) => Effect.Effect<ShakeResult, AgentError>;
+  readonly switchModel: (
+    chatId: Chat.ChatId,
+    model: ModelRef,
+  ) => Effect.Effect<ModelSwitchResult, AgentError>;
   readonly sendCaptured: (
     chatId: Chat.ChatId,
     runId: ScheduleRunId,
@@ -163,6 +172,8 @@ interface LiveEntry {
   readonly askBtw: (question: string, signal: AbortSignal) => Promise<string>;
   readonly createHandoff: (signal: AbortSignal) => Promise<string>;
   readonly shake: OpenedSession["shake"];
+  readonly switchModel: OpenedSession["switchModel"];
+  readonly flush: OpenedSession["flush"];
   readonly contextUsage: () => ContextUsage;
   readonly appendAssistantMessage: (message: OmpAssistantMessage) => Promise<void>;
   readonly events: Queue.Queue<SessionItem, Cause.Done>;
@@ -382,7 +393,7 @@ const closeEntry = Effect.fn("SessionPool.closeEntry")(function* (entry: LiveEnt
 }, Effect.uninterruptible);
 
 const releaseEntry = (entry: LiveEntry) =>
-  attemptCleanup(entry.chatId, "release", closeEntry(entry));
+  attemptCleanup(entry.chatId, "release", entry.admission.withPermit(closeEntry(entry)));
 
 const acquireEntry = Effect.fn("SessionPool.acquireEntry")(function* (
   factory: SessionFactory,
@@ -474,6 +485,8 @@ const acquireEntry = Effect.fn("SessionPool.acquireEntry")(function* (
     askBtw: opened.askBtw,
     createHandoff: opened.createHandoff,
     shake: opened.shake,
+    switchModel: opened.switchModel,
+    flush: opened.flush,
     appendAssistantMessage: opened.appendAssistantMessage,
     contextUsage: opened.contextUsage,
     events,
@@ -997,6 +1010,7 @@ export const makeSessionPool = Effect.fn("SessionPool.make")(function* (
                 });
               }
               yield* requireIdle;
+              yield* boundary("Failed to flush OMP rotation source", entry.flush);
               yield* commit(handoff);
               yield* closeEntry(entry).pipe(Effect.ensuring(invalidate(sessions, entry.key)));
             }),
@@ -1116,6 +1130,43 @@ export const makeSessionPool = Effect.fn("SessionPool.make")(function* (
     );
   });
 
+  const switchModel = Effect.fn("AgentRuntime.switchModel")(function* (
+    chatId: Chat.ChatId,
+    model: ModelRef,
+  ) {
+    return yield* Effect.scoped(
+      Effect.gen(function* () {
+        const entry = yield* retain(sessions, chatId);
+        return yield* entry.admission.withPermit(
+          Effect.gen(function* () {
+            if (MutableRef.get(entry.lifecycle).type !== "open") {
+              return yield* new AgentError({ message: "OMP session is closing" });
+            }
+            if (
+              MutableRef.get(entry.capture) !== null ||
+              MutableRef.get(entry.run) !== null ||
+              entry.operations.size !== 0 ||
+              entry.session.isStreaming
+            ) {
+              return yield* new AgentError({ message: "OMP session is busy" });
+            }
+            const selected = yield* boundary("Failed to switch OMP model", () =>
+              entry.switchModel(model),
+            );
+            const persisted = yield* Effect.tryPromise({
+              try: entry.flush,
+              catch: () => undefined,
+            }).pipe(Effect.isSuccess);
+            return {
+              kind: persisted ? "persisted" : "persistence-unconfirmed",
+              model: selected,
+            } satisfies ModelSwitchResult;
+          }).pipe(Effect.uninterruptible),
+        );
+      }),
+    );
+  });
+
   const shake = Effect.fn("AgentRuntime.shake")(function* (chatId: Chat.ChatId, mode: ShakeMode) {
     return yield* Effect.scoped(
       Effect.gen(function* () {
@@ -1162,6 +1213,7 @@ export const makeSessionPool = Effect.fn("SessionPool.make")(function* (
     close,
     abort,
     contextUsage,
+    switchModel,
     shake,
   } satisfies SessionPool;
 });

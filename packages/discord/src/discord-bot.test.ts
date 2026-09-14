@@ -2,7 +2,12 @@ import * as BunCrypto from "@effect/platform-bun/BunCrypto";
 import { assert, describe, it } from "@effect/vitest";
 import type { AgentEvent } from "@pico/contract/agent-event";
 import type { AgentPrompt } from "@pico/contract/agent-message";
-import type { ContextUsage, ShakeResult } from "@pico/contract/agent-runtime";
+import type {
+  ContextUsage,
+  ModelInfo,
+  ModelSwitchResult,
+  ShakeResult,
+} from "@pico/contract/agent-runtime";
 import { Application } from "@pico/contract/application";
 import type * as Chat from "@pico/contract/chat-model";
 import { ApplicationError } from "@pico/contract/errors";
@@ -11,7 +16,10 @@ import type { ReplyTarget } from "@pico/contract/reply-target";
 import { ApplicationCommandOptionTypes, InteractionTypes } from "discordeno";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
+import * as Logger from "effect/Logger";
 import * as Option from "effect/Option";
+import * as TestClock from "effect/testing/TestClock";
 import * as HttpClient from "effect/unstable/http/HttpClient";
 import * as HttpClientResponse from "effect/unstable/http/HttpClientResponse";
 import {
@@ -21,6 +29,9 @@ import {
   interaction,
   interactionHandlerFor,
   message,
+  modelOptions,
+  modelSuggestions,
+  privateCommandReply,
   workspaceId,
 } from "./discord-input.fixture.ts";
 import { type DiscordInputBot, type DiscordInteraction, install } from "./discord-input.ts";
@@ -78,6 +89,8 @@ const fixture = Effect.fn("DiscordBotTest.fixture")(function* (options: {
   readonly getOrCreateBotChat?: Application["Service"]["getOrCreateBotChat"];
   readonly contextUsage?: Application["Service"]["contextUsage"];
   readonly shake?: Application["Service"]["shake"];
+  readonly availableModels?: Application["Service"]["availableModels"];
+  readonly switchModel?: Application["Service"]["switchModel"];
   readonly botStorage?: boolean;
   readonly httpClient?: HttpClient.HttpClient;
 }) {
@@ -157,6 +170,8 @@ const fixture = Effect.fn("DiscordBotTest.fixture")(function* (options: {
     askBtw: () => Effect.die("unexpected side question"),
     abort: () => Effect.die("DM commands must not abort a shared bot chat"),
     contextUsage: options.contextUsage ?? (() => Effect.die("unexpected context read")),
+    availableModels: options.availableModels ?? (() => Effect.die("unexpected model discovery")),
+    switchModel: options.switchModel ?? (() => Effect.die("unexpected model switch")),
     shake: options.shake ?? (() => Effect.die("unexpected chat shake")),
   });
   const httpClient =
@@ -184,6 +199,320 @@ const fixture = Effect.fn("DiscordBotTest.fixture")(function* (options: {
 });
 
 describe("Discord bot direct messages", () => {
+  it.effect(
+    "discovers models before a DM exists and resolves bounded choices without truncating identities",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const longId = "family/".repeat(20);
+          const longA = { provider: "custom", id: `${longId}a`, name: "A".repeat(120) };
+          const longB = { provider: "custom", id: `${longId}b`, name: "B".repeat(120) };
+          const short = {
+            provider: "native",
+            id: "nested/sonnet",
+            name: `Swift model ${"\u{1D440}".repeat(120)}`,
+          };
+          let catalog: readonly ModelInfo[] = [
+            longA,
+            longB,
+            short,
+            ...Array.from({ length: 25 }, (_, index) => ({
+              provider: "other",
+              id: `model-${index}`,
+              name: `Model ${index}`,
+            })),
+          ];
+          const selected: ModelInfo[] = [];
+          const harness = yield* fixture({
+            sendBotMessage: () => Effect.die("autocomplete must not prompt"),
+            availableModels: (target) => {
+              assert.deepStrictEqual(target, {
+                kind: "bot",
+                bot: { botRoot, platform: "discord" },
+              });
+              return Effect.succeed(catalog);
+            },
+            switchModel: (id, ref) =>
+              Effect.gen(function* () {
+                assert.strictEqual(id, chatId);
+                const model = catalog.find(
+                  (model) => model.provider === ref.provider && model.id === ref.id,
+                );
+                if (model === undefined) return yield* Effect.die("selection was not resolved");
+                selected.push(model);
+                return { kind: "persisted", model } satisfies ModelSwitchResult;
+              }),
+          });
+          const suggestions = yield* modelSuggestions(
+            harness.bot,
+            directInteraction({ data: { name: "switch", options: modelOptions("", true) } }),
+          );
+          assert.strictEqual(suggestions.length, 25);
+          for (const choice of suggestions) {
+            assert.isAtMost(choice.name.length, 100);
+            assert.isAtMost(String(choice.value).length, 100);
+          }
+          assert.notStrictEqual(suggestions[0]?.value, suggestions[1]?.value);
+          assert.strictEqual(suggestions[2]?.value, "native/nested/sonnet");
+          for (const query of ["NATIVE", "nested/sonnet", "swift"]) {
+            const matches = yield* modelSuggestions(
+              harness.bot,
+              directInteraction({ data: { name: "switch", options: modelOptions(query, true) } }),
+            );
+            assert.deepStrictEqual(
+              matches.map(({ value }) => value),
+              ["native/nested/sonnet"],
+            );
+          }
+          assert.deepStrictEqual(harness.resolvedRoots, []);
+          const token = suggestions[1]?.value;
+          if (typeof token !== "string") return yield* Effect.die("missing string choice");
+          yield* privateCommandReply(
+            harness.bot,
+            directInteraction({ data: { name: "switch", options: modelOptions(token) } }),
+          );
+          assert.deepStrictEqual(selected, [longB]);
+          assert.deepStrictEqual(harness.resolvedRoots, [botRoot]);
+          catalog = [short];
+          yield* privateCommandReply(
+            harness.bot,
+            directInteraction({ data: { name: "switch", options: modelOptions(token) } }),
+          );
+          assert.deepStrictEqual(selected, [longB]);
+          assert.deepStrictEqual(harness.resolvedRoots, [botRoot]);
+        }),
+      ),
+  );
+
+  it.effect(
+    "answers autocomplete during a DM turn while a submitted switch keeps shared bot ordering",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const firstStarted = yield* Deferred.make<void>();
+          const releaseFirst = yield* Deferred.make<void>();
+          const switched = yield* Deferred.make<string>();
+          const acknowledged = yield* Deferred.make<void>();
+          const laterSent = yield* Deferred.make<void>();
+          const model = { provider: "native", id: "next", name: "Next model" };
+          let activeModel = "original";
+          const seen: string[] = [];
+          const harness = yield* fixture({
+            availableModels: () => Effect.succeed([model]),
+            switchModel: () =>
+              Effect.sync(() => {
+                activeModel = model.id;
+                return { kind: "persisted", model } satisfies ModelSwitchResult;
+              }),
+            sendBotMessage: (_id, prompt) =>
+              Effect.gen(function* () {
+                seen.push(activeModel);
+                if (prompt.text === "first") {
+                  yield* Deferred.succeed(firstStarted, undefined);
+                  yield* Deferred.await(releaseFirst);
+                } else {
+                  yield* Deferred.succeed(laterSent, undefined);
+                }
+              }),
+          });
+          handlerFor(harness.bot)(directMessage({ content: "first" }));
+          yield* Deferred.await(firstStarted);
+          const choices = yield* modelSuggestions(
+            harness.bot,
+            directInteraction({
+              channelId: 202n,
+              user: { id: 22n },
+              data: { name: "switch", options: modelOptions("", true) },
+            }),
+          );
+          assert.deepStrictEqual(
+            choices.map(({ value }) => value),
+            ["native/next"],
+          );
+          assert.deepStrictEqual(harness.resolvedRoots, [botRoot]);
+          interactionHandlerFor(harness.bot)(
+            directInteraction({
+              channelId: 202n,
+              user: { id: 22n },
+              data: { name: "switch", options: modelOptions("native/next") },
+              defer: async (isPrivate) => {
+                assert.isTrue(isPrivate);
+                Deferred.doneUnsafe(acknowledged, Effect.void);
+              },
+              edit: async (response) => {
+                assert.deepStrictEqual(response.allowedMentions, { parse: [], repliedUser: false });
+                Deferred.doneUnsafe(switched, Effect.succeed(response.content ?? ""));
+              },
+            }),
+          );
+          yield* Deferred.await(acknowledged);
+          assert.strictEqual(activeModel, "original");
+          yield* Deferred.succeed(releaseFirst, undefined);
+          assert.include(yield* Deferred.await(switched), "native/next");
+          handlerFor(harness.bot)(
+            directMessage({ channelId: 303n, author: { id: 33n }, content: "later" }),
+          );
+          yield* Deferred.await(laterSent);
+          assert.deepStrictEqual(seen, ["original", "next"]);
+          assert.deepStrictEqual(harness.resolvedRoots, [botRoot, botRoot, botRoot]);
+        }),
+      ),
+  );
+
+  it.effect("privately confirms a DM switch when saving its selection is unconfirmed", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const model = { provider: "private-provider-selection", id: "dm-model", name: "Chosen" };
+        const logs: Array<ReturnType<typeof Logger.formatStructured.log>> = [];
+        const harness = yield* fixture({
+          sendBotMessage: () => Effect.die("a model command must not prompt"),
+          availableModels: () => Effect.succeed([model]),
+          switchModel: () => Effect.succeed({ kind: "persistence-unconfirmed", model }),
+        }).pipe(
+          Effect.provide(
+            Logger.layer([
+              Logger.make((options) => {
+                logs.push(Logger.formatStructured.log(options));
+              }),
+            ]),
+          ),
+        );
+        const reply = yield* privateCommandReply(
+          harness.bot,
+          directInteraction({
+            data: {
+              name: "switch",
+              options: modelOptions("private-provider-selection/dm-model"),
+            },
+          }),
+        );
+        assert.match(reply, /Switched.*private-provider-selection\/dm-model/);
+        assert.match(reply, /saving.*could not be confirmed/i);
+        assert.match(reply, /restart may lose/i);
+        assert.notInclude(reply, "could not switch");
+        assert.strictEqual(logs.length, 1);
+        assert.strictEqual(logs[0]?.level, "WARN");
+        assert.strictEqual(logs[0]?.annotations.operation, "persist-model-selection");
+        assert.notInclude(JSON.stringify(logs), model.provider);
+        assert.deepStrictEqual(harness.replies, []);
+      }),
+    ),
+  );
+
+  it.effect("rejects malformed, unknown and ambiguous selections before provisioning a DM", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* fixture({
+          sendBotMessage: () => Effect.die("a model command must not prompt"),
+          availableModels: () =>
+            Effect.succeed([
+              { provider: "one", id: "shared", name: "First" },
+              { provider: "two", id: "shared", name: "Second" },
+              { provider: "one/shared", id: "nested", name: "Nested provider" },
+              { provider: "one", id: "shared/nested", name: "Nested model" },
+            ]),
+        });
+        for (const options of [
+          [],
+          modelOptions(""),
+          modelOptions("shared"),
+          modelOptions("one/missing"),
+          modelOptions("one/shared/nested"),
+          modelOptions("x".repeat(101)),
+        ]) {
+          yield* privateCommandReply(
+            harness.bot,
+            directInteraction({ data: { name: "switch", options } }),
+          );
+        }
+        assert.deepStrictEqual(harness.resolvedRoots, []);
+        assert.deepStrictEqual(harness.sent, []);
+      }),
+    ),
+  );
+
+  it.effect(
+    "returns empty autocomplete on catalog failure and bounds slow cancellation below Discord's deadline",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const requested = yield* Deferred.make<void>();
+          const releaseCleanup = yield* Deferred.make<void>();
+          const cleanupFinished = yield* Deferred.make<void>();
+          let slow = false;
+          const logs: Array<ReturnType<typeof Logger.formatStructured.log>> = [];
+          const harness = yield* fixture({
+            sendBotMessage: () => Effect.die("autocomplete must not prompt"),
+            availableModels: () =>
+              slow
+                ? Deferred.succeed(requested, undefined).pipe(
+                    Effect.andThen(Effect.never),
+                    Effect.onInterrupt(() =>
+                      Deferred.await(releaseCleanup).pipe(
+                        Effect.andThen(Deferred.succeed(cleanupFinished, undefined)),
+                      ),
+                    ),
+                  )
+                : Effect.fail(
+                    new ApplicationError({ reason: "operation", message: "secret-provider" }),
+                  ),
+          }).pipe(
+            Effect.provide(
+              Logger.layer([
+                Logger.make((options) => {
+                  logs.push(Logger.formatStructured.log(options));
+                }),
+              ]),
+            ),
+          );
+          const command = directInteraction({
+            data: { name: "switch", options: modelOptions("", true) },
+          });
+          assert.deepStrictEqual(yield* modelSuggestions(harness.bot, command), []);
+          assert.strictEqual(logs.length, 1);
+          assert.strictEqual(logs[0]?.annotations.operation, "autocomplete-models");
+          const error = yield* privateCommandReply(
+            harness.bot,
+            directInteraction({ data: { name: "switch", options: modelOptions("one/model") } }),
+          );
+          assert.notInclude(error, "secret-provider");
+          assert.deepStrictEqual(harness.resolvedRoots, []);
+          assert.strictEqual(logs.length, 2);
+          slow = true;
+          const suggestions = yield* modelSuggestions(harness.bot, command).pipe(Effect.forkChild);
+          yield* Deferred.await(requested);
+          yield* TestClock.adjust("2 seconds");
+          assert.deepStrictEqual(yield* Fiber.join(suggestions), []);
+          assert.deepStrictEqual(harness.resolvedRoots, []);
+          assert.strictEqual(logs.length, 2);
+          yield* Deferred.succeed(releaseCleanup, undefined);
+          yield* Deferred.await(cleanupFinished);
+        }),
+      ),
+  );
+  it.effect("keeps model discovery empty and submissions private without bot storage", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* fixture({
+          botStorage: false,
+          sendBotMessage: () => Effect.die("a model command must not prompt"),
+        });
+        assert.deepStrictEqual(
+          yield* modelSuggestions(
+            harness.bot,
+            directInteraction({ data: { name: "switch", options: modelOptions("", true) } }),
+          ),
+          [],
+        );
+        yield* privateCommandReply(
+          harness.bot,
+          directInteraction({ data: { name: "switch", options: modelOptions("native/model") } }),
+        );
+        assert.deepStrictEqual(harness.resolvedRoots, []);
+      }),
+    ),
+  );
+
   it.effect(
     "keeps concurrent senders on one chat without sharing reply destinations or thread state",
     () =>

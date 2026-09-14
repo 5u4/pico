@@ -1,13 +1,14 @@
 import type { DiscordConfig } from "@pico/config/config";
 import type * as AgentMessage from "@pico/contract/agent-message";
-import type { ContextUsage, MessageDelivery, ShakeResult } from "@pico/contract/agent-runtime";
+import type {
+  ContextUsage,
+  MessageDelivery,
+  ModelTarget,
+  ShakeResult,
+} from "@pico/contract/agent-runtime";
 import { Application, type CloseChatResult } from "@pico/contract/application";
 import type * as Chat from "@pico/contract/chat-model";
-import {
-  AgentError,
-  type ApplicationError,
-  type WorkspaceBindingInvalid,
-} from "@pico/contract/errors";
+import { AgentError, ApplicationError, type WorkspaceBindingInvalid } from "@pico/contract/errors";
 import type { AbsolutePath } from "@pico/contract/path";
 import type * as Workspace from "@pico/contract/workspace-model";
 import {
@@ -35,6 +36,7 @@ import * as DiscordBtw from "./discord-btw.ts";
 import * as DiscordCommand from "./discord-command.ts";
 import { discordError, promiseBoundary, reportFailure } from "./discord-error.ts";
 import * as DiscordMarkdown from "./discord-markdown.ts";
+import * as DiscordModel from "./discord-model.ts";
 import * as DiscordOutput from "./discord-output.ts";
 import { type DiscordMessage, projectDiscordPrompt } from "./discord-prompt.ts";
 
@@ -304,6 +306,43 @@ export const install = Effect.fn("DiscordInput.install")(function* <
     });
     yield* Effect.annotateLogsScoped({ chatId: chat.id });
     return Option.some(chat.id);
+  });
+
+  const resolveModelTarget = Effect.fnUntraced(function* (interaction: Interaction) {
+    if (interaction.guildId === undefined) {
+      return botOptions === undefined
+        ? Option.none<ModelTarget>()
+        : Option.some<ModelTarget>({
+            kind: "bot",
+            bot: { botRoot: botOptions.botRoot, platform: "discord" },
+          });
+    }
+    const thread = yield* resolveCommandThread(interaction);
+    if (Option.isNone(thread)) return Option.none<ModelTarget>();
+    const chatId = yield* resolveCommandChatId(thread.value);
+    return Option.map(chatId, (chatId): ModelTarget => ({ kind: "chat", chatId }));
+  });
+
+  const autocompleteModels = Effect.fnUntraced(function* (interaction: Interaction) {
+    const request = yield* Effect.gen(function* () {
+      const query = DiscordCommand.parseModelQuery(interaction.data?.options);
+      if (query === undefined) return [];
+      const target = yield* resolveModelTarget(interaction);
+      if (Option.isNone(target)) return [];
+      const models = yield* application.availableModels(target.value);
+      return yield* DiscordModel.choices(crypto, models, query);
+    }).pipe(Effect.forkIn(scope));
+    const choices = yield* Fiber.join(request).pipe(
+      Effect.timeout("2 seconds"),
+      Effect.ensuring(Effect.sync(() => request.interruptUnsafe())),
+      Effect.catchTag("TimeoutError", () => Effect.succeed([])),
+      Effect.catchCause((cause) =>
+        Cause.hasInterruptsOnly(cause)
+          ? Effect.succeed([])
+          : reportFailure("autocomplete-models", cause).pipe(Effect.as([])),
+      ),
+    );
+    yield* promiseBoundary("autocomplete-models", () => interaction.respond({ choices }));
   });
 
   const replyMessageFailure = Effect.fnUntraced(function* (
@@ -720,6 +759,55 @@ export const install = Effect.fn("DiscordInput.install")(function* <
     return formatContextUsage(yield* application.contextUsage(chatId.value));
   });
 
+  const switchResponse = Effect.fnUntraced(function* (
+    interaction: Interaction,
+    command: DiscordCommand.SwitchCommand,
+  ) {
+    if (command.kind === "malformedSwitch") return "Choose a model from the /switch suggestions.";
+    const policyCopy = "This command can only be used in a pico-owned Discord thread.";
+    const target = yield* resolveModelTarget(interaction);
+    if (Option.isNone(target)) {
+      return interaction.guildId === undefined
+        ? "Direct messages are unavailable because bot storage is not configured."
+        : policyCopy;
+    }
+    const models = yield* application.availableModels(target.value);
+    const model = yield* DiscordModel.resolve(crypto, models, command.model);
+    if (model === undefined)
+      return "That model is unavailable. Choose a model from the suggestions.";
+    const chatId =
+      target.value.kind === "chat"
+        ? Option.some(target.value.chatId)
+        : yield* resolveBotCommandChatId();
+    if (Option.isNone(chatId)) return policyCopy;
+    yield* Effect.annotateLogsScoped({ phase: "switch-model" });
+    const selected = yield* application.switchModel(chatId.value, {
+      provider: model.provider,
+      id: model.id,
+    });
+    const confirmation = `Switched this chat to ${DiscordModel.label(selected.model)}.`;
+    switch (selected.kind) {
+      case "persisted":
+        return confirmation;
+      case "persistence-unconfirmed":
+        yield* reportFailure(
+          "persist-model-selection",
+          Cause.fail(
+            new ApplicationError({
+              reason: "operation",
+              message: "Model selection persistence could not be confirmed",
+            }),
+          ),
+          "warning",
+        );
+        return `${confirmation} Saving this choice could not be confirmed. A restart may lose it.`;
+      default: {
+        const exhaustive: never = selected.kind;
+        return exhaustive;
+      }
+    }
+  });
+
   const handleBtw = Effect.fn("Discord.handleBtw")(function* (
     interaction: Interaction,
     command: DiscordCommand.BtwCommand,
@@ -952,6 +1040,16 @@ export const install = Effect.fn("DiscordInput.install")(function* <
               reportFailure("shake-chat", cause).pipe(Effect.as("pico could not shake this chat.")),
             ),
           );
+        case "switch":
+        case "malformedSwitch":
+          return switchResponse(interaction, command).pipe(
+            Effect.catchTag("ChatClosed", () => Effect.succeed(closedMessage)),
+            Effect.catchCause((cause) =>
+              reportFailure("switch-model", cause).pipe(
+                Effect.as("pico could not switch this chat's model. Please try again."),
+              ),
+            ),
+          );
         case "context":
           return contextResponse(interaction).pipe(
             Effect.catchTag("ChatClosed", () => Effect.succeed(closedMessage)),
@@ -1048,6 +1146,22 @@ export const install = Effect.fn("DiscordInput.install")(function* <
         ? customId.slice(closeConfirmationPrefix.length)
         : undefined;
     const name = interaction.data?.name;
+    if (interaction.type === InteractionTypes.ApplicationCommandAutocomplete && name === "switch") {
+      run(
+        Effect.scoped(autocompleteModels(interaction)).pipe(
+          Effect.catchCause((cause) => reportFailure("autocomplete-models", cause)),
+          Effect.annotateLogs({
+            component: "discord",
+            eventType: "interactionCreate",
+            command: "switch",
+            interactionId: interaction.id?.toString(),
+            guildId: interaction.guildId?.toString(),
+            channelId: interaction.channelId?.toString(),
+          }),
+        ),
+      );
+      return;
+    }
     const isCommand =
       interaction.type === InteractionTypes.ApplicationCommand &&
       DiscordCommand.applicationCommands.some((command) => command.name === name);
@@ -1068,7 +1182,7 @@ export const install = Effect.fn("DiscordInput.install")(function* <
           );
           return;
         }
-        if (interaction.guildId === undefined && botOptions === undefined) {
+        if (interaction.guildId === undefined && botOptions === undefined && name !== "switch") {
           yield* promiseBoundary("reply-unconfigured-direct-command", () =>
             interaction.respond({
               content: "Direct messages are unavailable because bot storage is not configured.",

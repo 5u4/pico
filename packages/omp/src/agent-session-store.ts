@@ -1,4 +1,7 @@
+import type { FileEntry, SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
+import { loadEntriesFromFile } from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { migrateToCurrentVersion } from "@oh-my-pi/pi-coding-agent/session/session-migrations";
 import { AgentSessionStore, type CreateAgentSession } from "@pico/contract/agent-session-store";
 import { SessionJournal } from "@pico/contract/bot-session";
 import { AgentError } from "@pico/contract/errors";
@@ -12,6 +15,27 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
 import { agentError } from "./agent-error.ts";
+
+const temporaryModelIntent = (entries: readonly FileEntry[]): string | undefined => {
+  const byId = new Map<string, SessionEntry>();
+  for (const entry of entries) {
+    if (entry.type !== "session") byId.set(entry.id, entry);
+  }
+  const seen = new Set<string>();
+  let entry = entries.at(-1);
+  while (entry !== undefined && entry.type !== "session" && !seen.has(entry.id)) {
+    if (
+      entry.type === "model_change" &&
+      entry.role === "temporary" &&
+      !entry.resolvedModelIsFallback
+    ) {
+      return entry.model;
+    }
+    seen.add(entry.id);
+    entry = entry.parentId === null ? undefined : byId.get(entry.parentId);
+  }
+  return undefined;
+};
 
 export const make = Effect.fn("AgentSessionStore.make")(function* (sessionsDir: AbsolutePath) {
   const fileSystem = yield* FileSystem.FileSystem;
@@ -126,10 +150,30 @@ export const make = Effect.fn("AgentSessionStore.make")(function* (sessionsDir: 
   const createPhysical = Effect.fn("AgentSessionStore.createPhysical")(function* (
     botRoot: AbsolutePath,
     cwd: AbsolutePath,
+    previousJournal?: SessionJournal,
   ) {
     const directory = path.join(botRoot, "sessions");
     let journal: SessionJournal | undefined;
     return yield* Effect.gen(function* () {
+      const previousModel =
+        previousJournal === undefined
+          ? undefined
+          : yield* Effect.tryPromise({
+              try: async () => {
+                const entries = await loadEntriesFromFile(previousJournal.file);
+                const header = entries[0];
+                if (
+                  header?.type !== "session" ||
+                  header.id !== previousJournal.id ||
+                  header.cwd !== cwd
+                ) {
+                  throw new Error("Previous physical session identity mismatch");
+                }
+                migrateToCurrentVersion(entries);
+                return temporaryModelIntent(entries);
+              },
+              catch: (cause) => agentError("Failed to read previous OMP model selection", cause),
+            });
       yield* fileSystem.makeDirectory(directory, { recursive: true, mode: 0o700 });
       return yield* Effect.acquireUseRelease(
         Effect.try({
@@ -144,7 +188,10 @@ export const make = Effect.fn("AgentSessionStore.make")(function* (sessionsDir: 
                 file: manager.getSessionFile(),
               });
               journal = physical;
+              if (previousModel !== undefined)
+                manager.appendModelChange(previousModel, "temporary");
               await manager.ensureOnDisk();
+              await manager.flush();
               return physical;
             },
             catch: (cause) => agentError("Failed to persist physical OMP session", cause),

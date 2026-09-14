@@ -4,7 +4,16 @@ import type * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import type { AgentEvent } from "./agent-event.ts";
 import type { AgentPrompt, AgentTranscript } from "./agent-message.ts";
-import type { ContextUsage, MessageDelivery, ShakeMode, ShakeResult } from "./agent-runtime.ts";
+import type {
+  ContextUsage,
+  MessageDelivery,
+  ModelInfo,
+  ModelRef,
+  ModelSwitchResult,
+  ModelTarget,
+  ShakeMode,
+  ShakeResult,
+} from "./agent-runtime.ts";
 import type { BotDescriptor } from "./bot-session.ts";
 import type { Chat, ChatId } from "./chat-model.ts";
 import type {
@@ -140,6 +149,17 @@ export class Application extends Context.Service<
     readonly contextUsage: (
       chatId: ChatId,
     ) => Effect.Effect<ContextUsage, ApplicationError | ChatClosed>;
+
+    /** Platform adapters call this while displaying the model picker, before a chat may exist. */
+    readonly availableModels: (
+      target: ModelTarget,
+    ) => Effect.Effect<readonly ModelInfo[], ApplicationError | ChatClosed>;
+
+    /** Platform adapters call this after selecting a model for the current open chat. */
+    readonly switchModel: (
+      chatId: ChatId,
+      model: ModelRef,
+    ) => Effect.Effect<ModelSwitchResult, ApplicationError | ChatClosed>;
 
     readonly shake: (
       chatId: ChatId,

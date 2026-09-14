@@ -11,6 +11,7 @@ import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-sessi
 import type * as AgentEvent from "@pico/contract/agent-event";
 import * as AgentMessage from "@pico/contract/agent-message";
 import * as Chat from "@pico/contract/chat-model";
+import { AgentError } from "@pico/contract/errors";
 import { AbsolutePath } from "@pico/contract/path";
 import type { ReplyTarget } from "@pico/contract/reply-target";
 import * as Schedule from "@pico/contract/schedule";
@@ -48,6 +49,9 @@ const importNative = async () => {
     import("./layer.ts"),
     import("@oh-my-pi/pi-coding-agent/extensibility/extensions/wrapper"),
     import("./schedule-extension.ts"),
+    import("./session-settings.ts"),
+    import("@oh-my-pi/pi-coding-agent/session/session-loader"),
+    import("@oh-my-pi/pi-coding-agent/session/session-context"),
   ]);
   const [
     core,
@@ -67,6 +71,9 @@ const importNative = async () => {
     adapter,
     wrappers,
     scheduleExtension,
+    sessionSettings,
+    sessionLoader,
+    sessionContext,
   ] = modules;
   return {
     ...core,
@@ -84,11 +91,15 @@ const importNative = async () => {
     ...pool,
     ...normalized,
     ...wrappers,
+    ...sessionSettings,
+    ...sessionLoader,
+    ...sessionContext,
     makeScheduleExtension: scheduleExtension.make,
     makeSessionHandle: adapter.makeSessionHandle,
     makeBtw: adapter.makeBtw,
     makeHandoff: adapter.makeHandoff,
     makeShake: adapter.makeShake,
+    makeSwitchModel: adapter.makeSwitchModel,
   };
 };
 
@@ -321,6 +332,11 @@ const makePool = Effect.fn("NativePoolTest.make")(function* (
             askBtw: native.makeBtw(currentSession),
             createHandoff: native.makeHandoff(currentSession),
             shake: native.makeShake(currentSession),
+            switchModel: native.makeSwitchModel(currentSession),
+            flush: async () => {
+              await currentSession.sessionManager.ensureOnDisk();
+              await currentSession.sessionManager.flush();
+            },
             contextUsage: () => ({ kind: "unavailable" }),
             appendAssistantMessage: () =>
               Promise.reject(new Error("Publication is not part of ownership tests")),
@@ -365,6 +381,234 @@ const seedShake = async (session: AgentSession) => {
 };
 
 describe("native SessionPool ownership", () => {
+  it("discovers authenticated enabled models without creating a fresh bot's directories", async () => {
+    await withSession([], async (session) => {
+      const botRoot = join(root, "unprovisioned-bot");
+      const cwd = AbsolutePath.make(join(botRoot, "work"));
+      const agentDir = AbsolutePath.make(join(botRoot, "omp"));
+      const refresh = vi.spyOn(session.modelRegistry, "refresh");
+      const baseModel = session.model;
+      if (baseModel === undefined) throw new Error("Expected a native initial model");
+      session.modelRegistry.registerProvider("model-picker-no-auth", {
+        apiKey: "revoked-test-key",
+        api: "openai-completions",
+        baseUrl: "http://127.0.0.1:1/v1",
+        models: [
+          {
+            id: "unavailable-model",
+            name: "Missing credentials",
+            reasoning: baseModel.reasoning,
+            input: baseModel.input,
+            cost: baseModel.cost,
+            contextWindow: 128_000,
+            maxTokens: 4_096,
+          },
+        ],
+      });
+      session.modelRegistry.authStorage.removeConfigApiKey("model-picker-no-auth");
+      session.modelRegistry.authStorage.setFallbackResolver(() => undefined);
+      const models = await Effect.runPromise(
+        native.loadAvailableModels(session.modelRegistry, cwd, agentDir),
+      );
+      expect(models.some((model) => model.provider === "openai" && model.id === "gpt-4.1")).toBe(
+        true,
+      );
+      expect(models.some((model) => model.provider === "model-picker-no-auth")).toBe(false);
+      expect(
+        await NodeFileSystem.stat(botRoot).then(
+          () => true,
+          () => false,
+        ),
+      ).toBe(false);
+
+      await NodeFileSystem.mkdir(agentDir, { recursive: true });
+      const config = "enabledModels:\n  - openai/gpt-4.1\n  - model-picker-no-auth/*\n";
+      await NodeFileSystem.writeFile(join(agentDir, "config.yml"), config);
+      const filtered = await Effect.runPromise(
+        native.loadAvailableModels(session.modelRegistry, cwd, agentDir),
+      );
+      expect(filtered.map(({ provider, id }) => `${provider}/${id}`)).toEqual(["openai/gpt-4.1"]);
+      expect(await NodeFileSystem.readdir(botRoot)).toEqual(["omp"]);
+      expect(await NodeFileSystem.readdir(agentDir)).toEqual(["config.yml"]);
+      expect(await NodeFileSystem.readFile(join(agentDir, "config.yml"), "utf8")).toBe(config);
+      expect(refresh).not.toHaveBeenCalled();
+    });
+  });
+
+  it("persists a per-session choice before the first prompt without changing model defaults", async () => {
+    await withSession([], async (session) => {
+      const chosen = session
+        .getAvailableModels()
+        .find((model) => model.provider === "openai" && model.id === "gpt-4.1-mini");
+      if (chosen === undefined) throw new Error("Pinned OMP catalog has no gpt-4.1-mini model");
+      const defaults = structuredClone(session.settings.get("modelRoles"));
+      const file = session.sessionManager.getSessionFile();
+      if (file === undefined) throw new Error("Expected native model selection journal");
+      await withSession([], async (other) => {
+        await Effect.runPromise(
+          Effect.scoped(
+            Effect.gen(function* () {
+              const pool = yield* makePool(session);
+              expect(yield* pool.switchModel(chatId, chosen)).toEqual({
+                kind: "persisted",
+                model: { provider: chosen.provider, id: chosen.id, name: chosen.name },
+              });
+              expect(session.model?.id).toBe(chosen.id);
+              expect(other.model?.id).toBe("gpt-4.1");
+              const persisted = yield* Effect.promise(() => native.loadEntriesFromFile(file));
+              const entries = persisted.filter((entry) => entry.type !== "session");
+              expect(
+                native.getRestorableSessionModels(
+                  native.buildSessionContext(entries).models,
+                  entries.findLast((entry) => entry.type === "model_change")?.role,
+                )[0],
+              ).toBe(`${chosen.provider}/${chosen.id}`);
+              expect(session.settings.get("modelRoles")).toEqual(defaults);
+              yield* pool.close(chatId);
+            }).pipe(Effect.provide(platform)),
+          ),
+        );
+      });
+    });
+  });
+
+  it.each(["Error", "AbortError"])(
+    "reports an applied model when flushing its selection fails with %s",
+    async (errorName) => {
+      const turn = providerTurn("Continue with the selected model");
+      await withSession([turn], (session) =>
+        Effect.runPromise(
+          Effect.scoped(
+            Effect.gen(function* () {
+              const pool = yield* makePool(session);
+              const chosen = { provider: "openai", id: "gpt-4.1-mini" };
+              const file = session.sessionManager.getSessionFile();
+              if (file === undefined) throw new Error("Expected native model selection journal");
+              const failure = new Error("private-journal-path");
+              failure.name = errorName;
+              vi.spyOn(session.sessionManager, "flush").mockRejectedValueOnce(failure);
+              const outcome = yield* pool.switchModel(chatId, chosen);
+              expect(outcome).toMatchObject({
+                kind: "persistence-unconfirmed",
+                model: chosen,
+              });
+              const delivery = yield* pool.send(chatId, prompt("continue after the switch"));
+              yield* Effect.promise(() => turn.entered.promise);
+              turn.release.resolve();
+              if (delivery.kind !== "handled") yield* delivery.completed;
+              const reply = session.messages.findLast((message) => message.role === "assistant");
+              expect(reply?.role === "assistant" ? reply.model : undefined).toBe(chosen.id);
+              expect(yield* pool.switchModel(chatId, chosen)).toEqual({
+                kind: "persisted",
+                model: outcome.model,
+              });
+              const entries = yield* Effect.promise(() => native.loadEntriesFromFile(file));
+              expect(
+                native.buildSessionContext(entries.filter((entry) => entry.type !== "session"))
+                  .models.temporary,
+              ).toBe(`${chosen.provider}/${chosen.id}`);
+            }).pipe(Effect.provide(platform)),
+          ),
+        ),
+      );
+    },
+  );
+
+  it("rejects busy and stale model choices without changing the running model", async () => {
+    const turn = providerTurn("Complete with the original model");
+    await withSession([turn], (session) =>
+      Effect.runPromise(
+        Effect.scoped(
+          Effect.gen(function* () {
+            const pool = yield* makePool(session);
+            const original = session.model;
+            session.settings.override("enabledModels", ["openai/gpt-4.1"]);
+            expect(
+              yield* pool
+                .switchModel(chatId, { provider: "openai", id: "gpt-4.1-mini" })
+                .pipe(Effect.flip),
+            ).toBeInstanceOf(AgentError);
+            expect(session.model).toBe(original);
+            session.settings.clearOverride("enabledModels");
+            const delivery = yield* pool.send(chatId, prompt("stay on this model"));
+            yield* Effect.promise(() => turn.entered.promise);
+            expect(
+              yield* pool
+                .switchModel(chatId, { provider: "openai", id: "gpt-4.1-mini" })
+                .pipe(Effect.flip),
+            ).toBeInstanceOf(AgentError);
+            expect(session.model).toBe(original);
+            turn.release.resolve();
+            if (delivery.kind !== "handled") yield* delivery.completed;
+          }).pipe(Effect.provide(platform)),
+        ),
+      ),
+    );
+  });
+
+  it("retains model admission through native completion and flush after interruption", async () => {
+    await withSession([], (session) => {
+      const nativeEntered = Promise.withResolvers<void>();
+      const releaseNative = Promise.withResolvers<void>();
+      const flushing = Promise.withResolvers<void>();
+      const releaseFlush = Promise.withResolvers<void>();
+      return Effect.runPromise(
+        Effect.scoped(
+          Effect.gen(function* () {
+            const refresh = session.modelRegistry.refreshSelectedModelMetadata.bind(
+              session.modelRegistry,
+            );
+            vi.spyOn(session.modelRegistry, "refreshSelectedModelMetadata").mockImplementation(
+              async (model) => {
+                nativeEntered.resolve();
+                await releaseNative.promise;
+                return refresh(model);
+              },
+            );
+            const flush = session.sessionManager.flush.bind(session.sessionManager);
+            vi.spyOn(session.sessionManager, "flush").mockImplementation(async () => {
+              flushing.resolve();
+              await releaseFlush.promise;
+              await flush();
+            });
+            const dispose = vi.spyOn(session, "dispose");
+            const pool = yield* makePool(session);
+            const switching = yield* pool
+              .switchModel(chatId, { provider: "openai", id: "gpt-4.1-mini" })
+              .pipe(Effect.forkChild);
+            yield* Effect.promise(() => nativeEntered.promise);
+            const interrupting = yield* Fiber.interrupt(switching).pipe(Effect.forkChild);
+            const closing = yield* pool.close(chatId).pipe(Effect.forkChild);
+            yield* Effect.yieldNow;
+            expect(dispose).not.toHaveBeenCalled();
+            releaseNative.resolve();
+            yield* Effect.promise(() => flushing.promise);
+            expect(dispose).not.toHaveBeenCalled();
+            releaseFlush.resolve();
+            yield* Fiber.join(interrupting);
+            yield* Fiber.join(closing);
+            expect(session.model?.id).toBe("gpt-4.1-mini");
+            const file = session.sessionManager.getSessionFile();
+            if (file === undefined) throw new Error("Expected native model selection journal");
+            const entries = yield* Effect.promise(() => native.loadEntriesFromFile(file));
+            expect(
+              native.buildSessionContext(entries.filter((entry) => entry.type !== "session")).models
+                .temporary,
+            ).toBe("openai/gpt-4.1-mini");
+          }).pipe(
+            Effect.ensuring(
+              Effect.sync(() => {
+                releaseNative.resolve();
+                releaseFlush.resolve();
+              }),
+            ),
+            Effect.provide(platform),
+          ),
+        ),
+      );
+    });
+  });
+
   it("cancels native shake artifact staging without changing history, then shakes normally", async () => {
     await withSession([], async (session, reopen) => {
       const { original, file } = await seedShake(session);

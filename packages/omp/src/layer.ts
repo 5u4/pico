@@ -8,7 +8,12 @@ import type * as OmpAgentSession from "@oh-my-pi/pi-coding-agent/session/agent-s
 import * as OmpSessionLoader from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import * as OmpSessionManager from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type * as OmpShake from "@oh-my-pi/pi-coding-agent/session/shake-types";
-import { AgentRuntime, type ContextUsage, type ShakeResult } from "@pico/contract/agent-runtime";
+import {
+  AgentRuntime,
+  type ContextUsage,
+  type ModelTarget,
+  type ShakeResult,
+} from "@pico/contract/agent-runtime";
 import { BotSessions } from "@pico/contract/bot-session";
 import { BranchNaming, type BranchNamingHandler } from "@pico/contract/branch-naming";
 import type * as Chat from "@pico/contract/chat-model";
@@ -38,7 +43,7 @@ import {
   type SessionFactory,
   type SessionHandle,
 } from "./session-pool.ts";
-import { prepareSessionSettings } from "./session-settings.ts";
+import { loadAvailableModels, prepareSessionSettings } from "./session-settings.ts";
 
 interface RuntimeOptions {
   readonly paths: Pick<PicoPaths, "root" | "sessionsDir">;
@@ -95,6 +100,27 @@ export const make = Effect.fn("AgentRuntime.make")(function* ({
     return yield* syncBoundary("Failed to normalize OMP transcript", () =>
       normalizeTranscript(messages),
     );
+  });
+
+  const availableModels = Effect.fn("AgentRuntime.availableModels")(function* (
+    target: ModelTarget,
+  ) {
+    let cwd: AbsolutePath;
+    let agentDir: AbsolutePath | undefined;
+    if (target.kind === "bot") {
+      cwd = AbsolutePath.make(path.join(target.bot.botRoot, "work"));
+      agentDir = AbsolutePath.make(path.join(target.bot.botRoot, "omp"));
+    } else {
+      const { chat } = yield* chatSessionContext.resolve(target.chatId);
+      cwd = chat.cwd;
+      const bot = yield* botSessions
+        .findByChat(target.chatId)
+        .pipe(Effect.mapError((error) => agentError("Failed to resolve bot model catalog", error)));
+      if (Option.isSome(bot)) {
+        agentDir = AbsolutePath.make(path.join(bot.value.botRoot, "omp"));
+      }
+    }
+    return yield* loadAvailableModels(modelRegistry, cwd, agentDir);
   });
   let browsers: AgentBrowserManager | undefined;
   switch (browser.externalBrowser) {
@@ -158,6 +184,8 @@ export const make = Effect.fn("AgentRuntime.make")(function* ({
     }, Effect.uninterruptible),
     abort: pool.abort,
     contextUsage: pool.contextUsage,
+    availableModels,
+    switchModel: pool.switchModel,
     shake: pool.shake,
   });
 });
@@ -221,6 +249,19 @@ export const makeShake =
   (session: Pick<OmpAgentSession.AgentSession, "shake">): OpenedSession["shake"] =>
   (mode, signal) =>
     session.shake(mode, { signal }).then(normalizeShakeResult);
+
+export const makeSwitchModel =
+  (
+    session: Pick<OmpAgentSession.AgentSession, "getAvailableModels" | "setModelTemporary">,
+  ): OpenedSession["switchModel"] =>
+  async (ref) => {
+    const model = session
+      .getAvailableModels()
+      .find((candidate) => candidate.provider === ref.provider && candidate.id === ref.id);
+    if (model === undefined) throw new Error("The selected model is no longer available");
+    await session.setModelTemporary(model);
+    return { provider: model.provider, id: model.id, name: model.name };
+  };
 
 const promiseBoundary = <A>(message: string, evaluate: () => Promise<A>) =>
   Effect.tryPromise({
@@ -380,6 +421,24 @@ const makeFactory = (
         await manager.flush();
       }).pipe(Effect.catch((error) => closeManagerAfterFailure(manager, error)));
     }
+    yield* promiseBoundary("Failed to restore OMP model selection", async () => {
+      const branch = manager.getBranch();
+      const selected = branch.findLast(
+        (entry) =>
+          entry.type === "model_change" &&
+          entry.role === "temporary" &&
+          !entry.resolvedModelIsFallback,
+      );
+      const latest = branch.findLast((entry) => entry.type === "model_change");
+      if (
+        selected?.type === "model_change" &&
+        (latest?.role !== "temporary" || latest.resolvedModelIsFallback)
+      ) {
+        manager.appendModelChange(selected.model, "temporary");
+        await manager.ensureOnDisk();
+        await manager.flush();
+      }
+    }).pipe(Effect.catch((error) => closeManagerAfterFailure(manager, error)));
     const created = yield* promiseBoundary("Failed to create OMP session", () =>
       OmpSdk.createAgentSession({
         cwd: chat.cwd,
@@ -552,6 +611,11 @@ const makeFactory = (
       askBtw: makeBtw(created.session),
       createHandoff: makeHandoff(created.session),
       shake: makeShake(created.session),
+      switchModel: makeSwitchModel(created.session),
+      flush: async () => {
+        await manager.ensureOnDisk();
+        await manager.flush();
+      },
       contextUsage: () => normalizeContextUsage(created.session.getContextBreakdown()),
       appendAssistantMessage: async (message) => {
         created.session.sessionManager.appendMessage(message);

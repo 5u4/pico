@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as BunCrypto from "@effect/platform-bun/BunCrypto";
@@ -22,18 +22,20 @@ import { afterAll, beforeAll, expect, it, vi } from "vitest";
 import * as Persistence from "../../persistence/src/layer.ts";
 
 const importNative = async () => {
-  const [runtime, store, managers, settings, providers] = await Promise.all([
+  const [runtime, store, managers, settings, providers, entries] = await Promise.all([
     import("./layer.ts"),
     import("./agent-session-store.ts"),
     import("@oh-my-pi/pi-coding-agent/session/session-manager"),
     import("@oh-my-pi/pi-coding-agent/config/settings"),
     import("@oh-my-pi/pi-ai/registry"),
+    import("@oh-my-pi/pi-coding-agent/session/session-entries"),
   ]);
   return {
     make: runtime.make,
     makeStore: store.make,
     SessionManager: managers.SessionManager,
     Settings: settings.Settings,
+    EPHEMERAL_MODEL_CHANGE_ROLE: entries.EPHEMERAL_MODEL_CHANGE_ROLE,
     disabledProviders: [
       ...providers.PROVIDER_REGISTRY.map(({ id }) => id),
       "ollama",
@@ -68,6 +70,7 @@ afterAll(async () => {
 });
 
 const ProviderRequest = Schema.Struct({
+  model: Schema.String,
   messages: Schema.Array(
     Schema.Struct({
       role: Schema.Literals(["system", "developer", "user", "assistant", "tool"]),
@@ -126,7 +129,7 @@ const expectHistoricalHandoff = (request: ProviderRequest, handoff: string, inpu
   expect(handoffIndex).toBeLessThan(inputIndex);
 };
 
-it("keeps generated handoffs below system and developer roles across rotation, restart, and compaction", async () => {
+it("preserves handoff authority and selected models across rotation, restart, and compaction", async () => {
   const requests: ProviderRequest[] = [];
   const replies: string[] = [];
   const provider = Bun.serve({
@@ -136,7 +139,8 @@ it("keeps generated handoffs below system and developer roles across rotation, r
       if (new URL(request.url).pathname !== "/v1/chat/completions") {
         return new Response("Unexpected provider route", { status: 404 });
       }
-      requests.push(Schema.decodeUnknownSync(ProviderRequest)(await request.json()));
+      const input = Schema.decodeUnknownSync(ProviderRequest)(await request.json());
+      requests.push(input);
       const reply = replies.shift();
       if (reply === undefined) return new Response("Unexpected provider turn", { status: 500 });
       const chunk = (delta: Record<string, string>, finishReason: "stop" | null) =>
@@ -144,7 +148,7 @@ it("keeps generated handoffs below system and developer roles across rotation, r
           id: `handoff-${requests.length}`,
           object: "chat.completion.chunk",
           created: 1,
-          model: "handoff-model",
+          model: input.model,
           choices: [{ index: 0, delta, finish_reason: finishReason }],
         })}\n\n`;
       return new Response(
@@ -192,6 +196,15 @@ it("keeps generated handoffs below system and developer roles across rotation, r
                 {
                   id: "handoff-model",
                   name: "Local handoff role capture",
+                  reasoning: false,
+                  input: ["text"],
+                  contextWindow: 1_000_000,
+                  maxTokens: 4096,
+                  compat: { supportsDeveloperRole: true },
+                },
+                {
+                  id: "chosen-model",
+                  name: "Local chosen model",
                   reasoning: false,
                   input: ["text"],
                   contextWindow: 1_000_000,
@@ -279,7 +292,7 @@ it("keeps generated handoffs below system and developer roles across rotation, r
               Effect.gen(function* () {
                 const before = yield* currentBot;
                 const saved = yield* bots.saveHandoff(before, content);
-                const journal = yield* store.createPhysical(botRoot, cwd);
+                const journal = yield* store.createPhysical(botRoot, cwd, before.journal);
                 yield* bots.rotate(before, journal, saved);
               }).pipe(Effect.orDie),
             );
@@ -288,18 +301,43 @@ it("keeps generated handoffs below system and developer roles across rotation, r
           yield* Effect.scoped(
             Effect.gen(function* () {
               const runtime = yield* open;
+              yield* runtime.switchModel(chat.id, {
+                provider: "handoff-local",
+                id: "chosen-model",
+              });
               yield* send(runtime, "Finish the report task.");
               yield* rotate(runtime, adversarialHandoff);
               const request = yield* send(runtime, "Continue after rotation.");
               expectHistoricalHandoff(request, adversarialHandoff, "Continue after rotation.");
+              expect(request.model).toBe("chosen-model");
               expect((yield* currentBot).journal.id).not.toBe(initial.id);
             }),
           );
+          const beforeRestart = yield* currentBot;
+          yield* Effect.promise(async () => {
+            const manager = await native.SessionManager.open(
+              beforeRestart.journal.file,
+              join(botRoot, "sessions"),
+              undefined,
+              { suppressBreadcrumb: true },
+            );
+            try {
+              manager.appendModelChange(
+                "handoff-local/handoff-model",
+                native.EPHEMERAL_MODEL_CHANGE_ROLE,
+                true,
+              );
+              await manager.flush();
+            } finally {
+              await manager.close();
+            }
+          });
           yield* Effect.scoped(
             Effect.gen(function* () {
               const runtime = yield* open;
               const request = yield* send(runtime, "Continue after restart.");
               expectHistoricalHandoff(request, adversarialHandoff, "Continue after restart.");
+              expect(request.model).toBe("chosen-model");
             }),
           );
 
@@ -344,6 +382,12 @@ it("keeps generated handoffs below system and developer roles across rotation, r
             }),
           );
           expect(replies).toEqual([]);
+          expect(yield* Effect.promise(() => readFile(join(agentDir, "config.yml"), "utf8"))).toBe(
+            config,
+          );
+          expect(
+            yield* Effect.promise(() => readFile(join(root, "agent", "config.yml"), "utf8")),
+          ).toBe(config);
         }).pipe(
           Effect.provide(Persistence.layer(AbsolutePath.make(join(root, "store.db")))),
           Effect.provide(platform),

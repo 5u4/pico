@@ -69,6 +69,8 @@ describe("session pool capture", () => {
                   },
                   createHandoff: () => Promise.reject(new Error("unexpected handoff")),
                   askBtw: () => Promise.reject(new Error("unexpected side question")),
+                  switchModel: () => Promise.reject(new Error("unexpected model switch")),
+                  flush: () => Promise.resolve(),
                   sendPrompt: async (value, onStarted): Promise<MessageDelivery> => {
                     if (value.text === "reject")
                       throw new AgentError({ message: "Rejected before admission" });
@@ -155,6 +157,8 @@ describe("session pool capture", () => {
                 },
                 createHandoff: () => Promise.reject(new Error("unexpected handoff")),
                 askBtw: () => Promise.reject(new Error("unexpected side question")),
+                switchModel: () => Promise.reject(new Error("unexpected model switch")),
+                flush: () => Promise.resolve(),
                 sendPrompt: async (value, onStarted): Promise<MessageDelivery> => {
                   if (value.text === "following") {
                     emit({ type: "run-finished", outcome: "completed" });
@@ -232,6 +236,8 @@ describe("session pool capture", () => {
                 },
                 createHandoff: () => Promise.reject(new Error("unexpected handoff")),
                 askBtw: () => Promise.reject(new Error("unexpected side question")),
+                switchModel: () => Promise.reject(new Error("unexpected model switch")),
+                flush: () => Promise.resolve(),
                 sendPrompt: (_value, onStarted) => {
                   onStarted?.();
                   emit({ type: "run-started" });
@@ -310,6 +316,8 @@ describe("session pool capture", () => {
                 },
                 createHandoff: () => Promise.reject(new Error("unexpected handoff")),
                 askBtw: () => Promise.reject(new Error("unexpected side question")),
+                switchModel: () => Promise.reject(new Error("unexpected model switch")),
+                flush: () => Promise.resolve(),
                 sendPrompt: (_value, onStarted) => {
                   onStarted?.();
                   emit({ type: "run-started" });
@@ -398,6 +406,8 @@ describe("session pool capture", () => {
                 },
                 createHandoff: () => Promise.reject(new Error("unexpected handoff")),
                 askBtw: () => Promise.reject(new Error("unexpected side question")),
+                switchModel: () => Promise.reject(new Error("unexpected model switch")),
+                flush: () => Promise.resolve(),
                 sendPrompt: (_value, onStarted) => {
                   sends += 1;
                   if (sends === 1) {
@@ -509,6 +519,8 @@ describe("session pool capture", () => {
                 },
                 createHandoff: () => Promise.reject(new Error("unexpected handoff")),
                 askBtw: () => Promise.reject(new Error("unexpected side question")),
+                switchModel: () => Promise.reject(new Error("unexpected model switch")),
+                flush: () => Promise.resolve(),
                 sendPrompt: (_value, onStarted) => {
                   sends += 1;
                   if (sends === 1) {
@@ -589,6 +601,8 @@ describe("session pool capture", () => {
                   },
                   createHandoff: () => Promise.reject(new Error("unexpected handoff")),
                   askBtw: () => Promise.reject(new Error("unexpected side question")),
+                  switchModel: () => Promise.reject(new Error("unexpected model switch")),
+                  flush: () => Promise.resolve(),
                   sendPrompt: (value, onStarted) => {
                     if (value.text === "reject") return Promise.reject(rejected);
                     if (value.text === "abort-reject")

@@ -63,6 +63,7 @@ const fixture = (
     readonly afterCutover?: Effect.Effect<void>;
     readonly afterCreatePhysical?: Effect.Effect<void>;
     readonly afterPublish?: Effect.Effect<void>;
+    readonly availableModels?: AgentRuntime["Service"]["availableModels"];
   } = {},
 ) => {
   const { afterCutover, afterCreatePhysical, afterPublish } = options;
@@ -91,8 +92,10 @@ const fixture = (
             const store = yield* AgentSessionStore;
             return AgentSessionStore.of({
               ...store,
-              createPhysical: (botRoot, cwd) =>
-                store.createPhysical(botRoot, cwd).pipe(Effect.tap(() => afterCreatePhysical)),
+              createPhysical: (botRoot, cwd, previousJournal) =>
+                store
+                  .createPhysical(botRoot, cwd, previousJournal)
+                  .pipe(Effect.tap(() => afterCreatePhysical)),
             });
           }),
         ).pipe(Layer.provide(baseSessions));
@@ -146,6 +149,8 @@ const fixture = (
         close: () => Effect.die("bot must not archive its conversation"),
         abort: () => Effect.void,
         contextUsage: () => Effect.succeed({ kind: "unavailable" }),
+        availableModels: options.availableModels ?? (() => Effect.die("unexpected model catalog")),
+        switchModel: () => Effect.die("unexpected model switch"),
         shake: () => Effect.die("unexpected shake"),
       });
     }),
@@ -253,6 +258,25 @@ const retryConversation = Effect.fn("BotTest.retryConversation")(function* (
 });
 
 describe("bot conversation provisioning", () => {
+  it.effect("lists models before a bot exists without provisioning its conversation", () =>
+    Effect.gen(function* () {
+      const { root, botRoot, fs } = yield* setup();
+      yield* Effect.gen(function* () {
+        const app = yield* Application;
+        yield* app.availableModels({ kind: "bot", bot: { botRoot, platform: null } });
+        assert.isFalse(yield* fs.exists(botRoot));
+        assert.deepStrictEqual(yield* rowCounts(root), { workspaces: 0, chats: 0, bots: 0 });
+      }).pipe(
+        Effect.provide(
+          fixture(root, boundary(), {
+            availableModels: () =>
+              Effect.succeed([{ provider: "openai", id: "gpt-4.1", name: "GPT-4.1" }]),
+          }),
+        ),
+      );
+    }).pipe(Effect.provide(platform)),
+  );
+
   it.effect(
     "leaves no rows when physical journal acquisition fails and preserves existing files",
     () =>

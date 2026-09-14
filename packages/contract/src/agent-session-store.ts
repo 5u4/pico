@@ -20,6 +20,7 @@ export class AgentSessionStore extends Context.Service<
     readonly createPhysical: (
       botRoot: AbsolutePath,
       cwd: AbsolutePath,
+      previousJournal?: SessionJournal,
     ) => Effect.Effect<SessionJournal, AgentError>;
     // Application removes an unpublished journal when rotation fails.
     readonly removePhysical: (journal: SessionJournal) => Effect.Effect<void, AgentError>;
