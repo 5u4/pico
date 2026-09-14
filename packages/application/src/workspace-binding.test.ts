@@ -126,7 +126,7 @@ describe("Workspace binding", () => {
         const chats = yield* ChatRepository;
         const binding: Workspace.WorkspaceBinding = {
           platform: "discord",
-          externalId: "channel-1",
+          externalId: "9007199254740993.10",
         };
 
         const created = yield* application.bindWorkspace({
@@ -138,7 +138,7 @@ describe("Workspace binding", () => {
         assert.strictEqual(created.defaultCwd, firstCwd);
 
         const freshWorktree = yield* application.bindWorkspace({
-          binding: { platform: "discord", externalId: "channel-worktree" },
+          binding: { platform: "discord", externalId: "9007199254740993.20" },
           workspaceName: "worktree channel",
           configuration: {
             kind: "worktree",
@@ -149,7 +149,7 @@ describe("Workspace binding", () => {
         assert.strictEqual(freshWorktree.name, "worktree channel");
         assert.deepStrictEqual(freshWorktree.binding, {
           platform: "discord",
-          externalId: "channel-worktree",
+          externalId: "9007199254740993.20",
         });
         assert.strictEqual(freshWorktree.defaultCwd, secondCwd);
         assert.deepStrictEqual(freshWorktree.worktree, { branch: "main", prefix: "fresh/" });
@@ -159,14 +159,11 @@ describe("Workspace binding", () => {
           externalId: "thread-old",
         });
         const repeated = yield* application.bindWorkspace({
-          binding: { ...binding, guildId: "9007199254740993" },
+          binding,
           workspaceName: "ignored rename",
           configuration: { kind: "direct", cwd: `${firstCwd}/.` },
         });
-        assert.deepStrictEqual(repeated, {
-          ...created,
-          binding: { ...binding, guildId: "9007199254740993" },
-        });
+        assert.deepStrictEqual(repeated, created);
 
         const rebound = yield* application.bindWorkspace({
           binding,
@@ -238,7 +235,7 @@ describe("Workspace binding", () => {
 
         const invalidBranch = yield* application
           .bindWorkspace({
-            binding: { platform: "discord", externalId: "invalid-branch" },
+            binding: { platform: "discord", externalId: "1.30" },
             workspaceName: "invalid branch",
             configuration: {
               kind: "worktree",
@@ -253,7 +250,7 @@ describe("Workspace binding", () => {
         assert.strictEqual(invalidBranch.issue.field, "branch");
         assert.strictEqual(invalidBranch.issue.reason, "not-commit");
         assert.isTrue(
-          Option.isNone(yield* application.findWorkspaceByPlatformId("discord", "invalid-branch")),
+          Option.isNone(yield* application.findWorkspaceByPlatformId("discord", "1.30")),
         );
 
         const invalidInputs: ReadonlyArray<{
@@ -264,15 +261,15 @@ describe("Workspace binding", () => {
             { readonly field: "cwd" }
           >["reason"];
         }> = [
-          { externalId: "whitespace", cwd: ` ${firstCwd}`, reason: "surrounding-whitespace" },
-          { externalId: "relative", cwd: "relative/project", reason: "not-absolute" },
-          { externalId: "home", cwd: "~/project", reason: "not-absolute" },
+          { externalId: "1.40", cwd: ` ${firstCwd}`, reason: "surrounding-whitespace" },
+          { externalId: "1.41", cwd: "relative/project", reason: "not-absolute" },
+          { externalId: "1.42", cwd: "~/project", reason: "not-absolute" },
           {
-            externalId: "missing",
+            externalId: "1.43",
             cwd: path.join(temporaryDirectory, "missing"),
             reason: "not-found",
           },
-          { externalId: "file", cwd: file, reason: "not-directory" },
+          { externalId: "1.44", cwd: file, reason: "not-directory" },
         ];
         for (const input of invalidInputs) {
           const error = yield* application
@@ -296,7 +293,7 @@ describe("Workspace binding", () => {
 
         const unreadable = yield* application
           .bindWorkspace({
-            binding: { platform: "discord", externalId: "unreadable" },
+            binding: { platform: "discord", externalId: "1.45" },
             workspaceName: "unreadable",
             configuration: { kind: "direct", cwd: unreadableCwd },
           })
@@ -307,7 +304,7 @@ describe("Workspace binding", () => {
         assert.strictEqual(unreadable.issue.field, "cwd");
         assert.strictEqual(unreadable.issue.reason, "unreadable");
         assert.isTrue(
-          Option.isNone(yield* application.findWorkspaceByPlatformId("discord", "unreadable")),
+          Option.isNone(yield* application.findWorkspaceByPlatformId("discord", "1.45")),
         );
       }).pipe(
         Effect.provide(ApplicationLayer.layer(gitWorktree)),
@@ -406,7 +403,7 @@ describe("Workspace binding", () => {
           const chats = yield* ChatRepository;
           const binding = Workspace.WorkspaceBinding.make({
             platform: "discord",
-            externalId: winner,
+            externalId: winner === "message" ? "1.10" : "1.20",
           });
           const messageCreation = application.getOrCreateWorkspaceByBinding({
             name: "message",
@@ -439,7 +436,9 @@ describe("Workspace binding", () => {
             worktree: settings,
           });
           assert.deepStrictEqual(
-            Option.getOrThrow(yield* application.findWorkspaceByPlatformId("discord", winner)),
+            Option.getOrThrow(
+              yield* application.findWorkspaceByPlatformId("discord", binding.externalId),
+            ),
             second,
           );
           const nextChat = yield* application.createChat({

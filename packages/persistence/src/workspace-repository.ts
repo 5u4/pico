@@ -15,7 +15,6 @@ const WorkspaceRow = Schema.Struct({
   name: Schema.NonEmptyString,
   platform: Schema.NullOr(Workspace.WorkspacePlatform),
   externalId: Schema.NullOr(Schema.NonEmptyString),
-  guildId: Schema.NullOr(Schema.NonEmptyString),
   defaultCwd: AbsolutePath,
   worktreeBranch: Schema.NullOr(Schema.NonEmptyString),
   worktreePrefix: Schema.NullOr(Schema.NonEmptyString),
@@ -43,7 +42,6 @@ const decodeWorkspace = Effect.fn("WorkspaceRepository.decodeWorkspace")(functio
     binding = {
       platform: row.platform,
       externalId: row.externalId,
-      ...(row.guildId === null ? {} : { guildId: row.guildId }),
     };
   } else {
     return yield* Effect.fail(
@@ -84,7 +82,6 @@ const make = Effect.fn("WorkspaceRepository.make")(function* () {
         name,
         platform,
         external_id AS "externalId",
-        guild_id AS "guildId",
         default_cwd AS "defaultCwd",
         worktree_branch AS "worktreeBranch",
         worktree_prefix AS "worktreePrefix",
@@ -103,7 +100,6 @@ const make = Effect.fn("WorkspaceRepository.make")(function* () {
         name,
         platform,
         external_id,
-        guild_id,
         default_cwd,
         worktree_branch,
         worktree_prefix,
@@ -113,7 +109,6 @@ const make = Effect.fn("WorkspaceRepository.make")(function* () {
         ${workspace.name},
         ${workspace.binding?.platform ?? null},
         ${workspace.binding?.externalId ?? null},
-        ${workspace.binding?.guildId ?? null},
         ${workspace.defaultCwd},
         ${workspace.worktree?.branch ?? null},
         ${workspace.worktree?.prefix ?? null},
@@ -124,7 +119,6 @@ const make = Effect.fn("WorkspaceRepository.make")(function* () {
         name,
         platform,
         external_id AS "externalId",
-        guild_id AS "guildId",
         default_cwd AS "defaultCwd",
         worktree_branch AS "worktreeBranch",
         worktree_prefix AS "worktreePrefix",
@@ -140,7 +134,6 @@ const make = Effect.fn("WorkspaceRepository.make")(function* () {
         name,
         platform,
         external_id,
-        guild_id,
         default_cwd,
         worktree_branch,
         worktree_prefix,
@@ -150,15 +143,12 @@ const make = Effect.fn("WorkspaceRepository.make")(function* () {
         ${workspace.name},
         ${workspace.binding.platform},
         ${workspace.binding.externalId},
-        ${workspace.binding.guildId ?? null},
         ${workspace.defaultCwd},
         ${workspace.worktree?.branch ?? null},
         ${workspace.worktree?.prefix ?? null},
         ${workspace.createdAt}
       )
-      ON CONFLICT(platform, external_id) DO UPDATE
-      SET guild_id = excluded.guild_id
-      WHERE excluded.guild_id IS NOT NULL AND workspaces.guild_id IS NOT excluded.guild_id
+      ON CONFLICT(platform, external_id) DO NOTHING
     `,
   });
 
@@ -171,7 +161,6 @@ const make = Effect.fn("WorkspaceRepository.make")(function* () {
         name,
         platform,
         external_id AS "externalId",
-        guild_id AS "guildId",
         default_cwd AS "defaultCwd",
         worktree_branch AS "worktreeBranch",
         worktree_prefix AS "worktreePrefix",
@@ -190,7 +179,6 @@ const make = Effect.fn("WorkspaceRepository.make")(function* () {
         name,
         platform,
         external_id AS "externalId",
-        guild_id AS "guildId",
         default_cwd AS "defaultCwd",
         worktree_branch AS "worktreeBranch",
         worktree_prefix AS "worktreePrefix",
@@ -217,7 +205,6 @@ const make = Effect.fn("WorkspaceRepository.make")(function* () {
         name,
         platform,
         external_id AS "externalId",
-        guild_id AS "guildId",
         default_cwd AS "defaultCwd",
         worktree_branch AS "worktreeBranch",
         worktree_prefix AS "worktreePrefix",

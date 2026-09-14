@@ -6,11 +6,12 @@ import { ChatSessionContext } from "@pico/contract/chat-session-context";
 import { AgentError } from "@pico/contract/errors";
 import type { InstructionsReader, InstructionsScope } from "@pico/contract/instructions";
 import type { ReplyTarget } from "@pico/contract/reply-target";
-import type * as Workspace from "@pico/contract/workspace-model";
+import * as Workspace from "@pico/contract/workspace-model";
 import { WorkspaceRepository } from "@pico/contract/workspace-repository";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 import persona from "./persona.md" with { type: "text" };
 
 interface Options {
@@ -36,6 +37,9 @@ const platformPrompts = {
   web: "You are chatting with the user through Pico Web.",
 } satisfies Record<Workspace.WorkspacePlatform | "web", string>;
 
+const decodeDiscordWorkspaceExternalId = Schema.decodeUnknownEffect(
+  Workspace.DiscordWorkspaceExternalId,
+);
 const instructionsGuidance =
   "Apply the following instructions from general to specific. More-specific instructions take precedence, but do not override higher-level safety requirements.";
 
@@ -65,15 +69,21 @@ const resolve = Effect.fn("ChatSessionContext.resolve")(function* (
     .findByChat(chatId)
     .pipe(Effect.mapError(repositoryError("Failed to resolve bot session")));
   const binding = maybeWorkspace.value.binding;
+  const discordAddress =
+    binding?.platform === "discord"
+      ? yield* decodeDiscordWorkspaceExternalId(binding.externalId).pipe(
+          Effect.mapError(() => new AgentError({ message: "Invalid Discord workspace binding" })),
+        )
+      : null;
   const platform = Option.isSome(bot) ? bot.value.platform : (binding?.platform ?? null);
   const scope: InstructionsScope = Option.isSome(bot)
     ? { kind: "bot", botRoot: bot.value.botRoot }
-    : binding === null
+    : discordAddress === null
       ? { kind: "global" }
       : {
           kind: "discord",
           botId: discordBotId === null ? null : yield* discordBotId,
-          channelId: binding.externalId,
+          channelId: discordAddress[2],
         };
   const instructionsText = yield* instructions(scope).pipe(
     Effect.mapError((cause) => new AgentError({ message: cause.message })),
@@ -81,12 +91,12 @@ const resolve = Effect.fn("ChatSessionContext.resolve")(function* (
   const identity = JSON.stringify({
     workspaceId: chat.workspaceId,
     chatId: chat.id,
-    ...(binding?.platform === "discord"
+    ...(discordAddress !== null
       ? {
           discord: {
-            channelId: binding.externalId,
+            guildId: discordAddress[0],
+            channelId: discordAddress[2],
             ...(chat.externalId === null ? {} : { threadId: chat.externalId }),
-            ...(binding.guildId === undefined ? {} : { guildId: binding.guildId }),
           },
         }
       : {}),

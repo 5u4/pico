@@ -64,7 +64,7 @@ export const CreateChat = Schema.Struct({
 });
 export type CreateChat = typeof CreateChat.Type;
 
-export type ChatPlatformBinding = Pick<typeof WorkspaceBinding.Type, "platform" | "externalId">;
+export type ChatPlatformBinding = WorkspaceBinding;
 
 export interface CloseChatOptions {
   readonly allowDirtyWorktree: boolean;
@@ -84,7 +84,7 @@ export class Application extends Context.Service<
       input: CreateWorkspace,
     ) => Effect.Effect<Workspace, ApplicationError>;
 
-    /** Platform adapters call this to observe binding metadata without replacing existing configuration. */
+    /** Platform adapters call this when first resolving a channel's workspace. */
     readonly getOrCreateWorkspaceByBinding: (
       input: Omit<CreateWorkspace, "binding"> & { readonly binding: WorkspaceBinding },
     ) => Effect.Effect<Workspace, ApplicationError>;

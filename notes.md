@@ -72,7 +72,7 @@
   - id: bun uuidv7 primary
   - name: workspace name; not null
   - platform: null | discord
-  - external_id: nullable, the discord or other chat app id
+  - external_id: nullable opaque platform address; Discord uses `<guildId>.<channelId>`
   - default_cwd: the current workspace cwd; not null
   - worktree_branch: the worktree source branch; nullable
   - worktree_prefix: the worktree new branch name prefix; nullable
@@ -81,10 +81,12 @@
   - id: bun uuidv7 primary
   - workspace_id: the workspace id; not null
   - cwd: the chat cwd; not null
-  - external_id: nullable, the discord or other chat app id
+  - external_id: nullable opaque platform address; Discord uses the raw thread ID
   - created_at: ms integer; not null
   - archived_at: ms integer; nullable
 - a guild workspace in Discord is a channel
+  - Discord input encodes the workspace address; session context decodes it for guild/channel identity and parent-channel instructions. Persistence does not parse it or store platform-specific fields.
+  - databases from before the composite-address cutover must be recreated. The removed `0003` migration and legacy channel-only workspace IDs have no compatibility path.
 - a guild chat in Discord is a thread; DMs use the shared bot chat instead
   - Discord creates the thread before pico persists the chat. Chat setup and opening-message failures therefore reply directly to that thread, even without a chat binding.
   - these replies identify the failed stage without exposing raw errors. Pure interruption stays quiet. Failed notification delivery is logged separately without retrying.

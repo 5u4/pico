@@ -101,7 +101,7 @@ describe("discord input", () => {
               return {
                 id: workspaceId,
                 name: "general",
-                binding: { platform: "discord", externalId: "10" },
+                binding: { platform: "discord", externalId: "1.10" },
                 defaultCwd,
                 worktree: null,
                 createdAt: 0,
@@ -173,7 +173,7 @@ describe("discord input", () => {
   );
 
   it.effect(
-    "observes guild input after cold output lookup and caches only successful observation",
+    "restores cold output, input, and command routing without changing workspace configuration",
     () =>
       Effect.scoped(
         Effect.gen(function* () {
@@ -187,12 +187,11 @@ describe("discord input", () => {
           );
           const workspaces = Context.get(repositories, WorkspaceRepository);
           const chats = Context.get(repositories, ChatRepository);
-          const legacyWorkspace = {
+          const storedWorkspace = {
             ...boundWorkspace,
-            binding: { platform: "discord", externalId: "10" },
             worktree: { branch: "main", prefix: "retained/" },
           } satisfies Workspace.Workspace;
-          yield* workspaces.create(legacyWorkspace);
+          yield* workspaces.create(storedWorkspace);
           yield* chats.create({
             id: chatId,
             workspaceId,
@@ -203,20 +202,12 @@ describe("discord input", () => {
           const persistenceFailure = (cause: { readonly message: string }) =>
             new ApplicationError({ reason: "operation", message: cause.message });
           let channelReads = 0;
-          let observations = 0;
           let inputLookups = 0;
-          let failObservation = true;
-          const observationFailure = Promise.withResolvers<void>();
-          const logger = Logger.make((options) => {
-            if (Logger.formatStructured.log(options).annotations.operation === "message-request") {
-              observationFailure.resolve();
-            }
-          });
           const firstInput = yield* Deferred.make<void>();
           const secondInput = yield* Deferred.make<void>();
           const unknownLookup = yield* Deferred.make<void>();
-          const admittedGuildIds: Array<string | undefined> = [];
-          const commandGuildIds: Array<string | undefined> = [];
+          const admittedChatIds: Chat.ChatId[] = [];
+          const commandChatIds: Chat.ChatId[] = [];
           let bindingLookups = 0;
           const delivered = yield* Deferred.make<void>();
           const sent: Array<{ readonly threadId: bigint; readonly content: string }> = [];
@@ -250,31 +241,17 @@ describe("discord input", () => {
             askBtw: () => Effect.die("unexpected side question"),
             listWorkspaces: () => Effect.die("unexpected workspace list"),
             createWorkspace: () => Effect.die("unexpected explicit workspace creation"),
-            getOrCreateWorkspaceByBinding: (input) =>
-              Effect.gen(function* () {
-                observations += 1;
-                if (failObservation) {
-                  return yield* new ApplicationError({
-                    reason: "operation",
-                    message: "Observation unavailable",
-                  });
-                }
-                return yield* workspaces.getOrCreateByBinding({
-                  ...input,
-                  id: Workspace.WorkspaceId.make("018f47a0-0000-7000-8000-000000000099"),
-                  createdAt: 1,
-                });
-              }).pipe(Effect.mapError(persistenceFailure)),
+            getOrCreateWorkspaceByBinding: () => Effect.die("unexpected workspace creation"),
             bindWorkspace: () => Effect.die("unexpected workspace binding"),
             listChats: () => Effect.die("unexpected chat list"),
             createChat: () => Effect.die("unexpected chat creation"),
             findWorkspaceByPlatformId: () => Effect.die("unexpected workspace lookup"),
-            findChatByPlatformId: (platform, parentId, externalId) =>
+            findChatByPlatformId: (platform, workspaceExternalId, externalId) =>
               Effect.gen(function* () {
                 inputLookups += 1;
                 const workspace = yield* workspaces.findByBinding({
                   platform,
-                  externalId: parentId,
+                  externalId: workspaceExternalId,
                 });
                 const chat = Option.isNone(workspace)
                   ? Option.none<Chat.Chat>()
@@ -291,31 +268,27 @@ describe("discord input", () => {
                 });
               }),
             transcript: () => Effect.die("unexpected transcript read"),
-            sendMessage: () =>
+            sendMessage: (id) =>
               Effect.gen(function* () {
-                const workspace = Option.getOrThrow(yield* workspaces.findById(workspaceId));
-                admittedGuildIds.push(workspace.binding?.guildId);
+                admittedChatIds.push(id);
                 yield* Deferred.succeed(
-                  admittedGuildIds.length === 1 ? firstInput : secondInput,
+                  admittedChatIds.length === 1 ? firstInput : secondInput,
                   undefined,
                 );
                 return startedDelivery;
-              }).pipe(Effect.mapError(persistenceFailure)),
+              }),
             abort: () => Effect.die("unexpected chat abort"),
             contextUsage: (id) =>
-              Effect.gen(function* () {
-                const chat = Option.getOrThrow(yield* chats.findById(id));
-                const workspace = Option.getOrThrow(yield* workspaces.findById(chat.workspaceId));
-                commandGuildIds.push(workspace.binding?.guildId);
+              Effect.sync(() => {
+                commandChatIds.push(id);
                 return { kind: "unavailable" } satisfies ContextUsage;
-              }).pipe(Effect.mapError(persistenceFailure)),
+              }),
             shake: () => Effect.die("unexpected chat shake"),
             closeChat: () => Effect.die("unexpected chat close"),
           });
           const resolveThreadId = yield* install(bot, config).pipe(
             Effect.provideService(Application, application),
             Effect.provide(BunCrypto.layer),
-            Effect.provide(Logger.layer([logger])),
           );
           const envelopes: ReadonlyArray<AgentEventEnvelope> = [
             {
@@ -379,39 +352,27 @@ describe("discord input", () => {
           assert.deepStrictEqual(sent, [{ threadId: 20n, content: "scheduled after restart" }]);
           assert.strictEqual(bindingLookups, 2);
           assert.strictEqual(channelReads, 0);
-          assert.strictEqual(observations, 0);
           const handleMessage = handlerFor(bot);
           handleMessage(message({ channelId: 20n }));
-          yield* Effect.promise(() => observationFailure.promise);
-          assert.deepStrictEqual(admittedGuildIds, []);
+          yield* Deferred.await(firstInput);
+          assert.deepStrictEqual(admittedChatIds, [chatId]);
           assert.deepStrictEqual(
             Option.getOrThrow(yield* workspaces.findById(workspaceId)),
-            legacyWorkspace,
+            storedWorkspace,
           );
-
-          failObservation = false;
           handleMessage(message({ channelId: 20n, id: 12n }));
-          yield* Deferred.await(firstInput);
-          assert.deepStrictEqual(admittedGuildIds, ["1"]);
-          assert.deepStrictEqual(Option.getOrThrow(yield* workspaces.findById(workspaceId)), {
-            ...legacyWorkspace,
-            binding: { ...legacyWorkspace.binding, guildId: "1" },
-          });
-          handleMessage(message({ channelId: 20n, id: 13n }));
           yield* Deferred.await(secondInput);
-          assert.deepStrictEqual(admittedGuildIds, ["1", "1"]);
-          assert.strictEqual(observations, 2);
-          assert.strictEqual(inputLookups, 2);
-          assert.strictEqual(channelReads, 2);
+          assert.deepStrictEqual(admittedChatIds, [chatId, chatId]);
+          assert.strictEqual(inputLookups, 1);
+          assert.strictEqual(channelReads, 1);
 
           handleMessage(message({ channelId: 21n }));
           yield* Deferred.await(unknownLookup);
-          assert.strictEqual(observations, 2);
           assert.isTrue(
             Option.isNone(
               yield* workspaces.findByBinding({
                 platform: "discord",
-                externalId: "30",
+                externalId: "1.30",
               }),
             ),
           );
@@ -420,9 +381,9 @@ describe("discord input", () => {
             "018f47a0-0000-7000-8000-000000000004",
           );
           yield* workspaces.create({
-            ...legacyWorkspace,
+            ...storedWorkspace,
             id: commandWorkspaceId,
-            binding: { platform: "discord", externalId: "30" },
+            binding: { platform: "discord", externalId: "1.30" },
           });
           yield* chats.create({
             id: failingChatId,
@@ -440,8 +401,15 @@ describe("discord input", () => {
             }),
           );
           yield* Effect.promise(() => commandEdited.promise);
-          assert.deepStrictEqual(commandGuildIds, ["1"]);
-          assert.strictEqual(observations, 3);
+          assert.deepStrictEqual(commandChatIds, [failingChatId]);
+          assert.deepStrictEqual(
+            Option.getOrThrow(yield* workspaces.findById(commandWorkspaceId)),
+            {
+              ...storedWorkspace,
+              id: commandWorkspaceId,
+              binding: { platform: "discord", externalId: "1.30" },
+            },
+          );
         }),
       ).pipe(Effect.provide(Layer.merge(BunFileSystem.layer, BunPath.layer))),
   );
@@ -928,7 +896,7 @@ describe("discord input", () => {
         let workspace: Workspace.Workspace = {
           id: workspaceId,
           name: "general",
-          binding: { platform: "discord", externalId: "10" },
+          binding: { platform: "discord", externalId: "1.10" },
           defaultCwd,
           worktree: null,
           createdAt: 0,
@@ -1044,7 +1012,7 @@ describe("discord input", () => {
         const workspace: Workspace.Workspace = {
           id: workspaceId,
           name: "general",
-          binding: { platform: "discord", externalId: "10" },
+          binding: { platform: "discord", externalId: "1.10" },
           defaultCwd,
           worktree: null,
           createdAt: 0,
@@ -1174,7 +1142,7 @@ describe("discord input", () => {
             Effect.succeed({
               id: workspaceId,
               name: "general",
-              binding: { platform: "discord", externalId: "10" },
+              binding: { platform: "discord", externalId: "1.10" },
               defaultCwd,
               worktree: null,
               createdAt: 0,
@@ -1303,7 +1271,7 @@ describe("discord input", () => {
               Effect.succeed({
                 id: workspaceId,
                 name: "general",
-                binding: { platform: "discord", externalId: "10" },
+                binding: { platform: "discord", externalId: "1.10" },
                 defaultCwd,
                 worktree: null,
                 createdAt: 0,

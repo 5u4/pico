@@ -9,10 +9,17 @@ export type WorkspaceId = typeof WorkspaceId.Type;
 export const WorkspacePlatform = Schema.Literals(["discord"]);
 export type WorkspacePlatform = typeof WorkspacePlatform.Type;
 
+const DiscordSnowflake = Schema.String.check(Schema.isPattern(/^[0-9]+$/), Schema.isTrimmed());
+
+export const DiscordWorkspaceExternalId = Schema.TemplateLiteralParser([
+  DiscordSnowflake,
+  ".",
+  DiscordSnowflake,
+]);
+
 export const WorkspaceBinding = Schema.Struct({
   platform: WorkspacePlatform,
   externalId: Schema.NonEmptyString,
-  guildId: Schema.optional(Schema.NonEmptyString),
 });
 export type WorkspaceBinding = typeof WorkspaceBinding.Type;
 
