@@ -165,9 +165,18 @@ function LiveRoute({ state }: { readonly state: State | null }) {
   const conversation = useAtomValue(conversationAtom);
 
   const updateNavigation = (change: (current: NavigationState) => NavigationState) => {
-    const next = change(navigationRef.current);
+    const current = navigationRef.current;
+    const next = change(current);
     navigationRef.current = next;
     setNavigation(next);
+    if (state && current.expanded !== next.expanded) {
+      for (const id of next.expanded) {
+        if (current.expanded.has(id)) continue;
+        const chats = state.chats(id);
+        const result = registry.get(chats);
+        if (result._tag !== "Initial" && !result.waiting) registry.refresh(chats);
+      }
+    }
   };
   const updateEntry = (key: number, change: (entry: DraftEntry) => DraftEntry) => {
     updateNavigation((current) => {
@@ -627,11 +636,6 @@ function LiveRoute({ state }: { readonly state: State | null }) {
           onWorkspaceToggle={(id) => {
             const workspace = groups.find((group) => group.workspace.id === id)?.workspace;
             if (!workspace) return;
-            if (state && !navigationRef.current.expanded.has(workspace.id)) {
-              const chats = state.chats(workspace.id);
-              const result = registry.get(chats);
-              if (result._tag !== "Initial" && !result.waiting) registry.refresh(chats);
-            }
             updateNavigation((current) => {
               const expanded = new Set(current.expanded);
               if (expanded.has(workspace.id)) expanded.delete(workspace.id);
