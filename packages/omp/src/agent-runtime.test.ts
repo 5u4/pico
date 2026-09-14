@@ -67,7 +67,6 @@ describe("AgentRuntime", () => {
                 beginDispose: () => {},
                 dispose: async () => {},
               },
-              createHandoff: () => Promise.reject(new Error("unexpected handoff")),
               askBtw: () => Promise.reject(new Error("unexpected side question")),
               switchModel: () => Promise.reject(new Error("unexpected model switch")),
               flush: () => Promise.resolve(),
@@ -120,7 +119,6 @@ describe("AgentRuntime", () => {
                       Deferred.doneUnsafe(disposed, Effect.void);
                     },
                   },
-                  createHandoff: () => Promise.reject(new Error("unexpected handoff")),
                   askBtw: () => Promise.reject(new Error("unexpected side question")),
                   switchModel: () => Promise.reject(new Error("unexpected model switch")),
                   flush: () => Promise.resolve(),
@@ -234,7 +232,6 @@ describe("AgentRuntime", () => {
                   return Promise.resolve();
                 },
               },
-              createHandoff: () => Promise.reject(new Error("unexpected handoff")),
               askBtw: () => Promise.reject(new Error("unexpected side question")),
               switchModel: () => Promise.reject(new Error("unexpected model switch")),
               flush: () => Promise.resolve(),
@@ -352,7 +349,6 @@ describe("AgentRuntime", () => {
                 beginDispose: () => {},
                 dispose: () => Promise.resolve(),
               },
-              createHandoff: () => Promise.reject(new Error("unexpected handoff")),
               askBtw: () => Promise.reject(new Error("unexpected side question")),
               switchModel: () => Promise.reject(new Error("unexpected model switch")),
               flush: () => Promise.resolve(),
@@ -455,7 +451,6 @@ describe("AgentRuntime", () => {
                   return Promise.resolve();
                 },
               },
-              createHandoff: () => Promise.reject(new Error("unexpected handoff")),
               askBtw: () => Promise.reject(new Error("unexpected side question")),
               switchModel: () => Promise.reject(new Error("unexpected model switch")),
               flush: () => Promise.resolve(),
@@ -520,7 +515,6 @@ describe("AgentRuntime", () => {
                         return disposal;
                       },
                     },
-                    createHandoff: () => Promise.reject(new Error("unexpected handoff")),
                     askBtw: () => Promise.reject(new Error("unexpected side question")),
                     switchModel: () => Promise.reject(new Error("unexpected model switch")),
                     flush: () => Promise.resolve(),
@@ -594,7 +588,6 @@ describe("AgentRuntime", () => {
                   beginDispose: () => {},
                   dispose: () => Promise.resolve(),
                 },
-                createHandoff: () => Promise.reject(new Error("unexpected handoff")),
                 askBtw: () => Promise.reject(new Error("unexpected side question")),
                 switchModel: () => Promise.reject(new Error("unexpected model switch")),
                 flush: () => Promise.resolve(),
@@ -648,7 +641,6 @@ describe("AgentRuntime", () => {
                   beginDispose: () => {},
                   dispose: () => Promise.resolve(),
                 },
-                createHandoff: () => Promise.reject(new Error("unexpected handoff")),
                 askBtw: () => Promise.reject(new Error("unexpected side question")),
                 switchModel: () => Promise.reject(new Error("unexpected model switch")),
                 flush: () => Promise.resolve(),

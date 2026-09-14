@@ -96,8 +96,6 @@ describe("Chat close", () => {
                 ),
               ),
             sendCaptured: () => Effect.die("unexpected scheduled request"),
-            sendTurn: () => Effect.die("unexpected bot turn"),
-            rotate: () => Effect.die("unexpected bot rotation"),
             deliver: () => Effect.die("unexpected delivery"),
             publish: () => Effect.die("unexpected publication"),
             close: () =>
@@ -169,8 +167,6 @@ describe("Chat close", () => {
               AgentSessionStore.of({
                 create: () => Effect.void,
                 remove: () => Effect.void,
-                createPhysical: () => Effect.die("unexpected physical session creation"),
-                removePhysical: () => Effect.die("unexpected physical session removal"),
               }),
             ),
           ),
@@ -232,8 +228,6 @@ describe("Chat close", () => {
                   finalAssistantText: "",
                 }),
               ),
-            sendTurn: () => Effect.die("unexpected bot turn"),
-            rotate: () => Effect.die("unexpected bot rotation"),
             deliver: () => Effect.die("unexpected scheduled delivery"),
             publish: () => Effect.die("unexpected scheduled publish"),
             close: (id) =>
@@ -262,8 +256,6 @@ describe("Chat close", () => {
         AgentSessionStore.of({
           create: () => Effect.void,
           remove: () => Effect.void,
-          createPhysical: () => Effect.die("unexpected physical session creation"),
-          removePhysical: () => Effect.die("unexpected physical session removal"),
         }),
       );
       const gitWorktree: GitWorktree = {
@@ -330,7 +322,7 @@ describe("Chat close", () => {
         assert.instanceOf(yield* application.contextUsage(chat.id).pipe(Effect.flip), ChatClosed);
         assert.instanceOf(yield* application.shake(chat.id, "elide").pipe(Effect.flip), ChatClosed);
         assert.instanceOf(
-          yield* application.availableModels({ kind: "chat", chatId: chat.id }).pipe(Effect.flip),
+          yield* application.availableModels(chat.id).pipe(Effect.flip),
           ChatClosed,
         );
         assert.instanceOf(
@@ -357,9 +349,7 @@ describe("Chat close", () => {
           "not-found",
         );
         assertApplicationError(
-          yield* application
-            .availableModels({ kind: "chat", chatId: missingChatId })
-            .pipe(Effect.flip),
+          yield* application.availableModels(missingChatId).pipe(Effect.flip),
           "not-found",
         );
         assertApplicationError(
@@ -431,8 +421,6 @@ describe("Chat close", () => {
                 ),
               ),
             ),
-          sendTurn: () => Effect.die("unexpected bot turn"),
-          rotate: () => Effect.die("unexpected bot rotation"),
           deliver: () => Effect.die("unexpected delivery"),
           publish: () => Effect.die("unexpected publication"),
           close: () => Deferred.succeed(stopped, undefined).pipe(Effect.asVoid),
@@ -446,8 +434,6 @@ describe("Chat close", () => {
         AgentSessionStore.of({
           create: () => Effect.void,
           remove: () => Effect.void,
-          createPhysical: () => Effect.die("unexpected physical session creation"),
-          removePhysical: () => Effect.die("unexpected physical session removal"),
         }),
       );
       const gitWorktree: GitWorktree = {
@@ -554,8 +540,6 @@ describe("Chat close", () => {
             transcript: () => Effect.succeed([]),
             send: () => Effect.die("unexpected send"),
             sendCaptured: () => Effect.die("unexpected captured runtime send"),
-            sendTurn: () => Effect.die("unexpected bot turn"),
-            rotate: () => Effect.die("unexpected bot rotation"),
             deliver: () => Effect.die("unexpected scheduled delivery"),
             publish: () => Effect.die("unexpected scheduled publish"),
             close: (id) =>
@@ -577,8 +561,6 @@ describe("Chat close", () => {
         AgentSessionStore.of({
           create: () => Effect.void,
           remove: () => Effect.void,
-          createPhysical: () => Effect.die("unexpected physical session creation"),
-          removePhysical: () => Effect.die("unexpected physical session removal"),
         }),
       );
       const gitWorktree: GitWorktree = {

@@ -17,7 +17,6 @@
   - instructions files load in order: `<picoRoot>/agents/instructions.md`, `agents/discord/bots/{botId}/instructions.md`, then `agents/discord/channels/{channelId}/instructions.md`
   - `channelId` is the owning workspace's parent Discord channel, never the chat's thread ID; scheduled chats and native clients use that same ownership
   - native workspaces load only the global file; channel instructions are shared across bots
-  - bot-mode sessions load the global file followed by `<botRoot>/instructions.md`, never a sender or guild-channel file
   - the single configured bot's identity comes from authenticated Discord READY; configured but not ready fails session opening, while disabled Discord skips only the bot file
   - missing and blank instructions files are ignored; other read failures include the path and cause
   - all layers append; empty files do not clear inherited content; more-specific instructions take precedence as model guidance, not authorization
@@ -61,13 +60,13 @@
 - schedule runs copy their exact metadata and complete source tree before execution; future immutable snapshots retain helper files and directories, and source edits never change existing snapshots
 - `target` accepts `{ kind: "current-chat" }`, `{ kind: "current-workspace" }`, `{ kind: "chat", chatId }`, or `{ kind: "workspace", workspaceId }`. Explicit IDs are Pico UUIDv7 IDs, not Discord IDs.
 - the creating workspace keeps schedule ownership and management access when the destination changes. Scripts and the agent use the destination chat's actual workspace and cwd.
-- workspace targets create a new local chat per run. Bot workspaces reuse their logical bot chat, turn queue, physical journal, memory settings, and rotation policy.
+- workspace targets create a new local chat per run.
 - creation and target-supplied updates replace caller reply policy. Convenience selectors save that operation's caller reply or clear it when absent. Explicit selectors clear saved replies, even for the current chat or workspace.
 - updates that omit `target` preserve saved replies. Retargeting affects future claims, not an in-flight run's frozen destination or reply.
 - scheduled prompts and script-only publications use the saved reply or existing destination routing. Saved-reply delivery failures fail the run. UUID selection creates no external recipient or Discord thread. Missing workspaces and missing or archived chats fail before execution, without an owner or origin fallback.
 - schedule definitions and runs never use sqlite
 - each workspace can only belong to one platform (native | discord | ...)
-- an absent workspace platform binding means there is no foreign channel; native workspaces and shared bot workspaces both use this shape
+- an absent workspace platform binding means there is no foreign channel.
 - db workspace schema
   - id: bun uuidv7 primary
   - name: workspace name; not null
@@ -87,15 +86,15 @@
 - a guild workspace in Discord is a channel
   - Discord input encodes the workspace address; session context decodes it for guild/channel identity and parent-channel instructions. Persistence does not parse it or store platform-specific fields.
   - databases from before the composite-address cutover must be recreated. The removed `0003` migration and legacy channel-only workspace IDs have no compatibility path.
-- a guild chat in Discord is a thread; DMs use the shared bot chat instead
+- a guild chat in Discord is a thread
   - Discord creates the thread before pico persists the chat. Chat setup and opening-message failures therefore reply directly to that thread, even without a chat binding.
   - these replies identify the failed stage without exposing raw errors. Pure interruption stays quiet. Failed notification delivery is logged separately without retrying.
-  - `/switch model:` uses Discord autocomplete in bound threads and bot DMs. Search by provider, model ID, or display name; Discord shows at most 25 matches per query.
-  - autocomplete reads OMP's authenticated, enabled model catalogue without opening a session or provisioning a DM chat. It bypasses turn queues and returns no choices if discovery exceeds two seconds.
+  - `/switch model:` uses Discord autocomplete in bound threads. Search by provider, model ID, or display name; Discord shows at most 25 matches per query.
+  - autocomplete reads OMP's authenticated, enabled model catalogue without opening a session. It bypasses turn queues and returns no choices if discovery exceeds two seconds.
   - Discord owns picker formatting and selection parsing, application resolves the conversation, and OMP revalidates the choice before calling `setModelTemporary`. Confirmation is private.
-  - the selection belongs to the current logical chat, including the bot's shared DM chat, not OMP's global or project model defaults. Native journal entries preserve it through reopen and bot rotation without a second preference store.
+  - the selection belongs to the current chat, not OMP's global or project model defaults. Native journal entries preserve it through reopen without a second preference store.
   - if the model changes but journal flush fails, the result is `persistence-unconfirmed`, not a rejected switch. Discord confirms the live model, warns that saving was not confirmed, and logs a safe warning. A failed flush does not prove the write was lost or roll back the live model.
-  - a busy thread rejects switching rather than changing an in-flight run. DM switches follow the existing whole-turn queue; autocomplete does not wait for that queue.
+  - a busy thread rejects switching rather than changing an in-flight run. Autocomplete does not wait for the thread queue.
 - when creating the chat, write workspace.default_cwd to chat.cwd
   - when workspace.default_cwd is changed, chat.cwd remains the same
   - each new chat uses the complete workspace configuration read during creation, even if a bind finishes before chat creation completes
@@ -150,17 +149,11 @@
 - logging - 30d retention, 1d rotation, write to file and console
 - config.toml controls configs
 - daemon always serve web; when config.toml configures discord + secret loads, serve discord as well
-  - a nonblank `secrets/discord_bot_token` enables Discord when the `[discord]` section is present; `allowed_guild = []` enables DMs only, not guild messages
+  - a nonblank `secrets/discord_bot_token` enables Discord when the `[discord]` section is present. `allowed_guild = []` starts the connection but admits no conversations.
   - guild messages still require a listed guild; `default_cwd` remains a required absolute path for new guild workspaces
-  - the gateway subscribes to direct messages; every non-bot sender intentionally shares one bot conversation and memory, with no owner restriction or per-user partition; own messages, other bots, and webhooks are ignored
-  - one DM queue preserves arrival order through attachment downloads, chat creation, and the complete reply; each reply targets the triggering message and channel. Binding and thread-management commands are unavailable in DMs.
-  - Discord resolves `<picoRoot>/agents/discord/bots/<botId>` as `botRoot`; application and OMP bot lifecycle code use that path without Discord-specific path rules
-  - `<botRoot>/work` is the durable working directory and is never cleared on rotation; `<botRoot>/sessions` contains physical journals, `<botRoot>/omp` owns OMP local memory, and `<botRoot>/handoffs/<source-session-id>.md` bridges generations
-  - one logical bot chat keeps a persisted pointer to the active physical session across restart; its workspace and chat have no Discord channel/thread binding
-  - the starting rotation policy is 8 MiB of journal data or 12 hours idle, checked before the next turn after a completed turn; these are initial policy values, not measured cutoffs
-  - pending, failed, or aborted turns keep their current generation until a successful turn; a handoff failure leaves the prior active session in place and replies with an error
-  - rotation saves a short semantic handoff before switching the durable pointer; it does not fork the full transcript, remove old journals, or bound total disk retention
-  - OMP compaction stays enabled; its local memory scanner is asynchronous and has a minimum idle age, so the new session explicitly reads the relevant handoff while memory extraction catches up
+  - Discord accepts guild messages only. Guild-less messages and interactions, own messages, other bots, and webhooks are ignored before prompt or attachment processing.
+  - startup clears global commands before validating guild membership, so a missing configured guild cannot leave obsolete DM commands behind. Guild commands register only after validation.
+  - Discord chats use the ordinary `<picoRoot>/sessions/<chatId>.jsonl` journal.
 - phases
   - spike critical parts, define packages
   - write critical packages

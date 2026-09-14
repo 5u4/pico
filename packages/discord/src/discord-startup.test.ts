@@ -1,11 +1,6 @@
 import { assert, describe, it } from "@effect/vitest";
 import { AbsolutePath } from "@pico/contract/path";
-import {
-  ApplicationCommandOptionTypes,
-  type CreateApplicationCommand,
-  DiscordApplicationIntegrationType,
-  DiscordInteractionContextType,
-} from "discordeno";
+import { ApplicationCommandOptionTypes, type CreateApplicationCommand } from "discordeno";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Logger from "effect/Logger";
@@ -75,27 +70,13 @@ describe("Discord startup", () => {
           yield* openBot(harness.bot, config, harness.collectedGuildIds);
           assert.deepStrictEqual(harness.calls, [
             { kind: "start" },
-            { kind: "global", commands: DiscordCommand.directMessageCommands },
+            { kind: "global", commands: [] },
             { kind: "guild", guildId: "1", commands: DiscordCommand.applicationCommands },
             { kind: "guild", guildId: "2", commands: DiscordCommand.applicationCommands },
             { kind: "guild", guildId: "3", commands: [] },
           ]);
-          const global = harness.calls.find((call) => call.kind === "global");
-          assert.isDefined(global);
-          assert.deepStrictEqual(global?.commands.map(({ name }) => name).sort(), [
-            "context",
-            "shake",
-            "switch",
-          ]);
-          for (const command of global?.commands ?? []) {
-            assert.deepStrictEqual(command.contexts, [DiscordInteractionContextType.BotDm]);
-            assert.deepStrictEqual(command.integrationTypes, [
-              DiscordApplicationIntegrationType.GuildInstall,
-            ]);
-          }
           for (const registration of harness.calls) {
-            if (registration.kind !== "global" && registration.kind !== "guild") continue;
-            if (registration.kind === "guild" && registration.guildId === "3") continue;
+            if (registration.kind !== "guild" || registration.guildId === "3") continue;
             const command = registration.commands.find(({ name }) => name === "switch");
             if (command === undefined || !("options" in command)) {
               throw new Error("Expected a registered model picker");
@@ -116,31 +97,42 @@ describe("Discord startup", () => {
     }),
   );
 
-  it.effect(
-    "starts DM-only mode and removes guild commands without requiring guild membership",
-    () =>
-      Effect.gen(function* () {
-        const harness = makeBot(["3"]);
-        yield* Effect.scoped(
-          openBot(harness.bot, { ...config, allowedGuildIds: [] }, harness.collectedGuildIds),
-        );
-        assert.deepStrictEqual(harness.calls, [
-          { kind: "start" },
-          { kind: "global", commands: DiscordCommand.directMessageCommands },
-          { kind: "guild", guildId: "3", commands: [] },
-          { kind: "shutdown" },
-        ]);
-      }),
+  it.effect("accepts an empty guild allowlist and clears all commands", () =>
+    Effect.gen(function* () {
+      const harness = makeBot(["3"]);
+      yield* Effect.scoped(
+        openBot(harness.bot, { ...config, allowedGuildIds: [] }, harness.collectedGuildIds),
+      );
+      assert.deepStrictEqual(harness.calls, [
+        { kind: "start" },
+        { kind: "global", commands: [] },
+        { kind: "guild", guildId: "3", commands: [] },
+        { kind: "shutdown" },
+      ]);
+    }),
   );
 
-  it.effect("fails missing allowed guilds and cleans up the connected bot", () =>
+  it.effect("clears stale global commands even when an allowed guild is missing", () =>
     Effect.gen(function* () {
       const harness = makeBot(["1", "3"]);
-      const exit = yield* Effect.exit(
-        Effect.scoped(openBot(harness.bot, config, harness.collectedGuildIds)),
+      let globalCommands: Array<CreateApplicationCommand> = [
+        { name: "context", description: "Show context usage" },
+      ];
+      const bot: DiscordStartupBot = {
+        ...harness.bot,
+        helpers: {
+          ...harness.bot.helpers,
+          upsertGlobalApplicationCommands: async (commands) => {
+            globalCommands = commands;
+          },
+        },
+      };
+      const failure = yield* Effect.flip(
+        Effect.scoped(openBot(bot, config, harness.collectedGuildIds)),
       );
 
-      assert.isTrue(Exit.isFailure(exit));
+      assert.strictEqual(failure.operation, "validate-guild-membership");
+      assert.deepStrictEqual(globalCommands, []);
       assert.deepStrictEqual(harness.calls, [{ kind: "start" }, { kind: "shutdown" }]);
     }),
   );
@@ -155,7 +147,7 @@ describe("Discord startup", () => {
       assert.isTrue(Exit.isFailure(exit));
       assert.deepStrictEqual(harness.calls, [
         { kind: "start" },
-        { kind: "global", commands: DiscordCommand.directMessageCommands },
+        { kind: "global", commands: [] },
         { kind: "guild", guildId: "1", commands: DiscordCommand.applicationCommands },
         { kind: "guild", guildId: "2", commands: DiscordCommand.applicationCommands },
         { kind: "shutdown" },

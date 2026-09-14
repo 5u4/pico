@@ -22,12 +22,7 @@ export const make = Effect.fn("Instructions.make")(function* (root: PicoRoot) {
     const sources = [
       { path: path.join(agentsDir, "instructions.md"), heading: "Global instructions" },
     ];
-    if (scope.kind === "bot") {
-      sources.push({
-        path: path.join(scope.botRoot, "instructions.md"),
-        heading: "Bot instructions",
-      });
-    } else if (scope.kind === "discord") {
+    if (scope.kind === "discord") {
       const channelId = yield* decodeDiscordId(scope.channelId).pipe(
         Effect.mapError(
           () =>

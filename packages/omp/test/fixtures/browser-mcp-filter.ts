@@ -4,7 +4,6 @@ import { join } from "node:path";
 import * as BunCrypto from "@effect/platform-bun/BunCrypto";
 import * as BunFileSystem from "@effect/platform-bun/BunFileSystem";
 import * as BunPath from "@effect/platform-bun/BunPath";
-import { BotSessions } from "@pico/contract/bot-session";
 import { BranchNaming } from "@pico/contract/branch-naming";
 import * as Chat from "@pico/contract/chat-model";
 import { ChatSessionContext } from "@pico/contract/chat-session-context";
@@ -14,7 +13,6 @@ import { Schedules } from "@pico/contract/schedule";
 import { WorkspaceId } from "@pico/contract/workspace-model";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 const root = process.cwd();
@@ -122,19 +120,8 @@ try {
     BunCrypto.layer,
     BunFileSystem.layer,
     BunPath.layer,
-    Layer.succeed(BotSessions, {
-      findByChat: () => Effect.succeed(Option.none()),
-      findByWorkspace: () => Effect.die("Unexpected bot lookup"),
-      findByRoot: () => Effect.die("Unexpected bot lookup"),
-      createConversation: () => Effect.die("Unexpected bot creation"),
-      setTurn: () => Effect.die("Unexpected bot turn"),
-      saveHandoff: () => Effect.die("Unexpected bot handoff"),
-      readHandoff: () => Effect.die("Unexpected bot handoff"),
-      rotate: () => Effect.die("Unexpected bot rotation"),
-    }),
     Layer.succeed(ChatSessionContext, {
-      resolve: () =>
-        Effect.succeed({ chat, platform: null, appendSystemPrompt: "", formatTurnContext: null }),
+      resolve: () => Effect.succeed({ chat, platform: null, appendSystemPrompt: "" }),
     }),
     Layer.succeed(BranchNaming, {
       handle: () => {

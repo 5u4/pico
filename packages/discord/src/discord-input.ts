@@ -1,15 +1,9 @@
 import type { DiscordConfig } from "@pico/config/config";
 import type * as AgentMessage from "@pico/contract/agent-message";
-import type {
-  ContextUsage,
-  MessageDelivery,
-  ModelTarget,
-  ShakeResult,
-} from "@pico/contract/agent-runtime";
+import type { ContextUsage, MessageDelivery, ShakeResult } from "@pico/contract/agent-runtime";
 import { Application, type CloseChatResult } from "@pico/contract/application";
 import type * as Chat from "@pico/contract/chat-model";
-import { AgentError, ApplicationError, type WorkspaceBindingInvalid } from "@pico/contract/errors";
-import type { AbsolutePath } from "@pico/contract/path";
+import { ApplicationError, type WorkspaceBindingInvalid } from "@pico/contract/errors";
 import * as Workspace from "@pico/contract/workspace-model";
 import {
   ButtonStyles,
@@ -37,7 +31,6 @@ import * as DiscordCommand from "./discord-command.ts";
 import { discordError, promiseBoundary, reportFailure } from "./discord-error.ts";
 import * as DiscordMarkdown from "./discord-markdown.ts";
 import * as DiscordModel from "./discord-model.ts";
-import * as DiscordOutput from "./discord-output.ts";
 import { type DiscordMessage, projectDiscordPrompt } from "./discord-prompt.ts";
 
 export interface DiscordChannel {
@@ -88,10 +81,6 @@ export interface DiscordInputBot<
       options: {
         readonly content: string;
         readonly allowedMentions: { readonly parse: []; readonly repliedUser: false };
-        readonly messageReference?: {
-          readonly messageId: bigint;
-          readonly failIfNotExists: false;
-        };
       },
     ) => Promise<unknown>;
     readonly editChannel: (
@@ -104,11 +93,6 @@ export interface DiscordInputBot<
       options: { readonly name: string; readonly autoArchiveDuration: 1_440 },
     ) => Promise<{ readonly id: bigint }>;
   };
-}
-
-export interface DiscordBotOptions {
-  readonly botRoot: AbsolutePath;
-  readonly outputClient: DiscordOutput.DiscordOutputClient;
 }
 
 const isThread = (type: ChannelTypes) =>
@@ -155,14 +139,12 @@ export const install = Effect.fn("DiscordInput.install")(function* <
   config: DiscordConfig,
   drainOutput: () => Effect.Effect<void> = () => Effect.void,
   httpClient?: HttpClient.HttpClient,
-  botOptions?: DiscordBotOptions,
 ) {
   const application = yield* Application;
   const crypto = yield* Crypto.Crypto;
   const scope = yield* Scope.Scope;
   const run = yield* FiberSet.makeRuntime();
   const allowedGuildIds = new Set(config.allowedGuildIds);
-  const directMessages = Semaphore.makeUnsafe(1);
   const workspaceIds = new Map<bigint, Workspace.WorkspaceId>();
   const chatIds = new Map<bigint, Chat.ChatId>();
   const threadIds = new Map<Chat.ChatId, bigint>();
@@ -299,39 +281,19 @@ export const install = Effect.fn("DiscordInput.install")(function* <
     return Option.some(chat.value.id);
   });
 
-  const resolveBotCommandChatId = Effect.fnUntraced(function* () {
-    if (botOptions === undefined) return Option.none<Chat.ChatId>();
-    yield* Effect.annotateLogsScoped({ phase: "resolve-bot-chat" });
-    const chat = yield* application.getOrCreateBotChat({
-      botRoot: botOptions.botRoot,
-      platform: "discord",
-    });
-    yield* Effect.annotateLogsScoped({ chatId: chat.id });
-    return Option.some(chat.id);
-  });
-
-  const resolveModelTarget = Effect.fnUntraced(function* (interaction: Interaction) {
-    if (interaction.guildId === undefined) {
-      return botOptions === undefined
-        ? Option.none<ModelTarget>()
-        : Option.some<ModelTarget>({
-            kind: "bot",
-            bot: { botRoot: botOptions.botRoot, platform: "discord" },
-          });
-    }
+  const resolveModelChatId = Effect.fnUntraced(function* (interaction: Interaction) {
     const thread = yield* resolveCommandThread(interaction);
-    if (Option.isNone(thread)) return Option.none<ModelTarget>();
-    const chatId = yield* resolveCommandChatId(thread.value);
-    return Option.map(chatId, (chatId): ModelTarget => ({ kind: "chat", chatId }));
+    if (Option.isNone(thread)) return Option.none<Chat.ChatId>();
+    return yield* resolveCommandChatId(thread.value);
   });
 
   const autocompleteModels = Effect.fnUntraced(function* (interaction: Interaction) {
     const request = yield* Effect.gen(function* () {
       const query = DiscordCommand.parseModelQuery(interaction.data?.options);
       if (query === undefined) return [];
-      const target = yield* resolveModelTarget(interaction);
-      if (Option.isNone(target)) return [];
-      const models = yield* application.availableModels(target.value);
+      const chatId = yield* resolveModelChatId(interaction);
+      if (Option.isNone(chatId)) return [];
+      const models = yield* application.availableModels(chatId.value);
       return yield* DiscordModel.choices(crypto, models, query);
     }).pipe(Effect.forkIn(scope));
     const choices = yield* Fiber.join(request).pipe(
@@ -379,6 +341,7 @@ export const install = Effect.fn("DiscordInput.install")(function* <
 
   const processMessage = Effect.fnUntraced(function* (
     message: Message,
+    guildId: bigint,
     knownChannel?: DiscordChannel,
   ) {
     const sourceAttachments = message.attachments ?? [];
@@ -418,57 +381,6 @@ export const install = Effect.fn("DiscordInput.install")(function* <
     );
     if (prompt === undefined) return;
 
-    if (message.guildId === undefined) {
-      const reply = (content: string) =>
-        promiseBoundary("reply-direct-message", () =>
-          bot.helpers.sendMessage(message.channelId, {
-            content,
-            allowedMentions,
-            messageReference: { messageId: message.id, failIfNotExists: false },
-          }),
-        );
-      if (botOptions === undefined) {
-        yield* reply("Direct messages are unavailable because bot storage is not configured.");
-        return;
-      }
-      const turnScope = yield* Scope.Scope;
-      const dispatch = DiscordOutput.make(botOptions.outputClient, turnScope, config, {
-        kind: "direct-message",
-        messageId: message.id,
-      });
-      yield* Effect.gen(function* () {
-        yield* Effect.annotateLogsScoped({ phase: "resolve-bot-chat" });
-        const chat = yield* application.getOrCreateBotChat({
-          botRoot: botOptions.botRoot,
-          platform: "discord",
-        });
-        yield* Effect.annotateLogsScoped({ phase: "send-bot-prompt", chatId: chat.id });
-        yield* application.sendBotMessage(
-          chat.id,
-          prompt,
-          (event) =>
-            dispatch(message.channelId, { chatId: chat.id, event }).pipe(
-              Effect.tapCause((cause) => reportFailure("deliver-bot-event", cause)),
-              Effect.mapError(() => new AgentError({ message: "Discord reply delivery failed" })),
-            ),
-          {
-            platform: "discord",
-            conversationId: message.channelId.toString(),
-            messageId: message.id.toString(),
-          },
-        );
-      }).pipe(
-        Effect.catchTags({
-          ApplicationError: (error) =>
-            reportFailure("bot-message-request", Cause.fail(error)).pipe(
-              Effect.andThen(reply("pico could not continue this conversation. Please try again.")),
-            ),
-          ChatClosed: () => reply("This bot conversation is closed."),
-        }),
-      );
-      return;
-    }
-
     const cachedChatId = chatIds.get(message.channelId);
     if (cachedChatId !== undefined) {
       return yield* sendMessageToChat(cachedChatId, prompt, message.channelId);
@@ -485,7 +397,7 @@ export const install = Effect.fn("DiscordInput.install")(function* <
       yield* Effect.annotateLogsScoped({ phase: "resolve-chat", threadId: channel.id.toString() });
       const chat = yield* application.findChatByPlatformId(
         "discord",
-        workspaceExternalId(message.guildId, channel.parentId),
+        workspaceExternalId(guildId, channel.parentId),
         channel.id.toString(),
       );
       if (Option.isNone(chat)) return;
@@ -499,7 +411,7 @@ export const install = Effect.fn("DiscordInput.install")(function* <
     if (channel.type !== ChannelTypes.GuildText) return;
 
     yield* Effect.annotateLogsScoped({ phase: "resolve-workspace" });
-    const workspaceId = yield* resolveWorkspace(channel.id, message.guildId, channel.name);
+    const workspaceId = yield* resolveWorkspace(channel.id, guildId, channel.name);
     yield* Effect.annotateLogsScoped({ phase: "create-thread", workspaceId });
     const thread = yield* promiseBoundary("create-thread", () =>
       bot.helpers.startThreadWithMessage(channel.id, message.id, {
@@ -541,19 +453,18 @@ export const install = Effect.fn("DiscordInput.install")(function* <
   });
 
   const handleMessage = Effect.fnUntraced(function* (message: Message) {
+    const guildId = message.guildId;
     if (
-      (message.guildId !== undefined && !allowedGuildIds.has(message.guildId.toString())) ||
+      guildId === undefined ||
+      !allowedGuildIds.has(guildId.toString()) ||
       message.webhookId !== undefined ||
       message.author.bot === true ||
       message.author.id === bot.id
     ) {
       return;
     }
-    if (message.guildId === undefined) {
-      return yield* directMessages.withPermit(Effect.scoped(processMessage(message)));
-    }
     if (inputLocks.get(message.channelId)?.knownThread === true || chatIds.has(message.channelId)) {
-      return yield* threadLock(message.channelId).withPermit(processMessage(message));
+      return yield* threadLock(message.channelId).withPermit(processMessage(message, guildId));
     }
     const entry = inputLock(message.channelId);
     const result = yield* entry.semaphore.withPermit(
@@ -564,14 +475,14 @@ export const install = Effect.fn("DiscordInput.install")(function* <
         );
         if (isThread(channel.type)) {
           entry.knownThread = true;
-          const delivery = yield* processMessage(message, channel);
+          const delivery = yield* processMessage(message, guildId, channel);
           return { kind: "thread", delivery } as const;
         }
         return { kind: "parent", channel } as const;
       }),
     );
     if (result.kind === "thread") return result.delivery;
-    return yield* processMessage(message, result.channel);
+    return yield* processMessage(message, guildId, result.channel);
   });
 
   type WorkspacePathIssue = Extract<
@@ -714,14 +625,12 @@ export const install = Effect.fn("DiscordInput.install")(function* <
   ) {
     const policyCopy = "This command can only be used in a pico-owned Discord thread.";
     const thread = yield* resolveCommandThread(interaction);
-    if (interaction.guildId !== undefined && Option.isNone(thread)) return policyCopy;
+    if (Option.isNone(thread)) return policyCopy;
     if (command.kind === "malformedShake") {
       return "The /shake command accepts one mode: elide, images, or thinking.";
     }
 
-    const chatId = Option.isSome(thread)
-      ? yield* resolveCommandChatId(thread.value)
-      : yield* resolveBotCommandChatId();
+    const chatId = yield* resolveCommandChatId(thread.value);
     if (Option.isNone(chatId)) return policyCopy;
     yield* Effect.annotateLogsScoped({ phase: "shake-chat" });
     return formatShakeResult(yield* application.shake(chatId.value, command.mode));
@@ -749,11 +658,9 @@ export const install = Effect.fn("DiscordInput.install")(function* <
   const contextResponse = Effect.fnUntraced(function* (interaction: Interaction) {
     const policyCopy = "This command can only be used in a pico-owned Discord thread.";
     const thread = yield* resolveCommandThread(interaction);
-    if (interaction.guildId !== undefined && Option.isNone(thread)) return policyCopy;
+    if (Option.isNone(thread)) return policyCopy;
 
-    const chatId = Option.isSome(thread)
-      ? yield* resolveCommandChatId(thread.value)
-      : yield* resolveBotCommandChatId();
+    const chatId = yield* resolveCommandChatId(thread.value);
     if (Option.isNone(chatId)) return policyCopy;
     yield* Effect.annotateLogsScoped({ phase: "context-usage" });
     return formatContextUsage(yield* application.contextUsage(chatId.value));
@@ -765,21 +672,12 @@ export const install = Effect.fn("DiscordInput.install")(function* <
   ) {
     if (command.kind === "malformedSwitch") return "Choose a model from the /switch suggestions.";
     const policyCopy = "This command can only be used in a pico-owned Discord thread.";
-    const target = yield* resolveModelTarget(interaction);
-    if (Option.isNone(target)) {
-      return interaction.guildId === undefined
-        ? "Direct messages are unavailable because bot storage is not configured."
-        : policyCopy;
-    }
-    const models = yield* application.availableModels(target.value);
+    const chatId = yield* resolveModelChatId(interaction);
+    if (Option.isNone(chatId)) return policyCopy;
+    const models = yield* application.availableModels(chatId.value);
     const model = yield* DiscordModel.resolve(crypto, models, command.model);
     if (model === undefined)
       return "That model is unavailable. Choose a model from the suggestions.";
-    const chatId =
-      target.value.kind === "chat"
-        ? Option.some(target.value.chatId)
-        : yield* resolveBotCommandChatId();
-    if (Option.isNone(chatId)) return policyCopy;
     yield* Effect.annotateLogsScoped({ phase: "switch-model" });
     const selected = yield* application.switchModel(chatId.value, {
       provider: model.provider,
@@ -1139,6 +1037,7 @@ export const install = Effect.fn("DiscordInput.install")(function* <
   };
 
   bot.events.interactionCreate = (interaction) => {
+    if (interaction.guildId === undefined) return;
     const customId = interaction.data?.customId;
     const closeNonce =
       interaction.type === InteractionTypes.MessageComponent &&
@@ -1169,28 +1068,6 @@ export const install = Effect.fn("DiscordInput.install")(function* <
 
     const response = Effect.scoped(
       Effect.gen(function* () {
-        if (
-          interaction.guildId === undefined &&
-          (closeNonce !== undefined ||
-            !DiscordCommand.directMessageCommands.some((command) => command.name === name))
-        ) {
-          yield* promiseBoundary("reply-unsupported-direct-command", () =>
-            interaction.respond({
-              content: "This command is only available in server channels and threads.",
-              allowedMentions,
-            }),
-          );
-          return;
-        }
-        if (interaction.guildId === undefined && botOptions === undefined && name !== "switch") {
-          yield* promiseBoundary("reply-unconfigured-direct-command", () =>
-            interaction.respond({
-              content: "Direct messages are unavailable because bot storage is not configured.",
-              allowedMentions,
-            }),
-          );
-          return;
-        }
         const channelId = interaction.channelId;
         const btwClosed =
           name === "btw" && channelId !== undefined
@@ -1239,10 +1116,6 @@ export const install = Effect.fn("DiscordInput.install")(function* <
               ? undefined
               : handleInteraction(interaction, command);
         if (effect === undefined) return;
-        if (interaction.guildId === undefined) {
-          yield* directMessages.withPermit(effect);
-          return;
-        }
         if (channelId === undefined || command?.kind === "abort" || name === "btw") {
           yield* effect;
           return;

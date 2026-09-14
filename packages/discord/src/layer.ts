@@ -1,8 +1,6 @@
 import type { DiscordConfig } from "@pico/config/config";
-import { discordBotRoot } from "@pico/config/root";
 import type { AgentEventEnvelope } from "@pico/contract/agent-event";
 import type * as Chat from "@pico/contract/chat-model";
-import type { PicoRoot } from "@pico/contract/config";
 import { EventRouter } from "@pico/contract/event-router";
 import { ReplyDelivery } from "@pico/contract/reply-target";
 import { type CreateApplicationCommand, createBot, GatewayIntents, MessageFlags } from "discordeno";
@@ -23,7 +21,6 @@ import * as DiscordOutput from "./discord-output.ts";
 export { DiscordError };
 
 export interface DiscordOptions {
-  readonly picoRoot: PicoRoot;
   readonly onAuthenticated: (botId: string) => void;
 }
 
@@ -63,6 +60,9 @@ export const openBot = Effect.fn("Discord.openBot")(function* (
       }),
     );
     yield* promiseBoundary("start-bot", () => bot.start());
+    yield* promiseBoundary("clear-global-commands", () =>
+      bot.helpers.upsertGlobalApplicationCommands([]),
+    );
     const allowedGuildIdSet = new Set(config.allowedGuildIds);
     const allowedGuildIds = Array.from(allowedGuildIdSet);
     const missingGuildIds = allowedGuildIds.filter((guildId) => !joinedGuildIds.has(guildId));
@@ -75,9 +75,6 @@ export const openBot = Effect.fn("Discord.openBot")(function* (
       );
     }
 
-    yield* promiseBoundary("register-global-commands", () =>
-      bot.helpers.upsertGlobalApplicationCommands(DiscordCommand.directMessageCommands),
-    );
     yield* Effect.forEach(allowedGuildIds, (guildId) =>
       promiseBoundary(
         "register-guild-commands",
@@ -102,7 +99,6 @@ export const openBot = Effect.fn("Discord.openBot")(function* (
         botId: bot.id?.toString(),
         configuredGuildCount: allowedGuildIds.length,
         joinedGuildCount: joinedGuildIds.size,
-        directMessages: "enabled",
       }),
     );
     return bot;
@@ -233,10 +229,7 @@ const start = Effect.fn("Discord.start")(function* (
           },
         },
         intents:
-          GatewayIntents.Guilds |
-          GatewayIntents.GuildMessages |
-          GatewayIntents.DirectMessages |
-          GatewayIntents.MessageContent,
+          GatewayIntents.Guilds | GatewayIntents.GuildMessages | GatewayIntents.MessageContent,
         desiredProperties: {
           attachment: {
             contentType: true,
@@ -314,7 +307,6 @@ const start = Effect.fn("Discord.start")(function* (
     config,
     () => eventRouter.drain(),
     httpClient,
-    { botRoot: yield* discordBotRoot(options.picoRoot, bot.id.toString()), outputClient },
   );
   const dispatch = DiscordOutput.make(outputClient, yield* Scope.Scope, config);
 

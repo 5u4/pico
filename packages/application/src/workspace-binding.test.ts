@@ -74,8 +74,6 @@ describe("Workspace binding", () => {
               createdSessions.push(input);
             }),
           remove: () => Effect.void,
-          createPhysical: () => Effect.die("unexpected physical session creation"),
-          removePhysical: () => Effect.die("unexpected physical session removal"),
         }),
       );
       const runtimeLayer = Layer.succeed(
@@ -89,8 +87,6 @@ describe("Workspace binding", () => {
           transcript: () => Effect.die("unexpected transcript read"),
           send: () => Effect.die("unexpected runtime send"),
           sendCaptured: () => Effect.die("unexpected captured runtime send"),
-          sendTurn: () => Effect.die("unexpected bot turn"),
-          rotate: () => Effect.die("unexpected bot rotation"),
           deliver: () => Effect.die("unexpected scheduled delivery"),
           publish: () => Effect.die("unexpected scheduled publish"),
           abort: () => Effect.die("unexpected runtime abort"),
@@ -342,8 +338,6 @@ describe("Workspace binding", () => {
           transcript: () => Effect.die("unexpected transcript read"),
           send: () => Effect.die("unexpected runtime send"),
           sendCaptured: () => Effect.die("unexpected captured runtime send"),
-          sendTurn: () => Effect.die("unexpected bot turn"),
-          rotate: () => Effect.die("unexpected bot rotation"),
           deliver: () => Effect.die("unexpected scheduled delivery"),
           publish: () => Effect.die("unexpected scheduled publish"),
           abort: () => Effect.die("unexpected runtime abort"),
@@ -357,8 +351,6 @@ describe("Workspace binding", () => {
         AgentSessionStore.of({
           create: () => Effect.void,
           remove: () => Effect.void,
-          createPhysical: () => Effect.die("unexpected physical session creation"),
-          removePhysical: () => Effect.die("unexpected physical session removal"),
         }),
       );
       const gitWorktree: GitWorktree = {

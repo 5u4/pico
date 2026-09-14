@@ -93,8 +93,6 @@ const installThreadInput = Effect.fn("test.installThreadInput")(function* (optio
   const application = Application.of({
     availableModels: options.availableModels ?? (() => Effect.die("unexpected model discovery")),
     switchModel: options.switchModel ?? (() => Effect.die("unexpected model switch")),
-    getOrCreateBotChat: () => Effect.die("unexpected bot chat creation"),
-    sendBotMessage: () => Effect.die("unexpected bot message"),
     listWorkspaces: () => Effect.die("unexpected workspace list"),
     createWorkspace: () => Effect.die("btw must not create a workspace"),
     getOrCreateWorkspaceByBinding: () => Effect.succeed(boundWorkspace),
@@ -132,6 +130,44 @@ const installThreadInput = Effect.fn("test.installThreadInput")(function* (optio
 });
 
 describe("discord interactions", () => {
+  it.effect("ignores guild-less commands and autocomplete before resolving a conversation", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const calls: string[] = [];
+        const bot = yield* installThreadInput({
+          availableModels: () =>
+            Effect.sync(() => {
+              calls.push("models");
+              return [];
+            }),
+          getChannel: async (id) => {
+            calls.push("channel");
+            return { id, guildId: 1n, type: ChannelTypes.PublicThread, parentId: 10n };
+          },
+        });
+        const stale = interaction({
+          channelId: 20n,
+          data: { name: "switch", options: modelOptions("model", true) },
+          defer: async () => {
+            calls.push("defer");
+          },
+          edit: async () => {
+            calls.push("edit");
+          },
+          respond: async () => {
+            calls.push("respond");
+          },
+        });
+        Reflect.deleteProperty(stale, "guildId");
+        const handle = interactionHandlerFor(bot);
+        handle(stale);
+        handle({ ...stale, type: InteractionTypes.ApplicationCommandAutocomplete });
+        yield* Effect.yieldNow;
+        assert.deepStrictEqual(calls, []);
+      }),
+    ),
+  );
+
   it.effect(
     "autocompletes a bound thread outside its input lock and changes only its current chat",
     () =>
@@ -143,8 +179,7 @@ describe("discord interactions", () => {
           const selected = { provider: "native", id: "thread-model", name: "Thread model" };
           let active = "original";
           const bot = yield* installThreadInput({
-            availableModels: (target) =>
-              Effect.succeed(target.kind === "chat" && target.chatId === chatId ? [selected] : []),
+            availableModels: (id) => Effect.succeed(id === chatId ? [selected] : []),
             switchModel: (id, model) =>
               Effect.sync(() => {
                 if (id !== chatId) throw new Error("wrong chat selected");
@@ -819,8 +854,6 @@ describe("discord interactions", () => {
         const application = Application.of({
           availableModels: () => Effect.die("unexpected model discovery"),
           switchModel: () => Effect.die("unexpected model switch"),
-          getOrCreateBotChat: () => Effect.die("unexpected bot chat creation"),
-          sendBotMessage: () => Effect.die("unexpected bot message"),
           askBtw: () => Effect.die("unexpected side question"),
           listWorkspaces: () => Effect.die("unexpected workspace list"),
           createWorkspace: () => Effect.die("unexpected explicit workspace creation"),
@@ -1035,8 +1068,6 @@ describe("discord interactions", () => {
         const application = Application.of({
           availableModels: () => Effect.die("unexpected model discovery"),
           switchModel: () => Effect.die("unexpected model switch"),
-          getOrCreateBotChat: () => Effect.die("unexpected bot chat creation"),
-          sendBotMessage: () => Effect.die("unexpected bot message"),
           askBtw: () => Effect.die("unexpected side question"),
           listWorkspaces: () => Effect.die("unexpected workspace list"),
           createWorkspace: () => Effect.die("unexpected explicit workspace creation"),
@@ -1220,8 +1251,6 @@ describe("discord interactions", () => {
         const application = Application.of({
           availableModels: () => Effect.die("unexpected model discovery"),
           switchModel: () => Effect.die("unexpected model switch"),
-          getOrCreateBotChat: () => Effect.die("unexpected bot chat creation"),
-          sendBotMessage: () => Effect.die("unexpected bot message"),
           askBtw: () => Effect.die("unexpected side question"),
           listWorkspaces: () => Effect.die("unexpected workspace list"),
           createWorkspace: () => Effect.die("unexpected explicit workspace creation"),
@@ -1362,8 +1391,6 @@ describe("discord interactions", () => {
         const application = Application.of({
           availableModels: () => Effect.die("unexpected model discovery"),
           switchModel: () => Effect.die("unexpected model switch"),
-          getOrCreateBotChat: () => Effect.die("unexpected bot chat creation"),
-          sendBotMessage: () => Effect.die("unexpected bot message"),
           askBtw: () => Effect.die("unexpected side question"),
           listWorkspaces: () => Effect.die("unexpected workspace list"),
           createWorkspace: () => Effect.die("unexpected workspace creation"),
@@ -1515,8 +1542,6 @@ describe("discord interactions", () => {
         const application = Application.of({
           availableModels: () => Effect.die("unexpected model discovery"),
           switchModel: () => Effect.die("unexpected model switch"),
-          getOrCreateBotChat: () => Effect.die("unexpected bot chat creation"),
-          sendBotMessage: () => Effect.die("unexpected bot message"),
           askBtw: () => Effect.die("unexpected side question"),
           listWorkspaces: () => Effect.die("unexpected workspace list"),
           createWorkspace: () => Effect.die("unexpected explicit workspace creation"),

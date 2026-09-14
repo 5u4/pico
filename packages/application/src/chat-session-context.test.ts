@@ -2,7 +2,6 @@ import * as BunFileSystem from "@effect/platform-bun/BunFileSystem";
 import * as BunPath from "@effect/platform-bun/BunPath";
 import { assert, describe, it } from "@effect/vitest";
 import * as Instructions from "@pico/config/instructions";
-import { BotSessions, PhysicalSessionId } from "@pico/contract/bot-session";
 import * as Chat from "@pico/contract/chat-model";
 import { ChatRepository } from "@pico/contract/chat-repository";
 import { ChatSessionContext } from "@pico/contract/chat-session-context";
@@ -101,20 +100,6 @@ const workspaceLayer = (findById: WorkspaceRepository["Service"]["findById"]) =>
     }),
   );
 
-const botSessionsLayer = Layer.succeed(
-  BotSessions,
-  BotSessions.of({
-    findByRoot: () => Effect.succeed(Option.none()),
-    findByChat: () => Effect.succeed(Option.none()),
-    findByWorkspace: () => Effect.succeed(Option.none()),
-    createConversation: () => Effect.die("unexpected bot conversation creation"),
-    setTurn: () => Effect.die("unexpected bot turn update"),
-    saveHandoff: () => Effect.die("unexpected bot handoff write"),
-    readHandoff: () => Effect.die("unexpected bot handoff read"),
-    rotate: () => Effect.die("unexpected bot rotation"),
-  }),
-);
-
 const resolve = Effect.fn("ChatSessionContextTest.resolve")(function* (
   id: Chat.ChatId,
   chats: Layer.Layer<ChatRepository>,
@@ -126,7 +111,6 @@ const resolve = Effect.fn("ChatSessionContextTest.resolve")(function* (
   }).pipe(
     Effect.provide(SessionContext.layer({ instructions, discordBotId: null })),
     Effect.provide(Layer.merge(chats, workspaces)),
-    Effect.provide(botSessionsLayer),
   );
 });
 
@@ -306,52 +290,6 @@ describe("ChatSessionContext", () => {
         ).pipe(Effect.flip);
         assert.instanceOf(error, AgentError);
       }
-    }).pipe(Effect.provide(platformLayer)),
-  );
-
-  it.effect("keeps shared bot reply destinations out of durable chat context", () =>
-    Effect.gen(function* () {
-      const { instructions, repositories, fileSystem, path, root } = yield* fixture;
-      const botRoot = AbsolutePath.make(path.join(root, "bot"));
-      yield* fileSystem.makeDirectory(botRoot);
-      yield* fileSystem.writeFileString(path.join(botRoot, "instructions.md"), "SHARED_BOT_RULE");
-      const context = SessionContext.layer({ instructions, discordBotId: null }).pipe(
-        Layer.provideMerge(repositories),
-      );
-      yield* Effect.gen(function* () {
-        const bots = yield* BotSessions;
-        const resolver = yield* ChatSessionContext;
-        yield* bots.createConversation({
-          botRoot,
-          platform: "discord",
-          workspaceId,
-          chatId,
-          cwd,
-          createdAt: 1,
-          journal: {
-            id: PhysicalSessionId.make("physical-journal"),
-            file: AbsolutePath.make(path.join(botRoot, "sessions", "physical-journal.jsonl")),
-          },
-        });
-        const resolved = yield* resolver.resolve(chatId);
-        assert.deepStrictEqual(identityFrom(resolved.appendSystemPrompt), { workspaceId, chatId });
-        assert.include(resolved.appendSystemPrompt, "SHARED_BOT_RULE");
-        const format = resolved.formatTurnContext;
-        if (format === null) return yield* Effect.die("Missing shared bot turn context");
-        assert.isUndefined(format(undefined));
-        const first = format({ platform: "discord", conversationId: "101", messageId: "201" });
-        const second = format({ platform: "discord", conversationId: "102", messageId: "202" });
-        if (first === undefined || second === undefined) {
-          return yield* Effect.die("Missing captured reply context");
-        }
-        assert.deepStrictEqual(identityFrom(first), { discord: { replyChannelId: "101" } });
-        assert.deepStrictEqual(identityFrom(second), { discord: { replyChannelId: "102" } });
-        assert.isUndefined(format(undefined));
-        assert.deepStrictEqual(identityFrom((yield* resolver.resolve(chatId)).appendSystemPrompt), {
-          workspaceId,
-          chatId,
-        });
-      }).pipe(Effect.provide(context));
     }).pipe(Effect.provide(platformLayer)),
   );
 

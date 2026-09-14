@@ -191,7 +191,7 @@ const daemonLayer = (paths: PicoPaths, config: Config.PicoConfig) =>
         paths,
         schedules,
         browser: config.browser,
-      }).pipe(Layer.provide(Layer.mergeAll(chatSessionContext, branchNaming, persistence)));
+      }).pipe(Layer.provide(Layer.merge(chatSessionContext, branchNaming)));
       const core = Layer.merge(application, EventRouterLayer.layer).pipe(
         Layer.provide(agentRuntime),
       );
@@ -199,7 +199,6 @@ const daemonLayer = (paths: PicoPaths, config: Config.PicoConfig) =>
         discord === null
           ? core
           : DiscordLayer.layer(discord.config, {
-              picoRoot: paths.root,
               onAuthenticated: (id) => {
                 Deferred.doneUnsafe(discord.authenticated, Effect.succeed(id));
               },

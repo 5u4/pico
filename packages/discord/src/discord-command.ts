@@ -1,10 +1,5 @@
 import type { ShakeMode } from "@pico/contract/agent-runtime";
-import {
-  ApplicationCommandOptionTypes,
-  type CreateApplicationCommand,
-  DiscordApplicationIntegrationType,
-  DiscordInteractionContextType,
-} from "discordeno";
+import { ApplicationCommandOptionTypes, type CreateApplicationCommand } from "discordeno";
 
 export const applicationCommands = [
   {
@@ -105,14 +100,6 @@ export const applicationCommands = [
     description: "Show this chat's context usage",
   },
 ] satisfies Array<CreateApplicationCommand>;
-
-export const directMessageCommands = applicationCommands
-  .filter(({ name }) => name === "context" || name === "shake" || name === "switch")
-  .map((command) => ({
-    ...command,
-    contexts: [DiscordInteractionContextType.BotDm],
-    integrationTypes: [DiscordApplicationIntegrationType.GuildInstall],
-  })) satisfies Array<CreateApplicationCommand>;
 
 export interface CommandOption {
   readonly name: string;

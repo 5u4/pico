@@ -3,7 +3,6 @@ import type * as Effect from "effect/Effect";
 import type * as Stream from "effect/Stream";
 import type { AgentEventEnvelope } from "./agent-event.ts";
 import type { AgentPrompt, AgentTranscript } from "./agent-message.ts";
-import type { BotDescriptor } from "./bot-session.ts";
 import type { ChatId } from "./chat-model.ts";
 import type { AgentError } from "./errors.ts";
 import type { ReplyTarget } from "./reply-target.ts";
@@ -22,10 +21,6 @@ export interface ModelSwitchResult {
   readonly kind: "persisted" | "persistence-unconfirmed";
   readonly model: ModelInfo;
 }
-
-export type ModelTarget =
-  | { readonly kind: "chat"; readonly chatId: ChatId }
-  | { readonly kind: "bot"; readonly bot: BotDescriptor };
 
 export type ShakeMode = "elide" | "images" | "thinking";
 
@@ -66,8 +61,6 @@ export interface CapturedAgentRun {
   readonly finalAssistantText: string;
 }
 
-export type AgentTurnResult = Omit<CapturedAgentRun, "runId">;
-
 export type MessageDelivery<E = AgentError> =
   | { readonly kind: "started"; readonly completed: Effect.Effect<void, E> }
   | {
@@ -98,18 +91,6 @@ export class AgentRuntime extends Context.Service<
       onEvent: (event: AgentEventEnvelope["event"]) => Effect.Effect<void, AgentError>,
       replyTarget?: ReplyTarget,
     ) => Effect.Effect<CapturedAgentRun, AgentError>;
-    // Application captures a whole bot turn for its operation-local reply destination.
-    readonly sendTurn: (
-      chatId: ChatId,
-      prompt: AgentPrompt,
-      onEvent: (event: AgentEventEnvelope["event"]) => Effect.Effect<void, AgentError>,
-      replyTarget?: ReplyTarget,
-    ) => Effect.Effect<AgentTurnResult, AgentError>;
-    // Application rotates only while the pool owns an idle, completed physical session.
-    readonly rotate: (
-      chatId: ChatId,
-      commit: (handoff: string) => Effect.Effect<void, AgentError>,
-    ) => Effect.Effect<void, AgentError>;
     readonly deliver: (chatId: ChatId, content: string) => Effect.Effect<void, AgentError>;
 
     readonly publish: (chatId: ChatId, content: string) => Effect.Effect<void, AgentError>;
@@ -121,9 +102,7 @@ export class AgentRuntime extends Context.Service<
     readonly contextUsage: (chatId: ChatId) => Effect.Effect<ContextUsage, AgentError>;
 
     /** Application calls this for model discovery without opening a session. */
-    readonly availableModels: (
-      target: ModelTarget,
-    ) => Effect.Effect<readonly ModelInfo[], AgentError>;
+    readonly availableModels: (chatId: ChatId) => Effect.Effect<readonly ModelInfo[], AgentError>;
 
     /** Application calls this to switch one chat and report whether persistence was confirmed. */
     readonly switchModel: (

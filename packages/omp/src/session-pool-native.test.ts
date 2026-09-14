@@ -97,7 +97,6 @@ const importNative = async () => {
     makeScheduleExtension: scheduleExtension.make,
     makeSessionHandle: adapter.makeSessionHandle,
     makeBtw: adapter.makeBtw,
-    makeHandoff: adapter.makeHandoff,
     makeShake: adapter.makeShake,
     makeSwitchModel: adapter.makeSwitchModel,
   };
@@ -330,7 +329,6 @@ const makePool = Effect.fn("NativePoolTest.make")(function* (
             ),
             sendPrompt,
             askBtw: native.makeBtw(currentSession),
-            createHandoff: native.makeHandoff(currentSession),
             shake: native.makeShake(currentSession),
             switchModel: native.makeSwitchModel(currentSession),
             flush: async () => {
@@ -381,12 +379,10 @@ const seedShake = async (session: AgentSession) => {
 };
 
 describe("native SessionPool ownership", () => {
-  it("discovers authenticated enabled models without creating a fresh bot's directories", async () => {
+  it("discovers authenticated models and applies project model filters", async () => {
     await withSession([], async (session) => {
-      const botRoot = join(root, "unprovisioned-bot");
-      const cwd = AbsolutePath.make(join(botRoot, "work"));
-      const agentDir = AbsolutePath.make(join(botRoot, "omp"));
-      const refresh = vi.spyOn(session.modelRegistry, "refresh");
+      const cwd = AbsolutePath.make(join(root, "model-picker-project"));
+      const configDir = join(cwd, ".omp");
       const baseModel = session.model;
       if (baseModel === undefined) throw new Error("Expected a native initial model");
       session.modelRegistry.registerProvider("model-picker-no-auth", {
@@ -408,30 +404,21 @@ describe("native SessionPool ownership", () => {
       session.modelRegistry.authStorage.removeConfigApiKey("model-picker-no-auth");
       session.modelRegistry.authStorage.setFallbackResolver(() => undefined);
       const models = await Effect.runPromise(
-        native.loadAvailableModels(session.modelRegistry, cwd, agentDir),
+        native.loadAvailableModels(session.modelRegistry, cwd),
       );
       expect(models.some((model) => model.provider === "openai" && model.id === "gpt-4.1")).toBe(
         true,
       );
       expect(models.some((model) => model.provider === "model-picker-no-auth")).toBe(false);
-      expect(
-        await NodeFileSystem.stat(botRoot).then(
-          () => true,
-          () => false,
-        ),
-      ).toBe(false);
 
-      await NodeFileSystem.mkdir(agentDir, { recursive: true });
+      await NodeFileSystem.mkdir(configDir, { recursive: true });
       const config = "enabledModels:\n  - openai/gpt-4.1\n  - model-picker-no-auth/*\n";
-      await NodeFileSystem.writeFile(join(agentDir, "config.yml"), config);
+      await NodeFileSystem.writeFile(join(configDir, "config.yml"), config);
       const filtered = await Effect.runPromise(
-        native.loadAvailableModels(session.modelRegistry, cwd, agentDir),
+        native.loadAvailableModels(session.modelRegistry, cwd),
       );
       expect(filtered.map(({ provider, id }) => `${provider}/${id}`)).toEqual(["openai/gpt-4.1"]);
-      expect(await NodeFileSystem.readdir(botRoot)).toEqual(["omp"]);
-      expect(await NodeFileSystem.readdir(agentDir)).toEqual(["config.yml"]);
-      expect(await NodeFileSystem.readFile(join(agentDir, "config.yml"), "utf8")).toBe(config);
-      expect(refresh).not.toHaveBeenCalled();
+      expect(await NodeFileSystem.readFile(join(configDir, "config.yml"), "utf8")).toBe(config);
     });
   });
 
@@ -747,18 +734,18 @@ describe("native SessionPool ownership", () => {
   }, 5_000);
 
   it("captures each schedule tool origin and keeps definition routes across later turns", async () => {
-    const first = providerTurn("First DM complete");
+    const first = providerTurn("First scheduled turn complete");
     const second = providerTurn("Scheduled continuation complete");
     const ordinary = providerTurn("Ordinary turn complete");
     const workspaceId = Workspace.WorkspaceId.make("018f47a0-0000-7000-8000-000000000002");
     const firstTarget: ReplyTarget = {
       platform: "discord",
-      conversationId: "first-dm",
+      conversationId: "first-destination",
       messageId: "first-message",
     };
     const secondTarget: ReplyTarget = {
       platform: "discord",
-      conversationId: "second-dm",
+      conversationId: "second-destination",
       messageId: "second-message",
     };
     await Effect.runPromise(
@@ -820,9 +807,10 @@ describe("native SessionPool ownership", () => {
                         return Schema.decodeUnknownSync(Schedule.ScheduleView)(result.details);
                       };
                       const firstCapture = yield* pool
-                        .sendTurn(
+                        .sendCaptured(
                           chatId,
-                          prompt("Create a schedule from the first DM"),
+                          runId,
+                          prompt("Create a schedule from the first captured run"),
                           () => Effect.void,
                           firstTarget,
                         )
@@ -838,7 +826,7 @@ describe("native SessionPool ownership", () => {
                         .sendCaptured(
                           chatId,
                           runId,
-                          prompt("Create another schedule from a scheduled DM continuation"),
+                          prompt("Create another schedule from a scheduled continuation"),
                           () => Effect.void,
                           secondTarget,
                         )

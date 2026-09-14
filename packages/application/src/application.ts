@@ -4,7 +4,6 @@ import {
   AgentRuntime,
   type MessageDelivery,
   type ModelRef,
-  type ModelTarget,
   type ShakeMode,
 } from "@pico/contract/agent-runtime";
 import { AgentSessionStore } from "@pico/contract/agent-session-store";
@@ -17,7 +16,6 @@ import {
   type CreateChat,
   type CreateWorkspace,
 } from "@pico/contract/application";
-import { type BotDescriptor, type BotSession, BotSessions } from "@pico/contract/bot-session";
 import * as Chat from "@pico/contract/chat-model";
 import { ChatRepository } from "@pico/contract/chat-repository";
 import {
@@ -73,13 +71,9 @@ const scheduleHostError = (cause: { readonly message?: string }) =>
     message: cause.message ?? "Scheduled application operation failed",
   });
 
-export const BOT_JOURNAL_MAX_BYTES = 8 * 1024 * 1024;
-export const BOT_SESSION_IDLE_MS = 12 * 60 * 60 * 1000;
-
 const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) {
   const workspaces = yield* WorkspaceRepository;
   const chats = yield* ChatRepository;
-  const bots = yield* BotSessions;
   const sessions = yield* AgentSessionStore;
   const runtime = yield* AgentRuntime;
   const crypto = yield* Crypto.Crypto;
@@ -404,168 +398,10 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
     );
   });
 
-  const getOrCreateBotChat = Effect.fn("Application.getOrCreateBotChat")(function* (
-    descriptor: BotDescriptor,
-  ) {
-    if (!path.isAbsolute(descriptor.botRoot)) {
-      return yield* new ApplicationError({
-        reason: "invalid-state",
-        message: "Bot root must be an absolute path",
-      });
-    }
-    const botRoot = AbsolutePath.make(path.normalize(descriptor.botRoot));
-    return yield* serialized(
-      botRoot,
-      Effect.gen(function* () {
-        const existing = yield* bots.findByRoot(botRoot);
-        if (Option.isSome(existing)) {
-          if (existing.value.platform !== descriptor.platform) {
-            return yield* new ApplicationError({
-              reason: "conflict",
-              message: "Bot root belongs to another platform",
-            });
-          }
-          return yield* findChat(existing.value.chatId);
-        }
-        const cwd = AbsolutePath.make(path.join(botRoot, "work"));
-        yield* fileSystem.makeDirectory(cwd, { recursive: true, mode: 0o700 });
-        const workspaceId = Workspace.WorkspaceId.make(yield* crypto.randomUUIDv7);
-        const id = Chat.ChatId.make(yield* crypto.randomUUIDv7);
-        const createdAt = yield* Clock.currentTimeMillis;
-        return yield* Effect.acquireUseRelease(
-          sessions.createPhysical(botRoot, cwd),
-          (journal) =>
-            bots.createConversation({
-              ...descriptor,
-              botRoot,
-              chatId: id,
-              workspaceId,
-              cwd,
-              createdAt,
-              journal,
-            }),
-          (journal, exit) =>
-            Exit.isFailure(exit)
-              ? sessions.removePhysical(journal).pipe(
-                  Effect.catchCause(() =>
-                    Effect.logError("Failed to remove unpublished bot journal").pipe(
-                      Effect.annotateLogs({
-                        component: "application",
-                        operation: "create-bot",
-                        chatId: id,
-                      }),
-                    ),
-                  ),
-                )
-              : Effect.void,
-        ).pipe(Effect.uninterruptible);
-      }),
-    ).pipe(Effect.mapError(failure("Failed to open bot conversation")));
-  });
-
-  const prepareBotSession = Effect.fn("Application.prepareBotSession")(function* (
-    source: BotSession,
-  ) {
-    if (source.turn.kind !== "completed") return source;
-    const now = yield* Clock.currentTimeMillis;
-    const info = yield* fileSystem.stat(source.journal.file);
-    if (Number(info.size) < BOT_JOURNAL_MAX_BYTES && now - source.turn.at < BOT_SESSION_IDLE_MS)
-      return source;
-    const chat = yield* findChat(source.chatId);
-    yield* runtime.rotate(source.chatId, (handoff) =>
-      Effect.gen(function* () {
-        const handoffPath = yield* bots.saveHandoff(source, handoff);
-        yield* Effect.acquireUseRelease(
-          sessions.createPhysical(source.botRoot, chat.cwd, source.journal),
-          (journal) => bots.rotate(source, journal, handoffPath),
-          (journal, exit) =>
-            Exit.isFailure(exit)
-              ? sessions.removePhysical(journal).pipe(
-                  Effect.catchCause(() =>
-                    Effect.logError("Failed to remove unpublished bot journal").pipe(
-                      Effect.annotateLogs({
-                        component: "application",
-                        operation: "rotate-bot",
-                        chatId: source.chatId,
-                      }),
-                    ),
-                  ),
-                )
-              : Effect.void,
-        ).pipe(Effect.uninterruptible);
-      }).pipe(Effect.mapError((cause) => new AgentError({ message: cause.message }))),
-    );
-    const rotated = yield* bots.findByChat(source.chatId);
-    if (Option.isNone(rotated)) {
-      return yield* new ApplicationError({
-        reason: "not-found",
-        message: "Bot conversation disappeared",
-      });
-    }
-    return rotated.value;
-  });
-
-  const runBotTurn = Effect.fn("Application.runBotTurn")(function* (
-    source: BotSession,
-    prompt: AgentMessage.AgentPrompt,
-    onEvent: (event: AgentEvent.AgentEvent) => Effect.Effect<void, AgentError>,
-    runId?: Schedule.ScheduleRunId,
-    replyTarget?: ReplyTarget,
-  ) {
-    yield* ensureChatOpen(source.chatId, "Failed to send bot message");
-    const active = yield* prepareBotSession(source);
-    yield* bots.setTurn(active.chatId, active.journal.id, { kind: "pending" });
-    const result = yield* runId === undefined
-      ? runtime.sendTurn(active.chatId, prompt, onEvent, replyTarget)
-      : runtime.sendCaptured(active.chatId, runId, prompt, onEvent, replyTarget);
-    if (result.outcome !== "completed") {
-      return yield* new ApplicationError({
-        reason: "operation",
-        message: `Bot turn ${result.outcome}; its physical session was retained`,
-      });
-    }
-    yield* bots.setTurn(active.chatId, active.journal.id, {
-      kind: "completed",
-      at: yield* Clock.currentTimeMillis,
-    });
-    return result;
-  });
-
-  const sendBotMessage = Effect.fn("Application.sendBotMessage")(function* (
-    chatId: Chat.ChatId,
-    prompt: AgentMessage.AgentPrompt,
-    onEvent: (event: AgentEvent.AgentEvent) => Effect.Effect<void, AgentError>,
-    replyTarget?: ReplyTarget,
-  ) {
-    yield* serialized(
-      chatId,
-      Effect.gen(function* () {
-        const bot = yield* bots.findByChat(chatId);
-        if (Option.isNone(bot)) {
-          return yield* new ApplicationError({
-            reason: "invalid-state",
-            message: "Chat is not a bot conversation",
-          });
-        }
-        yield* runBotTurn(bot.value, prompt, onEvent, undefined, replyTarget);
-      }),
-    ).pipe(
-      Effect.mapError((cause) =>
-        cause instanceof ChatClosed ? cause : failure("Failed to send bot message")(cause),
-      ),
-    );
-  });
-
   const createScheduledChat = Effect.fn("Application.createScheduledChat")(function* (
     workspaceId: Workspace.WorkspaceId,
     chatId: Chat.ChatId,
   ) {
-    const bot = yield* bots
-      .findByWorkspace(workspaceId)
-      .pipe(Effect.mapError(failure("Failed to resolve scheduled bot conversation")));
-    if (Option.isSome(bot)) {
-      return yield* resolveScheduledChat(bot.value.chatId);
-    }
     const existing = yield* chats
       .findById(chatId)
       .pipe(Effect.mapError(failure("Failed to create chat")));
@@ -661,18 +497,6 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
           { discard: true },
         );
         const chat = yield* findChat(chatId);
-        if (
-          Option.isSome(
-            yield* bots
-              .findByChat(chatId)
-              .pipe(Effect.mapError(failure("Failed to inspect bot conversation"))),
-          )
-        ) {
-          return yield* new ApplicationError({
-            reason: "invalid-state",
-            message: "A bot conversation cannot be archived",
-          });
-        }
         const inspection = yield* gitWorktree
           .inspectChat({ chatId, cwd: chat.cwd })
           .pipe(Effect.mapError(failure("Failed to inspect chat worktree")));
@@ -772,17 +596,6 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
       chatId,
       Effect.gen(function* () {
         yield* ensureChatOpen(chatId, "Failed to send message");
-        const bot = yield* bots
-          .findByChat(chatId)
-          .pipe(Effect.mapError(failure("Failed to resolve bot conversation")));
-        if (Option.isSome(bot)) {
-          yield* runBotTurn(bot.value, prompt, () => Effect.void).pipe(
-            Effect.mapError((cause) =>
-              cause instanceof ChatClosed ? cause : failure("Failed to send bot message")(cause),
-            ),
-          );
-          return { kind: "handled" } satisfies MessageDelivery<ApplicationError>;
-        }
         const delivery = yield* runtime
           .send(chatId, prompt)
           .pipe(Effect.mapError(failure("Failed to send message")));
@@ -846,31 +659,6 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
     onEvent: (event: AgentEvent.AgentEvent) => Effect.Effect<void, AgentError>,
     replyTarget?: ReplyTarget,
   ) {
-    const bot = yield* bots
-      .findByChat(chatId)
-      .pipe(Effect.mapError(failure("Failed to resolve scheduled bot conversation")));
-    if (Option.isSome(bot)) {
-      return yield* serialized(
-        chatId,
-        Effect.gen(function* () {
-          const current = yield* bots.findByChat(chatId);
-          if (Option.isNone(current)) {
-            return yield* new ApplicationError({
-              reason: "not-found",
-              message: "Bot conversation disappeared",
-            });
-          }
-          const result = yield* runBotTurn(current.value, prompt, onEvent, runId, replyTarget);
-          return { ...result, runId };
-        }),
-      ).pipe(
-        Effect.mapError((cause) =>
-          cause instanceof ChatClosed
-            ? cause
-            : failure("Failed to run scheduled bot prompt")(cause),
-        ),
-      );
-    }
     return yield* Effect.scoped(
       Effect.gen(function* () {
         const operationScope = yield* Effect.scope;
@@ -917,18 +705,7 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
       chatId,
       Effect.gen(function* () {
         yield* ensureChatOpen(chatId, "Failed to publish scheduled result");
-        const bot = yield* bots.findByChat(chatId);
-        const active = Option.isSome(bot) ? yield* prepareBotSession(bot.value) : undefined;
-        if (active !== undefined && active.turn.kind !== "pending") {
-          yield* bots.setTurn(active.chatId, active.journal.id, { kind: "pending" });
-        }
         yield* runtime.publish(chatId, content);
-        if (active !== undefined && active.turn.kind !== "pending") {
-          yield* bots.setTurn(active.chatId, active.journal.id, {
-            kind: "completed",
-            at: yield* Clock.currentTimeMillis,
-          });
-        }
       }),
     ).pipe(
       Effect.mapError((cause) =>
@@ -960,35 +737,10 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
     );
   });
 
-  const availableModels = Effect.fn("Application.availableModels")(function* (target: ModelTarget) {
-    if (target.kind === "chat") {
-      yield* ensureChatOpen(target.chatId, "Failed to list chat models");
-    } else {
-      if (!path.isAbsolute(target.bot.botRoot)) {
-        return yield* new ApplicationError({
-          reason: "invalid-state",
-          message: "Bot root must be an absolute path",
-        });
-      }
-      const botRoot = AbsolutePath.make(path.normalize(target.bot.botRoot));
-      const existing = yield* bots
-        .findByRoot(botRoot)
-        .pipe(Effect.mapError(failure("Failed to list bot models")));
-      if (Option.isSome(existing)) {
-        if (existing.value.platform !== target.bot.platform) {
-          return yield* new ApplicationError({
-            reason: "conflict",
-            message: "Bot root belongs to another platform",
-          });
-        }
-        yield* ensureChatOpen(existing.value.chatId, "Failed to list bot models");
-        target = { kind: "chat", chatId: existing.value.chatId };
-      } else {
-        target = { kind: "bot", bot: { ...target.bot, botRoot } };
-      }
-    }
+  const availableModels = Effect.fn("Application.availableModels")(function* (chatId: Chat.ChatId) {
+    yield* ensureChatOpen(chatId, "Failed to list chat models");
     return yield* runtime
-      .availableModels(target)
+      .availableModels(chatId)
       .pipe(Effect.mapError(failure("Failed to list available models")));
   });
 
@@ -1026,8 +778,6 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
     bindWorkspace,
     listChats,
     createChat,
-    getOrCreateBotChat,
-    sendBotMessage,
     findWorkspaceByPlatformId,
     findChatByPlatformId,
     findChatPlatformBinding,

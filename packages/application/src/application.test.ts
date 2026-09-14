@@ -100,8 +100,6 @@ describe("Application", () => {
                 createdSessions.push(input);
               }),
             remove: () => Effect.void,
-            createPhysical: () => Effect.die("unexpected physical session creation"),
-            removePhysical: () => Effect.die("unexpected physical session removal"),
           });
         }),
       ).pipe(Layer.provide(persistenceLayer));
@@ -143,8 +141,6 @@ describe("Application", () => {
                 finalAssistantText: `captured:${capturedChatId}`,
               }),
             ),
-          sendTurn: () => Effect.die("unexpected bot turn"),
-          rotate: () => Effect.die("unexpected bot rotation"),
           deliver: (deliveredChatId, content) =>
             Effect.sync(() => sentMessages.push({ chatId: deliveredChatId, content })),
           publish: (publishedChatId, content) =>
@@ -572,8 +568,6 @@ describe("Application", () => {
               : fileSystem
                   .remove(path.join(sessionsDir, `${chatId}.jsonl`), { force: true })
                   .pipe(Effect.orDie),
-          createPhysical: () => Effect.die("unexpected physical session creation"),
-          removePhysical: () => Effect.die("unexpected physical session removal"),
         }),
       );
       const runtimeLayer = Layer.succeed(
@@ -587,8 +581,6 @@ describe("Application", () => {
           transcript: () => Effect.die("unexpected transcript read"),
           send: () => Effect.die("unexpected runtime send"),
           sendCaptured: () => Effect.die("unexpected captured runtime send"),
-          sendTurn: () => Effect.die("unexpected bot turn"),
-          rotate: () => Effect.die("unexpected bot rotation"),
           deliver: () => Effect.die("unexpected scheduled delivery"),
           publish: () => Effect.die("unexpected scheduled publish"),
           abort: () => Effect.die("unexpected runtime abort"),

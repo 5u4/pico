@@ -4,7 +4,6 @@ import { assert, describe, it } from "@effect/vitest";
 import { PicoRoot } from "@pico/contract/config";
 import { ConfigError } from "@pico/contract/errors";
 import type { InstructionsScope } from "@pico/contract/instructions";
-import { AbsolutePath } from "@pico/contract/path";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -67,25 +66,6 @@ describe("Instructions reader", () => {
       assert.include(updated, "updated channel convention");
       assert.notInclude(updated, "bot convention");
       assert.notInclude(yield* read({ kind: "global" }), "channel convention");
-    }).pipe(Effect.provide(platformLayer)),
-  );
-
-  it.effect("loads a portable bot scope without channel instructions", () =>
-    Effect.gen(function* () {
-      const { path, read, put } = yield* fixture;
-      yield* put("instructions.md", "global convention");
-      const botFile = yield* put("other/bots/789/instructions.md", "portable bot convention");
-      yield* put("discord/channels/456/instructions.md", "guild-only convention");
-      const loaded = yield* read({
-        kind: "bot",
-        botRoot: AbsolutePath.make(path.dirname(botFile)),
-      });
-      assert.isBelow(
-        loaded.indexOf("global convention"),
-        loaded.indexOf("portable bot convention"),
-      );
-      assert.include(loaded, "portable bot convention");
-      assert.notInclude(loaded, "guild-only convention");
     }).pipe(Effect.provide(platformLayer)),
   );
 
