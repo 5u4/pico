@@ -1,4 +1,4 @@
-import { useAtomSet, useAtomValue } from "@effect/atom-react/Hooks";
+import { useAtomValue } from "@effect/atom-react/Hooks";
 import { RegistryContext, scheduleTask } from "@effect/atom-react/RegistryContext";
 import type {
   AgentAssistantMessage,
@@ -9,48 +9,82 @@ import type {
 import { CreateWorkspace } from "@pico/contract/application";
 import type { Chat, ChatId } from "@pico/contract/chat-model";
 import { ApplicationError, ChatClosed } from "@pico/contract/errors";
-import type { Workspace } from "@pico/contract/workspace-model";
+import type { Workspace, WorkspaceId } from "@pico/contract/workspace-model";
 import * as FrontendState from "@pico/frontend-state/client";
 import * as Cause from "effect/Cause";
+import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as AsyncResult from "effect/unstable/reactivity/AsyncResult";
+import * as Atom from "effect/unstable/reactivity/Atom";
 import * as AtomRegistry from "effect/unstable/reactivity/AtomRegistry";
-import { type FormEvent, useContext, useEffect, useState } from "react";
+import { useContext, useEffect, useMemo, useRef, useState } from "react";
 import type {
   AssistantBlock,
   AssistantState,
-  ChatSummary,
   ComposerPresentation,
+  NavigationPresentation,
   ToolCallPresentation,
   ToolState,
   TranscriptItem,
   TranscriptPresentation,
 } from "./chat/chat-model.ts";
-import { ChatScreen, type ChatScreenProps } from "./chat/chat-screen.tsx";
+import { ChatScreen, type WorkspaceFormProps } from "./chat/chat-screen.tsx";
 import { Button } from "./components/ui/button.tsx";
 import { applyThemePreference, readBootstrappedTheme, type Theme } from "./theme.ts";
 
-type Selection =
-  | { readonly kind: "picker" }
-  | { readonly kind: "workspace"; readonly workspace: Workspace }
-  | { readonly kind: "chat"; readonly workspace: Workspace; readonly chat: Chat };
 type State = ReturnType<typeof FrontendState.make>;
 interface Session {
   readonly state: State;
   readonly registry: AtomRegistry.AtomRegistry;
 }
-interface Draft {
+interface DraftValue {
   readonly text: string;
 }
-type Drafts = ReadonlyMap<ChatId, Draft>;
-const emptyDraft: Draft = { text: "" };
+interface DraftEntry {
+  readonly key: number;
+  readonly workspace: Workspace;
+  readonly value: DraftValue;
+  readonly target: { readonly kind: "new" } | { readonly kind: "chat"; readonly chat: Chat };
+  readonly submission:
+    | { readonly kind: "idle" }
+    | { readonly kind: "creating" }
+    | { readonly kind: "sending" }
+    | { readonly kind: "error"; readonly message: string };
+}
+interface NavigationState {
+  readonly selectedKey: number | null;
+  readonly entries: ReadonlyMap<number, DraftEntry>;
+  readonly expanded: ReadonlySet<WorkspaceId>;
+}
+const emptyDraft: DraftValue = { text: "" };
+const workspaceStorageKey = "pico-last-workspace";
+const openingConnection = Atom.make<FrontendState.Connection>({ kind: "opening" });
 const timeFormat = new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" });
-const dateFormat = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" });
 const decodeWorkspace = Schema.decodeUnknownOption(CreateWorkspace);
 
+function readWorkspacePreference(): string | null {
+  try {
+    return window.localStorage.getItem(workspaceStorageKey);
+  } catch {
+    return null;
+  }
+}
+
+function runCommand<A, E, Input>(
+  registry: AtomRegistry.AtomRegistry,
+  command: Atom.Writable<AsyncResult.AsyncResult<A, E>, Input>,
+  input: Input,
+): Promise<Exit.Exit<A, E>> {
+  registry.set(command, input);
+  return Effect.runPromiseExit(
+    AtomRegistry.getResult(registry, command, { suspendOnWaiting: true }),
+  );
+}
+
 export function LiveApp() {
+  const bootRegistry = useContext(RegistryContext);
   const [session, setSession] = useState<Session | null>(null);
   useEffect(() => {
     const url = new URL("/rpc", window.location.href);
@@ -59,48 +93,418 @@ export function LiveApp() {
     setSession({ registry, state: FrontendState.make({ url: url.href }) });
     return () => registry.dispose();
   }, []);
-  return session === null ? (
-    <main className="p-6" role="status">
-      Opening pico...
-    </main>
-  ) : (
-    <RegistryContext.Provider value={session.registry}>
-      <LiveRoute state={session.state} />
+  return (
+    <RegistryContext.Provider value={session?.registry ?? bootRegistry}>
+      <LiveRoute state={session?.state ?? null} />
     </RegistryContext.Provider>
   );
 }
 
-function LiveRoute({ state }: { readonly state: State }) {
-  const connection = useAtomValue(state.connection);
-  const workspaces = useAtomValue(state.workspaces);
-  const [selection, setSelection] = useState<Selection>({ kind: "picker" });
-  const [drafts, setDrafts] = useState<Drafts>(() => new Map());
+function LiveRoute({ state }: { readonly state: State | null }) {
+  const registry = useContext(RegistryContext);
+  const connection = useAtomValue(state?.connection ?? openingConnection);
+  const [navigation, setNavigation] = useState<NavigationState>(() => ({
+    selectedKey: null,
+    entries: new Map(),
+    expanded: new Set(),
+  }));
+  const navigationRef = useRef(navigation);
+  const nextDraftKey = useRef(0);
+  const navigationVersion = useRef(0);
+  const [initialWorkspace] = useState(readWorkspacePreference);
+  const preferredWorkspace = useRef(initialWorkspace);
+  const creatingChats = useRef(new Set<WorkspaceId>());
+  const stoppingChats = useRef(new Set<ChatId>());
+  const workspacePending = useRef(false);
+  const workspaceDialogVersion = useRef(0);
+  const openWorkspaceDialog = useRef<number | null>(null);
+  const [workspaceFormOpen, setWorkspaceFormOpen] = useState(false);
+  const [workspaceSubmission, setWorkspaceSubmission] = useState<WorkspaceFormProps["submission"]>({
+    kind: "ready",
+  });
   const [theme, setTheme] = useState<Theme>(readBootstrappedTheme);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [disclosures, setDisclosures] = useState<ReadonlySet<string>>(() => new Set());
   const [recoveryOpen, setRecoveryOpen] = useState(false);
-  const registry = useContext(RegistryContext);
-  const onThemeChange = (next: Theme) => {
-    applyThemePreference(next);
-    setTheme(next);
+  const groupedAtom = useMemo(
+    () =>
+      Atom.make((get) => {
+        const result = state ? get(state.workspaces) : AsyncResult.initial<readonly Workspace[]>();
+        const workspaces = Option.getOrElse(AsyncResult.value(result), () => []);
+        return {
+          result,
+          groups: workspaces.map((workspace) => ({
+            workspace,
+            chats:
+              state && navigation.expanded.has(workspace.id)
+                ? get(state.chats(workspace.id))
+                : null,
+          })),
+        };
+      }),
+    [state, navigation.expanded],
+  );
+  const { result: workspaces, groups } = useAtomValue(groupedAtom);
+  const selected =
+    navigation.selectedKey === null ? undefined : navigation.entries.get(navigation.selectedKey);
+  const chatId = selected?.target.kind === "chat" ? selected.target.chat.id : null;
+  const conversationAtom = useMemo(
+    () =>
+      Atom.make((get) =>
+        state && chatId
+          ? {
+              snapshot: get(state.transcript(chatId)),
+              live: get(state.live(chatId)),
+              sending: get(state.send(chatId)),
+              stopping: get(state.abort(chatId)),
+            }
+          : null,
+      ),
+    [state, chatId],
+  );
+  const conversation = useAtomValue(conversationAtom);
+
+  const updateNavigation = (change: (current: NavigationState) => NavigationState) => {
+    const current = navigationRef.current;
+    const next = change(current);
+    navigationRef.current = next;
+    setNavigation(next);
+    if (state && current.expanded !== next.expanded) {
+      for (const id of next.expanded) {
+        if (current.expanded.has(id)) continue;
+        const chats = state.chats(id);
+        const result = registry.get(chats);
+        if (result._tag !== "Initial" && !result.waiting) registry.refresh(chats);
+      }
+    }
   };
-  const draftValues = [...drafts.entries()].filter(([, draft]) => draft.text.length > 0);
+  const updateEntry = (key: number, change: (entry: DraftEntry) => DraftEntry) => {
+    updateNavigation((current) => {
+      const entry = current.entries.get(key);
+      if (!entry) return current;
+      return { ...current, entries: new Map(current.entries).set(key, change(entry)) };
+    });
+  };
+  const selectDraft = (workspace: Workspace) => {
+    const current = navigationRef.current;
+    const existing = [...current.entries.values()].find(
+      (entry) => entry.workspace.id === workspace.id && entry.target.kind === "new",
+    );
+    const entry: DraftEntry = existing ?? {
+      key: nextDraftKey.current++,
+      workspace,
+      value: emptyDraft,
+      target: { kind: "new" },
+      submission: { kind: "idle" },
+    };
+    navigationVersion.current++;
+    updateNavigation((value) => ({
+      selectedKey: entry.key,
+      entries: existing ? value.entries : new Map(value.entries).set(entry.key, entry),
+      expanded: new Set(value.expanded).add(workspace.id),
+    }));
+  };
+
+  useEffect(() => {
+    if (workspaces._tag !== "Success" || workspaces.waiting) return;
+    const current = navigationRef.current;
+    const entry =
+      current.selectedKey === null ? undefined : current.entries.get(current.selectedKey);
+    if (entry && workspaces.value.some((workspace) => workspace.id === entry.workspace.id)) {
+      try {
+        window.localStorage.setItem(workspaceStorageKey, entry.workspace.id);
+      } catch {}
+      preferredWorkspace.current = entry.workspace.id;
+      return;
+    }
+    const workspace =
+      workspaces.value.find((item) => item.id === preferredWorkspace.current) ??
+      workspaces.value[0];
+    if (workspace) selectDraft(workspace);
+    else {
+      if (current.selectedKey !== null)
+        updateNavigation((value) => ({ ...value, selectedKey: null }));
+      try {
+        window.localStorage.removeItem(workspaceStorageKey);
+      } catch {}
+    }
+  }, [workspaces, selected?.workspace.id]);
+
+  const setWorkspaceOpen = (open: boolean) => {
+    openWorkspaceDialog.current = open ? ++workspaceDialogVersion.current : null;
+    setWorkspaceSubmission({ kind: workspacePending.current ? "pending" : "ready" });
+    setWorkspaceFormOpen(open);
+  };
+  const createWorkspace = async (input: { readonly name: string; readonly directory: string }) => {
+    if (!state || workspacePending.current || registry.get(state.connection).kind !== "active")
+      return;
+    const decoded = decodeWorkspace({
+      name: input.name.trim(),
+      defaultCwd: input.directory,
+      binding: null,
+      worktree: null,
+    });
+    if (Option.isNone(decoded)) {
+      setWorkspaceSubmission({
+        kind: "error",
+        message: "Enter a workspace name and an absolute directory on the machine running pico.",
+      });
+      return;
+    }
+    workspacePending.current = true;
+    const dialogVersion = openWorkspaceDialog.current;
+    const selectionVersion = navigationVersion.current;
+    setWorkspaceSubmission({ kind: "pending" });
+    const exit = await runCommand(registry, state.createWorkspace, decoded.value);
+    workspacePending.current = false;
+    if (openWorkspaceDialog.current !== dialogVersion) {
+      setWorkspaceSubmission({ kind: "ready" });
+      return;
+    }
+    if (Exit.isFailure(exit)) {
+      setWorkspaceSubmission({ kind: "error", message: errorMessage(exit.cause) });
+      return;
+    }
+    setWorkspaceOpen(false);
+    if (navigationVersion.current === selectionVersion) selectDraft(exit.value);
+  };
+  const newChat = (workspaceId?: string) => {
+    const current = navigationRef.current;
+    const entry =
+      current.selectedKey === null ? undefined : current.entries.get(current.selectedKey);
+    const workspace = workspaceId
+      ? groups.find((group) => group.workspace.id === workspaceId)?.workspace
+      : (entry?.workspace ?? groups[0]?.workspace);
+    if (workspace) selectDraft(workspace);
+    else setWorkspaceOpen(true);
+  };
+  const selectChat = (workspaceId: string, id: string) => {
+    const group = groups.find((item) => item.workspace.id === workspaceId);
+    if (!group) return;
+    const current = navigationRef.current;
+    const existing = [...current.entries.values()].find(
+      (entry) => entry.target.kind === "chat" && entry.target.chat.id === id,
+    );
+    const chat =
+      existing?.target.kind === "chat"
+        ? existing.target.chat
+        : group.chats &&
+          Option.getOrElse(AsyncResult.value(group.chats), () => []).find((item) => item.id === id);
+    if (!chat) return;
+    const entry: DraftEntry = existing ?? {
+      key: nextDraftKey.current++,
+      workspace: group.workspace,
+      value: emptyDraft,
+      target: { kind: "chat", chat },
+      submission: { kind: "idle" },
+    };
+    navigationVersion.current++;
+    updateNavigation((value) => ({
+      ...value,
+      selectedKey: entry.key,
+      entries: existing ? value.entries : new Map(value.entries).set(entry.key, entry),
+    }));
+  };
+  const submitDraft = async () => {
+    if (!state || registry.get(state.connection).kind !== "active") return;
+    const current = navigationRef.current;
+    const entry =
+      current.selectedKey === null ? undefined : current.entries.get(current.selectedKey);
+    if (
+      !entry ||
+      entry.value.text.trim().length === 0 ||
+      entry.submission.kind === "creating" ||
+      entry.submission.kind === "sending"
+    )
+      return;
+    const key = entry.key;
+    const sentValue = entry.value;
+    let chat: Chat;
+    if (entry.target.kind === "new") {
+      if (creatingChats.current.has(entry.workspace.id)) return;
+      creatingChats.current.add(entry.workspace.id);
+      updateEntry(key, (value) => ({ ...value, submission: { kind: "creating" } }));
+      const exit = await runCommand(registry, state.createChat(entry.workspace.id), {
+        externalId: null,
+      });
+      creatingChats.current.delete(entry.workspace.id);
+      if (Exit.isFailure(exit)) {
+        updateEntry(key, (value) => ({
+          ...value,
+          submission: {
+            kind: "error",
+            message: `${errorMessage(exit.cause)} Your draft is kept. Try sending again.`,
+          },
+        }));
+        return;
+      }
+      chat = exit.value;
+      updateEntry(key, (value) => ({
+        ...value,
+        target: { kind: "chat", chat },
+        submission: { kind: "sending" },
+      }));
+    } else {
+      chat = entry.target.chat;
+      if (
+        registry.get(state.send(chat.id)).waiting ||
+        registry.get(state.live(chat.id)).run.kind === "running"
+      )
+        return;
+      updateEntry(key, (value) => ({ ...value, submission: { kind: "sending" } }));
+    }
+    const exit = await runCommand(registry, state.send(chat.id), {
+      text: sentValue.text,
+      attachments: [],
+    });
+    updateEntry(key, (value) => ({
+      ...value,
+      value: Exit.isSuccess(exit) && value.value === sentValue ? emptyDraft : value.value,
+      submission: Exit.isSuccess(exit)
+        ? { kind: "idle" }
+        : {
+            kind: "error",
+            message: `${errorMessage(exit.cause)} Your draft is kept. Edit or send it again.`,
+          },
+    }));
+  };
+  const stop = async () => {
+    if (!state || registry.get(state.connection).kind !== "active") return;
+    const current = navigationRef.current;
+    const entry =
+      current.selectedKey === null ? undefined : current.entries.get(current.selectedKey);
+    if (entry?.target.kind !== "chat") return;
+    const id = entry.target.chat.id;
+    if (stoppingChats.current.has(id) || registry.get(state.abort(id)).waiting) return;
+    stoppingChats.current.add(id);
+    await runCommand(registry, state.abort(id), undefined);
+    stoppingChats.current.delete(id);
+  };
+
+  const draftValues = [...navigation.entries.values()].filter(
+    (entry) => entry.value.text.length > 0,
+  );
   const unavailable = connection.kind === "unavailable";
+  const available = connection.kind === "active";
   const onReload = () => {
     if (draftValues.length > 0) setRecoveryOpen(true);
     else window.location.reload();
   };
-  const updateDraft = (chatId: ChatId, text: string) => {
-    setDrafts((current) => new Map(current).set(chatId, { text }));
+  const retryTranscript = () => {
+    if (unavailable) onReload();
+    else if (state && chatId) registry.refresh(state.transcript(chatId));
+    else if (state) registry.refresh(state.workspaces);
   };
-  const sentDraft = (chatId: ChatId, sent: Draft) => {
-    setDrafts((current) => {
-      if (current.get(chatId) !== sent) return current;
-      const next = new Map(current);
-      next.delete(chatId);
-      return next;
-    });
+  const presentation: NavigationPresentation = {
+    activeWorkspaceId: selected?.workspace.id ?? null,
+    activeChatId: chatId,
+    status:
+      workspaces._tag === "Failure"
+        ? { kind: "error", label: errorMessage(workspaces.cause) }
+        : workspaces.waiting || workspaces._tag === "Initial"
+          ? { kind: "pending", label: "Loading workspaces..." }
+          : groups.length === 0
+            ? { kind: "empty", label: "No workspaces yet." }
+            : undefined,
+    groups: groups.map(({ workspace, chats }) => {
+      const records = chats ? [...Option.getOrElse(AsyncResult.value(chats), () => [])] : [];
+      if (chats) {
+        for (const entry of navigation.entries.values()) {
+          if (entry.workspace.id !== workspace.id || entry.target.kind !== "chat") continue;
+          const chat = entry.target.chat;
+          if (!records.some((record) => record.id === chat.id)) records.unshift(chat);
+        }
+      }
+      return {
+        workspace: { id: workspace.id, name: workspace.name, contextLabel: workspace.defaultCwd },
+        expanded: navigation.expanded.has(workspace.id),
+        chats: records.map((chat) => ({
+          id: chat.id,
+          title:
+            chat.id === chatId && conversation?.live.title
+              ? conversation.live.title
+              : `Chat ${chat.id.slice(-8)}`,
+        })),
+        status:
+          chats?._tag === "Failure"
+            ? { kind: "error", label: errorMessage(chats.cause) }
+            : chats && (chats.waiting || chats._tag === "Initial")
+              ? { kind: "pending", label: "Loading chats..." }
+              : chats && records.length === 0
+                ? { kind: "empty", label: "No chats yet." }
+                : undefined,
+      };
+    }),
   };
+  const creating = selected?.submission.kind === "creating";
+  const sending = selected?.submission.kind === "sending" || conversation?.sending.waiting;
+  const running = conversation?.live.run.kind === "running";
+  const statusLabel = !selected
+    ? "Add a workspace to start a chat"
+    : connection.kind === "opening"
+      ? "Opening connection. Draft kept."
+      : !available
+        ? "Connection unavailable. Draft kept."
+        : creating
+          ? "Creating chat. Draft kept."
+          : conversation?.stopping.waiting
+            ? "Stop requested..."
+            : running
+              ? "Pico is working"
+              : sending
+                ? "Waiting for response completion..."
+                : conversation?.live.run.kind === "unknown"
+                  ? "Run status unknown. You can send or request Stop."
+                  : conversation?.live.run.kind === "finished" &&
+                      conversation.live.run.outcome === "aborted"
+                    ? "Response stopped"
+                    : conversation?.live.run.kind === "finished" &&
+                        conversation.live.run.outcome === "failed"
+                      ? "Response failed. Review the error before sending again."
+                      : "Enter to send · Shift+Enter for a new line";
+  const composer: ComposerPresentation =
+    running || sending
+      ? {
+          mode: "stop",
+          value: selected?.value.text ?? "",
+          placeholder: "Write your next message...",
+          editable: true,
+          canStop: available && !conversation?.stopping.waiting,
+          statusLabel,
+        }
+      : {
+          mode: "send",
+          value: selected?.value.text ?? "",
+          placeholder: selected
+            ? "Ask pico to help with your project..."
+            : "Add a workspace to start",
+          editable: !!selected,
+          canSubmit: available && !!selected && !creating && selected.value.text.trim().length > 0,
+          statusLabel,
+        };
+  const transcript: TranscriptPresentation = conversation
+    ? presentTranscript(conversation.snapshot, conversation.live, disclosures, connection)
+    : selected
+      ? {
+          state: "empty",
+          title: "What are you working on?",
+          description: `Start a conversation in ${selected.workspace.name}.`,
+        }
+      : workspaces._tag === "Failure"
+        ? {
+            state: "error",
+            title: "Workspaces unavailable",
+            description: errorMessage(workspaces.cause),
+            retryLabel: unavailable ? "Reload" : "Retry workspaces",
+          }
+        : workspaces._tag === "Initial" || workspaces.waiting
+          ? { state: "loading", label: "Loading workspaces..." }
+          : {
+              state: "empty",
+              title: "Bring your project to pico",
+              description:
+                "Add a workspace to chat about your code. Your conversations stay together in its project directory.",
+            };
 
   return (
     <div className="flex h-dvh min-h-0 flex-col bg-canvas text-foreground">
@@ -127,13 +531,14 @@ function LiveRoute({ state }: { readonly state: State }) {
           <p className="mt-1 text-label text-muted">
             Copy any drafts you want to keep. Reloading clears unsent text.
           </p>
-          {draftValues.map(([chatId, draft]) => (
-            <label className="mt-3 block text-label" key={chatId}>
-              Draft for chat {chatId.slice(-8)}
+          {draftValues.map((entry) => (
+            <label className="mt-3 block text-label" key={entry.key}>
+              {entry.target.kind === "chat" ? `Chat ${entry.target.chat.id.slice(-8)}` : "New chat"}{" "}
+              in {entry.workspace.name}
               <textarea
                 className="mt-1 block min-h-24 w-full rounded-control border border-border bg-canvas p-3 text-base"
                 readOnly
-                value={draft.text}
+                value={entry.value.text}
               />
             </label>
           ))}
@@ -147,480 +552,41 @@ function LiveRoute({ state }: { readonly state: State }) {
           </div>
         </section>
       )}
-      <div className="min-h-0 flex-1">
-        {selection.kind === "picker" ? (
-          <WorkspacePicker
-            connection={connection}
-            onSelect={(workspace) => setSelection({ kind: "workspace", workspace })}
-            onThemeChange={onThemeChange}
-            state={state}
-            theme={theme}
-            workspaces={workspaces}
-          />
-        ) : (
-          <WorkspaceView
-            connection={connection}
-            disclosures={disclosures}
-            draft={
-              selection.kind === "chat" ? (drafts.get(selection.chat.id) ?? emptyDraft) : emptyDraft
-            }
-            onChatCreated={(chat) =>
-              setSelection((current) =>
-                current === selection
-                  ? { kind: "chat", workspace: selection.workspace, chat }
-                  : current,
-              )
-            }
-            onChatSelect={(chat) =>
-              setSelection({ kind: "chat", workspace: selection.workspace, chat })
-            }
-            onDisclosureToggle={(id) =>
-              setDisclosures((current) => {
-                const next = new Set(current);
-                if (next.has(id)) next.delete(id);
-                else next.add(id);
-                return next;
-              })
-            }
-            onDraftChange={updateDraft}
-            onDraftSent={sentDraft}
-            onReload={onReload}
-            onSidebarOpenChange={setSidebarOpen}
-            onThemeChange={onThemeChange}
-            onWorkspaceChange={() => {
-              setSelection({ kind: "picker" });
-              setSidebarOpen(false);
-              registry.refresh(state.workspaces);
-            }}
-            selection={selection}
-            sidebarOpen={sidebarOpen}
-            state={state}
-            theme={theme}
-          />
-        )}
-      </div>
-    </div>
-  );
-}
-
-function WorkspacePicker({
-  state,
-  connection,
-  workspaces,
-  theme,
-  onThemeChange,
-  onSelect,
-}: {
-  readonly state: State;
-  readonly connection: FrontendState.Connection;
-  readonly workspaces: AsyncResult.AsyncResult<readonly Workspace[], unknown>;
-  readonly theme: Theme;
-  readonly onThemeChange: (theme: Theme) => void;
-  readonly onSelect: (workspace: Workspace) => void;
-}) {
-  const registry = useContext(RegistryContext);
-  const create = useAtomSet(state.createWorkspace, { mode: "promiseExit" });
-  const creation = useAtomValue(state.createWorkspace);
-  const [name, setName] = useState("");
-  const [directory, setDirectory] = useState("");
-  const [formError, setFormError] = useState<string | null>(null);
-  const values = Option.getOrElse(AsyncResult.value(workspaces), () => []);
-  const submit = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    const form = event.currentTarget;
-    if (registry.get(state.createWorkspace).waiting || connection.kind !== "active") return;
-    const input = decodeWorkspace({
-      name: name.trim(),
-      defaultCwd: directory,
-      binding: null,
-      worktree: null,
-    });
-    if (Option.isNone(input)) {
-      setFormError("Enter a workspace name and an absolute directory on the machine running pico.");
-      return;
-    }
-    setFormError(null);
-    const exit = await create(input.value);
-    if (Exit.isSuccess(exit)) {
-      onSelect(exit.value);
-    } else {
-      const field = form.elements.namedItem("directory");
-      if (field instanceof HTMLInputElement) field.focus();
-    }
-  };
-  const error = formError ?? (creation._tag === "Failure" ? errorMessage(creation.cause) : null);
-  return (
-    <main className="h-full overflow-y-auto px-4 py-8 md:py-16">
-      <div className="mx-auto max-w-2xl">
-        <header className="flex flex-wrap items-center justify-between gap-4">
-          <div>
-            <h1 className="text-display font-semibold">Choose a workspace</h1>
-            <p className="mt-2 text-copy text-muted">
-              Keep conversations together in a project directory.
-            </p>
-          </div>
-          <Button
-            aria-pressed={theme === "dark"}
-            onClick={() => onThemeChange(theme === "dark" ? "light" : "dark")}
-            size="small"
-            tone="secondary"
-          >
-            Dark theme
-          </Button>
-        </header>
-        <section aria-label="Workspaces" className="mt-8">
-          <div className="flex items-center justify-between gap-3">
-            <h2 className="text-title font-semibold">Workspaces</h2>
-            <Button
-              disabled={workspaces.waiting || connection.kind !== "active"}
-              onClick={() => registry.refresh(state.workspaces)}
-              size="small"
-              tone="ghost"
-            >
-              Refresh
-            </Button>
-          </div>
-          <p className="mt-2 text-label text-muted" role="status">
-            {workspaces.waiting
-              ? "Loading workspaces..."
-              : workspaces._tag === "Success" && values.length === 0
-                ? "No workspaces yet. Create one below."
-                : ""}
-          </p>
-          {workspaces._tag === "Failure" && (
-            <p className="mt-2 text-label text-danger" role="alert">
-              {errorMessage(workspaces.cause)} Use Refresh to try again, or reload if the connection
-              is unavailable.
-            </p>
-          )}
-          <ul className="mt-3 space-y-2">
-            {values.map((workspace) => (
-              <li key={workspace.id}>
-                <button
-                  className="w-full rounded-control border border-border bg-panel px-4 py-3 text-left hover:bg-surface-hover disabled:opacity-60"
-                  disabled={creation.waiting}
-                  onClick={() => onSelect(workspace)}
-                  type="button"
-                >
-                  <span className="block break-words text-title font-medium">{workspace.name}</span>
-                  <span className="mt-1 block break-all text-label text-muted">
-                    {workspace.defaultCwd}
-                  </span>
-                  <span className="mt-1 block text-meta text-muted">
-                    Created {dateFormat.format(workspace.createdAt)}
-                  </span>
-                </button>
-              </li>
-            ))}
-          </ul>
-        </section>
-        <form
-          aria-labelledby="create-workspace-heading"
-          className="mt-8 border-t border-border pt-6"
-          onSubmit={submit}
-        >
-          <h2 className="text-title font-semibold" id="create-workspace-heading">
-            Create a workspace
-          </h2>
-          <label className="mt-4 block text-label font-medium" htmlFor="workspace-name">
-            Workspace name
-          </label>
-          <input
-            aria-describedby={error ? "workspace-error" : undefined}
-            aria-invalid={formError ? true : undefined}
-            autoComplete="off"
-            className="mt-2 block w-full rounded-control border border-border bg-panel px-3 py-2 text-base"
-            disabled={creation.waiting}
-            id="workspace-name"
-            name="workspaceName"
-            onChange={(event) => setName(event.currentTarget.value)}
-            required
-            type="text"
-            value={name}
-          />
-          <label className="mt-4 block text-label font-medium" htmlFor="workspace-directory">
-            Project directory
-          </label>
-          <p className="mt-1 text-label text-muted" id="directory-hint">
-            Use an existing absolute path on the machine running pico.
-          </p>
-          <input
-            aria-describedby={error ? "directory-hint workspace-error" : "directory-hint"}
-            aria-invalid={error ? true : undefined}
-            autoCapitalize="none"
-            autoComplete="off"
-            className="mt-2 block w-full rounded-control border border-border bg-panel px-3 py-2 text-base"
-            disabled={creation.waiting}
-            id="workspace-directory"
-            name="directory"
-            onChange={(event) => setDirectory(event.currentTarget.value)}
-            placeholder="/path/to/project"
-            required
-            spellCheck={false}
-            type="text"
-            value={directory}
-          />
-          {error && (
-            <p className="mt-3 text-label text-danger" id="workspace-error" role="alert">
-              {error} Check the name and directory, then create the workspace again.
-            </p>
-          )}
-          <Button
-            className="mt-4"
-            disabled={creation.waiting || connection.kind !== "active"}
-            type="submit"
-          >
-            {creation.waiting ? "Creating workspace..." : "Create workspace"}
-          </Button>
-        </form>
-      </div>
-    </main>
-  );
-}
-
-interface WorkspaceViewProps {
-  readonly state: State;
-  readonly selection: Exclude<Selection, { readonly kind: "picker" }>;
-  readonly connection: FrontendState.Connection;
-  readonly draft: Draft;
-  readonly disclosures: ReadonlySet<string>;
-  readonly theme: Theme;
-  readonly sidebarOpen: boolean;
-  readonly onChatSelect: (chat: Chat) => void;
-  readonly onChatCreated: (chat: Chat) => void;
-  readonly onWorkspaceChange: () => void;
-  readonly onDraftChange: (chatId: ChatId, text: string) => void;
-  readonly onDraftSent: (chatId: ChatId, draft: Draft) => void;
-  readonly onReload: () => void;
-  readonly onSidebarOpenChange: (open: boolean) => void;
-  readonly onDisclosureToggle: (id: string) => void;
-  readonly onThemeChange: (theme: Theme) => void;
-}
-
-function WorkspaceView(props: WorkspaceViewProps) {
-  const { state, selection, connection } = props;
-  const registry = useContext(RegistryContext);
-  const chatsAtom = state.chats(selection.workspace.id);
-  const chats = useAtomValue(chatsAtom);
-  useEffect(() => {
-    if (!registry.get(chatsAtom).waiting) registry.refresh(chatsAtom);
-  }, [chatsAtom, registry]);
-  const creation = useAtomValue(state.createChat(selection.workspace.id));
-  const create = useAtomSet(state.createChat(selection.workspace.id), { mode: "promiseExit" });
-  const values = Option.getOrElse(AsyncResult.value(chats), () => []);
-  const records =
-    selection.kind === "chat" && !values.some((chat) => chat.id === selection.chat.id)
-      ? [selection.chat, ...values]
-      : values;
-  const summaries: readonly ChatSummary[] = records.map((chat) => ({
-    id: chat.id,
-    title: `Chat ${chat.id.slice(-8)}`,
-    preview: chat.cwd,
-    updatedLabel: `Created ${dateFormat.format(chat.createdAt)}`,
-    activity: "unknown",
-  }));
-  const screen = {
-    workspace: {
-      id: selection.workspace.id,
-      name: selection.workspace.name,
-      contextLabel: selection.workspace.defaultCwd,
-    },
-    chats: summaries,
-    activeChatId: selection.kind === "chat" ? selection.chat.id : null,
-    sidebarOpen: props.sidebarOpen,
-    theme: props.theme,
-    newChatPending: creation.waiting || connection.kind !== "active",
-    chatListStatus:
-      chats._tag === "Failure"
-        ? { kind: "error", label: `${errorMessage(chats.cause)} Retry loading chats.` }
-        : chats.waiting
-          ? { kind: "pending", label: "Loading chats..." }
-          : values.length === 0
-            ? { kind: "empty", label: "No chats yet. Create a chat to start." }
-            : undefined,
-    onChatsRetry: () => registry.refresh(state.chats(selection.workspace.id)),
-    onWorkspaceChange: props.onWorkspaceChange,
-    onSidebarOpenChange: props.onSidebarOpenChange,
-    onThemeChange: props.onThemeChange,
-    onDisclosureToggle: props.onDisclosureToggle,
-    onChatSelect: (id: string) => {
-      const chat = records.find((record) => record.id === id);
-      if (chat) props.onChatSelect(chat);
-    },
-    onNewChat: async () => {
-      if (
-        registry.get(state.createChat(selection.workspace.id)).waiting ||
-        connection.kind !== "active"
-      )
-        return;
-      const exit = await create({ externalId: null });
-      if (Exit.isSuccess(exit)) props.onChatCreated(exit.value);
-    },
-  } satisfies Omit<
-    ChatScreenProps,
-    | "transcript"
-    | "composer"
-    | "onComposerValueChange"
-    | "onComposerSubmit"
-    | "onStop"
-    | "onTranscriptRetry"
-  >;
-  return (
-    <div className="flex h-full min-h-0 flex-col">
-      {creation.waiting && (
-        <p
-          className="shrink-0 border-b border-border bg-panel p-3 text-label text-muted"
-          role="status"
-        >
-          Creating chat...
-        </p>
-      )}
-      {creation._tag === "Failure" && (
-        <p
-          className="shrink-0 border-b border-border bg-panel p-3 text-label text-danger"
-          role="alert"
-        >
-          {errorMessage(creation.cause)} Check the workspace directory, then try New chat again.
-        </p>
-      )}
-      <div className="min-h-0 flex-1">
-        {selection.kind === "chat" ? (
-          <SelectedChat {...props} chat={selection.chat} key={selection.chat.id} screen={screen} />
-        ) : (
-          <ChatScreen
-            {...screen}
-            composer={{
-              mode: "send",
-              value: "",
-              placeholder: "Create or select a chat",
-              editable: false,
-              canSubmit: false,
-              statusLabel: "Choose New chat to start",
-            }}
-            onComposerSubmit={screen.onNewChat}
-            onComposerValueChange={() => props.onSidebarOpenChange(true)}
-            onStop={() => props.onSidebarOpenChange(true)}
-            onTranscriptRetry={screen.onChatsRetry}
-            transcript={{
-              state: "empty",
-              title: "Choose a chat",
-              description: "Select a conversation from the sidebar, or choose New chat.",
-            }}
-          />
-        )}
-      </div>
-    </div>
-  );
-}
-
-function SelectedChat({
-  state,
-  chat,
-  connection,
-  draft,
-  disclosures,
-  onDraftChange,
-  onDraftSent,
-  onReload,
-  screen,
-}: WorkspaceViewProps & {
-  readonly chat: Chat;
-  readonly screen: Omit<
-    ChatScreenProps,
-    | "transcript"
-    | "composer"
-    | "onComposerValueChange"
-    | "onComposerSubmit"
-    | "onStop"
-    | "onTranscriptRetry"
-  >;
-}) {
-  const registry = useContext(RegistryContext);
-  const snapshot = useAtomValue(state.transcript(chat.id));
-  const live = useAtomValue(state.live(chat.id));
-  const sending = useAtomValue(state.send(chat.id));
-  const stopping = useAtomValue(state.abort(chat.id));
-  const send = useAtomSet(state.send(chat.id), { mode: "promiseExit" });
-  const stop = useAtomSet(state.abort(chat.id));
-  const available = connection.kind === "active";
-  const running = live.run.kind === "running";
-  const statusLabel =
-    connection.kind === "opening"
-      ? "Opening connection. Draft kept."
-      : !available
-        ? "Connection unavailable. Draft kept."
-        : stopping.waiting
-          ? "Stop requested..."
-          : running
-            ? "Pico is working"
-            : sending.waiting
-              ? "Waiting for response completion..."
-              : live.run.kind === "unknown"
-                ? "Run status unknown. You can send or request Stop."
-                : live.run.outcome === "aborted"
-                  ? "Response stopped"
-                  : live.run.outcome === "failed"
-                    ? "Response failed. Review the error before sending again."
-                    : "Enter to send · Shift+Enter for a new line";
-  const composer: ComposerPresentation =
-    running || sending.waiting
-      ? {
-          mode: "stop",
-          value: draft.text,
-          placeholder: "Write your next message...",
-          editable: true,
-          canStop: available && !stopping.waiting,
-          statusLabel,
-        }
-      : {
-          mode: "send",
-          value: draft.text,
-          placeholder: "Ask pico to help with your project...",
-          editable: true,
-          canSubmit: available && draft.text.trim().length > 0,
-          statusLabel,
-        };
-  const transcript = presentTranscript(snapshot, live, disclosures, connection);
-  const retry = () =>
-    connection.kind === "unavailable" ? onReload() : registry.refresh(state.transcript(chat.id));
-  return (
-    <div className="flex h-full min-h-0 flex-col">
-      {snapshot._tag === "Failure" && transcript.state !== "error" && (
+      {conversation?.snapshot._tag === "Failure" && transcript.state !== "error" && (
         <div className="flex shrink-0 flex-wrap items-center gap-3 border-b border-border bg-panel p-3 text-label">
           <p className="min-w-0 flex-1 text-danger" role="alert">
-            {errorMessage(snapshot.cause)} Displayed history may be incomplete.
+            {errorMessage(conversation.snapshot.cause)} Displayed history may be incomplete.
           </p>
-          <Button onClick={retry} size="small" tone="secondary">
-            {connection.kind === "unavailable" ? "Reload" : "Retry history"}
+          <Button onClick={retryTranscript} size="small" tone="secondary">
+            {unavailable ? "Reload" : "Retry history"}
           </Button>
         </div>
       )}
-      {sending._tag === "Failure" && (
+      {selected?.submission.kind === "error" && (
         <p
           className="shrink-0 border-b border-border bg-panel p-3 text-label text-danger"
           role="alert"
         >
-          {errorMessage(sending.cause)} Your draft is kept. Check the error and edit or send it
-          again.
+          {selected.submission.message}
         </p>
       )}
-      {stopping._tag === "Failure" && (
+      {conversation?.stopping._tag === "Failure" && (
         <p
           className="shrink-0 border-b border-border bg-panel p-3 text-label text-danger"
           role="alert"
         >
-          {errorMessage(stopping.cause)} Stop was not confirmed. Try Stop again or reload to
-          reconnect.
+          {errorMessage(conversation.stopping.cause)} Stop was not confirmed. Try Stop again or
+          reload to reconnect.
         </p>
       )}
-      {available && live.run.kind === "unknown" && !sending.waiting && (
+      {available && conversation?.live.run.kind === "unknown" && !sending && (
         <div className="flex shrink-0 flex-wrap items-center gap-3 border-b border-border bg-panel px-4 py-2 text-label">
           <p className="min-w-0 flex-1 text-muted">
             Run status is unknown. History does not confirm whether a response is still running.
           </p>
           <Button
-            disabled={stopping.waiting}
-            onClick={() => stop(undefined)}
+            disabled={conversation.stopping.waiting}
+            onClick={stop}
             size="small"
             tone="secondary"
           >
@@ -630,39 +596,64 @@ function SelectedChat({
       )}
       <div className="min-h-0 flex-1">
         <ChatScreen
-          {...screen}
-          chats={screen.chats.map(
-            (summary): ChatSummary =>
-              summary.id === chat.id
-                ? {
-                    ...summary,
-                    title: live.title ?? summary.title,
-                    activity:
-                      live.run.kind === "running"
-                        ? "running"
-                        : live.run.kind === "unknown"
-                          ? "unknown"
-                          : live.run.outcome === "failed"
-                            ? "failed"
-                            : "idle",
-                  }
-                : summary,
-          )}
           composer={composer}
-          onComposerSubmit={async () => {
-            if (
-              !available ||
-              registry.get(state.send(chat.id)).waiting ||
-              draft.text.trim().length === 0
-            )
-              return;
-            const exit = await send({ text: draft.text, attachments: [] });
-            if (Exit.isSuccess(exit)) onDraftSent(chat.id, draft);
+          contextLabel={
+            selected
+              ? `${selected.workspace.name} · ${selected.target.kind === "chat" ? selected.target.chat.cwd : selected.workspace.defaultCwd}`
+              : "Your project conversations"
+          }
+          conversationKey={selected ? String(selected.key) : null}
+          navigation={presentation}
+          onChatSelect={selectChat}
+          onChatsRetry={(id) => {
+            const workspace = groups.find((group) => group.workspace.id === id)?.workspace;
+            if (state && workspace) registry.refresh(state.chats(workspace.id));
           }}
-          onComposerValueChange={(text) => onDraftChange(chat.id, text)}
-          onStop={() => stop(undefined)}
-          onTranscriptRetry={retry}
+          onComposerSubmit={submitDraft}
+          onComposerValueChange={(text) => {
+            const key = navigationRef.current.selectedKey;
+            if (key !== null) updateEntry(key, (entry) => ({ ...entry, value: { text } }));
+          }}
+          onDisclosureToggle={(id) =>
+            setDisclosures((current) => {
+              const next = new Set(current);
+              if (next.has(id)) next.delete(id);
+              else next.add(id);
+              return next;
+            })
+          }
+          onNewChat={newChat}
+          onSidebarOpenChange={setSidebarOpen}
+          onStop={stop}
+          onThemeChange={(next) => {
+            applyThemePreference(next);
+            setTheme(next);
+          }}
+          onTranscriptRetry={retryTranscript}
+          onWorkspaceRetry={() => {
+            if (state) registry.refresh(state.workspaces);
+          }}
+          onWorkspaceToggle={(id) => {
+            const workspace = groups.find((group) => group.workspace.id === id)?.workspace;
+            if (!workspace) return;
+            updateNavigation((current) => {
+              const expanded = new Set(current.expanded);
+              if (expanded.has(workspace.id)) expanded.delete(workspace.id);
+              else expanded.add(workspace.id);
+              return { ...current, expanded };
+            });
+          }}
+          sidebarOpen={sidebarOpen}
+          theme={theme}
+          title={chatId ? (conversation?.live.title ?? `Chat ${chatId.slice(-8)}`) : "New chat"}
           transcript={transcript}
+          workspaceForm={{
+            open: workspaceFormOpen,
+            available,
+            submission: workspaceSubmission,
+            onOpenChange: setWorkspaceOpen,
+            onSubmit: createWorkspace,
+          }}
         />
       </div>
     </div>

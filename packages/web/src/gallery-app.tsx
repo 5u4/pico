@@ -46,6 +46,7 @@ export function GalleryApp({ designMode }: GalleryAppProps) {
     stateFromFixture,
   );
   const [theme, setTheme] = useState<Theme>(readBootstrappedTheme);
+  const [workspaceExpanded, setWorkspaceExpanded] = useState(true);
 
   const selectScenario = (scenarioId: GalleryScenarioId) => {
     const url = new URL(window.location.href);
@@ -60,10 +61,16 @@ export function GalleryApp({ designMode }: GalleryAppProps) {
 
   const screen = (
     <ChatScreen
-      activeChatId={state.activeChatId}
-      chats={state.chats}
+      conversationKey={state.activeChatId ?? "gallery-draft"}
+      contextLabel={state.workspace.contextLabel}
+      navigation={{
+        activeWorkspaceId: state.workspace.id,
+        activeChatId: state.activeChatId,
+        groups: [{ workspace: state.workspace, expanded: workspaceExpanded, chats: state.chats }],
+      }}
       composer={state.composer}
-      onChatSelect={(chatId) => dispatch({ type: "chat-selected", chatId })}
+      onChatSelect={(_workspaceId, chatId) => dispatch({ type: "chat-selected", chatId })}
+      onChatsRetry={() => dispatch({ type: "scenario-selected", scenarioId: state.scenarioId })}
       onComposerSubmit={() => dispatch({ type: "message-submitted" })}
       onComposerValueChange={(value) => dispatch({ type: "composer-changed", value })}
       onDisclosureToggle={(itemId) => dispatch({ type: "disclosure-toggled", itemId })}
@@ -72,10 +79,12 @@ export function GalleryApp({ designMode }: GalleryAppProps) {
       onStop={() => dispatch({ type: "generation-stopped" })}
       onTranscriptRetry={() => dispatch({ type: "transcript-retried" })}
       onThemeChange={changeTheme}
+      onWorkspaceRetry={() => dispatch({ type: "scenario-selected", scenarioId: state.scenarioId })}
+      onWorkspaceToggle={() => setWorkspaceExpanded((expanded) => !expanded)}
       sidebarOpen={state.sidebarOpen}
       transcript={state.transcript}
       theme={theme}
-      workspace={state.workspace}
+      title={state.chats.find((chat) => chat.id === state.activeChatId)?.title ?? "New chat"}
     />
   );
 
@@ -127,6 +136,12 @@ function galleryReducer(state: GalleryState, action: GalleryAction): GalleryStat
     case "chat-selected":
       return selectChat(state, action.chatId);
     case "new-chat-selected":
+      if (
+        state.activeChatId === null &&
+        state.composer.mode === "send" &&
+        state.composer.value.length > 0
+      )
+        return state;
       return {
         ...state,
         activeChatId: null,
@@ -272,8 +287,15 @@ function submitMessage(state: GalleryState): GalleryState {
     },
   ];
 
+  const chatId = state.activeChatId ?? `gallery-chat-${sequence}`;
+
   return {
     ...state,
+    activeChatId: chatId,
+    chats:
+      state.activeChatId === null
+        ? [{ id: chatId, title: text.slice(0, 64) }, ...state.chats]
+        : state.chats,
     transcript: {
       state: "ready",
       items,
