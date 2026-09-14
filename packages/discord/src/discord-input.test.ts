@@ -1,19 +1,28 @@
 import * as BunCrypto from "@effect/platform-bun/BunCrypto";
+import * as BunFileSystem from "@effect/platform-bun/BunFileSystem";
+import * as BunPath from "@effect/platform-bun/BunPath";
 import { assert, describe, it } from "@effect/vitest";
 import type { AgentEventEnvelope } from "@pico/contract/agent-event";
 import * as AgentMessage from "@pico/contract/agent-message";
 import type { ContextUsage } from "@pico/contract/agent-runtime";
 import { Application } from "@pico/contract/application";
 import * as Chat from "@pico/contract/chat-model";
+import { ChatRepository } from "@pico/contract/chat-repository";
 import { ApplicationError, ChatClosed } from "@pico/contract/errors";
 import { EventRouter } from "@pico/contract/event-router";
 import { AbsolutePath } from "@pico/contract/path";
-import type * as Workspace from "@pico/contract/workspace-model";
+import * as Workspace from "@pico/contract/workspace-model";
+import { WorkspaceRepository } from "@pico/contract/workspace-repository";
+import * as Persistence from "@pico/persistence/layer";
 import { ChannelTypes } from "discordeno";
+import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Layer from "effect/Layer";
 import * as Logger from "effect/Logger";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
@@ -21,6 +30,7 @@ import * as HttpClient from "effect/unstable/http/HttpClient";
 import * as HttpClientResponse from "effect/unstable/http/HttpClientResponse";
 import {
   bindOptions,
+  boundWorkspace,
   chatId,
   config,
   defaultCwd,
@@ -72,7 +82,6 @@ describe("discord input", () => {
             startThreadWithMessage: async (_channelId, _messageId, options) => {
               order.push("create-thread");
               assert.strictEqual(options.name, "hello from pico");
-              assert.strictEqual(options.autoArchiveDuration, 1_440);
               return { id: 20n };
             },
           },
@@ -98,11 +107,9 @@ describe("discord input", () => {
             }),
           bindWorkspace: () => Effect.die("unexpected workspace binding"),
           listChats: () => Effect.die("unexpected chat list"),
-          createChat: (input) =>
+          createChat: () =>
             Effect.sync(() => {
               order.push("create-chat");
-              assert.strictEqual(input.workspaceId, workspaceId);
-              assert.strictEqual(input.externalId, "20");
               return {
                 id: chatId,
                 workspaceId,
@@ -145,13 +152,7 @@ describe("discord input", () => {
 
         handleMessage(message({ content: "  hello   from pico  " }));
         yield* Deferred.await(firstSent);
-        assert.deepStrictEqual(order, [
-          "find-workspace",
-          "create-workspace",
-          "create-thread",
-          "create-chat",
-          "send",
-        ]);
+        assert.deepStrictEqual(order, ["create-workspace", "create-thread", "create-chat", "send"]);
         assert.deepStrictEqual(sent, [
           AgentMessage.AgentPrompt.make({ text: "  hello   from pico  ", attachments: [] }),
         ]);
@@ -169,122 +170,276 @@ describe("discord input", () => {
     ),
   );
 
-  it.effect("delivers persisted Discord output with cold caches", () =>
-    Effect.scoped(
-      Effect.gen(function* () {
-        let bindingLookups = 0;
-        const delivered = yield* Deferred.make<void>();
-        const sent: Array<{ readonly threadId: bigint; readonly content: string }> = [];
-        const bot = {
-          id: 999n,
-          events: {},
-          helpers: {
-            addReaction: async () => undefined,
-            deleteOwnReaction: async () => undefined,
-            getChannel: async () => {
-              throw new Error("cold output must not inspect Discord channels");
-            },
-            sendMessage: async () => undefined,
-            editChannel: async () => undefined,
-            startThreadWithMessage: async () => {
-              throw new Error("cold output must not create Discord threads");
-            },
-          },
-        } satisfies DiscordInputBot;
-        const application = Application.of({
-          getOrCreateBotChat: () => Effect.die("unexpected bot chat creation"),
-          sendBotMessage: () => Effect.die("unexpected bot message"),
-          askBtw: () => Effect.die("unexpected side question"),
-          listWorkspaces: () => Effect.die("unexpected workspace list"),
-          createWorkspace: () => Effect.die("unexpected explicit workspace creation"),
-          getOrCreateWorkspaceByBinding: () => Effect.die("unexpected workspace creation"),
-          bindWorkspace: () => Effect.die("unexpected workspace binding"),
-          listChats: () => Effect.die("unexpected chat list"),
-          createChat: () => Effect.die("unexpected chat creation"),
-          findWorkspaceByPlatformId: () => Effect.die("unexpected workspace lookup"),
-          findChatByPlatformId: () => Effect.die("unexpected chat lookup"),
-          findChatPlatformBinding: (requestedChatId) =>
-            Effect.sync(() => {
-              bindingLookups += 1;
-              return Option.some({
-                platform: "discord",
-                externalId: requestedChatId === chatId ? "20" : "not-a-thread",
-              });
-            }),
-          transcript: () => Effect.die("unexpected transcript read"),
-          sendMessage: () => Effect.die("unexpected message send"),
-          abort: () => Effect.die("unexpected chat abort"),
-          contextUsage: () => Effect.die("unexpected context read"),
-          shake: () => Effect.die("unexpected chat shake"),
-          closeChat: () => Effect.die("unexpected chat close"),
-        });
-        const resolveThreadId = yield* install(bot, config).pipe(
-          Effect.provideService(Application, application),
-          Effect.provide(BunCrypto.layer),
-        );
-        const envelopes: ReadonlyArray<AgentEventEnvelope> = [
-          {
-            chatId: failingChatId,
-            event: { type: "notice", level: "error", message: "invalid persisted binding" },
-          },
-          { chatId, event: { type: "run-started" } },
-          {
-            chatId,
-            event: {
-              type: "message-settled",
-              message: {
-                role: "assistant",
-                status: "completed",
-                stopReason: "stop",
-                content: [{ type: "text", text: "scheduled after restart" }],
-                model: "pico/schedule",
-                timestamp: 0,
+  it.effect(
+    "observes guild input after cold output lookup and caches only successful observation",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const root = yield* fileSystem.makeTempDirectoryScoped({
+            prefix: "pico-discord-identity-",
+          });
+          const repositories = yield* Layer.build(
+            Persistence.layer(AbsolutePath.make(path.join(root, "store.db"))),
+          );
+          const workspaces = Context.get(repositories, WorkspaceRepository);
+          const chats = Context.get(repositories, ChatRepository);
+          const legacyWorkspace = {
+            ...boundWorkspace,
+            binding: { platform: "discord", externalId: "10" },
+            worktree: { branch: "main", prefix: "retained/" },
+          } satisfies Workspace.Workspace;
+          yield* workspaces.create(legacyWorkspace);
+          yield* chats.create({
+            id: chatId,
+            workspaceId,
+            cwd: defaultCwd,
+            externalId: "20",
+            createdAt: 0,
+          });
+          const persistenceFailure = (cause: { readonly message: string }) =>
+            new ApplicationError({ reason: "operation", message: cause.message });
+          let channelReads = 0;
+          let observations = 0;
+          let inputLookups = 0;
+          let failObservation = true;
+          const observationFailure = Promise.withResolvers<void>();
+          const logger = Logger.make((options) => {
+            if (Logger.formatStructured.log(options).annotations.operation === "message-request") {
+              observationFailure.resolve();
+            }
+          });
+          const firstInput = yield* Deferred.make<void>();
+          const secondInput = yield* Deferred.make<void>();
+          const unknownLookup = yield* Deferred.make<void>();
+          const admittedGuildIds: Array<string | undefined> = [];
+          const commandGuildIds: Array<string | undefined> = [];
+          let bindingLookups = 0;
+          const delivered = yield* Deferred.make<void>();
+          const sent: Array<{ readonly threadId: bigint; readonly content: string }> = [];
+          const bot = {
+            id: 999n,
+            events: {},
+            helpers: {
+              addReaction: async () => undefined,
+              deleteOwnReaction: async () => undefined,
+              getChannel: async (id) => {
+                channelReads += 1;
+                return {
+                  id,
+                  guildId: 1n,
+                  type: ChannelTypes.PublicThread,
+                  parentId: id === 20n ? 10n : 30n,
+                };
+              },
+              sendMessage: async () => undefined,
+              editChannel: async () => undefined,
+              startThreadWithMessage: async () => {
+                throw new Error("cold output must not create Discord threads");
               },
             },
-          },
-          { chatId, event: { type: "run-finished", outcome: "completed" } },
-        ];
-        const eventRouter = EventRouter.of({
-          open: (filter) =>
-            Effect.sync(() => {
-              assert.isTrue(envelopes.every(filter));
-              return {
-                events: Stream.fromIterable(envelopes),
-                setFilter: () => Effect.void,
-              };
-            }),
-          drain: () => Deferred.await(delivered),
-        });
-        const scope = yield* Scope.Scope;
-        const dispatch = DiscordOutput.make(
-          {
-            send: (threadId, output) =>
+          } satisfies DiscordInputBot;
+          const application = Application.of({
+            getOrCreateBotChat: () => Effect.die("unexpected bot chat creation"),
+            sendBotMessage: () => Effect.die("unexpected bot message"),
+            askBtw: () => Effect.die("unexpected side question"),
+            listWorkspaces: () => Effect.die("unexpected workspace list"),
+            createWorkspace: () => Effect.die("unexpected explicit workspace creation"),
+            getOrCreateWorkspaceByBinding: (input) =>
+              Effect.gen(function* () {
+                observations += 1;
+                if (failObservation) {
+                  return yield* new ApplicationError({
+                    reason: "operation",
+                    message: "Observation unavailable",
+                  });
+                }
+                return yield* workspaces.getOrCreateByBinding({
+                  ...input,
+                  id: Workspace.WorkspaceId.make("018f47a0-0000-7000-8000-000000000099"),
+                  createdAt: 1,
+                });
+              }).pipe(Effect.mapError(persistenceFailure)),
+            bindWorkspace: () => Effect.die("unexpected workspace binding"),
+            listChats: () => Effect.die("unexpected chat list"),
+            createChat: () => Effect.die("unexpected chat creation"),
+            findWorkspaceByPlatformId: () => Effect.die("unexpected workspace lookup"),
+            findChatByPlatformId: (platform, parentId, externalId) =>
+              Effect.gen(function* () {
+                inputLookups += 1;
+                const workspace = yield* workspaces.findByBinding({
+                  platform,
+                  externalId: parentId,
+                });
+                const chat = Option.isNone(workspace)
+                  ? Option.none<Chat.Chat>()
+                  : yield* chats.findByExternalId(workspace.value.id, externalId);
+                if (Option.isNone(chat)) yield* Deferred.succeed(unknownLookup, undefined);
+                return chat;
+              }).pipe(Effect.mapError(persistenceFailure)),
+            findChatPlatformBinding: (requestedChatId) =>
               Effect.sync(() => {
-                sent.push({ threadId, content: output.content });
-                return 1n;
+                bindingLookups += 1;
+                return Option.some({
+                  platform: "discord",
+                  externalId: requestedChatId === chatId ? "20" : "not-a-thread",
+                });
               }),
-            edit: () => Effect.void,
-            renameThread: () => Effect.void,
-            triggerTyping: () => Effect.void,
-          },
-          scope,
-          { showToolCalls: false, showThinking: false },
-        );
-        yield* pumpOutput(eventRouter, resolveThreadId, (threadId, envelope) =>
-          dispatch(threadId, envelope).pipe(
-            Effect.tap(() =>
-              envelope.event.type === "run-finished"
-                ? Deferred.succeed(delivered, undefined)
-                : Effect.void,
+            transcript: () => Effect.die("unexpected transcript read"),
+            sendMessage: () =>
+              Effect.gen(function* () {
+                const workspace = Option.getOrThrow(yield* workspaces.findById(workspaceId));
+                admittedGuildIds.push(workspace.binding?.guildId);
+                yield* Deferred.succeed(
+                  admittedGuildIds.length === 1 ? firstInput : secondInput,
+                  undefined,
+                );
+                return startedDelivery;
+              }).pipe(Effect.mapError(persistenceFailure)),
+            abort: () => Effect.die("unexpected chat abort"),
+            contextUsage: (id) =>
+              Effect.gen(function* () {
+                const chat = Option.getOrThrow(yield* chats.findById(id));
+                const workspace = Option.getOrThrow(yield* workspaces.findById(chat.workspaceId));
+                commandGuildIds.push(workspace.binding?.guildId);
+                return { kind: "unavailable" } satisfies ContextUsage;
+              }).pipe(Effect.mapError(persistenceFailure)),
+            shake: () => Effect.die("unexpected chat shake"),
+            closeChat: () => Effect.die("unexpected chat close"),
+          });
+          const resolveThreadId = yield* install(bot, config).pipe(
+            Effect.provideService(Application, application),
+            Effect.provide(BunCrypto.layer),
+            Effect.provide(Logger.layer([logger])),
+          );
+          const envelopes: ReadonlyArray<AgentEventEnvelope> = [
+            {
+              chatId: failingChatId,
+              event: { type: "notice", level: "error", message: "invalid persisted binding" },
+            },
+            { chatId, event: { type: "run-started" } },
+            {
+              chatId,
+              event: {
+                type: "message-settled",
+                message: {
+                  role: "assistant",
+                  status: "completed",
+                  stopReason: "stop",
+                  content: [{ type: "text", text: "scheduled after restart" }],
+                  model: "pico/schedule",
+                  timestamp: 0,
+                },
+              },
+            },
+            { chatId, event: { type: "run-finished", outcome: "completed" } },
+          ];
+          const eventRouter = EventRouter.of({
+            open: (filter) =>
+              Effect.sync(() => {
+                assert.isTrue(envelopes.every(filter));
+                return {
+                  events: Stream.fromIterable(envelopes),
+                  setFilter: () => Effect.void,
+                };
+              }),
+            drain: () => Deferred.await(delivered),
+          });
+          const scope = yield* Scope.Scope;
+          const dispatch = DiscordOutput.make(
+            {
+              send: (threadId, output) =>
+                Effect.sync(() => {
+                  sent.push({ threadId, content: output.content });
+                  return 1n;
+                }),
+              edit: () => Effect.void,
+              renameThread: () => Effect.void,
+              triggerTyping: () => Effect.void,
+            },
+            scope,
+            { showToolCalls: false, showThinking: false },
+          );
+          yield* pumpOutput(eventRouter, resolveThreadId, (threadId, envelope) =>
+            dispatch(threadId, envelope).pipe(
+              Effect.tap(() =>
+                envelope.event.type === "run-finished"
+                  ? Deferred.succeed(delivered, undefined)
+                  : Effect.void,
+              ),
             ),
-          ),
-        );
-        yield* eventRouter.drain();
+          );
+          yield* eventRouter.drain();
 
-        assert.deepStrictEqual(sent, [{ threadId: 20n, content: "scheduled after restart" }]);
-        assert.strictEqual(bindingLookups, 2);
-      }),
-    ),
+          assert.deepStrictEqual(sent, [{ threadId: 20n, content: "scheduled after restart" }]);
+          assert.strictEqual(bindingLookups, 2);
+          assert.strictEqual(channelReads, 0);
+          assert.strictEqual(observations, 0);
+          const handleMessage = handlerFor(bot);
+          handleMessage(message({ channelId: 20n }));
+          yield* Effect.promise(() => observationFailure.promise);
+          assert.deepStrictEqual(admittedGuildIds, []);
+          assert.deepStrictEqual(
+            Option.getOrThrow(yield* workspaces.findById(workspaceId)),
+            legacyWorkspace,
+          );
+
+          failObservation = false;
+          handleMessage(message({ channelId: 20n, id: 12n }));
+          yield* Deferred.await(firstInput);
+          assert.deepStrictEqual(admittedGuildIds, ["1"]);
+          assert.deepStrictEqual(Option.getOrThrow(yield* workspaces.findById(workspaceId)), {
+            ...legacyWorkspace,
+            binding: { ...legacyWorkspace.binding, guildId: "1" },
+          });
+          handleMessage(message({ channelId: 20n, id: 13n }));
+          yield* Deferred.await(secondInput);
+          assert.deepStrictEqual(admittedGuildIds, ["1", "1"]);
+          assert.strictEqual(observations, 2);
+          assert.strictEqual(inputLookups, 2);
+          assert.strictEqual(channelReads, 2);
+
+          handleMessage(message({ channelId: 21n }));
+          yield* Deferred.await(unknownLookup);
+          assert.strictEqual(observations, 2);
+          assert.isTrue(
+            Option.isNone(
+              yield* workspaces.findByBinding({
+                platform: "discord",
+                externalId: "30",
+              }),
+            ),
+          );
+
+          const commandWorkspaceId = Workspace.WorkspaceId.make(
+            "018f47a0-0000-7000-8000-000000000004",
+          );
+          yield* workspaces.create({
+            ...legacyWorkspace,
+            id: commandWorkspaceId,
+            binding: { platform: "discord", externalId: "30" },
+          });
+          yield* chats.create({
+            id: failingChatId,
+            workspaceId: commandWorkspaceId,
+            cwd: defaultCwd,
+            externalId: "21",
+            createdAt: 0,
+          });
+          const commandEdited = Promise.withResolvers<void>();
+          interactionHandlerFor(bot)(
+            interaction({
+              channelId: 21n,
+              data: { name: "context" },
+              edit: async () => commandEdited.resolve(),
+            }),
+          );
+          yield* Effect.promise(() => commandEdited.promise);
+          assert.deepStrictEqual(commandGuildIds, ["1"]);
+          assert.strictEqual(observations, 3);
+        }),
+      ).pipe(Effect.provide(Layer.merge(BunFileSystem.layer, BunPath.layer))),
   );
 
   it.effect("aborts an active send before its lock releases and preserves queued input", () =>
@@ -328,7 +483,7 @@ describe("discord input", () => {
           askBtw: () => Effect.die("unexpected side question"),
           listWorkspaces: () => Effect.die("unexpected workspace list"),
           createWorkspace: () => Effect.die("unexpected workspace creation"),
-          getOrCreateWorkspaceByBinding: () => Effect.die("unexpected workspace creation"),
+          getOrCreateWorkspaceByBinding: () => Effect.succeed(boundWorkspace),
           bindWorkspace: () => Effect.die("unexpected workspace binding"),
           listChats: () => Effect.die("unexpected chat list"),
           createChat: () => Effect.die("unexpected chat creation"),
@@ -472,7 +627,7 @@ describe("discord input", () => {
           askBtw: () => Effect.die("unexpected side question"),
           listWorkspaces: () => Effect.die("unexpected workspace list"),
           createWorkspace: () => Effect.die("unexpected explicit workspace creation"),
-          getOrCreateWorkspaceByBinding: () => Effect.die("unexpected workspace creation"),
+          getOrCreateWorkspaceByBinding: () => Effect.succeed(boundWorkspace),
           bindWorkspace: () => Effect.die("unexpected workspace binding"),
           listChats: () => Effect.die("unexpected chat list"),
           createChat: () => Effect.die("unexpected chat creation"),
@@ -570,7 +725,7 @@ describe("discord input", () => {
           askBtw: () => Effect.die("unexpected side question"),
           listWorkspaces: () => Effect.die("unexpected workspace list"),
           createWorkspace: () => Effect.die("unexpected explicit workspace creation"),
-          getOrCreateWorkspaceByBinding: () => Effect.die("unexpected workspace creation"),
+          getOrCreateWorkspaceByBinding: () => Effect.succeed(boundWorkspace),
           bindWorkspace: () => Effect.die("unexpected workspace binding"),
           listChats: () => Effect.die("unexpected chat list"),
           createChat: () => Effect.die("unexpected chat creation"),
@@ -669,7 +824,7 @@ describe("discord input", () => {
           askBtw: () => Effect.die("unexpected side question"),
           listWorkspaces: () => Effect.die("unexpected workspace list"),
           createWorkspace: () => Effect.die("unexpected explicit workspace creation"),
-          getOrCreateWorkspaceByBinding: () => Effect.die("unexpected workspace creation"),
+          getOrCreateWorkspaceByBinding: () => Effect.succeed(boundWorkspace),
           bindWorkspace: () => Effect.die("unexpected workspace binding"),
           listChats: () => Effect.die("unexpected chat list"),
           createChat: () => Effect.die("unexpected chat creation"),
@@ -903,7 +1058,7 @@ describe("discord input", () => {
           askBtw: () => Effect.die("unexpected side question"),
           listWorkspaces: () => Effect.die("unexpected workspace list"),
           createWorkspace: () => Effect.die("unexpected explicit workspace creation"),
-          getOrCreateWorkspaceByBinding: () => Effect.die("unexpected workspace creation"),
+          getOrCreateWorkspaceByBinding: () => Effect.succeed(workspace),
           bindWorkspace: () =>
             Effect.gen(function* () {
               yield* Deferred.succeed(bindStarted, undefined);
@@ -1378,7 +1533,7 @@ describe("discord input", () => {
           askBtw: () => Effect.die("unexpected side question"),
           listWorkspaces: () => Effect.die("unexpected workspace list"),
           createWorkspace: () => Effect.die("unexpected workspace creation"),
-          getOrCreateWorkspaceByBinding: () => Effect.die("unexpected workspace creation"),
+          getOrCreateWorkspaceByBinding: () => Effect.succeed(boundWorkspace),
           bindWorkspace: () => Effect.die("unexpected workspace binding"),
           listChats: () => Effect.die("unexpected chat list"),
           createChat: () => Effect.die("unexpected chat creation"),
@@ -1512,7 +1667,7 @@ describe("discord input", () => {
           askBtw: () => Effect.die("unexpected side question"),
           listWorkspaces: () => Effect.die("unexpected workspace list"),
           createWorkspace: () => Effect.die("unexpected workspace creation"),
-          getOrCreateWorkspaceByBinding: () => Effect.die("unexpected workspace creation"),
+          getOrCreateWorkspaceByBinding: () => Effect.succeed(boundWorkspace),
           bindWorkspace: () => Effect.die("unexpected workspace binding"),
           listChats: () => Effect.die("unexpected chat list"),
           createChat: () => Effect.die("unexpected chat creation"),

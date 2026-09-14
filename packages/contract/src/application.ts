@@ -75,7 +75,7 @@ export class Application extends Context.Service<
       input: CreateWorkspace,
     ) => Effect.Effect<Workspace, ApplicationError>;
 
-    /** Platform adapters call this when lazily creating a workspace for incoming input. */
+    /** Platform adapters call this to observe binding metadata without replacing existing configuration. */
     readonly getOrCreateWorkspaceByBinding: (
       input: Omit<CreateWorkspace, "binding"> & { readonly binding: WorkspaceBinding },
     ) => Effect.Effect<Workspace, ApplicationError>;

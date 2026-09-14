@@ -5,6 +5,7 @@ import { ChatRepository } from "@pico/contract/chat-repository";
 import { ChatSessionContext } from "@pico/contract/chat-session-context";
 import { AgentError } from "@pico/contract/errors";
 import type { InstructionsReader, InstructionsScope } from "@pico/contract/instructions";
+import type { ReplyTarget } from "@pico/contract/reply-target";
 import type * as Workspace from "@pico/contract/workspace-model";
 import { WorkspaceRepository } from "@pico/contract/workspace-repository";
 import * as Effect from "effect/Effect";
@@ -77,10 +78,22 @@ const resolve = Effect.fn("ChatSessionContext.resolve")(function* (
   const instructionsText = yield* instructions(scope).pipe(
     Effect.mapError((cause) => new AgentError({ message: cause.message })),
   );
-  const basePrompt =
-    Option.isSome(bot) && platform === null
-      ? personaPrompt
-      : `${personaPrompt}\n\n${platformPrompts[platform ?? "web"]}`;
+  const identity = JSON.stringify({
+    workspaceId: chat.workspaceId,
+    chatId: chat.id,
+    ...(binding?.platform === "discord"
+      ? {
+          discord: {
+            channelId: binding.externalId,
+            ...(chat.externalId === null ? {} : { threadId: chat.externalId }),
+            ...(binding.guildId === undefined ? {} : { guildId: binding.guildId }),
+          },
+        }
+      : {}),
+  });
+  const platformPrompt =
+    Option.isSome(bot) && platform === null ? "" : `\n\n${platformPrompts[platform ?? "web"]}`;
+  const basePrompt = `${personaPrompt}${platformPrompt}\n\nChat context\n${identity}`;
 
   return {
     chat,
@@ -89,8 +102,17 @@ const resolve = Effect.fn("ChatSessionContext.resolve")(function* (
       instructionsText.length === 0
         ? basePrompt
         : `${basePrompt}\n\n${instructionsGuidance}\n\n${instructionsText}`,
+    formatTurnContext:
+      Option.isSome(bot) && platform === "discord" ? formatDiscordTurnContext : null,
   };
 });
+
+const formatDiscordTurnContext = (target: ReplyTarget | undefined) =>
+  target?.platform === "discord"
+    ? `Current captured Discord reply context\n${JSON.stringify({
+        discord: { replyChannelId: target.conversationId },
+      })}`
+    : undefined;
 
 const repositoryError = (message: string) => (cause: { readonly message: string }) =>
   new AgentError({ message: `${message}: ${cause.message}` });

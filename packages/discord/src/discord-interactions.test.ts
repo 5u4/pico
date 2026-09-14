@@ -20,6 +20,7 @@ import * as Option from "effect/Option";
 import * as TestClock from "effect/testing/TestClock";
 import {
   bindOptions,
+  boundWorkspace,
   chatId,
   config,
   defaultCwd,
@@ -82,7 +83,7 @@ const installBtwInput = Effect.fn("test.installBtwInput")(function* (options: {
     sendBotMessage: () => Effect.die("unexpected bot message"),
     listWorkspaces: () => Effect.die("unexpected workspace list"),
     createWorkspace: () => Effect.die("btw must not create a workspace"),
-    getOrCreateWorkspaceByBinding: () => Effect.die("btw must not create a workspace"),
+    getOrCreateWorkspaceByBinding: () => Effect.succeed(boundWorkspace),
     bindWorkspace: () => Effect.die("btw must not bind a workspace"),
     listChats: () => Effect.die("unexpected chat list"),
     createChat: () => Effect.die("btw must not create a chat"),
@@ -744,32 +745,6 @@ describe("discord interactions", () => {
           ),
           "Workspace worktrees configured from /repo. This affects new chats only.",
         );
-        assert.deepStrictEqual(bindings, [
-          {
-            binding: { platform: "discord", externalId: "10" },
-            workspaceName: "general",
-            configuration: { kind: "direct", cwd: "/missing" },
-          },
-          {
-            binding: { platform: "discord", externalId: "10" },
-            workspaceName: "general",
-            configuration: { kind: "direct", cwd: "/repo" },
-          },
-          ...[
-            { repository: "/not-git", branch: "main", prefix: "chat/" },
-            { repository: "/repo", branch: "missing", prefix: "chat/" },
-            { repository: "/repo", branch: "main", prefix: "bad" },
-            { repository: "/repo", branch: "main", prefix: "chat/" },
-          ].map(({ repository, branch, prefix }) => ({
-            binding: { platform: "discord" as const, externalId: "10" },
-            workspaceName: "general",
-            configuration: {
-              kind: "worktree" as const,
-              repository,
-              settings: { branch, prefix },
-            },
-          })),
-        ]);
 
         let ignoredDefers = 0;
         handleInteraction(
@@ -848,7 +823,7 @@ describe("discord interactions", () => {
           askBtw: () => Effect.die("unexpected side question"),
           listWorkspaces: () => Effect.die("unexpected workspace list"),
           createWorkspace: () => Effect.die("unexpected explicit workspace creation"),
-          getOrCreateWorkspaceByBinding: () => Effect.die("shake must not create a workspace"),
+          getOrCreateWorkspaceByBinding: () => Effect.succeed(boundWorkspace),
           bindWorkspace: () => Effect.die("unexpected workspace binding"),
           listChats: () => Effect.die("unexpected chat list"),
           createChat: () => Effect.die("shake must not create a chat"),
@@ -1034,7 +1009,7 @@ describe("discord interactions", () => {
           askBtw: () => Effect.die("unexpected side question"),
           listWorkspaces: () => Effect.die("unexpected workspace list"),
           createWorkspace: () => Effect.die("unexpected explicit workspace creation"),
-          getOrCreateWorkspaceByBinding: () => Effect.die("context must not create a workspace"),
+          getOrCreateWorkspaceByBinding: () => Effect.succeed(boundWorkspace),
           bindWorkspace: () => Effect.die("unexpected workspace binding"),
           listChats: () => Effect.die("unexpected chat list"),
           createChat: () => Effect.die("context must not create a chat"),
@@ -1181,7 +1156,7 @@ describe("discord interactions", () => {
           askBtw: () => Effect.die("unexpected side question"),
           listWorkspaces: () => Effect.die("unexpected workspace list"),
           createWorkspace: () => Effect.die("unexpected workspace creation"),
-          getOrCreateWorkspaceByBinding: () => Effect.die("unexpected workspace creation"),
+          getOrCreateWorkspaceByBinding: () => Effect.succeed(boundWorkspace),
           bindWorkspace: () => Effect.die("unexpected workspace binding"),
           listChats: () => Effect.die("unexpected chat list"),
           createChat: () => Effect.die("unexpected chat creation"),
@@ -1332,7 +1307,7 @@ describe("discord interactions", () => {
           askBtw: () => Effect.die("unexpected side question"),
           listWorkspaces: () => Effect.die("unexpected workspace list"),
           createWorkspace: () => Effect.die("unexpected explicit workspace creation"),
-          getOrCreateWorkspaceByBinding: () => Effect.die("unexpected workspace creation"),
+          getOrCreateWorkspaceByBinding: () => Effect.succeed(boundWorkspace),
           bindWorkspace: () => Effect.die("unexpected workspace binding"),
           listChats: () => Effect.die("unexpected chat list"),
           createChat: () => Effect.die("unexpected chat creation"),

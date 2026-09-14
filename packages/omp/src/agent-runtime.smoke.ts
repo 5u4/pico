@@ -60,6 +60,7 @@ const smoke = Effect.fn("AgentRuntime.smoke")(function* () {
           chat: resolvedChat,
           platform: null,
           appendSystemPrompt: "You are pico, a personal agent assistant.",
+          formatTurnContext: null,
         }),
     }),
   );

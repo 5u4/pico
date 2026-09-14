@@ -2,7 +2,7 @@ import * as BunFileSystem from "@effect/platform-bun/BunFileSystem";
 import * as BunPath from "@effect/platform-bun/BunPath";
 import { assert, describe, it } from "@effect/vitest";
 import * as Instructions from "@pico/config/instructions";
-import { BotSessions } from "@pico/contract/bot-session";
+import { BotSessions, PhysicalSessionId } from "@pico/contract/bot-session";
 import * as Chat from "@pico/contract/chat-model";
 import { ChatRepository } from "@pico/contract/chat-repository";
 import { ChatSessionContext } from "@pico/contract/chat-session-context";
@@ -130,6 +130,12 @@ const resolve = Effect.fn("ChatSessionContextTest.resolve")(function* (
   );
 });
 
+const identityFrom = (prompt: string): unknown => {
+  const identity = prompt.match(/\n(\{[^\n]+\})/)?.[1];
+  if (identity === undefined) throw new Error("Missing chat identity");
+  return JSON.parse(identity);
+};
+
 describe("ChatSessionContext", () => {
   it.effect(
     "uses persisted parent-channel instructions for direct and threadless scheduled chats",
@@ -150,26 +156,41 @@ describe("ChatSessionContext", () => {
           const chats = yield* ChatRepository;
           const resolver = yield* ChatSessionContext;
           yield* workspaces.create(
-            makeWorkspace(workspaceId, { platform: "discord", externalId: "456" }),
+            makeWorkspace(workspaceId, {
+              platform: "discord",
+              externalId: "456",
+              guildId: "9007199254740993",
+            }),
           );
           yield* chats.create(makeChat(chatId, workspaceId, "789"));
           yield* chats.create(makeChat(secondChatId, workspaceId, null));
           const direct = yield* resolver.resolve(chatId);
           const scheduled = yield* resolver.resolve(secondChatId);
           assert.strictEqual(direct.platform, "discord");
-          assert.strictEqual(scheduled.appendSystemPrompt, direct.appendSystemPrompt);
-          assert.include(direct.appendSystemPrompt, "GLOBAL_CONVENTION");
-          assert.include(direct.appendSystemPrompt, "BOT_CONVENTION");
-          assert.include(direct.appendSystemPrompt, "CHANNEL_CONVENTION");
-          assert.notInclude(direct.appendSystemPrompt, "WRONG_THREAD_CONVENTION");
-          assert.isBelow(
-            direct.appendSystemPrompt.indexOf("GLOBAL_CONVENTION"),
-            direct.appendSystemPrompt.indexOf("BOT_CONVENTION"),
-          );
-          assert.isBelow(
-            direct.appendSystemPrompt.indexOf("BOT_CONVENTION"),
-            direct.appendSystemPrompt.indexOf("CHANNEL_CONVENTION"),
-          );
+          assert.deepStrictEqual(identityFrom(direct.appendSystemPrompt), {
+            workspaceId,
+            chatId,
+            discord: { channelId: "456", threadId: "789", guildId: "9007199254740993" },
+          });
+          assert.deepStrictEqual(identityFrom(scheduled.appendSystemPrompt), {
+            workspaceId,
+            chatId: secondChatId,
+            discord: { channelId: "456", guildId: "9007199254740993" },
+          });
+          for (const resolved of [direct, scheduled]) {
+            assert.include(resolved.appendSystemPrompt, "GLOBAL_CONVENTION");
+            assert.include(resolved.appendSystemPrompt, "BOT_CONVENTION");
+            assert.include(resolved.appendSystemPrompt, "CHANNEL_CONVENTION");
+            assert.notInclude(resolved.appendSystemPrompt, "WRONG_THREAD_CONVENTION");
+            assert.isBelow(
+              resolved.appendSystemPrompt.indexOf("GLOBAL_CONVENTION"),
+              resolved.appendSystemPrompt.indexOf("BOT_CONVENTION"),
+            );
+            assert.isBelow(
+              resolved.appendSystemPrompt.indexOf("BOT_CONVENTION"),
+              resolved.appendSystemPrompt.indexOf("CHANNEL_CONVENTION"),
+            );
+          }
 
           yield* put("discord/channels/456/instructions.md", "UPDATED_CHANNEL_CONVENTION");
           assert.include(
@@ -214,6 +235,7 @@ describe("ChatSessionContext", () => {
           assert.include(global.appendSystemPrompt, "GLOBAL_ONLY");
           assert.notInclude(global.appendSystemPrompt, "CHANNEL_ONLY");
           assert.notInclude(global.appendSystemPrompt, "AUTHENTICATED_BOT");
+          assert.deepStrictEqual(identityFrom(global.appendSystemPrompt), { workspaceId, chatId });
           const pending = yield* resolver.resolve(secondChatId).pipe(Effect.flip);
           assert.instanceOf(pending, AgentError);
           assert.include(pending.message, "not authenticated");
@@ -247,6 +269,11 @@ describe("ChatSessionContext", () => {
         assert.include(resolved.appendSystemPrompt, "GLOBAL_WITHOUT_BOT");
         assert.include(resolved.appendSystemPrompt, "BOUND_CHANNEL");
         assert.notInclude(resolved.appendSystemPrompt, "UNAVAILABLE_BOT");
+        assert.deepStrictEqual(identityFrom(resolved.appendSystemPrompt), {
+          workspaceId,
+          chatId,
+          discord: { channelId: "456" },
+        });
 
         yield* fileSystem.remove(channelFile);
         yield* fileSystem.makeDirectory(channelFile);
@@ -255,6 +282,52 @@ describe("ChatSessionContext", () => {
         assert.instanceOf(error, AgentError);
         assert.notInclude(error.message, channelFile);
         assert.include(error.message, cause.reason._tag);
+      }).pipe(Effect.provide(context));
+    }).pipe(Effect.provide(platformLayer)),
+  );
+
+  it.effect("keeps shared bot reply destinations out of durable chat context", () =>
+    Effect.gen(function* () {
+      const { instructions, repositories, fileSystem, path, root } = yield* fixture;
+      const botRoot = AbsolutePath.make(path.join(root, "bot"));
+      yield* fileSystem.makeDirectory(botRoot);
+      yield* fileSystem.writeFileString(path.join(botRoot, "instructions.md"), "SHARED_BOT_RULE");
+      const context = SessionContext.layer({ instructions, discordBotId: null }).pipe(
+        Layer.provideMerge(repositories),
+      );
+      yield* Effect.gen(function* () {
+        const bots = yield* BotSessions;
+        const resolver = yield* ChatSessionContext;
+        yield* bots.createConversation({
+          botRoot,
+          platform: "discord",
+          workspaceId,
+          chatId,
+          cwd,
+          createdAt: 1,
+          journal: {
+            id: PhysicalSessionId.make("physical-journal"),
+            file: AbsolutePath.make(path.join(botRoot, "sessions", "physical-journal.jsonl")),
+          },
+        });
+        const resolved = yield* resolver.resolve(chatId);
+        assert.deepStrictEqual(identityFrom(resolved.appendSystemPrompt), { workspaceId, chatId });
+        assert.include(resolved.appendSystemPrompt, "SHARED_BOT_RULE");
+        const format = resolved.formatTurnContext;
+        if (format === null) return yield* Effect.die("Missing shared bot turn context");
+        assert.isUndefined(format(undefined));
+        const first = format({ platform: "discord", conversationId: "101", messageId: "201" });
+        const second = format({ platform: "discord", conversationId: "102", messageId: "202" });
+        if (first === undefined || second === undefined) {
+          return yield* Effect.die("Missing captured reply context");
+        }
+        assert.deepStrictEqual(identityFrom(first), { discord: { replyChannelId: "101" } });
+        assert.deepStrictEqual(identityFrom(second), { discord: { replyChannelId: "102" } });
+        assert.isUndefined(format(undefined));
+        assert.deepStrictEqual(identityFrom((yield* resolver.resolve(chatId)).appendSystemPrompt), {
+          workspaceId,
+          chatId,
+        });
       }).pipe(Effect.provide(context));
     }).pipe(Effect.provide(platformLayer)),
   );

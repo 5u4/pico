@@ -17,7 +17,7 @@ export class WorkspaceRepository extends Context.Service<
 
     readonly create: (workspace: Workspace) => Effect.Effect<Workspace, PersistenceError>;
 
-    /** Application calls this when a platform binding may already have a workspace. */
+    /** Application calls this to merge observed binding metadata while preserving existing configuration. */
     readonly getOrCreateByBinding: (
       workspace: Omit<Workspace, "binding"> & { readonly binding: WorkspaceBinding },
     ) => Effect.Effect<Workspace, PersistenceError>;

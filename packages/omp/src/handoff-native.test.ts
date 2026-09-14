@@ -239,7 +239,12 @@ it("keeps generated handoffs below system and developer roles across rotation, r
             .pipe(
               Effect.provideService(ChatSessionContext, {
                 resolve: () =>
-                  Effect.succeed({ chat, platform: null, appendSystemPrompt: botPrompt }),
+                  Effect.succeed({
+                    chat,
+                    platform: null,
+                    appendSystemPrompt: botPrompt,
+                    formatTurnContext: null,
+                  }),
               }),
               Effect.provideService(BranchNaming, {
                 handle: () => {

@@ -12,6 +12,7 @@ export type WorkspacePlatform = typeof WorkspacePlatform.Type;
 export const WorkspaceBinding = Schema.Struct({
   platform: WorkspacePlatform,
   externalId: Schema.NonEmptyString,
+  guildId: Schema.optional(Schema.NonEmptyString),
 });
 export type WorkspaceBinding = typeof WorkspaceBinding.Type;
 

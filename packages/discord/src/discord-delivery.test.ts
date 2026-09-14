@@ -60,7 +60,15 @@ const installInput = Effect.fn("test.installDeliveryInput")(function* (options: 
     askBtw: () => Effect.die("unexpected side question"),
     listWorkspaces: () => Effect.die("unexpected workspace list"),
     createWorkspace: () => Effect.die("unexpected explicit workspace creation"),
-    getOrCreateWorkspaceByBinding: () => Effect.die("unexpected workspace creation"),
+    getOrCreateWorkspaceByBinding: () =>
+      Effect.succeed({
+        id: workspaceId,
+        name: "general",
+        binding: { platform: "discord", externalId: "10", guildId: "1" },
+        defaultCwd: cwd,
+        worktree: null,
+        createdAt: 0,
+      }),
     bindWorkspace: () => Effect.die("unexpected workspace binding"),
     listChats: () => Effect.die("unexpected chat list"),
     createChat: () => Effect.succeed(chat),
