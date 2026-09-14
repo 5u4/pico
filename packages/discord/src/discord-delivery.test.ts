@@ -99,6 +99,44 @@ const installInput = Effect.fn("test.installDeliveryInput")(function* (options: 
 });
 
 describe("Discord message delivery", () => {
+  it.effect("distinguishes chat setup, admission, and completion failures in thread replies", () =>
+    Effect.gen(function* () {
+      const failure = new ApplicationError({
+        reason: "operation",
+        message: "private-stage-failure",
+      });
+      const stages = ["creation", "admission", "completion"] as const;
+      const replies = yield* Effect.forEach(stages, (stage) =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const replied = Promise.withResolvers<string>();
+            const handle = yield* installInput({
+              createChat: () =>
+                stage === "creation" ? Effect.fail(failure) : Effect.succeed(chat),
+              sendMessage: () =>
+                stage === "admission"
+                  ? Effect.fail(failure)
+                  : Effect.succeed({ kind: "started", completed: Effect.fail(failure) }),
+              reply: async (_channelId, options) => {
+                replied.resolve(options.content);
+              },
+              reactions: {
+                addReaction: async () => undefined,
+                deleteOwnReaction: async () => undefined,
+              },
+            }).pipe(Effect.provide(Logger.layer([])));
+
+            handle(message(101n, 10n));
+            const content = yield* Effect.promise(() => replied.promise);
+            assert.notInclude(content, failure.message);
+            return content;
+          }),
+        ),
+      );
+      assert.strictEqual(new Set(replies).size, stages.length);
+    }),
+  );
+
   for (const reason of ["operation", "invalid-state"] as const) {
     it.effect(`notifies the new thread when chat creation fails with ${reason}`, () =>
       Effect.scoped(
