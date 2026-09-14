@@ -92,6 +92,7 @@
   - autocomplete reads OMP's authenticated, enabled model catalogue without opening a session or provisioning a DM chat. It bypasses turn queues and returns no choices if discovery exceeds two seconds.
   - Discord owns picker formatting and selection parsing, application resolves the conversation, and OMP revalidates the choice before calling `setModelTemporary`. Confirmation is private.
   - the selection belongs to the current logical chat, including the bot's shared DM chat, not OMP's global or project model defaults. Native journal entries preserve it through reopen and bot rotation without a second preference store.
+  - if the model changes but journal flush fails, the result is `persistence-unconfirmed`, not a rejected switch. Discord confirms the live model, warns that saving was not confirmed, and logs a safe warning. A failed flush does not prove the write was lost or roll back the live model.
   - a busy thread rejects switching rather than changing an in-flight run. DM switches follow the existing whole-turn queue; autocomplete does not wait for that queue.
 - when creating the chat, write workspace.default_cwd to chat.cwd
   - when workspace.default_cwd is changed, chat.cwd remains the same

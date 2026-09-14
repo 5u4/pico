@@ -18,6 +18,11 @@ export interface ModelInfo extends ModelRef {
   readonly name: string;
 }
 
+export interface ModelSwitchResult {
+  readonly kind: "persisted" | "persistence-unconfirmed";
+  readonly model: ModelInfo;
+}
+
 export type ModelTarget =
   | { readonly kind: "chat"; readonly chatId: ChatId }
   | { readonly kind: "bot"; readonly bot: BotDescriptor };
@@ -120,8 +125,11 @@ export class AgentRuntime extends Context.Service<
       target: ModelTarget,
     ) => Effect.Effect<readonly ModelInfo[], AgentError>;
 
-    /** Application calls this to persist a temporary model choice in one chat. */
-    readonly switchModel: (chatId: ChatId, model: ModelRef) => Effect.Effect<ModelInfo, AgentError>;
+    /** Application calls this to switch one chat and report whether persistence was confirmed. */
+    readonly switchModel: (
+      chatId: ChatId,
+      model: ModelRef,
+    ) => Effect.Effect<ModelSwitchResult, AgentError>;
 
     readonly shake: (chatId: ChatId, mode: ShakeMode) => Effect.Effect<ShakeResult, AgentError>;
   }

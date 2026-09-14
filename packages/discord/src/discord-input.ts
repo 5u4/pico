@@ -8,11 +8,7 @@ import type {
 } from "@pico/contract/agent-runtime";
 import { Application, type CloseChatResult } from "@pico/contract/application";
 import type * as Chat from "@pico/contract/chat-model";
-import {
-  AgentError,
-  type ApplicationError,
-  type WorkspaceBindingInvalid,
-} from "@pico/contract/errors";
+import { AgentError, ApplicationError, type WorkspaceBindingInvalid } from "@pico/contract/errors";
 import type { AbsolutePath } from "@pico/contract/path";
 import type * as Workspace from "@pico/contract/workspace-model";
 import {
@@ -784,7 +780,27 @@ export const install = Effect.fn("DiscordInput.install")(function* <
       provider: model.provider,
       id: model.id,
     });
-    return `Switched this chat to ${DiscordModel.label(selected)}.`;
+    const confirmation = `Switched this chat to ${DiscordModel.label(selected.model)}.`;
+    switch (selected.kind) {
+      case "persisted":
+        return confirmation;
+      case "persistence-unconfirmed":
+        yield* reportFailure(
+          "persist-model-selection",
+          Cause.fail(
+            new ApplicationError({
+              reason: "operation",
+              message: "Model selection persistence could not be confirmed",
+            }),
+          ),
+          "warning",
+        );
+        return `${confirmation} Saving this choice could not be confirmed. A restart may lose it.`;
+      default: {
+        const exhaustive: never = selected.kind;
+        return exhaustive;
+      }
+    }
   });
 
   const handleBtw = Effect.fn("Discord.handleBtw")(function* (

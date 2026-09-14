@@ -449,7 +449,10 @@ describe("native SessionPool ownership", () => {
           Effect.scoped(
             Effect.gen(function* () {
               const pool = yield* makePool(session);
-              yield* pool.switchModel(chatId, chosen);
+              expect(yield* pool.switchModel(chatId, chosen)).toEqual({
+                kind: "persisted",
+                model: { provider: chosen.provider, id: chosen.id, name: chosen.name },
+              });
               expect(session.model?.id).toBe(chosen.id);
               expect(other.model?.id).toBe("gpt-4.1");
               const persisted = yield* Effect.promise(() => native.loadEntriesFromFile(file));
@@ -469,32 +472,47 @@ describe("native SessionPool ownership", () => {
     });
   });
 
-  it("reports an applied model when flushing its selection fails", async () => {
-    const turn = providerTurn("Continue with the selected model");
-    await withSession([turn], (session) =>
-      Effect.runPromise(
-        Effect.scoped(
-          Effect.gen(function* () {
-            const pool = yield* makePool(session);
-            vi.spyOn(session.sessionManager, "flush").mockRejectedValueOnce(
-              new Error("private-journal-path"),
-            );
-            const outcome = yield* pool
-              .switchModel(chatId, { provider: "openai", id: "gpt-4.1-mini" })
-              .pipe(Effect.exit);
-            expect(session.model?.id).toBe("gpt-4.1-mini");
-            const delivery = yield* pool.send(chatId, prompt("continue after the switch"));
-            yield* Effect.promise(() => turn.entered.promise);
-            turn.release.resolve();
-            if (delivery.kind !== "handled") yield* delivery.completed;
-            const reply = session.messages.findLast((message) => message.role === "assistant");
-            expect(reply?.role === "assistant" ? reply.model : undefined).toBe("gpt-4.1-mini");
-            expect(Exit.isSuccess(outcome)).toBe(true);
-          }).pipe(Effect.provide(platform)),
+  it.each(["Error", "AbortError"])(
+    "reports an applied model when flushing its selection fails with %s",
+    async (errorName) => {
+      const turn = providerTurn("Continue with the selected model");
+      await withSession([turn], (session) =>
+        Effect.runPromise(
+          Effect.scoped(
+            Effect.gen(function* () {
+              const pool = yield* makePool(session);
+              const chosen = { provider: "openai", id: "gpt-4.1-mini" };
+              const file = session.sessionManager.getSessionFile();
+              if (file === undefined) throw new Error("Expected native model selection journal");
+              const failure = new Error("private-journal-path");
+              failure.name = errorName;
+              vi.spyOn(session.sessionManager, "flush").mockRejectedValueOnce(failure);
+              const outcome = yield* pool.switchModel(chatId, chosen);
+              expect(outcome).toMatchObject({
+                kind: "persistence-unconfirmed",
+                model: chosen,
+              });
+              const delivery = yield* pool.send(chatId, prompt("continue after the switch"));
+              yield* Effect.promise(() => turn.entered.promise);
+              turn.release.resolve();
+              if (delivery.kind !== "handled") yield* delivery.completed;
+              const reply = session.messages.findLast((message) => message.role === "assistant");
+              expect(reply?.role === "assistant" ? reply.model : undefined).toBe(chosen.id);
+              expect(yield* pool.switchModel(chatId, chosen)).toEqual({
+                kind: "persisted",
+                model: outcome.model,
+              });
+              const entries = yield* Effect.promise(() => native.loadEntriesFromFile(file));
+              expect(
+                native.buildSessionContext(entries.filter((entry) => entry.type !== "session"))
+                  .models.temporary,
+              ).toBe(`${chosen.provider}/${chosen.id}`);
+            }).pipe(Effect.provide(platform)),
+          ),
         ),
-      ),
-    );
-  });
+      );
+    },
+  );
 
   it("rejects busy and stale model choices without changing the running model", async () => {
     const turn = providerTurn("Complete with the original model");

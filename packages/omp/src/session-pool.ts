@@ -8,6 +8,7 @@ import type {
   MessageDelivery,
   ModelInfo,
   ModelRef,
+  ModelSwitchResult,
   ShakeMode,
   ShakeResult,
 } from "@pico/contract/agent-runtime";
@@ -90,7 +91,7 @@ export interface SessionPool {
   readonly switchModel: (
     chatId: Chat.ChatId,
     model: ModelRef,
-  ) => Effect.Effect<ModelInfo, AgentError>;
+  ) => Effect.Effect<ModelSwitchResult, AgentError>;
   readonly sendCaptured: (
     chatId: Chat.ChatId,
     runId: ScheduleRunId,
@@ -1152,8 +1153,14 @@ export const makeSessionPool = Effect.fn("SessionPool.make")(function* (
             const selected = yield* boundary("Failed to switch OMP model", () =>
               entry.switchModel(model),
             );
-            yield* boundary("Failed to persist OMP model selection", entry.flush);
-            return selected;
+            const persisted = yield* Effect.tryPromise({
+              try: entry.flush,
+              catch: () => undefined,
+            }).pipe(Effect.isSuccess);
+            return {
+              kind: persisted ? "persisted" : "persistence-unconfirmed",
+              model: selected,
+            } satisfies ModelSwitchResult;
           }).pipe(Effect.uninterruptible),
         );
       }),

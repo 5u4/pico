@@ -2,7 +2,12 @@ import * as BunCrypto from "@effect/platform-bun/BunCrypto";
 import { assert, describe, it } from "@effect/vitest";
 import type { AgentEvent } from "@pico/contract/agent-event";
 import type { AgentPrompt } from "@pico/contract/agent-message";
-import type { ContextUsage, ModelInfo, ShakeResult } from "@pico/contract/agent-runtime";
+import type {
+  ContextUsage,
+  ModelInfo,
+  ModelSwitchResult,
+  ShakeResult,
+} from "@pico/contract/agent-runtime";
 import { Application } from "@pico/contract/application";
 import type * as Chat from "@pico/contract/chat-model";
 import { ApplicationError } from "@pico/contract/errors";
@@ -12,6 +17,7 @@ import { ApplicationCommandOptionTypes, InteractionTypes } from "discordeno";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
+import * as Logger from "effect/Logger";
 import * as Option from "effect/Option";
 import * as TestClock from "effect/testing/TestClock";
 import * as HttpClient from "effect/unstable/http/HttpClient";
@@ -234,7 +240,7 @@ describe("Discord bot direct messages", () => {
                 );
                 if (model === undefined) return yield* Effect.die("selection was not resolved");
                 selected.push(model);
-                return model;
+                return { kind: "persisted", model } satisfies ModelSwitchResult;
               }),
           });
           const suggestions = yield* modelSuggestions(
@@ -296,7 +302,7 @@ describe("Discord bot direct messages", () => {
             switchModel: () =>
               Effect.sync(() => {
                 activeModel = model.id;
-                return model;
+                return { kind: "persisted", model } satisfies ModelSwitchResult;
               }),
             sendBotMessage: (_id, prompt) =>
               Effect.gen(function* () {
@@ -351,6 +357,46 @@ describe("Discord bot direct messages", () => {
           assert.deepStrictEqual(harness.resolvedRoots, [botRoot, botRoot, botRoot]);
         }),
       ),
+  );
+
+  it.effect("privately confirms a DM switch when saving its selection is unconfirmed", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const model = { provider: "private-provider-selection", id: "dm-model", name: "Chosen" };
+        const logs: Array<ReturnType<typeof Logger.formatStructured.log>> = [];
+        const harness = yield* fixture({
+          sendBotMessage: () => Effect.die("a model command must not prompt"),
+          availableModels: () => Effect.succeed([model]),
+          switchModel: () => Effect.succeed({ kind: "persistence-unconfirmed", model }),
+        }).pipe(
+          Effect.provide(
+            Logger.layer([
+              Logger.make((options) => {
+                logs.push(Logger.formatStructured.log(options));
+              }),
+            ]),
+          ),
+        );
+        const reply = yield* privateCommandReply(
+          harness.bot,
+          directInteraction({
+            data: {
+              name: "switch",
+              options: modelOptions("private-provider-selection/dm-model"),
+            },
+          }),
+        );
+        assert.match(reply, /Switched.*private-provider-selection\/dm-model/);
+        assert.match(reply, /saving.*could not be confirmed/i);
+        assert.match(reply, /restart may lose/i);
+        assert.notInclude(reply, "could not switch");
+        assert.strictEqual(logs.length, 1);
+        assert.strictEqual(logs[0]?.level, "WARN");
+        assert.strictEqual(logs[0]?.annotations.operation, "persist-model-selection");
+        assert.notInclude(JSON.stringify(logs), model.provider);
+        assert.deepStrictEqual(harness.replies, []);
+      }),
+    ),
   );
 
   it.effect("rejects malformed, unknown and ambiguous selections before provisioning a DM", () =>

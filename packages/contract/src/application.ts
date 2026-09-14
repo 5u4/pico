@@ -9,6 +9,7 @@ import type {
   MessageDelivery,
   ModelInfo,
   ModelRef,
+  ModelSwitchResult,
   ModelTarget,
   ShakeMode,
   ShakeResult,
@@ -158,7 +159,7 @@ export class Application extends Context.Service<
     readonly switchModel: (
       chatId: ChatId,
       model: ModelRef,
-    ) => Effect.Effect<ModelInfo, ApplicationError | ChatClosed>;
+    ) => Effect.Effect<ModelSwitchResult, ApplicationError | ChatClosed>;
 
     readonly shake: (
       chatId: ChatId,

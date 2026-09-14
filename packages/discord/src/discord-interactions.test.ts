@@ -1,6 +1,10 @@
 import * as BunCrypto from "@effect/platform-bun/BunCrypto";
 import { assert, describe, it } from "@effect/vitest";
-import type { ContextUsage, MessageDelivery } from "@pico/contract/agent-runtime";
+import type {
+  ContextUsage,
+  MessageDelivery,
+  ModelSwitchResult,
+} from "@pico/contract/agent-runtime";
 import { Application, type BindWorkspace } from "@pico/contract/application";
 import * as Chat from "@pico/contract/chat-model";
 import { ApplicationError, ChatClosed, WorkspaceBindingInvalid } from "@pico/contract/errors";
@@ -145,7 +149,7 @@ describe("discord interactions", () => {
               Effect.sync(() => {
                 if (id !== chatId) throw new Error("wrong chat selected");
                 active = `${model.provider}/${model.id}`;
-                return selected;
+                return { kind: "persisted", model: selected } satisfies ModelSwitchResult;
               }),
             sendMessage: (_id, prompt) =>
               Effect.gen(function* () {
@@ -212,7 +216,7 @@ describe("discord interactions", () => {
             switchModel: () =>
               Effect.sync(() => {
                 switches += 1;
-                return model;
+                return { kind: "persisted", model } satisfies ModelSwitchResult;
               }),
           });
           yield* modelSuggestions(
@@ -253,6 +257,49 @@ describe("discord interactions", () => {
       ),
   );
 
+  it.effect("privately confirms a thread switch when saving its selection is unconfirmed", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const model = {
+          provider: "private-provider-selection",
+          id: "thread-model",
+          name: "Chosen",
+        };
+        const logs: Array<ReturnType<typeof Logger.formatStructured.log>> = [];
+        const bot = yield* installThreadInput({
+          availableModels: () => Effect.succeed([model]),
+          switchModel: () => Effect.succeed({ kind: "persistence-unconfirmed", model }),
+        }).pipe(
+          Effect.provide(
+            Logger.layer([
+              Logger.make((options) => {
+                logs.push(Logger.formatStructured.log(options));
+              }),
+            ]),
+          ),
+        );
+        const reply = yield* privateCommandReply(
+          bot,
+          interaction({
+            channelId: 20n,
+            data: {
+              name: "switch",
+              options: modelOptions("private-provider-selection/thread-model"),
+            },
+          }),
+        );
+        assert.match(reply, /Switched.*private-provider-selection\/thread-model/);
+        assert.match(reply, /saving.*could not be confirmed/i);
+        assert.match(reply, /restart may lose/i);
+        assert.notInclude(reply, "could not switch");
+        assert.strictEqual(logs.length, 1);
+        assert.strictEqual(logs[0]?.level, "WARN");
+        assert.strictEqual(logs[0]?.annotations.operation, "persist-model-selection");
+        assert.notInclude(JSON.stringify(logs), model.provider);
+      }),
+    ),
+  );
+
   it.effect(
     "privately reports rejected and closed thread switches without exposing native failures",
     () =>
@@ -274,6 +321,7 @@ describe("discord interactions", () => {
             data: { name: "switch", options: modelOptions("native/model") },
           });
           const busyReply = yield* privateCommandReply(bot, command);
+          assert.include(busyReply, "could not switch");
           assert.notInclude(busyReply, "secret-provider");
           assert.notInclude(busyReply, "native/model");
           closed = true;
