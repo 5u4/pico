@@ -683,15 +683,10 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
     content: string,
     localOnly?: true,
   ) {
-    yield* serialized(
-      chatId,
-      Effect.gen(function* () {
-        yield* ensureChatOpen(chatId, "Failed to deliver scheduled result");
-        yield* runtime
-          .deliver(chatId, content, localOnly)
-          .pipe(Effect.mapError(failure("Failed to deliver scheduled result")));
-      }),
-    );
+    yield* ensureChatOpen(chatId, "Failed to deliver scheduled result");
+    yield* runtime
+      .deliver(chatId, content, localOnly)
+      .pipe(Effect.mapError(failure("Failed to deliver scheduled result")));
   });
 
   const publishScheduled = Effect.fn("Application.publishScheduled")(function* (
@@ -699,13 +694,10 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
     content: string,
     localOnly?: true,
   ) {
-    yield* serialized(
-      chatId,
-      Effect.gen(function* () {
-        yield* ensureChatOpen(chatId, "Failed to publish scheduled result");
-        yield* runtime.publish(chatId, content, localOnly);
-      }),
-    ).pipe(
+    yield* Effect.gen(function* () {
+      yield* ensureChatOpen(chatId, "Failed to publish scheduled result");
+      yield* runtime.publish(chatId, content, localOnly);
+    }).pipe(
       Effect.mapError((cause) =>
         cause instanceof ChatClosed ? cause : failure("Failed to publish scheduled result")(cause),
       ),
@@ -941,14 +933,19 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
       content: string,
       publication: "publish" | "deliver",
     ) {
-      const chat = yield* resolveScheduledChat(chatId);
-      const adapter = yield* validateWorkspace(yield* getWorkspace(chat.workspaceId), chat);
-      const localOnly = adapter === null ? undefined : true;
-      if (publication === "publish") yield* publishScheduled(chatId, content, localOnly);
-      else yield* deliverScheduled(chatId, content, localOnly);
-      if (adapter !== null && chat.externalId !== null) {
-        yield* adapter.send({ chatId, externalId: chat.externalId, content });
-      }
+      yield* serialized(
+        chatId,
+        Effect.gen(function* () {
+          const chat = yield* resolveScheduledChat(chatId);
+          const adapter = yield* validateWorkspace(yield* getWorkspace(chat.workspaceId), chat);
+          const localOnly = adapter === null ? undefined : true;
+          if (publication === "publish") yield* publishScheduled(chatId, content, localOnly);
+          else yield* deliverScheduled(chatId, content, localOnly);
+          if (adapter !== null && chat.externalId !== null) {
+            yield* adapter.send({ chatId, externalId: chat.externalId, content });
+          }
+        }),
+      );
     }, Effect.mapError(scheduleHostError));
 
     return {
