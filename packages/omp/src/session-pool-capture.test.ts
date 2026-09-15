@@ -242,6 +242,7 @@ describe("session pool capture", () => {
                     type: "message-settled",
                     message: {
                       role: "assistant",
+                      id: Agent.AgentMessageId.make("captured-answer"),
                       status: "completed",
                       stopReason: "stop",
                       content: [{ type: "text", text: "scheduled answer" }],
@@ -276,6 +277,7 @@ describe("session pool capture", () => {
               type: "message-settled",
               message: {
                 role: "assistant",
+                id: Agent.AgentMessageId.make("captured-answer"),
                 status: "completed",
                 stopReason: "stop",
                 content: [{ type: "text", text: "scheduled answer" }],
@@ -606,6 +608,7 @@ describe("session pool capture", () => {
                       type: "message-settled",
                       message: {
                         role: "assistant",
+                        id: Agent.AgentMessageId.make("captured-failure"),
                         status: "failed",
                         stopReason: "error",
                         message: "private provider payload",

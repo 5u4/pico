@@ -1,6 +1,6 @@
 import { assert, describe, it } from "@effect/vitest";
 import type { AgentEvent, AgentEventEnvelope } from "@pico/contract/agent-event";
-import type { AgentAssistantMessage } from "@pico/contract/agent-message";
+import { type AgentAssistantMessage, AgentMessageId } from "@pico/contract/agent-message";
 import * as Chat from "@pico/contract/chat-model";
 import { ScheduleHostError } from "@pico/contract/schedule";
 import * as Deferred from "effect/Deferred";
@@ -34,10 +34,12 @@ const envelope = (chatId: Chat.ChatId, event: AgentEvent): AgentEventEnvelope =>
 });
 
 const completed = (
+  id: string,
   stopReason: "stop" | "length" | "tool-use",
   content: AgentAssistantMessage["content"],
 ): AgentAssistantMessage => ({
   role: "assistant",
+  id: AgentMessageId.make(id),
   status: "completed",
   stopReason,
   content,
@@ -46,10 +48,12 @@ const completed = (
 });
 
 const failed = (
+  id: string,
   stopReason: "error" | "aborted",
   content: AgentAssistantMessage["content"] = [],
 ): AgentAssistantMessage => ({
   role: "assistant",
+  id: AgentMessageId.make(id),
   status: "failed",
   stopReason,
   message: "private runtime detail",
@@ -124,7 +128,7 @@ describe("Discord output", () => {
 
   it("renders committed content in order with safe notification policy", () => {
     const rendered = renderAssistant(
-      completed("stop", [
+      completed("table", "stop", [
         { type: "thinking", text: "checking" },
         { type: "text", text: "| A | B |\n| --- | --- |\n| x | y |" },
       ]),
@@ -137,32 +141,37 @@ describe("Discord output", () => {
       silent: false,
     });
     assert.isTrue(
-      renderAssistant(completed("tool-use", [{ type: "text", text: "working" }]), true)[0]?.silent,
+      renderAssistant(
+        completed("working", "tool-use", [{ type: "text", text: "working" }]),
+        true,
+      )[0]?.silent,
     );
     assert.include(
-      renderAssistant(completed("length", [{ type: "text", text: "partial" }]), true).at(-1)
-        ?.content,
+      renderAssistant(
+        completed("length-limit", "length", [{ type: "text", text: "partial" }]),
+        true,
+      ).at(-1)?.content,
       "length limit",
     );
     assert.deepStrictEqual(
-      renderAssistant(failed("error", [{ type: "text", text: "partial" }]), true),
+      renderAssistant(failed("partial-error", "error", [{ type: "text", text: "partial" }]), true),
       [
         { content: "partial", silent: false },
         { content: "The request failed.", silent: false },
       ],
     );
     const thinking = renderAssistant(
-      completed("stop", [{ type: "thinking", text: "x".repeat(1_000) }]),
+      completed("long-thinking", "stop", [{ type: "thinking", text: "x".repeat(1_000) }]),
       true,
     )[0];
     assert.strictEqual(Array.from(thinking?.content ?? "").length, 800);
   });
 
   it("does not render absent, empty, or whitespace-only thinking", () => {
-    assert.deepStrictEqual(renderAssistant(completed("stop", []), true), []);
+    assert.deepStrictEqual(renderAssistant(completed("empty", "stop", []), true), []);
     assert.deepStrictEqual(
       renderAssistant(
-        completed("stop", [
+        completed("empty-thinking", "stop", [
           { type: "thinking", text: "" },
           { type: "thinking", text: " \n\t" },
         ]),
@@ -220,7 +229,7 @@ describe("Discord output", () => {
           11n,
           envelope(chatA, {
             type: "message-settled",
-            message: completed("stop", [
+            message: completed("visible-answer", "stop", [
               { type: "thinking", text: "private reasoning" },
               { type: "text", text: "visible answer" },
             ]),
@@ -376,7 +385,7 @@ describe("Discord output", () => {
 
         yield* dispatch(
           11n,
-          envelope(chatA, { type: "message-settled", message: failed("error") }),
+          envelope(chatA, { type: "message-settled", message: failed("terminal-error", "error") }),
         );
         yield* dispatch(11n, envelope(chatA, { type: "run-finished", outcome: "failed" }));
         assert.strictEqual(
@@ -390,11 +399,21 @@ describe("Discord output", () => {
 
         yield* dispatch(
           11n,
-          envelope(chatA, { type: "text-delta", contentIndex: 0, text: "ignored" }),
+          envelope(chatA, {
+            type: "text-delta",
+            messageId: AgentMessageId.make("terminal-error"),
+            contentIndex: 0,
+            text: "ignored",
+          }),
         );
         yield* dispatch(
           11n,
-          envelope(chatA, { type: "thinking-delta", contentIndex: 0, text: "ignored" }),
+          envelope(chatA, {
+            type: "thinking-delta",
+            messageId: AgentMessageId.make("terminal-error"),
+            contentIndex: 0,
+            text: "ignored",
+          }),
         );
         assert.isFalse(sent.some(({ message }) => message.content === "ignored"));
       }),
@@ -605,7 +624,9 @@ describe("Discord output", () => {
           22n,
           envelope(chatB, {
             type: "message-settled",
-            message: completed("tool-use", [{ type: "text", text: "after failure" }]),
+            message: completed("after-rename-failure", "tool-use", [
+              { type: "text", text: "after failure" },
+            ]),
           }),
         );
 

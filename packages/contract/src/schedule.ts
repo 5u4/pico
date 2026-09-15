@@ -3,7 +3,7 @@ import type * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import type * as Scope from "effect/Scope";
 import type { AgentEvent } from "./agent-event.ts";
-import type { AgentPrompt } from "./agent-message.ts";
+import type { AgentAssistantMessage, AgentPrompt } from "./agent-message.ts";
 import type { CapturedAgentRun } from "./agent-runtime.ts";
 import { ChatId } from "./chat-model.ts";
 import { AbsolutePath } from "./path.ts";
@@ -283,7 +283,7 @@ export interface ScheduleRunHost {
   }) => Effect.Effect<void, ScheduleHostError>;
   readonly deliver: (
     chatId: typeof ChatId.Type,
-    content: string,
+    message: AgentAssistantMessage,
   ) => Effect.Effect<void, ScheduleHostError>;
   readonly publish: (
     chatId: typeof ChatId.Type,

@@ -30,6 +30,7 @@ import type * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import { agentError } from "./agent-error.ts";
+import { normalizeMessage } from "./agent-event.ts";
 import type { OmpPromptSender } from "./omp-prompt-sender.ts";
 
 type OmpAssistantMessage = Extract<
@@ -93,7 +94,11 @@ export interface SessionPool {
     prompt: AgentMessage.AgentPrompt,
     onEvent: (event: AgentEvent.AgentEvent) => Effect.Effect<void, AgentError>,
   ) => Effect.Effect<CapturedAgentRun, AgentError>;
-  readonly deliver: (chatId: Chat.ChatId, content: string, localOnly?: true) => Effect.Effect<void>;
+  readonly deliver: (
+    chatId: Chat.ChatId,
+    message: AgentMessage.AgentAssistantMessage,
+    localOnly?: true,
+  ) => Effect.Effect<void>;
   readonly publish: (
     chatId: Chat.ChatId,
     content: string,
@@ -904,24 +909,21 @@ export const makeSessionPool = Effect.fn("SessionPool.make")(function* (
 
   const deliverEvents = Effect.fn("AgentRuntime.deliverEvents")(function* (
     chatId: Chat.ChatId,
-    content: string,
-    timestamp: number,
+    message: AgentMessage.AgentAssistantMessage,
     localOnly?: true,
   ) {
     const events: ReadonlyArray<AgentEvent.AgentEvent> = [
       { type: "run-started" },
+      { type: "message-settled", message },
       {
-        type: "message-settled",
-        message: {
-          role: "assistant",
-          status: "completed",
-          stopReason: "stop",
-          content: [{ type: "text", text: content }],
-          model: "pico/schedule",
-          timestamp,
-        },
+        type: "run-finished",
+        outcome:
+          message.status === "completed"
+            ? "completed"
+            : message.stopReason === "aborted"
+              ? "aborted"
+              : "failed",
       },
-      { type: "run-finished", outcome: "completed" },
     ];
     for (const event of events) {
       yield* Queue.offer(output, {
@@ -933,11 +935,10 @@ export const makeSessionPool = Effect.fn("SessionPool.make")(function* (
 
   const deliver = Effect.fn("AgentRuntime.deliver")(function* (
     chatId: Chat.ChatId,
-    content: string,
+    message: AgentMessage.AgentAssistantMessage,
     localOnly?: true,
   ) {
-    const timestamp = yield* Clock.currentTimeMillis;
-    yield* deliverEvents(chatId, content, timestamp, localOnly);
+    yield* deliverEvents(chatId, message, localOnly);
   });
 
   const publish = Effect.fn("AgentRuntime.publish")(function* (
@@ -946,12 +947,13 @@ export const makeSessionPool = Effect.fn("SessionPool.make")(function* (
     localOnly?: true,
   ) {
     const timestamp = yield* Clock.currentTimeMillis;
-    const message: OmpAssistantMessage = {
+    const message: OmpAssistantMessage & { messageId: string } = {
       role: "assistant",
+      messageId: crypto.randomUUID(),
       content: [{ type: "text", text: content }],
       api: "pico",
       provider: "pico",
-      model: "schedule",
+      model: "pico/schedule",
       usage: {
         input: 0,
         output: 0,
@@ -970,7 +972,7 @@ export const makeSessionPool = Effect.fn("SessionPool.make")(function* (
           entry,
           "Failed to persist scheduled publication",
           () => entry.appendAssistantMessage(message),
-          () => deliverEvents(chatId, content, timestamp, localOnly),
+          () => deliverEvents(chatId, normalizeMessage(message), localOnly),
         );
       }),
     );

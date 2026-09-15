@@ -5,6 +5,7 @@ import { assert, describe, it } from "@effect/vitest";
 import type { AgentEventEnvelope } from "@pico/contract/agent-event";
 import {
   type AgentAssistantMessage,
+  AgentMessageId,
   AgentPrompt,
   type AgentTranscript,
 } from "@pico/contract/agent-message";
@@ -37,6 +38,11 @@ import { type LiveChat, make } from "../src/client.ts";
 
 const firstChat = ChatId.make("018f47a0-0000-7000-8000-000000000001");
 const secondChat = ChatId.make("018f47a0-0000-7000-8000-000000000002");
+const firstMessageId = AgentMessageId.make("first-message");
+const secondMessageId = AgentMessageId.make("second-message");
+const thirdMessageId = AgentMessageId.make("third-message");
+const orphanMessageId = AgentMessageId.make("orphan-message");
+const nextMessageId = AgentMessageId.make("next-message");
 const webWorkspace: Workspace = {
   id: WorkspaceId.make("018f47a0-0000-7000-8000-000000000003"),
   name: "Project",
@@ -49,16 +55,23 @@ const webWorkspace: Workspace = {
 };
 const message = { role: "user", content: [{ type: "text", text: "same" }], timestamp: 1 } as const;
 const prompt = (text: string) => AgentPrompt.make({ text, attachments: [] });
-const assistant = (text: string, timestamp: number): AgentAssistantMessage => ({
+const assistant = (id: AgentMessageId, text: string): AgentAssistantMessage => ({
+  id,
   role: "assistant",
   status: "completed",
   stopReason: "stop",
   content: [{ type: "text", text }],
   model: "test",
-  timestamp,
+  timestamp: 1,
 });
 const pendingMessages = (live: LiveChat) =>
-  live.pending.flatMap((entry) => (entry.kind === "message" ? [entry.message] : []));
+  [...live.assistant.values()].flatMap((entry) =>
+    entry.kind === "settled" ? [entry.message] : [],
+  );
+const draftBlock = (live: LiveChat, id: AgentMessageId, index: number) => {
+  const entry = live.assistant.get(id);
+  return entry?.kind === "draft" ? entry.blocks.get(index) : undefined;
+};
 
 interface Route {
   readonly queue: Queue.Queue<AgentEventEnvelope, Cause.Done>;
@@ -429,9 +442,33 @@ describe("frontend state over WebSocket", () => {
         yield* Deferred.await(firstRead);
         yield* Queue.offerAll(route.queue, [
           { chatId: firstChat, event: { type: "run-started" } },
-          { chatId: firstChat, event: { type: "thinking-delta", contentIndex: 2, text: "plan" } },
-          { chatId: firstChat, event: { type: "text-delta", contentIndex: 7, text: "partial" } },
-          { chatId: secondChat, event: { type: "text-delta", contentIndex: 7, text: "other" } },
+          {
+            chatId: firstChat,
+            event: {
+              type: "thinking-delta",
+              messageId: firstMessageId,
+              contentIndex: 2,
+              text: "plan",
+            },
+          },
+          {
+            chatId: firstChat,
+            event: {
+              type: "text-delta",
+              messageId: firstMessageId,
+              contentIndex: 7,
+              text: "partial",
+            },
+          },
+          {
+            chatId: secondChat,
+            event: {
+              type: "text-delta",
+              messageId: secondMessageId,
+              contentIndex: 7,
+              text: "other",
+            },
+          },
           { chatId: firstChat, event: { type: "message-settled", message } },
         ]);
         yield* waitFor(
@@ -446,13 +483,18 @@ describe("frontend state over WebSocket", () => {
         yield* Deferred.succeed(releaseStale, undefined);
         yield* Deferred.await(staleReturned);
         assert.deepStrictEqual(observed, [[message, message]]);
-        assert.deepStrictEqual(registry.get(state.live(firstChat)).blocks.get(2), {
-          type: "thinking-delta",
-          contentIndex: 2,
-          text: "plan",
-        });
-        assert.strictEqual(registry.get(state.live(firstChat)).blocks.get(7)?.text, "partial");
-        assert.strictEqual(registry.get(state.live(secondChat)).blocks.get(7)?.text, "other");
+        assert.strictEqual(
+          draftBlock(registry.get(state.live(firstChat)), firstMessageId, 2)?.text,
+          "plan",
+        );
+        assert.strictEqual(
+          draftBlock(registry.get(state.live(firstChat)), firstMessageId, 7)?.text,
+          "partial",
+        );
+        assert.strictEqual(
+          draftBlock(registry.get(state.live(secondChat)), secondMessageId, 7)?.text,
+          "other",
+        );
         assert.strictEqual(reads, 2);
 
         const releaseSendView = registry.mount(state.send(firstChat));
@@ -544,16 +586,27 @@ describe("frontend state over WebSocket", () => {
           assert.strictEqual(sends, 1);
           yield* Queue.offerAll(firstRoute.queue, [
             { chatId: firstChat, event: { type: "run-started" } },
-            { chatId: firstChat, event: { type: "text-delta", contentIndex: 3, text: "keep me" } },
+            {
+              chatId: firstChat,
+              event: {
+                type: "text-delta",
+                messageId: firstMessageId,
+                contentIndex: 3,
+                text: "keep me",
+              },
+            },
             { chatId: firstChat, event: { type: "title-changed", title: "First registry" } },
           ]);
           yield* waitFor(first, state.live(firstChat), (value) => value.title === "First registry");
           assert.strictEqual(second.get(state.live(firstChat)).title, null);
-          assert.strictEqual(second.get(state.live(firstChat)).blocks.size, 0);
+          assert.isUndefined(draftBlock(second.get(state.live(firstChat)), firstMessageId, 3));
           yield* Queue.end(firstRoute.queue);
           yield* waitFor(first, state.connection, (value) => value.kind === "unavailable");
           assert.strictEqual(first.get(state.live(firstChat)).run.kind, "unknown");
-          assert.strictEqual(first.get(state.live(firstChat)).blocks.get(3)?.text, "keep me");
+          assert.strictEqual(
+            draftBlock(first.get(state.live(firstChat)), firstMessageId, 3)?.text,
+            "keep me",
+          );
           first.set(state.send(firstChat), prompt("do not send"));
           yield* waitFor(first, state.send(firstChat), AsyncResult.isFailure);
           assert.strictEqual(sends, 1);
@@ -598,12 +651,20 @@ describe("frontend state over WebSocket", () => {
         const route = yield* Queue.take(server.opened);
         yield* Queue.offerAll(route.queue, [
           { chatId: firstChat, event: { type: "run-started" } },
-          { chatId: firstChat, event: { type: "text-delta", contentIndex: 0, text: "keep me" } },
+          {
+            chatId: firstChat,
+            event: {
+              type: "text-delta",
+              messageId: firstMessageId,
+              contentIndex: 0,
+              text: "keep me",
+            },
+          },
         ]);
         yield* waitFor(
           registry,
           state.live(firstChat),
-          (value) => value.blocks.get(0)?.text === "keep me",
+          (value) => draftBlock(value, firstMessageId, 0)?.text === "keep me",
         );
         const storeFile = yield* server.storeFile;
         const database = yield* Effect.acquireRelease(
@@ -622,7 +683,10 @@ describe("frontend state over WebSocket", () => {
         const error = Option.getOrThrow(Cause.findErrorOption(connection.cause));
         assert.instanceOf(error, ApplicationError);
         assert.strictEqual(error.reason, "operation");
-        assert.strictEqual(registry.get(state.live(firstChat)).blocks.get(0)?.text, "keep me");
+        assert.strictEqual(
+          draftBlock(registry.get(state.live(firstChat)), firstMessageId, 0)?.text,
+          "keep me",
+        );
         assert.strictEqual(registry.get(state.live(firstChat)).run.kind, "unknown");
         registry.set(state.send(firstChat), prompt("do not send"));
         yield* waitFor(registry, state.send(firstChat), AsyncResult.isFailure);
@@ -674,8 +738,8 @@ describe("frontend state over WebSocket", () => {
         yield* Effect.addFinalizer(() => server.release);
         const state = make({ url: yield* endpoint });
         const registry = yield* registryInScope;
-        const first = assistant("first answer", 1);
-        const second = assistant("second answer", 2);
+        const first = assistant(firstMessageId, "first answer");
+        const second = assistant(secondMessageId, "second answer");
         registry.mount(state.live(firstChat));
         const route = yield* Queue.take(server.opened);
         registry.mount(state.transcript(firstChat));
@@ -688,19 +752,29 @@ describe("frontend state over WebSocket", () => {
         yield* Queue.offerAll(route.queue, [
           {
             chatId: firstChat,
-            event: { type: "text-delta", contentIndex: 0, text: "first answer" },
+            event: {
+              type: "text-delta",
+              messageId: first.id,
+              contentIndex: 0,
+              text: "first answer",
+            },
           },
           { chatId: firstChat, event: { type: "message-settled", message: first } },
         ]);
         const slow = yield* Queue.take(server.requests);
         yield* Queue.offer(route.queue, {
           chatId: firstChat,
-          event: { type: "text-delta", contentIndex: 0, text: "second answer" },
+          event: {
+            type: "text-delta",
+            messageId: second.id,
+            contentIndex: 0,
+            text: "second answer",
+          },
         });
         yield* waitFor(
           registry,
           state.live(firstChat),
-          (value) => value.blocks.get(0)?.text === "second answer",
+          (value) => draftBlock(value, second.id, 0)?.text === "second answer",
         );
         assert.deepStrictEqual(pendingMessages(registry.get(state.live(firstChat))), [first]);
         yield* Deferred.fail(
@@ -745,7 +819,7 @@ describe("frontend state over WebSocket", () => {
           const persisted = snapshot._tag === "Some" ? snapshot.value : [];
           continuity.push(
             [...persisted, ...pendingMessages(registry.get(state.live(firstChat)))].some(
-              (message) => message.timestamp === second.timestamp,
+              (message) => message.role === "assistant" && message.id === second.id,
             ),
           );
         };
@@ -771,7 +845,7 @@ describe("frontend state over WebSocket", () => {
         yield* Effect.addFinalizer(() => server.release);
         const state = make({ url: yield* endpoint });
         const registry = yield* registryInScope;
-        const reply = assistant("PICO_WEB_OK", 2);
+        const reply = assistant(firstMessageId, "PICO_WEB_OK");
         registry.mount(state.live(firstChat));
         const route = yield* Queue.take(server.opened);
         registry.mount(state.transcript(firstChat));
@@ -788,12 +862,12 @@ describe("frontend state over WebSocket", () => {
         const early = yield* Queue.take(server.requests);
         yield* Queue.offer(route.queue, {
           chatId: firstChat,
-          event: { type: "text-delta", contentIndex: 0, text: "PICO_WEB_OK" },
+          event: { type: "text-delta", messageId: reply.id, contentIndex: 0, text: "PICO_WEB_OK" },
         });
         yield* waitFor(
           registry,
           state.live(firstChat),
-          (value) => value.blocks.get(0)?.text === "PICO_WEB_OK",
+          (value) => draftBlock(value, reply.id, 0)?.text === "PICO_WEB_OK",
         );
         yield* Deferred.succeed(early.reply, [message, reply]);
         yield* waitFor(
@@ -806,12 +880,13 @@ describe("frontend state over WebSocket", () => {
           reply,
         ]);
         assert.deepStrictEqual(pendingMessages(registry.get(state.live(firstChat))), []);
+        assert.isUndefined(draftBlock(registry.get(state.live(firstChat)), reply.id, 0));
         yield* Queue.offer(route.queue, {
           chatId: firstChat,
           event: { type: "message-settled", message: reply },
         });
         const settled = yield* Queue.take(server.requests);
-        assert.deepStrictEqual(pendingMessages(registry.get(state.live(firstChat))), [reply]);
+        assert.deepStrictEqual(pendingMessages(registry.get(state.live(firstChat))), []);
         yield* Deferred.succeed(settled.reply, [message, reply]);
         yield* waitFor(
           registry,
@@ -834,156 +909,174 @@ describe("frontend state over WebSocket", () => {
           reply,
         ]);
         const live = registry.get(state.live(firstChat));
-        assert.deepStrictEqual(live.pending, []);
-        assert.deepStrictEqual([...live.blocks], []);
+        assert.deepStrictEqual(pendingMessages(live), []);
+        assert.isUndefined(draftBlock(live, reply.id, 0));
         assert.deepStrictEqual(live.run, { kind: "finished", outcome: "completed" });
       }).pipe(Effect.scoped, Effect.provide(server.layer));
     }),
   );
 
-  it.live(
-    "requires new equivalent occurrences and never confirms orphan drafts from snapshots",
-    () =>
-      Effect.gen(function* () {
-        const server = yield* snapshotFixture();
-        yield* Effect.gen(function* () {
-          yield* Effect.addFinalizer(() => server.release);
-          const state = make({ url: yield* endpoint });
-          const registry = yield* registryInScope;
-          const repeated = assistant("repeated", 1);
-          registry.mount(state.live(firstChat));
-          const route = yield* Queue.take(server.opened);
-          registry.mount(state.transcript(firstChat));
-          yield* Deferred.succeed((yield* Queue.take(server.requests)).reply, [repeated]);
-          yield* waitFor(
-            registry,
-            state.transcript(firstChat),
-            (value) => AsyncResult.isSuccess(value) && !value.waiting,
-          );
-          yield* Queue.offer(route.queue, {
+  it.live("keeps equal messages distinct and retires orphan drafts only by their IDs", () =>
+    Effect.gen(function* () {
+      const server = yield* snapshotFixture();
+      yield* Effect.gen(function* () {
+        yield* Effect.addFinalizer(() => server.release);
+        const state = make({ url: yield* endpoint });
+        const registry = yield* registryInScope;
+        const history = assistant(firstMessageId, "repeated");
+        const first = assistant(secondMessageId, "repeated");
+        const second = assistant(thirdMessageId, "repeated");
+        registry.mount(state.live(firstChat));
+        const route = yield* Queue.take(server.opened);
+        registry.mount(state.transcript(firstChat));
+        yield* Deferred.succeed((yield* Queue.take(server.requests)).reply, [history]);
+        yield* waitFor(
+          registry,
+          state.transcript(firstChat),
+          (value) => AsyncResult.isSuccess(value) && !value.waiting,
+        );
+        yield* Queue.offer(route.queue, {
+          chatId: firstChat,
+          event: { type: "message-settled", message: first },
+        });
+        const stale = yield* Queue.take(server.requests);
+        yield* Queue.offer(route.queue, {
+          chatId: firstChat,
+          event: { type: "message-settled", message: second },
+        });
+        yield* Deferred.succeed((yield* Queue.take(server.requests)).reply, [history]);
+        yield* waitFor(
+          registry,
+          state.transcript(firstChat),
+          (value) => AsyncResult.isSuccess(value) && !value.waiting,
+        );
+        assert.deepStrictEqual(pendingMessages(registry.get(state.live(firstChat))), [
+          first,
+          second,
+        ]);
+        yield* Deferred.succeed(stale.reply, [history, first, second]);
+        yield* Deferred.await(stale.returned);
+        assert.deepStrictEqual(pendingMessages(registry.get(state.live(firstChat))), [
+          first,
+          second,
+        ]);
+        registry.refresh(state.transcript(firstChat));
+        yield* Deferred.succeed((yield* Queue.take(server.requests)).reply, [
+          history,
+          { ...first, model: "normalized-model" },
+        ]);
+        yield* waitFor(
+          registry,
+          state.transcript(firstChat),
+          (value) => AsyncResult.isSuccess(value) && !value.waiting,
+        );
+        assert.deepStrictEqual(pendingMessages(registry.get(state.live(firstChat))), [second]);
+        yield* Queue.offerAll(route.queue, [
+          {
             chatId: firstChat,
-            event: { type: "message-settled", message: repeated },
-          });
-          const one = yield* Queue.take(server.requests);
-          yield* Queue.offer(route.queue, {
+            event: {
+              type: "text-delta",
+              messageId: orphanMessageId,
+              contentIndex: 0,
+              text: "orphan",
+            },
+          },
+          { chatId: firstChat, event: { type: "run-finished", outcome: "aborted" } },
+        ]);
+        const finish = yield* Queue.take(server.requests);
+        yield* Queue.offerAll(route.queue, [
+          { chatId: firstChat, event: { type: "run-started" } },
+          {
             chatId: firstChat,
-            event: { type: "message-settled", message: repeated },
-          });
-          const two = yield* Queue.take(server.requests);
-          yield* Deferred.succeed(two.reply, [repeated]);
-          yield* waitFor(
-            registry,
-            state.transcript(firstChat),
-            (value) => AsyncResult.isSuccess(value) && !value.waiting,
-          );
-          assert.deepStrictEqual(pendingMessages(registry.get(state.live(firstChat))), [
-            repeated,
-            repeated,
-          ]);
-          yield* Deferred.succeed(one.reply, [repeated, repeated, repeated]);
-          yield* Deferred.await(one.returned);
-          registry.refresh(state.transcript(firstChat));
-          yield* Deferred.succeed((yield* Queue.take(server.requests)).reply, [
-            repeated,
-            { ...repeated, model: "different-model" },
-          ]);
-          yield* waitFor(
-            registry,
-            state.transcript(firstChat),
-            (value) => AsyncResult.isSuccess(value) && !value.waiting,
-          );
-          assert.deepStrictEqual(pendingMessages(registry.get(state.live(firstChat))), [
-            repeated,
-            repeated,
-          ]);
-          registry.refresh(state.transcript(firstChat));
-          yield* Deferred.succeed((yield* Queue.take(server.requests)).reply, [repeated, repeated]);
-          yield* waitFor(
-            registry,
-            state.transcript(firstChat),
-            (value) => AsyncResult.isSuccess(value) && !value.waiting,
-          );
-          assert.deepStrictEqual(pendingMessages(registry.get(state.live(firstChat))), [repeated]);
-          yield* Queue.offerAll(route.queue, [
-            { chatId: firstChat, event: { type: "text-delta", contentIndex: 0, text: "orphan" } },
-            { chatId: firstChat, event: { type: "run-finished", outcome: "aborted" } },
-          ]);
-          const finish = yield* Queue.take(server.requests);
-          yield* Queue.offerAll(route.queue, [
-            { chatId: firstChat, event: { type: "run-started" } },
-            { chatId: firstChat, event: { type: "text-delta", contentIndex: 0, text: "new run" } },
-          ]);
-          yield* waitFor(
-            registry,
-            state.live(firstChat),
-            (value) => value.blocks.get(0)?.text === "new run",
-          );
-          yield* Deferred.succeed(finish.reply, [
-            repeated,
-            repeated,
-            repeated,
-            assistant("orphan", 2),
-          ]);
-          yield* waitFor(
-            registry,
-            state.transcript(firstChat),
-            (value) => AsyncResult.isSuccess(value) && !value.waiting,
-          );
-          const live = registry.get(state.live(firstChat));
-          assert.deepStrictEqual(pendingMessages(live), []);
-          assert.deepStrictEqual(
-            live.pending.flatMap((entry) =>
-              entry.kind === "blocks" ? [...entry.blocks.values()].map((block) => block.text) : [],
-            ),
-            ["orphan"],
-          );
-          assert.strictEqual(live.blocks.get(0)?.text, "new run");
-        }).pipe(Effect.scoped, Effect.provide(server.layer));
-      }),
+            event: {
+              type: "text-delta",
+              messageId: nextMessageId,
+              contentIndex: 0,
+              text: "new run",
+            },
+          },
+        ]);
+        yield* waitFor(
+          registry,
+          state.live(firstChat),
+          (value) => draftBlock(value, nextMessageId, 0)?.text === "new run",
+        );
+        yield* Deferred.succeed(finish.reply, [history, first, second]);
+        yield* waitFor(
+          registry,
+          state.transcript(firstChat),
+          (value) => AsyncResult.isSuccess(value) && !value.waiting,
+        );
+        const retained = registry.get(state.live(firstChat));
+        assert.deepStrictEqual(pendingMessages(retained), []);
+        assert.strictEqual(draftBlock(retained, orphanMessageId, 0)?.text, "orphan");
+        assert.strictEqual(draftBlock(retained, nextMessageId, 0)?.text, "new run");
+        registry.refresh(state.transcript(firstChat));
+        yield* Deferred.succeed((yield* Queue.take(server.requests)).reply, [
+          history,
+          first,
+          second,
+          assistant(orphanMessageId, "orphan"),
+        ]);
+        yield* waitFor(
+          registry,
+          state.transcript(firstChat),
+          (value) => AsyncResult.isSuccess(value) && !value.waiting,
+        );
+        const acknowledged = registry.get(state.live(firstChat));
+        assert.isUndefined(draftBlock(acknowledged, orphanMessageId, 0));
+        assert.strictEqual(draftBlock(acknowledged, nextMessageId, 0)?.text, "new run");
+      }).pipe(Effect.scoped, Effect.provide(server.layer));
+    }),
   );
 
-  it.live(
-    "retains a live-first settlement when the first snapshot may contain an old identical message",
-    () =>
-      Effect.gen(function* () {
-        const server = yield* snapshotFixture();
-        yield* Effect.gen(function* () {
-          yield* Effect.addFinalizer(() => server.release);
-          const state = make({ url: yield* endpoint });
-          const registry = yield* registryInScope;
-          const repeated = assistant("same as history", 1);
-          registry.mount(state.live(firstChat));
-          const route = yield* Queue.take(server.opened);
-          yield* Queue.offerAll(route.queue, [
-            { chatId: firstChat, event: { type: "message-settled", message: repeated } },
-            { chatId: firstChat, event: { type: "title-changed", title: "settlement received" } },
-          ]);
-          yield* waitFor(
-            registry,
-            state.live(firstChat),
-            (value) => value.title === "settlement received",
-          );
-          registry.mount(state.transcript(firstChat));
-          yield* Deferred.succeed((yield* Queue.take(server.requests)).reply, [repeated]);
-          yield* waitFor(
-            registry,
-            state.transcript(firstChat),
-            (value) => AsyncResult.isSuccess(value) && !value.waiting,
-          );
-          assert.deepStrictEqual(
-            AsyncResult.getOrThrow(registry.get(state.transcript(firstChat))),
-            [repeated],
-          );
-          assert.deepStrictEqual(pendingMessages(registry.get(state.live(firstChat))), [repeated]);
-          registry.refresh(state.transcript(firstChat));
-          yield* Deferred.succeed((yield* Queue.take(server.requests)).reply, [repeated, repeated]);
-          yield* waitFor(
-            registry,
-            state.transcript(firstChat),
-            (value) => AsyncResult.isSuccess(value) && !value.waiting,
-          );
-          assert.deepStrictEqual(pendingMessages(registry.get(state.live(firstChat))), [repeated]);
-        }).pipe(Effect.scoped, Effect.provide(server.layer));
-      }),
+  it.live("acknowledges a live-first settlement in the first snapshot without a baseline", () =>
+    Effect.gen(function* () {
+      const server = yield* snapshotFixture();
+      yield* Effect.gen(function* () {
+        yield* Effect.addFinalizer(() => server.release);
+        const state = make({ url: yield* endpoint });
+        const registry = yield* registryInScope;
+        const repeated = assistant(firstMessageId, "same as history");
+        registry.mount(state.live(firstChat));
+        const route = yield* Queue.take(server.opened);
+        yield* Queue.offerAll(route.queue, [
+          { chatId: firstChat, event: { type: "message-settled", message: repeated } },
+          { chatId: firstChat, event: { type: "title-changed", title: "settlement received" } },
+        ]);
+        yield* waitFor(
+          registry,
+          state.live(firstChat),
+          (value) => value.title === "settlement received",
+        );
+        registry.mount(state.transcript(firstChat));
+        yield* Deferred.succeed((yield* Queue.take(server.requests)).reply, [repeated]);
+        yield* waitFor(
+          registry,
+          state.transcript(firstChat),
+          (value) => AsyncResult.isSuccess(value) && !value.waiting,
+        );
+        assert.deepStrictEqual(AsyncResult.getOrThrow(registry.get(state.transcript(firstChat))), [
+          repeated,
+        ]);
+        assert.deepStrictEqual(pendingMessages(registry.get(state.live(firstChat))), []);
+        yield* Queue.offerAll(route.queue, [
+          {
+            chatId: firstChat,
+            event: { type: "text-delta", messageId: repeated.id, contentIndex: 0, text: "late" },
+          },
+          { chatId: firstChat, event: { type: "message-settled", message: repeated } },
+        ]);
+        const late = yield* Queue.take(server.requests);
+        assert.deepStrictEqual(pendingMessages(registry.get(state.live(firstChat))), []);
+        assert.isUndefined(draftBlock(registry.get(state.live(firstChat)), repeated.id, 0));
+        yield* Deferred.succeed(late.reply, [repeated]);
+        yield* waitFor(
+          registry,
+          state.transcript(firstChat),
+          (value) => AsyncResult.isSuccess(value) && !value.waiting,
+        );
+      }).pipe(Effect.scoped, Effect.provide(server.layer));
+    }),
   );
 });

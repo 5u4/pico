@@ -78,6 +78,7 @@ const ownershipFixture = Effect.fnUntraced(function* () {
 const transcript: AgentMessage.AgentTranscript = [
   {
     role: "assistant",
+    id: AgentMessage.AgentMessageId.make("transcript-ready"),
     status: "completed",
     stopReason: "stop",
     content: [{ type: "text", text: "ready" }],
@@ -401,7 +402,12 @@ describe("RPC", () => {
         assert.strictEqual(created.id, newChatId);
         const createdEvent: AgentEvent.AgentEventEnvelope = {
           chatId: created.id,
-          event: { type: "text-delta", contentIndex: 0, text: "new web chat" },
+          event: {
+            type: "text-delta",
+            messageId: AgentMessage.AgentMessageId.make("new-web-chat"),
+            contentIndex: 0,
+            text: "new web chat",
+          },
         };
         yield* Queue.offerAll(eventQueue, [createdEvent, secondEvent]);
         assert.deepStrictEqual(yield* Queue.take(receivedEvents), createdEvent);

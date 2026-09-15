@@ -118,9 +118,19 @@ const platform = Layer.mergeAll(BunCrypto.layer, BunFileSystem.layer, BunPath.la
 const chatId = Chat.ChatId.make("018f47a0-0000-7000-8000-000000000001");
 const runId = Schedule.ScheduleRunId.make("scheduled-1000-018f47a0-0000-7000-8000-000000000003");
 const prompt = (text: string) => AgentMessage.AgentPrompt.make({ text, attachments: [] });
-const providerTurn = (text: string, abortReason: "aborted" | "error" = "aborted") => ({
+const providerTurn = (
+  text: string,
+  abortReason: "aborted" | "error" = "aborted",
+  options: {
+    readonly streaming?: true;
+    readonly messageId?: string;
+    readonly timestamp?: number;
+    readonly thinking?: string;
+  } = {},
+) => ({
   text,
   abortReason,
+  ...options,
   entered: Promise.withResolvers<Context>(),
   release: Promise.withResolvers<void>(),
   aborted: Promise.withResolvers<void>(),
@@ -178,8 +188,30 @@ const withSession = async (
         totalTokens: 2,
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
       },
-      timestamp: Date.now(),
+      timestamp: turn.timestamp ?? Date.now(),
     };
+    if (turn.messageId !== undefined) Object.assign(response, { messageId: turn.messageId });
+    if (turn.thinking !== undefined) {
+      response.content.unshift({ type: "thinking", thinking: turn.thinking });
+    }
+    const textIndex = turn.thinking === undefined ? 0 : 1;
+    if (turn.streaming) {
+      stream.push({ type: "start", partial: response });
+      if (turn.thinking !== undefined) {
+        stream.push({
+          type: "thinking_delta",
+          contentIndex: 0,
+          delta: turn.thinking,
+          partial: response,
+        });
+      }
+      stream.push({
+        type: "text_delta",
+        contentIndex: textIndex,
+        delta: turn.text,
+        partial: response,
+      });
+    }
     const abort = () => {
       turn.aborted.resolve();
       turn.release.resolve();
@@ -195,7 +227,14 @@ const withSession = async (
         response.errorMessage = "Request was aborted";
         stream.push({ type: "error", reason: turn.abortReason, error: response });
       } else {
-        stream.push({ type: "text_delta", contentIndex: 0, delta: turn.text, partial: response });
+        if (!turn.streaming) {
+          stream.push({
+            type: "text_delta",
+            contentIndex: textIndex,
+            delta: turn.text,
+            partial: response,
+          });
+        }
         stream.push({ type: "done", reason: "stop", message: response });
       }
       stream.end();
@@ -367,6 +406,68 @@ const seedShake = async (session: AgentSession) => {
 };
 
 describe("native SessionPool ownership", () => {
+  it("retains assistant identity through deltas, interleaved messages and persistence", async () => {
+    const options = { streaming: true, timestamp: 1, thinking: "Same reasoning" } as const;
+    const turns = [
+      providerTurn("Same answer", "aborted", options),
+      providerTurn("Same answer", "aborted", options),
+      providerTurn("Same answer", "aborted", { ...options, messageId: "existing-assistant" }),
+    ];
+    await withSession(turns, async (session) => {
+      const events: AgentEvent.AgentEvent[] = [];
+      let textReceived = Promise.withResolvers<void>();
+      const unsubscribe = session.subscribe((event) => {
+        const normalized = native.normalizeAgentEvent(event);
+        if (normalized === undefined) return;
+        events.push(normalized);
+        if (normalized.type === "text-delta") textReceived.resolve();
+      });
+      try {
+        for (const [index, turn] of turns.entries()) {
+          textReceived = Promise.withResolvers<void>();
+          const running = session.prompt(`Turn ${index}`, { expandPromptTemplates: false });
+          await textReceived.promise;
+          if (index === 0) {
+            const aside = { role: "user", content: "Interleaved aside", timestamp: 2 } as const;
+            session.agent.emitExternalEvent({ type: "message_start", message: aside });
+            session.agent.emitExternalEvent({ type: "message_end", message: aside });
+          }
+          turn.release.resolve();
+          await running;
+        }
+        await session.settleInFlightMessagePersistence();
+        await session.sessionManager.ensureOnDisk();
+        await session.sessionManager.flush();
+        const file = session.sessionManager.getSessionFile();
+        if (file === undefined) throw new Error("Expected identity journal");
+        const persisted = native.normalizeTranscript(
+          await native.loadSessionMessagesReadOnly(file),
+        );
+        const assistants = persisted.filter((message) => message.role === "assistant");
+        const settled = events.flatMap((event) =>
+          event.type === "message-settled" && event.message.role === "assistant"
+            ? [event.message]
+            : [],
+        );
+        const textIds = events.flatMap((event) =>
+          event.type === "text-delta" ? [event.messageId] : [],
+        );
+        const thinkingIds = events.flatMap((event) =>
+          event.type === "thinking-delta" ? [event.messageId] : [],
+        );
+        expect(settled).toEqual(assistants);
+        expect(textIds).toEqual(assistants.map((message) => message.id));
+        expect(thinkingIds).toEqual(textIds);
+        expect(assistants).toHaveLength(3);
+        expect(new Set(textIds).size).toBe(3);
+        expect(textIds[2]).toBe("existing-assistant");
+        expect(assistants[0]?.content).toEqual(assistants[1]?.content);
+      } finally {
+        unsubscribe();
+      }
+    });
+  }, 30_000);
+
   it("discovers authenticated models and applies project model filters", async () => {
     await withSession([], async (session) => {
       const cwd = AbsolutePath.make(join(root, "model-picker-project"));

@@ -1,6 +1,9 @@
 import type { AgentEvent } from "@pico/contract/agent-event";
-import { AgentAssistantMessage, type AgentTranscript } from "@pico/contract/agent-message";
-import * as Schema from "effect/Schema";
+import type {
+  AgentAssistantMessage,
+  AgentMessageId,
+  AgentTranscript,
+} from "@pico/contract/agent-message";
 
 type Event<Type extends AgentEvent["type"]> = Extract<AgentEvent, { readonly type: Type }>;
 
@@ -11,20 +14,13 @@ export type LiveRun =
 
 export type LiveBlock = Event<"text-delta" | "thinking-delta">;
 
-export type PendingContent =
+export type LiveAssistant =
   | {
-      readonly kind: "message";
-      readonly message: AgentAssistantMessage;
-      readonly occurrence: number | null;
+      readonly kind: "draft";
+      readonly blocks: ReadonlyMap<number, LiveBlock>;
+      readonly phase: "streaming" | "retained";
     }
-  | { readonly kind: "blocks"; readonly blocks: ReadonlyMap<number, LiveBlock> };
-
-type PendingMessage = Extract<PendingContent, { readonly kind: "message" }>;
-
-interface SettlementCursor {
-  readonly baseline: AgentTranscript | null;
-  readonly issued: ReadonlyArray<PendingMessage>;
-}
+  | { readonly kind: "settled"; readonly message: AgentAssistantMessage };
 
 export type LiveTool =
   | { readonly kind: "running"; readonly start: Event<"tool-started"> }
@@ -36,9 +32,8 @@ export type LiveTool =
 
 export interface LiveChat {
   readonly run: LiveRun;
-  readonly blocks: ReadonlyMap<number, LiveBlock>;
-  readonly pending: ReadonlyArray<PendingContent>;
-  readonly settlementCursor: SettlementCursor | null;
+  readonly assistant: ReadonlyMap<AgentMessageId, LiveAssistant>;
+  readonly snapshotIds: ReadonlySet<AgentMessageId>;
   readonly tools: ReadonlyMap<string, LiveTool>;
   readonly notices: ReadonlyArray<Event<"notice">>;
   readonly title: string | null;
@@ -46,113 +41,85 @@ export interface LiveChat {
 
 export const emptyLiveChat = (): LiveChat => ({
   run: { kind: "unknown" },
-  blocks: new Map(),
-  pending: [],
-  settlementCursor: null,
+  assistant: new Map(),
+  snapshotIds: new Set(),
   tools: new Map(),
   notices: [],
   title: null,
 });
 
-const equivalentMessage = Schema.toEquivalence(AgentAssistantMessage);
-
-const occurrences = (transcript: AgentTranscript, message: AgentAssistantMessage): number => {
-  let count = 0;
-  for (const candidate of transcript) {
-    if (candidate.role === "assistant" && equivalentMessage(candidate, message)) count += 1;
+const retainDrafts = (messages: LiveChat["assistant"]): LiveChat["assistant"] => {
+  let retained: Map<AgentMessageId, LiveAssistant> | undefined;
+  for (const [id, message] of messages) {
+    if (message.kind !== "draft" || message.phase === "retained") continue;
+    retained ??= new Map(messages);
+    retained.set(id, { ...message, phase: "retained" });
   }
-  return count;
+  return retained ?? messages;
 };
 
-const sealBlocks = (state: LiveChat): ReadonlyArray<PendingContent> =>
-  state.blocks.size === 0
-    ? state.pending
-    : [...state.pending, { kind: "blocks", blocks: state.blocks }];
-
-export const acknowledgeTranscript = (
-  state: LiveChat,
-  transcript: AgentTranscript,
-  eligible: ReadonlyArray<PendingContent>,
-): LiveChat => {
-  const pending = state.pending.filter(
-    (entry) =>
-      entry.kind === "blocks" ||
-      entry.occurrence === null ||
-      !eligible.includes(entry) ||
-      occurrences(transcript, entry.message) < entry.occurrence,
-  );
-  return pending.length === state.pending.length ? state : { ...state, pending };
+export const acknowledgeTranscript = (state: LiveChat, transcript: AgentTranscript): LiveChat => {
+  let assistant: Map<AgentMessageId, LiveAssistant> | undefined;
+  let snapshotIds: Set<AgentMessageId> | undefined;
+  for (const message of transcript) {
+    if (message.role !== "assistant") continue;
+    if (state.assistant.has(message.id)) {
+      assistant ??= new Map(state.assistant);
+      assistant.delete(message.id);
+    }
+    if (!state.snapshotIds.has(message.id)) {
+      snapshotIds ??= new Set(state.snapshotIds);
+      snapshotIds.add(message.id);
+    }
+  }
+  return assistant || snapshotIds
+    ? {
+        ...state,
+        assistant: assistant ?? state.assistant,
+        snapshotIds: snapshotIds ?? state.snapshotIds,
+      }
+    : state;
 };
 
-export const reduceLiveChat = (
-  state: LiveChat,
-  event: AgentEvent,
-  transcript: AgentTranscript | null = null,
-): LiveChat => {
-  if (event.type === "notice") return { ...state, notices: [...state.notices, event] };
-  if (event.type === "title-changed") return { ...state, title: event.title };
-  const settlementCursor =
-    event.type === "run-started" || state.settlementCursor === null
-      ? {
-          baseline: transcript,
-          issued: state.pending.filter((entry) => entry.kind === "message"),
-        }
-      : state.settlementCursor;
+export const reduceLiveChat = (state: LiveChat, event: AgentEvent): LiveChat => {
   switch (event.type) {
+    case "notice":
+      return { ...state, notices: [...state.notices, event] };
+    case "title-changed":
+      return { ...state, title: event.title };
     case "run-started":
       return {
         ...state,
         run: { kind: "running" },
-        pending: sealBlocks(state),
-        settlementCursor,
-        blocks: new Map(),
+        assistant: retainDrafts(state.assistant),
         tools: new Map(),
       };
     case "text-delta":
     case "thinking-delta": {
-      const previous = state.blocks.get(event.contentIndex);
-      const blocks = new Map(state.blocks);
+      if (state.snapshotIds.has(event.messageId)) return state;
+      const message = state.assistant.get(event.messageId);
+      if (message?.kind === "settled") return state;
+      const previous = message?.blocks.get(event.contentIndex);
+      const blocks = new Map(message?.blocks);
       blocks.set(event.contentIndex, {
         ...event,
         text: previous?.type === event.type ? previous.text + event.text : event.text,
       });
-      return { ...state, run: { kind: "running" }, blocks, settlementCursor };
+      const assistant = new Map(state.assistant);
+      assistant.set(event.messageId, { kind: "draft", blocks, phase: "streaming" });
+      return { ...state, run: { kind: "running" }, assistant };
     }
     case "message-settled": {
       const message = event.message;
-      if (message.role !== "assistant")
-        return settlementCursor === state.settlementCursor ? state : { ...state, settlementCursor };
-      let occurrence =
-        settlementCursor.baseline === null ? null : occurrences(settlementCursor.baseline, message);
-      if (occurrence !== null) {
-        for (const entry of settlementCursor.issued) {
-          if (!equivalentMessage(entry.message, message)) continue;
-          if (entry.occurrence === null) {
-            occurrence = null;
-            break;
-          }
-          occurrence = Math.max(occurrence, entry.occurrence);
-        }
-      }
-      const pending: PendingMessage = {
-        kind: "message",
-        message,
-        occurrence: occurrence === null ? null : occurrence + 1,
-      };
-      return {
-        ...state,
-        blocks: new Map(),
-        pending: [...state.pending, pending],
-        settlementCursor: {
-          ...settlementCursor,
-          issued: [...settlementCursor.issued, pending],
-        },
-      };
+      if (message.role !== "assistant" || state.snapshotIds.has(message.id)) return state;
+      const assistant = new Map(state.assistant);
+      assistant.set(message.id, { kind: "settled", message });
+      return { ...state, assistant };
     }
     case "tool-started": {
       const tools = new Map(state.tools);
       tools.set(event.toolCallId, { kind: "running", start: event });
-      return { ...state, run: { kind: "running" }, tools, settlementCursor };
+      return { ...state, run: { kind: "running" }, tools };
     }
     case "tool-finished": {
       const tools = new Map(state.tools);
@@ -161,15 +128,13 @@ export const reduceLiveChat = (
         start: state.tools.get(event.toolCallId)?.start ?? null,
         end: event,
       });
-      return { ...state, run: { kind: "running" }, tools, settlementCursor };
+      return { ...state, run: { kind: "running" }, tools };
     }
     case "run-finished":
       return {
         ...state,
         run: { kind: "finished", outcome: event.outcome },
-        pending: sealBlocks(state),
-        settlementCursor,
-        blocks: new Map(),
+        assistant: retainDrafts(state.assistant),
       };
     default: {
       const exhaustive: never = event;

@@ -80,7 +80,7 @@ describe("Application", () => {
       const createdWorktrees: Array<CreateWorktreeOptions> = [];
       const sentMessages: Array<{
         readonly chatId: string;
-        readonly content: string | AgentMessage.AgentPrompt;
+        readonly content: string | AgentMessage.AgentPrompt | AgentMessage.AgentAssistantMessage;
       }> = [];
       const transcriptChatIds: Array<Chat.ChatId> = [];
       const abortedChatIds: Array<Chat.ChatId> = [];
@@ -488,11 +488,21 @@ describe("Application", () => {
           events: [{ type: "run-started" }],
           finalAssistantText: `captured:${regularChat.id}`,
         });
-        yield* scheduleHost.deliver(regularChat.id, "scheduled delivery");
-        assert.deepInclude(sentMessages, {
-          chatId: regularChat.id,
-          content: "scheduled delivery",
-        });
+        const scheduledMessage: AgentMessage.AgentAssistantMessage = {
+          role: "assistant",
+          id: AgentMessage.AgentMessageId.make("scheduled-delivery"),
+          status: "completed",
+          stopReason: "stop",
+          content: [
+            { type: "thinking", text: "private reasoning" },
+            { type: "text", text: "scheduled " },
+            { type: "text", text: "delivery" },
+          ],
+          model: "test",
+          timestamp: 7,
+        };
+        yield* scheduleHost.deliver(regularChat.id, scheduledMessage);
+        assert.deepInclude(sentMessages, { chatId: regularChat.id, content: scheduledMessage });
         yield* scheduleHost.publish(regularChat.id, "scheduled publish");
         assert.deepInclude(sentMessages, {
           chatId: regularChat.id,
@@ -579,9 +589,22 @@ describe("Application", () => {
         );
         yield* discordHost.publish(target.chatId, "remote publication");
         assert.deepStrictEqual(remoteMessages, ["remote publication"]);
+        const discordMessage = {
+          ...scheduledMessage,
+          id: AgentMessage.AgentMessageId.make("discord-scheduled-delivery"),
+        };
+        yield* discordHost.deliver(target.chatId, discordMessage);
+        assert.deepStrictEqual(remoteMessages, ["remote publication", "scheduled delivery"]);
+        assert.deepInclude(sentMessages, { chatId: target.chatId, content: discordMessage });
         rejectSend = true;
         assert.strictEqual(
-          (yield* discordHost.deliver(target.chatId, "failed send").pipe(Effect.flip)).message,
+          (yield* discordHost
+            .deliver(target.chatId, {
+              ...scheduledMessage,
+              id: AgentMessage.AgentMessageId.make("rejected-scheduled-delivery"),
+              content: [{ type: "text", text: "failed send" }],
+            })
+            .pipe(Effect.flip)).message,
           "Send rejected",
         );
         assert.isTrue(remoteThreads.has("1"));

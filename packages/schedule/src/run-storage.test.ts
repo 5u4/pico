@@ -22,6 +22,7 @@ import {
   awaitExists,
   awaitFinished,
   caller,
+  capturedRun,
   chatId,
   permissionDenied,
   platformLayer,
@@ -391,12 +392,7 @@ describe("run storage", () => {
             yield* fileSystem.remove(eventsFile).pipe(Effect.orDie);
             yield* fileSystem.symlink(outside, eventsFile).pipe(Effect.orDie);
             yield* onEvent({ type: "run-started" });
-            return {
-              runId,
-              outcome: "completed",
-              events: [],
-              finalAssistantText: "must not publish",
-            };
+            return capturedRun(runId, "must not publish");
           }),
       };
 

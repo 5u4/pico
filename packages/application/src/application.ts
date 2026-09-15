@@ -735,12 +735,12 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
 
   const deliverScheduled = Effect.fn("Application.deliverScheduled")(function* (
     chatId: Chat.ChatId,
-    content: string,
+    message: AgentMessage.AgentAssistantMessage,
     localOnly?: true,
   ) {
     yield* ensureChatOpen(chatId, "Failed to deliver scheduled result");
     yield* runtime
-      .deliver(chatId, content, localOnly)
+      .deliver(chatId, message, localOnly)
       .pipe(Effect.mapError(failure("Failed to deliver scheduled result")));
   });
 
@@ -988,8 +988,9 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
 
     const sendScheduled = Effect.fn("Application.sendScheduled")(function* (
       chatId: Chat.ChatId,
-      content: string,
-      publication: "publish" | "deliver",
+      publication:
+        | { readonly kind: "publish"; readonly content: string }
+        | { readonly kind: "deliver"; readonly message: AgentMessage.AgentAssistantMessage },
     ) {
       yield* serialized(
         chatId,
@@ -997,9 +998,19 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
           const chat = yield* resolveScheduledChat(chatId);
           const adapter = yield* validateWorkspace(yield* getWorkspace(chat.workspaceId), chat);
           const localOnly = adapter === null ? undefined : true;
-          if (publication === "publish") yield* publishScheduled(chatId, content, localOnly);
-          else yield* deliverScheduled(chatId, content, localOnly);
+          if (publication.kind === "publish") {
+            yield* publishScheduled(chatId, publication.content, localOnly);
+          } else {
+            yield* deliverScheduled(chatId, publication.message, localOnly);
+          }
           if (adapter !== null && chat.externalId !== null) {
+            const content =
+              publication.kind === "publish"
+                ? publication.content
+                : publication.message.content
+                    .filter((block) => block.type === "text")
+                    .map((block) => block.text)
+                    .join("");
             yield* adapter.send({ chatId, externalId: chat.externalId, content });
           }
         }),
@@ -1010,8 +1021,8 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
       resolveTarget,
       prepare,
       materialize,
-      deliver: (chatId, content) => sendScheduled(chatId, content, "deliver"),
-      publish: (chatId, content) => sendScheduled(chatId, content, "publish"),
+      deliver: (chatId, message) => sendScheduled(chatId, { kind: "deliver", message }),
+      publish: (chatId, content) => sendScheduled(chatId, { kind: "publish", content }),
       runPrompt: (chatId, runId, prompt, onEvent) =>
         runScheduled(chatId, runId, prompt, (event) =>
           onEvent(event).pipe(
