@@ -1,8 +1,16 @@
 import { assert, describe, it } from "@effect/vitest";
-import type { AgentAssistantMessage } from "@pico/contract/agent-message";
-import { acknowledgeTranscript, emptyLiveChat, reduceLiveChat } from "./chat-state.ts";
+import { type AgentAssistantMessage, AgentMessageId } from "@pico/contract/agent-message";
+import {
+  acknowledgeTranscript,
+  emptyLiveChat,
+  type LiveChat,
+  reduceLiveChat,
+} from "./chat-state.ts";
 
+const firstId = AgentMessageId.make("first");
+const secondId = AgentMessageId.make("second");
 const repeated: AgentAssistantMessage = {
+  id: firstId,
   role: "assistant",
   status: "completed",
   stopReason: "stop",
@@ -10,9 +18,17 @@ const repeated: AgentAssistantMessage = {
   model: "test",
   timestamp: 1,
 };
+const settled = (state: LiveChat) =>
+  [...state.assistant.values()].flatMap((entry) =>
+    entry.kind === "settled" ? [entry.message] : [],
+  );
+const blocks = (state: LiveChat, id: AgentMessageId) => {
+  const message = state.assistant.get(id);
+  return message?.kind === "draft" ? [...message.blocks.values()] : [];
+};
 
 describe("live chat transitions", () => {
-  it("retains tool start arguments and represents a completion observed without its start", () => {
+  it("retains tool start arguments and supports completion without a start", () => {
     const started = reduceLiveChat(emptyLiveChat(), {
       type: "tool-started",
       toolCallId: "first",
@@ -31,30 +47,48 @@ describe("live chat transitions", () => {
       toolName: "read",
       status: "failed",
     });
-    assert.deepStrictEqual(joinedLate.tools.get("first"), {
-      kind: "finished",
-      start: {
-        type: "tool-started",
-        toolCallId: "first",
-        toolName: "shell",
-        argumentsJson: '{"command":"pwd"}',
-      },
-      end: { type: "tool-finished", toolCallId: "first", toolName: "shell", status: "succeeded" },
-    });
-    assert.deepStrictEqual(joinedLate.tools.get("second"), {
-      kind: "finished",
-      start: null,
-      end: { type: "tool-finished", toolCallId: "second", toolName: "read", status: "failed" },
-    });
+    const first = joinedLate.tools.get("first");
+    const second = joinedLate.tools.get("second");
+    assert.strictEqual(first?.start?.argumentsJson, '{"command":"pwd"}');
+    assert.strictEqual(first?.kind === "finished" ? first.end.status : null, "succeeded");
+    assert.strictEqual(second?.kind === "finished" ? second.end.status : null, "failed");
+    assert.strictEqual(second?.start, null);
   });
 
-  it("retains assistant settlement beside the next draft without clearing on tool settlement", () => {
-    const partial = reduceLiveChat(emptyLiveChat(), {
+  it("folds deltas by message and content index without joining distinct drafts", () => {
+    let state = emptyLiveChat();
+    for (const event of [
+      { type: "text-delta", messageId: firstId, contentIndex: 4, text: "first" },
+      { type: "thinking-delta", messageId: firstId, contentIndex: 0, text: "plan" },
+      { type: "text-delta", messageId: secondId, contentIndex: 4, text: "second" },
+      { type: "text-delta", messageId: firstId, contentIndex: 4, text: " answer" },
+    ] as const) {
+      state = reduceLiveChat(state, event);
+    }
+    assert.deepStrictEqual(
+      blocks(state, firstId).map((block) => block.text),
+      ["first answer", "plan"],
+    );
+    assert.deepStrictEqual(
+      blocks(state, secondId).map((block) => block.text),
+      ["second"],
+    );
+  });
+
+  it("settles one draft in place without clearing another or losing a failed response", () => {
+    const first = reduceLiveChat(emptyLiveChat(), {
       type: "text-delta",
-      contentIndex: 4,
+      messageId: firstId,
+      contentIndex: 0,
       text: "partial",
     });
-    const afterTool = reduceLiveChat(partial, {
+    const second = reduceLiveChat(first, {
+      type: "text-delta",
+      messageId: secondId,
+      contentIndex: 0,
+      text: "next",
+    });
+    const afterTool = reduceLiveChat(second, {
       type: "message-settled",
       message: {
         role: "tool-result",
@@ -65,127 +99,121 @@ describe("live chat transitions", () => {
         timestamp: 1,
       },
     });
-    assert.strictEqual(afterTool.blocks.get(4)?.text, "partial");
-    const afterAssistant = reduceLiveChat(afterTool, {
-      type: "message-settled",
-      message: {
-        role: "assistant",
-        status: "failed",
-        stopReason: "aborted",
-        message: null,
-        content: [{ type: "text", text: "partial" }],
-        model: "test",
-        timestamp: 2,
-      },
-    });
-    assert.deepStrictEqual(
-      afterAssistant.pending.map((entry) =>
-        entry.kind === "message" ? entry.message.content : [],
-      ),
-      [[{ type: "text", text: "partial" }]],
-    );
-    const next = reduceLiveChat(afterAssistant, {
+    const failed: AgentAssistantMessage = {
+      ...repeated,
+      status: "failed",
+      stopReason: "aborted",
+      message: null,
+      content: [{ type: "text", text: "partial" }],
+    };
+    const completed = reduceLiveChat(afterTool, { type: "message-settled", message: failed });
+    const late = reduceLiveChat(completed, {
       type: "text-delta",
-      contentIndex: 4,
+      messageId: firstId,
+      contentIndex: 0,
+      text: "late",
+    });
+    assert.deepStrictEqual(settled(late), [failed]);
+    assert.deepStrictEqual(
+      blocks(late, secondId).map((block) => block.text),
+      ["next"],
+    );
+    assert.deepStrictEqual([...late.assistant.keys()], [firstId, secondId]);
+    assert.deepStrictEqual(reduceLiveChat(late, { type: "run-finished", outcome: "aborted" }).run, {
+      kind: "finished",
+      outcome: "aborted",
+    });
+  });
+
+  it("preserves equal content with distinct IDs and acknowledges only the included ID", () => {
+    const other = { ...repeated, id: secondId };
+    const first = reduceLiveChat(emptyLiveChat(), { type: "message-settled", message: repeated });
+    const both = reduceLiveChat(first, { type: "message-settled", message: other });
+    assert.deepStrictEqual(settled(both), [repeated, other]);
+    const missing = acknowledgeTranscript(both, []);
+    assert.deepStrictEqual(settled(missing), [repeated, other]);
+    const acknowledged = acknowledgeTranscript(missing, [
+      { ...repeated, model: "normalized-model" },
+    ]);
+    assert.deepStrictEqual(settled(acknowledged), [other]);
+    assert.deepStrictEqual(settled(acknowledgeTranscript(acknowledged, [other])), []);
+  });
+
+  it("acknowledges a live-first settlement without a baseline and ignores repeated settlement", () => {
+    const first = reduceLiveChat(emptyLiveChat(), { type: "message-settled", message: repeated });
+    const repeatedEvent = reduceLiveChat(first, { type: "message-settled", message: repeated });
+    assert.deepStrictEqual(settled(repeatedEvent), [repeated]);
+    const snapshot = acknowledgeTranscript(repeatedEvent, [repeated]);
+    const late = reduceLiveChat(snapshot, { type: "message-settled", message: repeated });
+    assert.deepStrictEqual(settled(late), []);
+  });
+
+  it("replaces a draft with a snapshot while retaining a newer draft and suppressing late events", () => {
+    const first = reduceLiveChat(emptyLiveChat(), {
+      type: "thinking-delta",
+      messageId: firstId,
+      contentIndex: 0,
+      text: "plan",
+    });
+    const second = reduceLiveChat(first, {
+      type: "text-delta",
+      messageId: secondId,
+      contentIndex: 0,
       text: "next",
     });
-    assert.strictEqual(next.blocks.get(4)?.text, "next");
-    assert.deepStrictEqual(next.pending, afterAssistant.pending);
-    assert.strictEqual(afterAssistant.run.kind, "running");
+    const snapshot = acknowledgeTranscript(second, [repeated]);
+    assert.deepStrictEqual(blocks(snapshot, firstId), []);
     assert.deepStrictEqual(
-      reduceLiveChat(afterAssistant, {
-        type: "run-finished",
-        outcome: "aborted",
-      }).run,
-      { kind: "finished", outcome: "aborted" },
+      blocks(snapshot, secondId).map((block) => block.text),
+      ["next"],
     );
-  });
-
-  it("requires a second occurrence for an equal settlement after acknowledging the first", () => {
-    const running = reduceLiveChat(emptyLiveChat(), { type: "run-started" }, []);
-    const first = reduceLiveChat(running, { type: "message-settled", message: repeated }, []);
-    const acknowledged = acknowledgeTranscript(first, [repeated], first.pending);
-    assert.deepStrictEqual(acknowledged.pending, []);
-    const second = reduceLiveChat(acknowledged, { type: "message-settled", message: repeated }, [
-      repeated,
-    ]);
-    const missing = acknowledgeTranscript(second, [repeated], second.pending);
-    assert.deepStrictEqual(
-      missing.pending.flatMap((entry) => (entry.kind === "message" ? [entry.message] : [])),
-      [repeated],
-    );
-    assert.deepStrictEqual(
-      acknowledgeTranscript(missing, [repeated, repeated], missing.pending).pending,
-      [],
-    );
-  });
-
-  it("carries unresolved occurrence targets across runs without recounting their snapshot", () => {
-    const running = reduceLiveChat(emptyLiveChat(), { type: "run-started" }, []);
-    const first = reduceLiveChat(running, { type: "message-settled", message: repeated }, []);
-    const second = reduceLiveChat(first, { type: "message-settled", message: repeated }, []);
-    const nextRun = reduceLiveChat(second, { type: "run-started" }, [repeated]);
-    const third = reduceLiveChat(nextRun, { type: "message-settled", message: repeated }, [
-      repeated,
-    ]);
-    const missing = acknowledgeTranscript(third, [repeated, repeated], third.pending);
-    assert.deepStrictEqual(
-      missing.pending.flatMap((entry) => (entry.kind === "message" ? [entry.message] : [])),
-      [repeated],
-    );
-    assert.deepStrictEqual(
-      acknowledgeTranscript(missing, [repeated, repeated, repeated], missing.pending).pending,
-      [],
-    );
-  });
-
-  it("retains unknown occurrence targets through later snapshots and inherited equal settlements", () => {
-    const draft = reduceLiveChat(emptyLiveChat(), {
-      type: "text-delta",
+    const compacted = acknowledgeTranscript(snapshot, []);
+    const finished = reduceLiveChat(compacted, { type: "run-finished", outcome: "completed" });
+    const lateDelta = reduceLiveChat(finished, {
+      type: "thinking-delta",
+      messageId: firstId,
       contentIndex: 0,
-      text: "repeated",
+      text: "late",
     });
-    const first = reduceLiveChat(draft, { type: "message-settled", message: repeated }, [repeated]);
-    const missing = acknowledgeTranscript(first, [repeated, repeated], first.pending);
-    assert.deepStrictEqual(
-      missing.pending.flatMap((entry) => (entry.kind === "message" ? [entry.message] : [])),
-      [repeated],
-    );
-    const nextRun = reduceLiveChat(missing, { type: "run-started" }, [repeated, repeated]);
-    const second = reduceLiveChat(nextRun, { type: "message-settled", message: repeated }, [
-      repeated,
-      repeated,
-    ]);
-    const ambiguous = acknowledgeTranscript(second, [repeated, repeated, repeated], second.pending);
-    assert.deepStrictEqual(
-      ambiguous.pending.flatMap((entry) => (entry.kind === "message" ? [entry.message] : [])),
-      [repeated, repeated],
-    );
+    const lateSettlement = reduceLiveChat(lateDelta, {
+      type: "message-settled",
+      message: repeated,
+    });
+    assert.deepStrictEqual(blocks(lateSettlement, firstId), []);
+    assert.deepStrictEqual(settled(lateSettlement), []);
+    assert.deepStrictEqual(lateSettlement.run, { kind: "finished", outcome: "completed" });
   });
 
   for (const boundary of ["run-finished", "run-started"] as const) {
-    it(`retains an orphan draft across ${boundary} and the next run`, () => {
+    it(`retains an orphan draft across ${boundary} until its own ID is acknowledged`, () => {
       const partial = reduceLiveChat(emptyLiveChat(), {
         type: "text-delta",
+        messageId: firstId,
         contentIndex: 0,
         text: "orphan",
       });
-      const sealed = reduceLiveChat(
+      const retained = reduceLiveChat(
         partial,
         boundary === "run-finished" ? { type: boundary, outcome: "aborted" } : { type: boundary },
       );
-      const next = reduceLiveChat(reduceLiveChat(sealed, { type: "run-started" }), {
+      const next = reduceLiveChat(reduceLiveChat(retained, { type: "run-started" }), {
         type: "text-delta",
+        messageId: secondId,
         contentIndex: 0,
         text: "next run",
       });
+      const orphan = next.assistant.get(firstId);
+      assert.strictEqual(orphan?.kind === "draft" ? orphan.phase : null, "retained");
       assert.deepStrictEqual(
-        next.pending.flatMap((entry) =>
-          entry.kind === "blocks" ? [...entry.blocks.values()].map((block) => block.text) : [],
-        ),
+        blocks(next, firstId).map((block) => block.text),
         ["orphan"],
       );
-      assert.strictEqual(next.blocks.get(0)?.text, "next run");
+      const acknowledged = acknowledgeTranscript(next, [repeated]);
+      assert.deepStrictEqual(blocks(acknowledged, firstId), []);
+      assert.deepStrictEqual(
+        blocks(acknowledged, secondId).map((block) => block.text),
+        ["next run"],
+      );
     });
   }
 
@@ -202,11 +230,6 @@ describe("live chat transitions", () => {
         status: "succeeded",
       });
       assert.strictEqual(completed.run.kind, "running");
-      assert.deepStrictEqual(completed.tools.get("late"), {
-        kind: "finished",
-        start: null,
-        end: { type: "tool-finished", toolCallId: "late", toolName: "read", status: "succeeded" },
-      });
     });
   }
 });

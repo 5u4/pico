@@ -1,5 +1,5 @@
 import * as Schema from "effect/Schema";
-import { AgentMessage } from "./agent-message.ts";
+import { AgentMessage, AgentMessageId } from "./agent-message.ts";
 import { ChatId } from "./chat-model.ts";
 
 export const AgentRunStarted = Schema.Struct({
@@ -8,12 +8,14 @@ export const AgentRunStarted = Schema.Struct({
 
 export const AgentTextDelta = Schema.Struct({
   type: Schema.Literal("text-delta"),
+  messageId: AgentMessageId,
   contentIndex: Schema.Natural,
   text: Schema.String,
 });
 
 export const AgentThinkingDelta = Schema.Struct({
   type: Schema.Literal("thinking-delta"),
+  messageId: AgentMessageId,
   contentIndex: Schema.Natural,
   text: Schema.String,
 });

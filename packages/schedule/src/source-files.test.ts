@@ -17,6 +17,7 @@ import { open } from "./schedule.ts";
 import {
   awaitFinished,
   caller,
+  capturedRun,
   chatId,
   decodeDefinition,
   permissionDenied,
@@ -77,9 +78,7 @@ describe("source files", () => {
           deliver: () => Effect.void,
           publish: () => Effect.die("Expected an agent request"),
           runPrompt: (_chatId, runId, request) =>
-            Queue.offer(requests, request).pipe(
-              Effect.as({ runId, outcome: "completed", events: [], finalAssistantText: "done" }),
-            ),
+            Queue.offer(requests, request).pipe(Effect.as(capturedRun(runId, "done"))),
         });
         assert.deepStrictEqual(
           yield* Queue.take(requests),
@@ -419,9 +418,7 @@ describe("source files", () => {
         deliver: () => Effect.void,
         publish: () => Effect.die("Expected an agent request"),
         runPrompt: (_chatId, runId, request) =>
-          Queue.offer(requests, request).pipe(
-            Effect.as({ runId, outcome: "completed", events: [], finalAssistantText: "done" }),
-          ),
+          Queue.offer(requests, request).pipe(Effect.as(capturedRun(runId, "done"))),
       });
       assert.deepStrictEqual(
         yield* fileSystem.readDirectory(path.join(schedulesDir, ".staging")),
@@ -944,7 +941,7 @@ describe("source files", () => {
           runPrompt: (_chatId, runId) =>
             Effect.sync(() => {
               prompts++;
-              return { runId, outcome: "completed", events: [], finalAssistantText: "unexpected" };
+              return capturedRun(runId, "unexpected");
             }),
         };
         yield* TestClock.setTime(1_000);

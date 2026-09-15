@@ -20,7 +20,7 @@ import {
   reduceLiveChat,
 } from "./chat-state.ts";
 
-export type { LiveBlock, LiveChat, LiveRun, LiveTool, PendingContent } from "./chat-state.ts";
+export type { LiveAssistant, LiveBlock, LiveChat, LiveRun, LiveTool } from "./chat-state.ts";
 
 export type Connection =
   | { readonly kind: "opening" }
@@ -91,11 +91,7 @@ export const make = ({ url }: { readonly url: string }) => {
             if (get.registry.getNodes().has(cell)) {
               lifecycle.update(cell, (state) => ({
                 ...state,
-                live: reduceLiveChat(
-                  state.live,
-                  event,
-                  Option.getOrNull(AsyncResult.value(state.transcriptResult)),
-                ),
+                live: reduceLiveChat(state.live, event),
               }));
             }
             if (event.type === "message-settled" || event.type === "run-finished") {
@@ -212,10 +208,9 @@ export const make = ({ url }: { readonly url: string }) => {
       return Effect.gen(function* () {
         const session = yield* get.resultOnce(owner);
         yield* session.available;
-        const eligible = get.once(cell).live.pending;
         const messages = yield* session.client.Transcript({ chatId });
         session.recordResponse();
-        return { messages, eligible };
+        return messages;
       }).pipe(
         Effect.onExit((exit) =>
           Effect.sync(() => {
@@ -226,12 +221,8 @@ export const make = ({ url }: { readonly url: string }) => {
                 cell,
                 Exit.isSuccess(exit)
                   ? {
-                      live: acknowledgeTranscript(
-                        current.live,
-                        exit.value.messages,
-                        exit.value.eligible,
-                      ),
-                      transcriptResult: AsyncResult.success(exit.value.messages),
+                      live: acknowledgeTranscript(current.live, exit.value),
+                      transcriptResult: AsyncResult.success(exit.value),
                     }
                   : {
                       ...current,

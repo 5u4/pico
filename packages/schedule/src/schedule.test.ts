@@ -1,5 +1,5 @@
 import { assert, describe, it } from "@effect/vitest";
-import type * as Agent from "@pico/contract/agent-message";
+import * as Agent from "@pico/contract/agent-message";
 import type { CapturedAgentRun } from "@pico/contract/agent-runtime";
 import { AbsolutePath } from "@pico/contract/path";
 import * as Schedule from "@pico/contract/schedule";
@@ -27,6 +27,7 @@ import {
   awaitExists,
   awaitFinished,
   caller,
+  capturedRun,
   captureLogs,
   chatId,
   decodeDefinition,
@@ -280,8 +281,21 @@ describe("Schedules", () => {
       const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
       const cwd = AbsolutePath.make(root);
       const invoked = yield* Deferred.make<void>();
-      const delivered = yield* Deferred.make<string>();
+      const delivered = yield* Deferred.make<Agent.AgentAssistantMessage>();
       const schedules = yield* make(schedulesDir, resolveTarget);
+      const finalMessage: Agent.AgentAssistantMessage = {
+        role: "assistant",
+        id: Agent.AgentMessageId.make("final-captured-assistant"),
+        status: "completed",
+        stopReason: "stop",
+        content: [
+          { type: "thinking", text: "private reasoning" },
+          { type: "text", text: "fin" },
+          { type: "text", text: "ished" },
+        ],
+        model: "test",
+        timestamp: 1,
+      };
       const host: Schedule.ScheduleRunHost = {
         resolveTarget,
         materialize: () => Effect.void,
@@ -291,24 +305,32 @@ describe("Schedules", () => {
         runPrompt: (_target, runId, prompt, onEvent) =>
           Effect.gen(function* () {
             assert.deepStrictEqual(prompt, textPrompt("Inspect the workspace."));
-            yield* onEvent({ type: "run-started" });
-            yield* onEvent({
-              type: "message-settled",
-              message: {
-                role: "assistant",
-                status: "completed",
-                stopReason: "stop",
-                content: [{ type: "text", text: "finished" }],
-                model: "test",
-                timestamp: 1,
+            const events: CapturedAgentRun["events"] = [
+              { type: "run-started" },
+              {
+                type: "message-settled",
+                message: {
+                  ...finalMessage,
+                  id: Agent.AgentMessageId.make("earlier-captured-assistant"),
+                },
               },
-            });
-            yield* onEvent({ type: "run-finished", outcome: "completed" });
+              { type: "message-settled", message: finalMessage },
+              {
+                type: "message-settled",
+                message: {
+                  role: "user",
+                  content: [{ type: "text", text: "interleaved" }],
+                  timestamp: 2,
+                },
+              },
+              { type: "run-finished", outcome: "completed" },
+            ];
+            for (const event of events) yield* onEvent(event);
             yield* Deferred.succeed(invoked, undefined);
             return {
               runId,
               outcome: "completed",
-              events: [],
+              events,
               finalAssistantText: "finished",
             };
           }),
@@ -330,7 +352,7 @@ describe("Schedules", () => {
       const scheduleRuns = path.join(schedulesDir, "runs", created.id);
       yield* awaitExists(fileSystem, scheduleRuns);
       yield* Deferred.await(invoked);
-      assert.strictEqual(yield* Deferred.await(delivered), "finished");
+      assert.deepStrictEqual(yield* Deferred.await(delivered), finalMessage);
       const runNames = yield* fileSystem.readDirectory(scheduleRuns);
       const runDirectory = path.join(scheduleRuns, runNames[0] ?? "missing");
       assert.deepStrictEqual(runNames, [
@@ -362,7 +384,7 @@ describe("Schedules", () => {
         const cwd = AbsolutePath.make(root);
         const attempted = yield* Deferred.make<void>();
         const reject = yield* Deferred.make<void>();
-        const send: Schedule.ScheduleRunHost["deliver"] = () =>
+        const send = () =>
           Deferred.succeed(attempted, undefined).pipe(
             Effect.andThen(Deferred.await(reject)),
             Effect.andThen(
@@ -403,13 +425,7 @@ describe("Schedules", () => {
               prepare: () => Effect.succeed({ chatId, workspaceId, cwd }),
               deliver: send,
               publish: send,
-              runPrompt: (_chatId, runId) =>
-                Effect.succeed({
-                  runId,
-                  outcome: "completed",
-                  events: [],
-                  finalAssistantText: "reminder",
-                }),
+              runPrompt: (_chatId, runId) => Effect.succeed(capturedRun(runId, "reminder")),
             });
             yield* Deferred.await(attempted);
             const runFile = path.join(
@@ -461,12 +477,7 @@ describe("Schedules", () => {
         publish: () => Effect.die("agent output must not be persisted twice"),
         runPrompt: (_target, runId, prompt) =>
           Effect.sync(() => requests.set(runId, prompt)).pipe(
-            Effect.as({
-              runId,
-              outcome: "completed",
-              events: [],
-              finalAssistantText: "finished",
-            }),
+            Effect.as(capturedRun(runId, "finished")),
           ),
       };
 
@@ -732,22 +743,22 @@ describe("Schedules", () => {
               cwd: destination.workspaceId === workspaceId ? cwd : destinationCwd,
             };
           }),
-        deliver: (targetChatId, content) =>
+        deliver: (targetChatId, message) =>
           fileSystem
-            .writeFileString(path.join(root, `${targetChatId}.txt`), content)
+            .writeFileString(
+              path.join(root, `${targetChatId}.txt`),
+              message.content
+                .filter((block) => block.type === "text")
+                .map((block) => block.text)
+                .join(""),
+            )
             .pipe(
               Effect.mapError(
                 (error) => new Schedule.ScheduleHostError({ message: error.message }),
               ),
             ),
         publish: () => Effect.void,
-        runPrompt: (_target, runId) =>
-          Effect.succeed({
-            runId,
-            outcome: "completed",
-            events: [],
-            finalAssistantText: "old run",
-          }),
+        runPrompt: (_target, runId) => Effect.succeed(capturedRun(runId, "old run")),
       };
 
       yield* TestClock.setTime(1_000);
@@ -862,14 +873,7 @@ describe("Schedules", () => {
         deliver: () => Effect.void,
         publish: () => Effect.void,
         runPrompt: (_target, runId) =>
-          Deferred.succeed(invoked, undefined).pipe(
-            Effect.as({
-              runId,
-              outcome: "completed",
-              events: [],
-              finalAssistantText: "recovered",
-            }),
-          ),
+          Deferred.succeed(invoked, undefined).pipe(Effect.as(capturedRun(runId, "recovered"))),
       };
 
       yield* TestClock.setTime(0);
@@ -1015,13 +1019,7 @@ describe("Schedules", () => {
           prepare: () => Effect.succeed({ chatId, workspaceId, cwd }),
           deliver: () => Deferred.succeed(delivered, undefined).pipe(Effect.asVoid),
           publish: () => Effect.die("Agent schedules must deliver their final response"),
-          runPrompt: (_target, runId) =>
-            Effect.succeed({
-              runId,
-              outcome: "completed",
-              events: [],
-              finalAssistantText: "complete",
-            }),
+          runPrompt: (_target, runId) => Effect.succeed(capturedRun(runId, "complete")),
         };
         yield* TestClock.setTime(1_000);
         yield* schedules.start(host);
@@ -1317,7 +1315,7 @@ describe("Schedules", () => {
           runPrompt: (_chatId, runId) =>
             Effect.sync(() => {
               prompts++;
-              return { runId, outcome: "completed", events: [], finalAssistantText: "unexpected" };
+              return capturedRun(runId, "unexpected");
             }),
         })
         .pipe(Effect.scoped, Effect.forkChild);

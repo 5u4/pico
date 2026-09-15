@@ -2,6 +2,7 @@ import * as BunCrypto from "@effect/platform-bun/BunCrypto";
 import * as BunFileSystem from "@effect/platform-bun/BunFileSystem";
 import * as BunPath from "@effect/platform-bun/BunPath";
 import * as Agent from "@pico/contract/agent-message";
+import type { CapturedAgentRun } from "@pico/contract/agent-runtime";
 import * as Chat from "@pico/contract/chat-model";
 import { AbsolutePath } from "@pico/contract/path";
 import * as Schedule from "@pico/contract/schedule";
@@ -30,6 +31,28 @@ export const resolveTarget: Schedule.ScheduleRunHost["resolveTarget"] = (target)
     : Effect.fail(new Schedule.ScheduleHostError({ message: "Unexpected external test target" }));
 
 export const textPrompt = (text: string) => Agent.AgentPrompt.make({ text, attachments: [] });
+
+export const capturedRun = (runId: Schedule.ScheduleRunId, text: string): CapturedAgentRun => ({
+  runId,
+  outcome: "completed",
+  events: [
+    { type: "run-started" },
+    {
+      type: "message-settled",
+      message: {
+        role: "assistant",
+        id: Agent.AgentMessageId.make(`${runId}:assistant`),
+        status: "completed",
+        stopReason: "stop",
+        content: [{ type: "text", text }],
+        model: "test",
+        timestamp: 1,
+      },
+    },
+    { type: "run-finished", outcome: "completed" },
+  ],
+  finalAssistantText: text,
+});
 
 export const decodeRun = Schema.decodeUnknownEffect(
   Schema.fromJsonString(Schedule.ScheduleRunLifecycle),

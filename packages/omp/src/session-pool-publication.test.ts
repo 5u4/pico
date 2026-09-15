@@ -13,7 +13,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Stream from "effect/Stream";
-import { normalizeTranscript } from "./agent-event.ts";
+import { normalizeMessage, normalizeTranscript } from "./agent-event.ts";
 import { makeSessionPool, type OpenedSession, type SessionFactory } from "./session-pool.ts";
 
 const platformLayer = Layer.merge(BunFileSystem.layer, BunPath.layer);
@@ -137,10 +137,108 @@ describe("session pool publication", () => {
             status: "completed",
             stopReason: "stop",
             content: [{ type: "text", text: "durable publication" }],
-            model: "schedule",
+            model: "pico/schedule",
           });
+          const settlement = envelopes.find(({ event }) => event.type === "message-settled");
+          assert.strictEqual(settlement?.event.type, "message-settled");
+          if (settlement?.event.type !== "message-settled") return;
+          assert.deepStrictEqual(settlement.event.message, published);
+          assert.deepStrictEqual(normalizeMessage(liveMessage), published);
         }),
       ).pipe(Effect.provide(platformLayer)),
+  );
+
+  it.effect("preserves assistant tool-call structure before its result is persisted", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const directory = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "pico-pending-tool-snapshot-",
+        });
+        const sessionFile = path.join(directory, "session.jsonl");
+        const manager = yield* Effect.acquireRelease(
+          Effect.promise(() =>
+            OmpSessionManager.SessionManager.open(sessionFile, directory, undefined, {
+              initialCwd: directory,
+              suppressBreadcrumb: true,
+            }),
+          ),
+          (manager) => Effect.promise(() => manager.close()),
+        );
+        const assistantMessage: Parameters<OpenedSession["appendAssistantMessage"]>[0] & {
+          messageId: string;
+        } = {
+          role: "assistant",
+          messageId: "in-flight-assistant",
+          content: [
+            { type: "thinking", thinking: "Checking the source" },
+            { type: "toolCall", id: "pending-read", name: "read", arguments: { path: "file.ts" } },
+            { type: "text", text: "Waiting for the source" },
+          ],
+          api: "test",
+          provider: "test",
+          model: "test",
+          stopReason: "toolUse",
+          timestamp: 1,
+          usage: {
+            input: 0,
+            output: 0,
+            cacheRead: 0,
+            cacheWrite: 0,
+            totalTokens: 0,
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+          },
+        };
+        manager.appendMessage(assistantMessage);
+        yield* Effect.promise(() => manager.ensureOnDisk());
+        yield* Effect.promise(() => manager.flush());
+        const beforeResult = normalizeTranscript(
+          yield* Effect.promise(() => OmpSessionLoader.loadSessionMessagesReadOnly(sessionFile)),
+        );
+        assert.deepStrictEqual(beforeResult, [
+          {
+            role: "assistant",
+            id: Agent.AgentMessageId.make("in-flight-assistant"),
+            status: "completed",
+            stopReason: "tool-use",
+            content: [
+              { type: "thinking", text: "Checking the source" },
+              {
+                type: "tool-call",
+                id: "pending-read",
+                name: "read",
+                argumentsJson: '{"path":"file.ts"}',
+              },
+              { type: "text", text: "Waiting for the source" },
+            ],
+            model: "test",
+            timestamp: 1,
+          },
+        ]);
+        manager.appendMessage({
+          role: "toolResult",
+          toolCallId: "pending-read",
+          toolName: "read",
+          content: [{ type: "text", text: "Source contents" }],
+          isError: false,
+          timestamp: 2,
+        });
+        yield* Effect.promise(() => manager.flush());
+        const afterResult = normalizeTranscript(
+          yield* Effect.promise(() => OmpSessionLoader.loadSessionMessagesReadOnly(sessionFile)),
+        );
+        assert.deepStrictEqual(afterResult[0], beforeResult[0]);
+        assert.deepStrictEqual(afterResult[1], {
+          role: "tool-result",
+          toolCallId: "pending-read",
+          toolName: "read",
+          content: [{ type: "text", text: "Source contents" }],
+          status: "succeeded",
+          timestamp: 2,
+        });
+      }),
+    ).pipe(Effect.provide(platformLayer)),
   );
 
   it.effect("delivers one persisted agent response without appending it again", () =>
@@ -162,8 +260,11 @@ describe("session pool publication", () => {
                   undefined,
                   { initialCwd: sessionsDir, suppressBreadcrumb: true },
                 );
-                const assistantMessage: Parameters<OpenedSession["appendAssistantMessage"]>[0] = {
+                const assistantMessage: Parameters<OpenedSession["appendAssistantMessage"]>[0] & {
+                  messageId: string;
+                } = {
                   role: "assistant",
+                  messageId: "scheduled-answer",
                   content: [{ type: "text", text: "scheduled answer" }],
                   api: "test",
                   provider: "test",
@@ -206,14 +307,7 @@ describe("session pool publication", () => {
                     emit({ type: "run-started" });
                     emit({
                       type: "message-settled",
-                      message: {
-                        role: "assistant",
-                        status: "completed",
-                        stopReason: "stop",
-                        content: [{ type: "text", text: "scheduled answer" }],
-                        model: "test",
-                        timestamp: 1,
-                      },
+                      message: normalizeMessage(assistantMessage),
                     });
                     emit({ type: "run-finished", outcome: "completed" });
                     return Promise.resolve(admitted);
@@ -250,7 +344,11 @@ describe("session pool publication", () => {
           () => Effect.void,
         );
         assert.strictEqual(captured.finalAssistantText, "scheduled answer");
-        yield* pool.deliver(chatId, captured.finalAssistantText);
+        const settled = captured.events.find((event) => event.type === "message-settled");
+        if (settled?.type !== "message-settled" || settled.message.role !== "assistant") {
+          return yield* Effect.die("Capture missed assistant settlement");
+        }
+        yield* pool.deliver(chatId, settled.message);
 
         yield* pool.drain();
         assert.deepStrictEqual(observed, ["run-started", "message-settled", "run-finished"]);
@@ -258,6 +356,7 @@ describe("session pool publication", () => {
         yield* pool.close(chatId);
         const transcript = yield* pool.transcript(chatId);
         assert.strictEqual(transcript.length, 1);
+        assert.deepStrictEqual(transcript[0], settled.message);
         assert.deepInclude(transcript[0], {
           role: "assistant",
           content: [{ type: "text", text: "scheduled answer" }],

@@ -1,4 +1,8 @@
 import * as Schema from "effect/Schema";
+
+export const AgentMessageId = Schema.NonEmptyString.pipe(Schema.brand("AgentMessageId"));
+export type AgentMessageId = typeof AgentMessageId.Type;
+
 export const MAX_AGENT_IMAGE_ATTACHMENTS = 10;
 export const MAX_AGENT_IMAGE_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 export const MAX_AGENT_IMAGE_BYTES = 40 * 1024 * 1024;
@@ -108,6 +112,7 @@ export type AgentUserMessage = typeof AgentUserMessage.Type;
 
 const AgentCompletedAssistantMessage = Schema.Struct({
   role: Schema.Literal("assistant"),
+  id: AgentMessageId,
   status: Schema.Literal("completed"),
   stopReason: Schema.Literals(["stop", "length", "tool-use"]),
   content: Schema.Array(AgentAssistantContent),
@@ -117,6 +122,7 @@ const AgentCompletedAssistantMessage = Schema.Struct({
 
 const AgentFailedAssistantMessage = Schema.Struct({
   role: Schema.Literal("assistant"),
+  id: AgentMessageId,
   status: Schema.Literal("failed"),
   stopReason: Schema.Literals(["error", "aborted"]),
   message: Schema.NullOr(Schema.String),

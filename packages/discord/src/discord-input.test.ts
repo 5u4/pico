@@ -524,6 +524,7 @@ describe("discord input", () => {
                 type: "message-settled",
                 message: {
                   role: "assistant",
+                  id: AgentMessage.AgentMessageId.make("scheduled-after-restart"),
                   status: "completed",
                   stopReason: "stop",
                   content: [{ type: "text", text: "scheduled after restart" }],

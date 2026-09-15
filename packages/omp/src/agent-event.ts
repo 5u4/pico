@@ -1,6 +1,7 @@
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session-events";
 import type { AgentEvent } from "@pico/contract/agent-event";
-import type * as Agent from "@pico/contract/agent-message";
+import * as Agent from "@pico/contract/agent-message";
+import * as Schema from "effect/Schema";
 
 type SessionMessage = Extract<AgentSessionEvent, { readonly type: "message_end" }>["message"];
 type UserMessage = Extract<SessionMessage, { readonly role: "user" }>;
@@ -8,6 +9,11 @@ type AssistantMessage = Extract<SessionMessage, { readonly role: "assistant" }>;
 type ToolResultMessage = Extract<SessionMessage, { readonly role: "toolResult" }>;
 
 const stringifyArguments = (value: object): string => JSON.stringify(value) ?? "null";
+
+const decodeMessageId = Schema.decodeUnknownSync(Agent.AgentMessageId);
+
+const assistantMessageId = (message: SessionMessage): Agent.AgentMessageId =>
+  decodeMessageId("messageId" in message ? message.messageId : undefined);
 
 const normalizeUserContent = (
   content: UserMessage["content"],
@@ -80,7 +86,9 @@ const normalizeToolResultContent = (
     }
   });
 
-export const normalizeMessage = (message: SessionMessage): Agent.AgentMessage | undefined => {
+export function normalizeMessage(message: AssistantMessage): Agent.AgentAssistantMessage;
+export function normalizeMessage(message: SessionMessage): Agent.AgentMessage | undefined;
+export function normalizeMessage(message: SessionMessage): Agent.AgentMessage | undefined {
   switch (message.role) {
     case "user":
       return {
@@ -90,12 +98,14 @@ export const normalizeMessage = (message: SessionMessage): Agent.AgentMessage | 
       };
     case "assistant": {
       const content = normalizeAssistantContent(message.content);
+      const id = assistantMessageId(message);
       switch (message.stopReason) {
         case "stop":
         case "length":
         case "toolUse":
           return {
             role: "assistant",
+            id,
             status: "completed",
             stopReason: message.stopReason === "toolUse" ? "tool-use" : message.stopReason,
             content,
@@ -106,6 +116,7 @@ export const normalizeMessage = (message: SessionMessage): Agent.AgentMessage | 
         case "aborted":
           return {
             role: "assistant",
+            id,
             status: "failed",
             stopReason: message.stopReason,
             message: message.errorMessage ?? null,
@@ -142,7 +153,7 @@ export const normalizeMessage = (message: SessionMessage): Agent.AgentMessage | 
       return exhaustive;
     }
   }
-};
+}
 
 export const normalizeTranscript = (
   messages: ReadonlyArray<SessionMessage>,
@@ -162,12 +173,14 @@ const normalizeMessageUpdate = (
     case "text_delta":
       return {
         type: "text-delta",
+        messageId: assistantMessageId(event.message),
         contentIndex: event.assistantMessageEvent.contentIndex,
         text: event.assistantMessageEvent.delta,
       };
     case "thinking_delta":
       return {
         type: "thinking-delta",
+        messageId: assistantMessageId(event.message),
         contentIndex: event.assistantMessageEvent.contentIndex,
         text: event.assistantMessageEvent.delta,
       };

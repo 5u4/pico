@@ -34,6 +34,16 @@ const missingChatId = Chat.ChatId.make("018f47a0-0000-7000-8000-000000000098");
 
 const textPrompt = (text: string) => AgentMessage.AgentPrompt.make({ text, attachments: [] });
 
+const scheduledReply: AgentMessage.AgentAssistantMessage = {
+  role: "assistant",
+  id: AgentMessage.AgentMessageId.make("scheduled-reply"),
+  status: "completed",
+  stopReason: "stop",
+  content: [{ type: "text", text: "B" }],
+  model: "test",
+  timestamp: 7,
+};
+
 const runtimeTranscript: AgentMessage.AgentTranscript = [
   {
     role: "user",
@@ -78,9 +88,14 @@ const makeScheduledDeliveryFixture = Effect.fn("makeScheduledDeliveryFixture")(f
         transcript: () => Effect.die("unexpected transcript read"),
         send: () => Effect.die("unexpected ordinary send"),
         sendCaptured: () => Effect.die("unexpected captured run"),
-        deliver: (_chatId, content) =>
+        deliver: (_chatId, message) =>
           Effect.sync(() => {
-            order.push(`deliver:${content}`);
+            order.push(
+              `deliver:${message.content
+                .filter((block) => block.type === "text")
+                .map((block) => block.text)
+                .join("")}`,
+            );
           }),
         publish: (_chatId, content) =>
           Effect.sync(() => {
@@ -173,7 +188,7 @@ describe("Chat close", () => {
           .pipe(Effect.forkScoped({ startImmediately: true }));
         yield* Deferred.await(sendStarted);
         const delivering = yield* host
-          .deliver(chat.id, "B")
+          .deliver(chat.id, scheduledReply)
           .pipe(Effect.forkScoped({ startImmediately: true }));
         const otherDelivery = yield* host
           .publish(otherChat.id, "C")
@@ -231,7 +246,13 @@ describe("Chat close", () => {
       assert.isNotNull(Option.getOrThrow(yield* chats.findById(chat.id)).archivedAt);
       assert.deepStrictEqual(order, ["publish:A", "send:A:1", "send:A:2", "runtime-close"]);
       assert.instanceOf(
-        yield* host.deliver(chat.id, "late").pipe(Effect.flip),
+        yield* host
+          .deliver(chat.id, {
+            ...scheduledReply,
+            id: AgentMessage.AgentMessageId.make("late-reply"),
+            content: [{ type: "text", text: "late" }],
+          })
+          .pipe(Effect.flip),
         Schedule.ScheduleHostError,
       );
       assert.deepStrictEqual(order, ["publish:A", "send:A:1", "send:A:2", "runtime-close"]);
@@ -253,7 +274,7 @@ describe("Chat close", () => {
       assert.isTrue(Exit.isFailure(result) && Cause.hasInterruptsOnly(result.cause));
 
       const nextDelivery = yield* host
-        .deliver(chat.id, "B")
+        .deliver(chat.id, scheduledReply)
         .pipe(Effect.forkScoped({ startImmediately: true }));
       assert.deepStrictEqual(nextDelivery.pollUnsafe(), Exit.void);
       yield* Deferred.succeed(releaseSend, undefined);

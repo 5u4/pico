@@ -190,6 +190,83 @@ describe("AgentRuntime", () => {
     );
   });
 
+  it.effect("keeps legacy assistant identity across read-only loads and writable migrations", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const directory = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-identity-" });
+        const timestamp = "2026-01-01T00:00:00.000Z";
+        const message = {
+          role: "assistant",
+          content: [{ type: "text", text: "Same legacy answer" }],
+          api: "test",
+          provider: "test",
+          model: "test",
+          stopReason: "stop",
+          timestamp: 1,
+          usage: {
+            input: 0,
+            output: 0,
+            cacheRead: 0,
+            cacheWrite: 0,
+            totalTokens: 0,
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+          },
+        };
+        for (const version of [1, 3]) {
+          const sessionId = `legacy-session-${version}`;
+          const sessionFile = path.join(directory, `${sessionId}.jsonl`);
+          const entries = [
+            { type: "session", version, id: sessionId, timestamp, cwd: directory },
+            ...["first", "second", "third"].map((id, index, ids) => ({
+              type: "message",
+              ...(version === 1 ? {} : { id, parentId: ids[index - 1] ?? null }),
+              timestamp,
+              message: index === 2 ? { ...message, messageId: "retained-sdk-id" } : message,
+            })),
+          ];
+          const journal = `${entries.map((entry) => JSON.stringify(entry)).join("\n")}\n`;
+          yield* fileSystem.writeFileString(sessionFile, journal);
+          const first = normalizeTranscript(
+            yield* Effect.promise(() => OmpSessionLoader.loadSessionMessagesReadOnly(sessionFile)),
+          );
+          const second = normalizeTranscript(
+            yield* Effect.promise(() => OmpSessionLoader.loadSessionMessagesReadOnly(sessionFile)),
+          );
+          assert.deepStrictEqual(first, second);
+          assert.deepStrictEqual(
+            first.flatMap((entry) => (entry.role === "assistant" ? [entry.id] : [])),
+            [
+              `legacy:${sessionId}:${version === 1 ? "entry:1" : "first"}`,
+              `legacy:${sessionId}:${version === 1 ? "entry:2" : "second"}`,
+              "retained-sdk-id",
+            ],
+          );
+          assert.strictEqual(yield* fileSystem.readFileString(sessionFile), journal);
+          yield* Effect.acquireUseRelease(
+            Effect.promise(() =>
+              OmpSessionManager.SessionManager.open(sessionFile, directory, undefined, {
+                initialCwd: directory,
+                suppressBreadcrumb: true,
+              }),
+            ),
+            (manager) =>
+              Effect.promise(async () => {
+                await manager.ensureOnDisk();
+                await manager.flush();
+              }),
+            (manager) => Effect.promise(() => manager.close()),
+          );
+          const resumed = normalizeTranscript(
+            yield* Effect.promise(() => OmpSessionLoader.loadSessionMessagesReadOnly(sessionFile)),
+          );
+          assert.deepStrictEqual(resumed, first);
+        }
+      }),
+    ).pipe(Effect.provide(platformLayer)),
+  );
+
   it.effect("owns normalized events and one ordered session lifecycle", () =>
     Effect.gen(function* () {
       const toolArguments = { path: "before.ts" };

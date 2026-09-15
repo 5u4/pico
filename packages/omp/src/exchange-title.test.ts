@@ -35,6 +35,7 @@ const assistant = (
   type: "message-settled",
   message: {
     role: "assistant",
+    id: AgentMessage.AgentMessageId.make("title-assistant"),
     status: "completed",
     stopReason,
     content,

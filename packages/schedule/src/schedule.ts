@@ -561,8 +561,19 @@ const capture = Effect.fn("Schedules.capture")(function* (
         if (captured.success.outcome !== "completed") {
           return;
         }
+        const settlement = captured.success.events.findLast(
+          (event) => event.type === "message-settled" && event.message.role === "assistant",
+        );
+        if (
+          settlement?.type !== "message-settled" ||
+          settlement.message.role !== "assistant" ||
+          settlement.message.status !== "completed"
+        ) {
+          yield* fail("omp", "OMP run completed without a completed assistant message");
+          return;
+        }
         failureStage = "publish";
-        const delivery = yield* host.deliver(target.chatId, text).pipe(Effect.result);
+        const delivery = yield* host.deliver(target.chatId, settlement.message).pipe(Effect.result);
         if (Result.isFailure(delivery)) {
           yield* fail("publish", delivery.failure.message);
           return;

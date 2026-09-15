@@ -150,21 +150,24 @@ export function presentTranscript(
         text: message.message ?? "Partial output is retained. Send a message to continue.",
       });
   };
-  const appendBlocks = (blocks: ReadonlyMap<number, FrontendState.LiveBlock>, key: string) => {
-    if (blocks.size === 0) return;
-    const active = live.run.kind === "running" && connection.kind === "active";
+  const appendDraft = (
+    draft: Extract<FrontendState.LiveAssistant, { readonly kind: "draft" }>,
+    key: string,
+  ) => {
+    const active =
+      draft.phase === "streaming" && live.run.kind === "running" && connection.kind === "active";
     items.push({
       kind: "assistant",
-      id: key,
+      id: `${key}-part-0`,
       timestampLabel: "Live response",
       modelLabel: "pico",
       state: active
         ? { kind: "streaming", label: "Responding" }
         : { kind: "unknown", label: "Partial response retained" },
-      blocks: [...blocks.values()]
+      blocks: [...draft.blocks.values()]
         .sort((a, b) => a.contentIndex - b.contentIndex)
         .map((block): AssistantBlock => {
-          const id = `${key}-${block.contentIndex}`;
+          const id = `${key}-content-${block.contentIndex}`;
           return block.type === "text-delta"
             ? { kind: "text", id, text: block.text }
             : {
@@ -179,13 +182,13 @@ export function presentTranscript(
     });
   };
   for (const [index, message] of messages.entries()) {
-    append(message, `snapshot-${index}`);
+    append(message, message.role === "assistant" ? `assistant-${message.id}` : `snapshot-${index}`);
   }
-  live.pending.forEach((pending, index) => {
-    if (pending.kind === "message") append(pending.message, `pending-${index}`);
-    else appendBlocks(pending.blocks, `pending-blocks-${index}`);
-  });
-  appendBlocks(live.blocks, "live-blocks");
+  for (const [id, message] of live.assistant) {
+    const key = `assistant-${id}`;
+    if (message.kind === "settled") append(message.message, key);
+    else appendDraft(message, key);
+  }
   for (const [id, activity] of live.tools) {
     if (!anchoredTools.has(id))
       tool(

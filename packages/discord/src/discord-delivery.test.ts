@@ -1,6 +1,7 @@
 import * as BunCrypto from "@effect/platform-bun/BunCrypto";
 import { assert, describe, it } from "@effect/vitest";
 import type { AgentEventEnvelope } from "@pico/contract/agent-event";
+import { AgentMessageId } from "@pico/contract/agent-message";
 import { AgentRuntime, type MessageDelivery } from "@pico/contract/agent-runtime";
 import { Application } from "@pico/contract/application";
 import * as Chat from "@pico/contract/chat-model";
@@ -187,6 +188,7 @@ describe("Discord message delivery", () => {
                 type: "message-settled",
                 message: {
                   role: "assistant",
+                  id: AgentMessageId.make("scheduled-result"),
                   status: "completed",
                   stopReason: "stop",
                   model: "pico/schedule",
@@ -496,6 +498,7 @@ describe("Discord message delivery", () => {
                     type: "message-settled",
                     message: {
                       role: "assistant",
+                      id: AgentMessageId.make("failed-request"),
                       status: "failed",
                       stopReason: "error",
                       message: "private-terminal-error",
