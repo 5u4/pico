@@ -1,22 +1,13 @@
-import { MoonIcon, PlusIcon, SidebarSimpleIcon, SunIcon, XIcon } from "@phosphor-icons/react";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { MoonIcon, PlusIcon, SidebarSimpleIcon, SunIcon } from "@phosphor-icons/react";
+import { useLayoutEffect, useRef, useState } from "react";
 import { Button } from "../components/ui/button.tsx";
 import type { Theme } from "../theme.ts";
 import type { ComposerPresentation, TranscriptPresentation } from "./chat-model.ts";
 import { Composer } from "./composer.tsx";
+import { MobileSidebar } from "./mobile-sidebar.tsx";
 import { Transcript } from "./transcript.tsx";
+import { WorkspaceDialog, type WorkspaceFormProps } from "./workspace-dialog.tsx";
 import { WorkspaceSidebar, type WorkspaceSidebarProps } from "./workspace-sidebar.tsx";
-
-export interface WorkspaceFormProps {
-  readonly open: boolean;
-  readonly available: boolean;
-  readonly submission:
-    | { readonly kind: "ready" }
-    | { readonly kind: "pending" }
-    | { readonly kind: "error"; readonly message: string };
-  readonly onOpenChange: (open: boolean) => void;
-  readonly onSubmit: (input: { readonly name: string; readonly directory: string }) => void;
-}
 
 export interface ChatScreenProps extends Omit<WorkspaceSidebarProps, "onClose" | "onAddWorkspace"> {
   readonly conversationKey: string | null;
@@ -26,7 +17,7 @@ export interface ChatScreenProps extends Omit<WorkspaceSidebarProps, "onClose" |
   readonly composer: ComposerPresentation;
   readonly sidebarOpen: boolean;
   readonly theme: Theme;
-  readonly workspaceForm?: WorkspaceFormProps | undefined;
+  readonly workspaceForm: WorkspaceFormProps;
   readonly onSidebarOpenChange: (open: boolean) => void;
   readonly onComposerValueChange: (value: string) => void;
   readonly onComposerSubmit: () => void;
@@ -95,15 +86,13 @@ export function ChatScreen({
       onNewChat(workspaceId);
       closeSidebar();
     },
-    onAddWorkspace: workspaceForm
-      ? () => {
-          closeSidebar();
-          workspaceForm.onOpenChange(true);
-        }
-      : undefined,
+    onAddWorkspace: () => {
+      closeSidebar();
+      workspaceForm.onOpenChange(true);
+    },
     onClose: closeSidebar,
   } satisfies WorkspaceSidebarProps;
-  const onboarding = navigation.status?.kind === "empty" && workspaceForm;
+  const onboarding = navigation.status?.kind === "empty";
 
   return (
     <div className="grid h-full min-h-0 grid-cols-1 bg-canvas text-foreground md:grid-cols-[16rem_minmax(0,1fr)]">
@@ -174,7 +163,7 @@ export function ChatScreen({
             />
             {onboarding && (
               <div className="flex justify-center px-4 pb-8">
-                <Button onClick={() => onboarding.onOpenChange(true)} tone="primary">
+                <Button onClick={() => workspaceForm.onOpenChange(true)} tone="primary">
                   <PlusIcon aria-hidden="true" size={17} />
                   Add workspace
                 </Button>
@@ -209,164 +198,7 @@ export function ChatScreen({
           </div>
         </div>
       </main>
-      {workspaceForm && <WorkspaceDialog {...workspaceForm} />}
+      <WorkspaceDialog {...workspaceForm} />
     </div>
-  );
-}
-
-function MobileSidebar({ open, ...sidebar }: WorkspaceSidebarProps & { readonly open: boolean }) {
-  const dialogRef = useRef<HTMLDialogElement>(null);
-
-  useEffect(() => {
-    const dialog = dialogRef.current;
-    if (!dialog) return;
-    if (open && !dialog.open) dialog.showModal();
-    else if (!open && dialog.open) dialog.close();
-  }, [open]);
-
-  useEffect(() => {
-    const desktop = window.matchMedia("(min-width: 48rem)");
-    const closeOnDesktop = () => {
-      if (desktop.matches && open) sidebar.onClose();
-    };
-    desktop.addEventListener("change", closeOnDesktop);
-    return () => desktop.removeEventListener("change", closeOnDesktop);
-  }, [open, sidebar.onClose]);
-
-  return (
-    <dialog
-      aria-label="Workspace navigation"
-      className="fixed inset-y-0 left-0 z-30 m-0 h-dvh max-h-none w-[min(19rem,88vw)] max-w-none overscroll-contain border-0 bg-transparent p-0 backdrop:bg-overlay md:hidden"
-      onCancel={(event) => {
-        event.preventDefault();
-        sidebar.onClose();
-      }}
-      ref={dialogRef}
-    >
-      <WorkspaceSidebar {...sidebar} />
-    </dialog>
-  );
-}
-
-function WorkspaceDialog({
-  open,
-  available,
-  submission,
-  onOpenChange,
-  onSubmit,
-}: WorkspaceFormProps) {
-  const dialogRef = useRef<HTMLDialogElement>(null);
-  const nameRef = useRef<HTMLInputElement>(null);
-  const directoryRef = useRef<HTMLInputElement>(null);
-  const [name, setName] = useState("");
-  const [directory, setDirectory] = useState("");
-  const pending = submission.kind === "pending";
-  const error = submission.kind === "error" ? submission.message : null;
-
-  useEffect(() => {
-    const dialog = dialogRef.current;
-    if (!dialog) return;
-    if (open && !dialog.open) {
-      setName("");
-      setDirectory("");
-      dialog.showModal();
-      nameRef.current?.focus();
-    } else if (!open && dialog.open) dialog.close();
-  }, [open]);
-
-  useEffect(() => {
-    if (open && error) directoryRef.current?.focus();
-  }, [open, error]);
-
-  return (
-    <dialog
-      aria-labelledby="workspace-dialog-title"
-      className="fixed inset-0 m-auto max-h-[calc(100dvh_-_2rem)] w-[calc(100%_-_2rem)] max-w-md overflow-y-auto overscroll-contain rounded-surface border border-border bg-panel p-6 text-foreground shadow-composer backdrop:bg-overlay"
-      onCancel={(event) => {
-        event.preventDefault();
-        onOpenChange(false);
-      }}
-      ref={dialogRef}
-    >
-      <div className="flex items-center justify-between gap-3">
-        <h2 className="text-title font-semibold" id="workspace-dialog-title">
-          Add workspace
-        </h2>
-        <Button
-          aria-label="Close add workspace"
-          onClick={() => onOpenChange(false)}
-          size="icon"
-          tone="ghost"
-        >
-          <XIcon aria-hidden="true" size={18} />
-        </Button>
-      </div>
-      <p className="mt-2 text-label text-muted">Keep chats together in a project directory.</p>
-      <form
-        onSubmit={(event) => {
-          event.preventDefault();
-          if (!pending && available) onSubmit({ name, directory });
-        }}
-      >
-        <label className="mt-5 block text-label font-medium" htmlFor="workspace-name">
-          Workspace name
-        </label>
-        <input
-          aria-describedby={error ? "workspace-error" : undefined}
-          aria-invalid={error ? true : undefined}
-          autoComplete="off"
-          className="mt-2 block w-full rounded-control border border-border-strong bg-canvas px-3 py-2 text-base"
-          disabled={pending}
-          id="workspace-name"
-          name="workspaceName"
-          onChange={(event) => setName(event.currentTarget.value)}
-          ref={nameRef}
-          required
-          type="text"
-          value={name}
-        />
-        <label className="mt-4 block text-label font-medium" htmlFor="workspace-directory">
-          Project directory
-        </label>
-        <p className="mt-1 text-meta text-muted" id="directory-hint">
-          Use an existing absolute path on the machine running pico.
-        </p>
-        <input
-          aria-describedby={error ? "directory-hint workspace-error" : "directory-hint"}
-          aria-invalid={error ? true : undefined}
-          autoCapitalize="none"
-          autoComplete="off"
-          className="mt-2 block w-full rounded-control border border-border-strong bg-canvas px-3 py-2 text-base"
-          disabled={pending}
-          id="workspace-directory"
-          name="directory"
-          onChange={(event) => setDirectory(event.currentTarget.value)}
-          placeholder="/path/to/project"
-          ref={directoryRef}
-          required
-          spellCheck={false}
-          type="text"
-          value={directory}
-        />
-        {error && (
-          <p className="mt-3 text-label text-danger" id="workspace-error" role="alert">
-            {error}
-          </p>
-        )}
-        {!available && (
-          <p className="mt-3 text-label text-muted" role="status">
-            Connect to pico to add a workspace.
-          </p>
-        )}
-        <div className="mt-6 flex justify-end gap-2">
-          <Button onClick={() => onOpenChange(false)} tone="ghost">
-            Cancel
-          </Button>
-          <Button disabled={pending || !available} tone="primary" type="submit">
-            {pending ? "Adding workspace..." : "Add workspace"}
-          </Button>
-        </div>
-      </form>
-    </dialog>
   );
 }

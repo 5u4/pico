@@ -32,17 +32,35 @@ const smoke = Effect.fn("Daemon.smoke")(function* () {
       assert.strictEqual(document.headers["cache-control"], "no-store");
       assert.strictEqual(document.headers["x-content-type-options"], "nosniff");
       assert.strictEqual(document.headers["x-frame-options"], "DENY");
-      yield* document.text;
+      const html = yield* document.text;
+      const scriptPath = html.match(/src="([^"]+\.js)"/)?.[1];
+      const stylePath = html.match(/href="([^"]+\.css)"/)?.[1];
+      if (scriptPath === undefined || stylePath === undefined) {
+        return yield* Effect.die(new Error("Web document is missing compiled JavaScript or CSS"));
+      }
+      for (const { path, contentType } of [
+        { path: scriptPath, contentType: "javascript" },
+        { path: stylePath, contentType: "text/css" },
+      ]) {
+        const asset = yield* client.get(new URL(path, webUrl).href);
+        assert.strictEqual(asset.status, 200);
+        assert.include(asset.headers["content-type"], contentType);
+        yield* asset.text;
+      }
 
-      const head = yield* client.head(`${webUrl}/__design`);
+      const head = yield* client.head(webUrl);
       assert.strictEqual(head.status, 200);
       assert.strictEqual(yield* head.text, "");
-      const image = yield* client.get(`${webUrl}/interface-study.svg`);
-      assert.strictEqual(image.status, 200);
-      assert.include(image.headers["content-type"], "image/svg+xml");
-      yield* image.text;
 
-      for (const route of ["/package.json", "/src/main.tsx", "/.env", "/store.db", "/missing.js"]) {
+      for (const route of [
+        "/__design",
+        "/interface-study.svg",
+        "/package.json",
+        "/src/main.tsx",
+        "/.env",
+        "/store.db",
+        "/missing.js",
+      ]) {
         assert.strictEqual((yield* client.get(`${webUrl}${route}`)).status, 404);
       }
       const badHost = yield* client.get(webUrl, { headers: { host: "attacker.invalid" } });

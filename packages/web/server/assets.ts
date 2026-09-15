@@ -48,10 +48,6 @@ export const build = Effect.fn("WebAssets.build")(function* () {
       }
       const index = files.get("/index.html");
       if (index === undefined) throw new Error("Web build did not produce index.html");
-      files.set("/interface-study.svg", {
-        body: await Bun.file(new URL("../public/interface-study.svg", import.meta.url)).bytes(),
-        contentType: "image/svg+xml",
-      });
       return { index, files };
     },
     catch: () => new AssetBuildError({ message: "Could not build the Web application" }),

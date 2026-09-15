@@ -1,17 +1,9 @@
 import { useAtomValue } from "@effect/atom-react/Hooks";
-import { RegistryContext, scheduleTask } from "@effect/atom-react/RegistryContext";
-import type {
-  AgentAssistantMessage,
-  AgentMessage,
-  AgentToolResultMessage,
-  AgentTranscript,
-} from "@pico/contract/agent-message";
+import { RegistryContext } from "@effect/atom-react/RegistryContext";
 import { CreateWorkspace } from "@pico/contract/application";
 import type { Chat, ChatId } from "@pico/contract/chat-model";
-import { ApplicationError, ChatClosed } from "@pico/contract/errors";
 import type { Workspace, WorkspaceId } from "@pico/contract/workspace-model";
-import * as FrontendState from "@pico/frontend-state/client";
-import * as Cause from "effect/Cause";
+import type * as FrontendState from "@pico/frontend-state/client";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Option from "effect/Option";
@@ -21,24 +13,18 @@ import * as Atom from "effect/unstable/reactivity/Atom";
 import * as AtomRegistry from "effect/unstable/reactivity/AtomRegistry";
 import { useContext, useEffect, useMemo, useRef, useState } from "react";
 import type {
-  AssistantBlock,
-  AssistantState,
   ComposerPresentation,
   NavigationPresentation,
-  ToolCallPresentation,
-  ToolState,
-  TranscriptItem,
   TranscriptPresentation,
 } from "./chat/chat-model.ts";
-import { ChatScreen, type WorkspaceFormProps } from "./chat/chat-screen.tsx";
+import { ChatScreen } from "./chat/chat-screen.tsx";
+import { ConnectionRecovery } from "./chat/connection-recovery.tsx";
+import type { WorkspaceFormProps } from "./chat/workspace-dialog.tsx";
 import { Button } from "./components/ui/button.tsx";
 import { applyThemePreference, readBootstrappedTheme, type Theme } from "./theme.ts";
+import { errorMessage, presentTranscript } from "./transcript-presentation.ts";
 
 type State = ReturnType<typeof FrontendState.make>;
-interface Session {
-  readonly state: State;
-  readonly registry: AtomRegistry.AtomRegistry;
-}
 interface DraftValue {
   readonly text: string;
 }
@@ -61,7 +47,6 @@ interface NavigationState {
 const emptyDraft: DraftValue = { text: "" };
 const workspaceStorageKey = "pico-last-workspace";
 const openingConnection = Atom.make<FrontendState.Connection>({ kind: "opening" });
-const timeFormat = new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" });
 const decodeWorkspace = Schema.decodeUnknownOption(CreateWorkspace);
 
 function readWorkspacePreference(): string | null {
@@ -83,24 +68,7 @@ function runCommand<A, E, Input>(
   );
 }
 
-export function LiveApp() {
-  const bootRegistry = useContext(RegistryContext);
-  const [session, setSession] = useState<Session | null>(null);
-  useEffect(() => {
-    const url = new URL("/rpc", window.location.href);
-    url.protocol = "ws:";
-    const registry = AtomRegistry.make({ scheduleTask });
-    setSession({ registry, state: FrontendState.make({ url: url.href }) });
-    return () => registry.dispose();
-  }, []);
-  return (
-    <RegistryContext.Provider value={session?.registry ?? bootRegistry}>
-      <LiveRoute state={session?.state ?? null} />
-    </RegistryContext.Provider>
-  );
-}
-
-function LiveRoute({ state }: { readonly state: State | null }) {
+export function WorkspaceChat({ state }: { readonly state: State | null }) {
   const registry = useContext(RegistryContext);
   const connection = useAtomValue(state?.connection ?? openingConnection);
   const [navigation, setNavigation] = useState<NavigationState>(() => ({
@@ -512,50 +480,21 @@ function LiveRoute({ state }: { readonly state: State | null }) {
 
   return (
     <div className="flex h-dvh min-h-0 flex-col bg-canvas text-foreground">
-      {connection.kind !== "active" && (
-        <div className="flex shrink-0 flex-wrap items-center gap-3 border-b border-border bg-panel px-4 py-3 text-label">
-          <p className="min-w-0 flex-1" role={unavailable ? "alert" : "status"}>
-            {unavailable
-              ? "Connection unavailable. Responses and drafts are kept here. Try Reload. If pico restarted, open the new URL from its startup log."
-              : "Opening connection to pico..."}
-          </p>
-          {unavailable && (
-            <Button onClick={onReload} size="small" tone="secondary">
-              Reload
-            </Button>
-          )}
-        </div>
-      )}
-      {recoveryOpen && (
-        <section
-          aria-label="Save drafts before reloading"
-          className="max-h-[60dvh] shrink-0 overflow-y-auto border-b border-border bg-panel p-4"
-        >
-          <h2 className="text-title font-semibold">Save drafts before reloading</h2>
-          <p className="mt-1 text-label text-muted">
-            Copy any drafts you want to keep. Reloading clears unsent text.
-          </p>
-          {draftValues.map((entry) => (
-            <label className="mt-3 block text-label" key={entry.key}>
-              {entry.target.kind === "chat" ? `Chat ${entry.target.chat.id.slice(-8)}` : "New chat"}{" "}
-              in {entry.workspace.name}
-              <textarea
-                className="mt-1 block min-h-24 w-full rounded-control border border-border bg-canvas p-3 text-base"
-                readOnly
-                value={entry.value.text}
-              />
-            </label>
-          ))}
-          <div className="mt-3 flex flex-wrap gap-3">
-            <Button onClick={() => setRecoveryOpen(false)} size="small" tone="secondary">
-              Keep editing
-            </Button>
-            <Button onClick={() => window.location.reload()} size="small" tone="danger">
-              Discard drafts and reload
-            </Button>
-          </div>
-        </section>
-      )}
+      <ConnectionRecovery
+        connection={connection.kind}
+        recovery={
+          recoveryOpen
+            ? draftValues.map((entry) => ({
+                key: entry.key,
+                label: `${entry.target.kind === "chat" ? `Chat ${entry.target.chat.id.slice(-8)}` : "New chat"} in ${entry.workspace.name}`,
+                text: entry.value.text,
+              }))
+            : null
+        }
+        onReload={onReload}
+        onKeepEditing={() => setRecoveryOpen(false)}
+        onDiscardAndReload={() => window.location.reload()}
+      />
       {conversation?.snapshot._tag === "Failure" && transcript.state !== "error" && (
         <div className="flex shrink-0 flex-wrap items-center gap-3 border-b border-border bg-panel p-3 text-label">
           <p className="min-w-0 flex-1 text-danger" role="alert">
@@ -662,219 +601,4 @@ function LiveRoute({ state }: { readonly state: State | null }) {
       </div>
     </div>
   );
-}
-
-function errorMessage(cause: Cause.Cause<unknown>): string {
-  const error = Option.getOrNull(Cause.findErrorOption(cause));
-  if (error instanceof ApplicationError) return error.message;
-  if (error instanceof ChatClosed) return "This chat is closed. Create a new chat to continue.";
-  return "The request could not be completed.";
-}
-
-function presentTranscript(
-  snapshot: AsyncResult.AsyncResult<AgentTranscript, unknown>,
-  live: FrontendState.LiveChat,
-  disclosures: ReadonlySet<string>,
-  connection: FrontendState.Connection,
-): TranscriptPresentation {
-  const messages = Option.getOrElse(AsyncResult.value(snapshot), () => []);
-  const results = new Map<string, AgentToolResultMessage[]>();
-  for (const message of messages) {
-    if (message.role !== "tool-result") continue;
-    const current = results.get(message.toolCallId);
-    if (current) current.push(message);
-    else results.set(message.toolCallId, [message]);
-  }
-  const anchoredTools = new Set<string>();
-  const items: TranscriptItem[] = [];
-  const tool = (id: string, name: string, key: string) => {
-    anchoredTools.add(id);
-    const output = results.get(id);
-    const activity = live.tools.get(id);
-    const last = output?.at(-1);
-    const state: ToolState = last
-      ? { kind: last.status, label: last.status === "failed" ? "Failed" : "Complete" }
-      : activity?.kind === "finished"
-        ? {
-            kind: activity.end.status,
-            label: activity.end.status === "failed" ? "Failed" : "Complete",
-          }
-        : activity?.kind === "running" &&
-            live.run.kind === "running" &&
-            connection.kind === "active"
-          ? { kind: "running", label: "Running" }
-          : { kind: "unknown", label: "Status unknown" };
-    const call: ToolCallPresentation = {
-      id: key,
-      icon: "generic",
-      label: name,
-      summary: "Tool call",
-      state,
-      output: output
-        ?.flatMap((message) =>
-          message.content.map((content) =>
-            content.type === "text" ? content.text : "[Image result]",
-          ),
-        )
-        .join("\n"),
-    };
-    items.push({
-      kind: "tool-group",
-      id: key,
-      title: `${name} · ${state.label}`,
-      calls: [call],
-      open: disclosures.has(key),
-    });
-  };
-  const append = (message: AgentMessage, key: string) => {
-    if (message.role === "user") {
-      items.push({
-        kind: "user",
-        id: key,
-        text: message.content
-          .map((content) => (content.type === "text" ? content.text : "[Image attachment]"))
-          .join("\n"),
-        timestampLabel: timeFormat.format(message.timestamp),
-      });
-      return;
-    }
-    if (message.role === "tool-result") {
-      if (!anchoredTools.has(message.toolCallId)) tool(message.toolCallId, message.toolName, key);
-      return;
-    }
-    let blocks: AssistantBlock[] = [];
-    let part = 0;
-    const flush = () => {
-      if (blocks.length === 0) return;
-      items.push({
-        kind: "assistant",
-        id: `${key}-part-${part++}`,
-        blocks,
-        state: assistantState(message),
-        timestampLabel: timeFormat.format(message.timestamp),
-        modelLabel: message.model,
-      });
-      blocks = [];
-    };
-    for (const [index, content] of message.content.entries()) {
-      const id = `${key}-content-${index}`;
-      switch (content.type) {
-        case "text":
-          blocks.push({ kind: "text", id, text: content.text });
-          break;
-        case "thinking":
-          blocks.push({
-            kind: "thinking",
-            id,
-            label: "Thinking",
-            text: content.text,
-            open: disclosures.has(id),
-            phase: "complete",
-          });
-          break;
-        case "image":
-          blocks.push({ kind: "text", id, text: "[Image response]" });
-          break;
-        case "tool-call":
-          flush();
-          tool(content.id, content.name, id);
-          break;
-        default: {
-          const exhaustive: never = content;
-          return exhaustive;
-        }
-      }
-    }
-    flush();
-    if (message.status === "failed")
-      items.push({
-        kind: "notice",
-        id: `${key}-failure`,
-        tone: message.stopReason === "aborted" ? "warning" : "error",
-        title: message.stopReason === "aborted" ? "Response stopped" : "Response failed",
-        text: message.message ?? "Partial output is retained. Send a message to continue.",
-      });
-  };
-  const appendBlocks = (blocks: ReadonlyMap<number, FrontendState.LiveBlock>, key: string) => {
-    if (blocks.size === 0) return;
-    const active = live.run.kind === "running" && connection.kind === "active";
-    items.push({
-      kind: "assistant",
-      id: key,
-      timestampLabel: "Live response",
-      modelLabel: "pico",
-      state: active
-        ? { kind: "streaming", label: "Responding" }
-        : { kind: "unknown", label: "Partial response retained" },
-      blocks: [...blocks.values()]
-        .sort((a, b) => a.contentIndex - b.contentIndex)
-        .map((block): AssistantBlock => {
-          const id = `${key}-${block.contentIndex}`;
-          return block.type === "text-delta"
-            ? { kind: "text", id, text: block.text }
-            : {
-                kind: "thinking",
-                id,
-                label: "Thinking",
-                text: block.text,
-                open: disclosures.has(id),
-                phase: active ? "streaming" : "unknown",
-              };
-        }),
-    });
-  };
-  for (const [index, message] of messages.entries()) {
-    append(message, `snapshot-${index}`);
-  }
-  live.pending.forEach((pending, index) => {
-    if (pending.kind === "message") append(pending.message, `pending-${index}`);
-    else appendBlocks(pending.blocks, `pending-blocks-${index}`);
-  });
-  appendBlocks(live.blocks, "live-blocks");
-  for (const [id, activity] of live.tools) {
-    if (!anchoredTools.has(id))
-      tool(
-        id,
-        activity.kind === "running" ? activity.start.toolName : activity.end.toolName,
-        `live-tool-${id}`,
-      );
-  }
-  for (const [index, notice] of live.notices.entries()) {
-    items.push({
-      kind: "notice",
-      id: `notice-${index}`,
-      tone: notice.level,
-      title: notice.level === "error" ? "Request failed" : "Pico",
-      text: notice.message,
-    });
-  }
-  if (items.length > 0)
-    return {
-      state: "ready",
-      items,
-      liveLabel: live.run.kind === "running" ? "Response in progress" : "Conversation",
-    };
-  if (snapshot._tag === "Failure")
-    return {
-      state: "error",
-      title: "History unavailable",
-      description: `${errorMessage(snapshot.cause)} ${connection.kind === "unavailable" ? "Reload to reconnect." : "Retry loading the conversation."}`,
-      retryLabel: connection.kind === "unavailable" ? "Reload" : "Retry history",
-    };
-  if (snapshot.waiting || snapshot._tag === "Initial")
-    return { state: "loading", label: "Loading conversation..." };
-  return {
-    state: "empty",
-    title: "Start a conversation",
-    description: "Ask pico to help with the code in this workspace.",
-  };
-}
-
-function assistantState(message: AgentAssistantMessage): AssistantState {
-  return message.status === "completed"
-    ? { kind: "complete" }
-    : {
-        kind: "interrupted",
-        label: message.stopReason === "aborted" ? "Stopped" : "Response failed",
-      };
 }

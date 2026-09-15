@@ -42,7 +42,6 @@ const assetRoutes = (assets: WebAssets.Assets) =>
     Effect.gen(function* () {
       const index = response(assets.index);
       yield* router.add("*", "/", index);
-      yield* router.add("*", "/__design", index);
       for (const [path, asset] of assets.files) {
         yield* router.add("*", path, response(asset));
       }
@@ -63,7 +62,7 @@ const boundary = (host: string, webUrl: string, files: ReadonlyMap<string, WebAs
         }
         const query = request.url.indexOf("?");
         const path = query === -1 ? request.url : request.url.slice(0, query);
-        if (path !== "/rpc" && path !== "/" && path !== "/__design" && !files.has(path)) {
+        if (path !== "/rpc" && path !== "/" && !files.has(path)) {
           return HttpServerResponse.empty({ status: 404, headers });
         }
         if (path === "/rpc") {
