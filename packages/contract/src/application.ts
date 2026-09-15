@@ -34,6 +34,12 @@ export const WorkspaceBindingConfiguration = Schema.Union([
 ]);
 export type WorkspaceBindingConfiguration = typeof WorkspaceBindingConfiguration.Type;
 
+export const UpdateWorkspace = Schema.Struct({
+  workspaceId: WorkspaceId,
+  configuration: WorkspaceBindingConfiguration,
+});
+export type UpdateWorkspace = typeof UpdateWorkspace.Type;
+
 export const BindWorkspace = Schema.Struct({
   binding: WorkspaceBinding,
   workspaceName: Schema.NonEmptyString,
@@ -66,6 +72,11 @@ export class Application extends Context.Service<
     readonly createWorkspace: (
       input: CreateWorkspace,
     ) => Effect.Effect<Workspace, ApplicationError>;
+
+    /** Web clients call this when saving workspace settings. */
+    readonly updateWorkspace: (
+      input: UpdateWorkspace,
+    ) => Effect.Effect<Workspace, ApplicationError | GitError | WorkspaceBindingInvalid>;
 
     /** Platform adapters call this when first resolving a channel's workspace. */
     readonly getOrCreateWorkspaceByBinding: (

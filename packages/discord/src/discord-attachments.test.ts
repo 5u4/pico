@@ -97,6 +97,7 @@ describe("discord attachments", () => {
           },
         } satisfies DiscordInputBot;
         const application = Application.of({
+          updateWorkspace: () => Effect.die("unexpected workspace update"),
           availableWorkspaceModels: () => Effect.die("unexpected workspace model discovery"),
           setWorkspaceModel: () => Effect.die("unexpected workspace model update"),
           availableModels: () => Effect.die("unexpected model discovery"),
@@ -292,6 +293,7 @@ describe("discord attachments", () => {
           },
         } satisfies DiscordInputBot;
         const application = Application.of({
+          updateWorkspace: () => Effect.die("unexpected workspace update"),
           availableWorkspaceModels: () => Effect.die("unexpected workspace model discovery"),
           setWorkspaceModel: () => Effect.die("unexpected workspace model update"),
           availableModels: () => Effect.die("unexpected model discovery"),

@@ -10,6 +10,12 @@ import {
 } from "@phosphor-icons/react";
 import { type PointerEvent, useCallback, useEffect, useId, useLayoutEffect, useRef } from "react";
 import { Button } from "../components/ui/button.tsx";
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuTrigger,
+} from "../components/ui/context-menu.tsx";
 import type { NavigationPresentation } from "./chat-model.ts";
 
 export interface WorkspaceSidebarProps {
@@ -24,6 +30,9 @@ export interface WorkspaceSidebarProps {
   readonly onChatSelect: (workspaceId: string, chatId: string) => void;
   readonly onNewChat: (workspaceId?: string) => void;
   readonly onAddWorkspace?: (() => void) | undefined;
+  readonly onEditWorkspace?: ((workspaceId: string, origin: HTMLElement) => void) | undefined;
+  readonly workspaceEditPending?: boolean | undefined;
+  readonly contextMenuContainer?: HTMLElement | null | undefined;
   readonly onClose: () => void;
 }
 
@@ -36,6 +45,9 @@ export function WorkspaceSidebar({
   onChatSelect,
   onNewChat,
   onAddWorkspace,
+  onEditWorkspace,
+  workspaceEditPending,
+  contextMenuContainer,
   onClose,
 }: WorkspaceSidebarProps) {
   const id = useId();
@@ -196,22 +208,16 @@ export function WorkspaceSidebar({
             return (
               <li key={workspace.id}>
                 <div className="sidebar-row flex items-center gap-0.5" data-sidebar-row="">
-                  <button
-                    aria-controls={listId}
-                    aria-expanded={expanded}
-                    className={`sidebar-row flex min-w-0 flex-1 items-center gap-2 px-2 text-left text-label ${active ? "font-medium text-foreground" : "text-muted"}`}
-                    onClick={() => onWorkspaceToggle(workspace.id)}
-                    title={workspace.contextLabel}
-                    type="button"
-                  >
-                    {expanded ? (
-                      <CaretDownIcon aria-hidden="true" className="shrink-0" size={12} />
-                    ) : (
-                      <CaretRightIcon aria-hidden="true" className="shrink-0" size={12} />
-                    )}
-                    <FolderSimpleIcon aria-hidden="true" className="shrink-0" size={17} />
-                    <span className="truncate">{workspace.name}</span>
-                  </button>
+                  <WorkspaceToggle
+                    active={active}
+                    contextMenuContainer={contextMenuContainer}
+                    expanded={expanded}
+                    listId={listId}
+                    onEditWorkspace={onEditWorkspace}
+                    onWorkspaceToggle={onWorkspaceToggle}
+                    workspace={workspace}
+                    workspaceEditPending={workspaceEditPending}
+                  />
                   <button
                     aria-label={`New chat in ${workspace.name}`}
                     className="sidebar-row sidebar-icon-button inline-flex shrink-0 items-center justify-center text-muted"
@@ -283,5 +289,93 @@ export function WorkspaceSidebar({
         </div>
       )}
     </aside>
+  );
+}
+
+function WorkspaceToggle({
+  workspace,
+  expanded,
+  active,
+  listId,
+  onWorkspaceToggle,
+  onEditWorkspace,
+  workspaceEditPending,
+  contextMenuContainer,
+}: Pick<
+  WorkspaceSidebarProps,
+  "onWorkspaceToggle" | "onEditWorkspace" | "workspaceEditPending" | "contextMenuContainer"
+> & {
+  readonly workspace: NavigationPresentation["groups"][number]["workspace"];
+  readonly expanded: boolean;
+  readonly active: boolean;
+  readonly listId: string;
+}) {
+  const trigger = useRef<HTMLButtonElement>(null);
+  const pendingEdit = useRef<HTMLElement | null>(null);
+  const editable = workspace.canEditConfiguration && onEditWorkspace !== undefined;
+  const toggle = (
+    <button
+      aria-controls={listId}
+      aria-expanded={expanded}
+      className={`sidebar-row flex min-w-0 flex-1 items-center gap-2 px-2 text-left text-label ${active ? "font-medium text-foreground" : "text-muted"}`}
+      onClick={() => onWorkspaceToggle(workspace.id)}
+      onContextMenu={
+        editable ? (event) => event.currentTarget.focus({ preventScroll: true }) : undefined
+      }
+      onKeyDown={(event) => {
+        if (!editable || (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")))
+          return;
+        event.preventDefault();
+        const button = event.currentTarget;
+        const bounds = button.getBoundingClientRect();
+        button.dispatchEvent(
+          new MouseEvent("contextmenu", {
+            bubbles: true,
+            cancelable: true,
+            clientX: bounds.left + bounds.width / 2,
+            clientY: bounds.bottom,
+            button: 2,
+          }),
+        );
+      }}
+      ref={trigger}
+      title={workspace.contextLabel}
+      type="button"
+    >
+      {expanded ? (
+        <CaretDownIcon aria-hidden="true" className="shrink-0" size={12} />
+      ) : (
+        <CaretRightIcon aria-hidden="true" className="shrink-0" size={12} />
+      )}
+      <FolderSimpleIcon aria-hidden="true" className="shrink-0" size={17} />
+      <span className="truncate">{workspace.name}</span>
+    </button>
+  );
+  if (!editable) return toggle;
+  return (
+    <ContextMenu>
+      <ContextMenuTrigger asChild>{toggle}</ContextMenuTrigger>
+      <ContextMenuContent
+        container={contextMenuContainer}
+        onCloseAutoFocus={(event) => {
+          const origin = pendingEdit.current;
+          if (!origin) return;
+          pendingEdit.current = null;
+          event.preventDefault();
+          // Radix must release its focus scope before the native dialog opens.
+          queueMicrotask(() => onEditWorkspace?.(workspace.id, origin));
+        }}
+      >
+        <ContextMenuItem
+          disabled={workspaceEditPending ?? false}
+          onSelect={() => {
+            pendingEdit.current = trigger.current;
+          }}
+        >
+          <PencilSimpleLineIcon aria-hidden="true" size={17} />
+          Edit workspace
+        </ContextMenuItem>
+      </ContextMenuContent>
+    </ContextMenu>
   );
 }

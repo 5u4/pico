@@ -2,8 +2,10 @@ import { useAtomValue } from "@effect/atom-react/Hooks";
 import { RegistryContext } from "@effect/atom-react/RegistryContext";
 import { CreateWorkspace } from "@pico/contract/application";
 import type { Chat, ChatId } from "@pico/contract/chat-model";
+import { GitError, WorkspaceBindingInvalid } from "@pico/contract/errors";
 import type { Workspace, WorkspaceId } from "@pico/contract/workspace-model";
 import type * as FrontendState from "@pico/frontend-state/client";
+import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Option from "effect/Option";
@@ -20,6 +22,7 @@ import type {
 import { ChatScreen } from "./chat/chat-screen.tsx";
 import { ConnectionRecovery } from "./chat/connection-recovery.tsx";
 import type { WorkspaceFormProps } from "./chat/workspace-dialog.tsx";
+import type { WorkspaceSettingsEditor } from "./chat/workspace-settings-dialog.tsx";
 import { Button } from "./components/ui/button.tsx";
 import { applyThemePreference, readBootstrappedTheme, type Theme } from "./theme.ts";
 import { errorMessage, presentTranscript } from "./transcript-presentation.ts";
@@ -48,6 +51,22 @@ const emptyDraft: DraftValue = { text: "" };
 const workspaceStorageKey = "pico-last-workspace";
 const openingConnection = Atom.make<FrontendState.Connection>({ kind: "opening" });
 const decodeWorkspace = Schema.decodeUnknownOption(CreateWorkspace);
+
+function reconcileWorkspaceSnapshots(
+  current: NavigationState,
+  workspaces: readonly Workspace[],
+): NavigationState {
+  if (current.entries.size === 0) return current;
+  const byId = new Map(workspaces.map((workspace) => [workspace.id, workspace]));
+  let entries: Map<number, DraftEntry> | undefined;
+  for (const [key, entry] of current.entries) {
+    const workspace = byId.get(entry.workspace.id);
+    if (!workspace || workspace === entry.workspace) continue;
+    entries ??= new Map(current.entries);
+    entries.set(key, { ...entry, workspace });
+  }
+  return entries ? { ...current, entries } : current;
+}
 
 function readWorkspacePreference(): string | null {
   try {
@@ -90,6 +109,11 @@ export function WorkspaceChat({ state }: { readonly state: State | null }) {
   const [workspaceSubmission, setWorkspaceSubmission] = useState<WorkspaceFormProps["submission"]>({
     kind: "ready",
   });
+  const [workspaceEditor, setWorkspaceEditor] = useState<WorkspaceSettingsEditor>({
+    kind: "closed",
+  });
+  const workspaceEditorRef = useRef(workspaceEditor);
+  const nextWorkspaceEditorSession = useRef(0);
   const [theme, setTheme] = useState<Theme>(readBootstrappedTheme);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -176,6 +200,8 @@ export function WorkspaceChat({ state }: { readonly state: State | null }) {
 
   useEffect(() => {
     if (workspaces._tag !== "Success" || workspaces.waiting) return;
+    if (state && registry.get(state.workspaces) !== workspaces) return;
+    updateNavigation((current) => reconcileWorkspaceSnapshots(current, workspaces.value));
     const current = navigationRef.current;
     const entry =
       current.selectedKey === null ? undefined : current.entries.get(current.selectedKey);
@@ -237,6 +263,73 @@ export function WorkspaceChat({ state }: { readonly state: State | null }) {
     }
     setWorkspaceOpen(false);
     if (navigationVersion.current === selectionVersion) selectDraft(exit.value);
+  };
+  const updateWorkspaceEditor = (editor: WorkspaceSettingsEditor) => {
+    workspaceEditorRef.current = editor;
+    setWorkspaceEditor(editor);
+  };
+  const editWorkspace = (workspaceId: string, origin: HTMLElement) => {
+    const current = workspaceEditorRef.current;
+    if (
+      current.kind === "dismissed" ||
+      (current.kind === "open" && current.submission.kind === "pending")
+    )
+      return;
+    const workspace = groups.find((group) => group.workspace.id === workspaceId)?.workspace;
+    if (workspace?.platform !== "web") return;
+    updateWorkspaceEditor({
+      kind: "open",
+      session: ++nextWorkspaceEditorSession.current,
+      workspace,
+      configuration:
+        workspace.worktree === null
+          ? { kind: "direct", cwd: workspace.defaultCwd }
+          : { kind: "worktree", repository: workspace.defaultCwd, settings: workspace.worktree },
+      origin,
+      submission: { kind: "ready" },
+    });
+  };
+  const closeWorkspaceEditor = () => {
+    const current = workspaceEditorRef.current;
+    if (current.kind !== "open") return;
+    updateWorkspaceEditor(
+      current.submission.kind === "pending"
+        ? { kind: "dismissed", session: current.session }
+        : { kind: "closed" },
+    );
+  };
+  const saveWorkspace = async () => {
+    const editor = workspaceEditorRef.current;
+    if (
+      !state ||
+      editor.kind !== "open" ||
+      editor.submission.kind === "pending" ||
+      registry.get(state.connection).kind !== "active"
+    )
+      return;
+    updateWorkspaceEditor({ ...editor, submission: { kind: "pending" } });
+    const exit = await runCommand(registry, state.updateWorkspace, {
+      workspaceId: editor.workspace.id,
+      configuration: editor.configuration,
+    });
+    if (Exit.isSuccess(exit)) {
+      updateNavigation((current) => reconcileWorkspaceSnapshots(current, [exit.value]));
+    }
+    const current = workspaceEditorRef.current;
+    if (current.kind === "closed" || current.session !== editor.session) return;
+    if (current.kind === "dismissed" || Exit.isSuccess(exit)) {
+      updateWorkspaceEditor({ kind: "closed" });
+      return;
+    }
+    const error = Option.getOrNull(Cause.findErrorOption(exit.cause));
+    updateWorkspaceEditor({
+      ...current,
+      submission: {
+        kind: "error",
+        message: error instanceof GitError ? error.message : errorMessage(exit.cause),
+        issue: error instanceof WorkspaceBindingInvalid ? error.issue : null,
+      },
+    });
   };
   const newChat = (workspaceId?: string) => {
     const current = navigationRef.current;
@@ -389,7 +482,12 @@ export function WorkspaceChat({ state }: { readonly state: State | null }) {
         }
       }
       return {
-        workspace: { id: workspace.id, name: workspace.name, contextLabel: workspace.defaultCwd },
+        workspace: {
+          id: workspace.id,
+          name: workspace.name,
+          contextLabel: workspace.defaultCwd,
+          canEditConfiguration: workspace.platform === "web",
+        },
         expanded: navigation.expanded.has(workspace.id),
         chats: records.map((chat) => ({
           id: chat.id,
@@ -567,6 +665,7 @@ export function WorkspaceChat({ state }: { readonly state: State | null }) {
               return next;
             })
           }
+          onEditWorkspace={editWorkspace}
           onNewChat={newChat}
           onSidebarOpenChange={setSidebarOpen}
           onStop={stop}
@@ -592,6 +691,21 @@ export function WorkspaceChat({ state }: { readonly state: State | null }) {
           theme={theme}
           title={chatId ? (conversation?.live.title ?? `Chat ${chatId.slice(-8)}`) : "New chat"}
           transcript={transcript}
+          workspaceEditPending={
+            workspaceEditor.kind === "dismissed" ||
+            (workspaceEditor.kind === "open" && workspaceEditor.submission.kind === "pending")
+          }
+          workspaceSettings={{
+            editor: workspaceEditor,
+            available,
+            onChange: (configuration) => {
+              const current = workspaceEditorRef.current;
+              if (current.kind !== "open" || current.submission.kind === "pending") return;
+              updateWorkspaceEditor({ ...current, configuration, submission: { kind: "ready" } });
+            },
+            onClose: closeWorkspaceEditor,
+            onSubmit: saveWorkspace,
+          }}
           workspaceForm={{
             open: workspaceFormOpen,
             available,

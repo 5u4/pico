@@ -15,6 +15,7 @@ import {
   type CloseChatResult,
   type CreateChat,
   type CreateWorkspace,
+  type UpdateWorkspace,
 } from "@pico/contract/application";
 import * as Chat from "@pico/contract/chat-model";
 import { ChatRepository } from "@pico/contract/chat-repository";
@@ -194,6 +195,21 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
     },
     Effect.mapError(failure("Failed to create workspace")),
   );
+
+  const updateWorkspace = Effect.fn("Application.updateWorkspace")(function* (
+    input: UpdateWorkspace,
+  ) {
+    const existing = yield* workspaces
+      .findById(input.workspaceId)
+      .pipe(Effect.mapError(failure("Failed to find workspace")));
+    if (Option.isNone(existing)) {
+      return yield* new ApplicationError({ reason: "not-found", message: "Workspace not found" });
+    }
+    const configuration = yield* resolveConfiguration(input.configuration);
+    return yield* workspaces
+      .replaceConfiguration(existing.value.id, configuration)
+      .pipe(Effect.mapError(failure("Failed to update workspace")));
+  });
 
   const getOrCreateWorkspaceByBinding = Effect.fn("Application.getOrCreateWorkspaceByBinding")(
     function* (input: Extract<CreateWorkspace, { readonly externalId: string }>) {
@@ -803,6 +819,7 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
   const application = Application.of({
     listWorkspaces,
     createWorkspace,
+    updateWorkspace,
     getOrCreateWorkspaceByBinding,
     bindWorkspace,
     availableWorkspaceModels,
