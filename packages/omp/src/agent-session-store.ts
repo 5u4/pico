@@ -48,7 +48,16 @@ export const make = Effect.fn("AgentSessionStore.make")(function* (sessionsDir: 
           }),
           (manager) =>
             Effect.tryPromise({
-              try: () => manager.ensureOnDisk(),
+              try: async () => {
+                if (input.modelOverride !== null) {
+                  manager.appendModelChange(
+                    `${input.modelOverride.provider}/${input.modelOverride.id}`,
+                    "temporary",
+                  );
+                }
+                await manager.ensureOnDisk();
+                await manager.flush();
+              },
               catch: (cause) => agentError("Failed to persist OMP session", cause),
             }),
           (manager, exit) =>

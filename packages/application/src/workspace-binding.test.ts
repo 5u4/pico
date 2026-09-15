@@ -152,12 +152,14 @@ describe("Workspace binding", () => {
           workspaceId: created.id,
           externalId: "thread-old",
         });
+        const modelOverride = { provider: "native", id: "channel-model" };
+        const configured = yield* application.setWorkspaceModel(created.id, modelOverride);
         const repeated = yield* application.bindWorkspace({
           binding,
           workspaceName: "ignored rename",
           configuration: { kind: "direct", cwd: `${firstCwd}/.` },
         });
-        assert.deepStrictEqual(repeated, created);
+        assert.deepStrictEqual(repeated, configured);
 
         const rebound = yield* application.bindWorkspace({
           binding,
@@ -169,6 +171,7 @@ describe("Workspace binding", () => {
         });
         assert.strictEqual(rebound.name, "general");
         assert.strictEqual(rebound.defaultCwd, secondCwd);
+        assert.deepStrictEqual(rebound.modelOverride, modelOverride);
 
         const worktreeBound = yield* application.bindWorkspace({
           binding,

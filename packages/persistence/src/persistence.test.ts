@@ -1,6 +1,8 @@
 import { Database } from "bun:sqlite";
 import * as BunFileSystem from "@effect/platform-bun/BunFileSystem";
 import * as BunPath from "@effect/platform-bun/BunPath";
+import * as SqliteClient from "@effect/sql-sqlite-bun/SqliteClient";
+import * as SqliteMigrator from "@effect/sql-sqlite-bun/SqliteMigrator";
 import { assert, describe, it } from "@effect/vitest";
 import * as Chat from "@pico/contract/chat-model";
 import { ChatRepository } from "@pico/contract/chat-repository";
@@ -13,7 +15,9 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { layer } from "./layer.ts";
+import initial from "./migrations/0001-initial.ts";
 
 const platformLayer = Layer.merge(BunFileSystem.layer, BunPath.layer);
 
@@ -37,6 +41,7 @@ const regularWorkspace: Workspace.Workspace = {
   externalId: null,
   defaultCwd: cwdA,
   worktree: null,
+  modelOverride: null,
   createdAt: 1,
 };
 
@@ -47,6 +52,7 @@ const secondWorkspace: Workspace.Workspace = {
   externalId: null,
   defaultCwd: cwdA,
   worktree: null,
+  modelOverride: null,
   createdAt: 2,
 };
 
@@ -57,10 +63,83 @@ const worktreeWorkspace: Workspace.Workspace = {
   externalId: "9007199254740993.10",
   defaultCwd: cwdA,
   worktree: { branch: "main", prefix: "chat/" },
+  modelOverride: null,
   createdAt: 3,
 };
 
 describe("Persistence.layer", () => {
+  it.effect("upgrades existing workspaces and enforces nullable model pairs across reopen", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const directory = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "pico-workspace-model-migration-",
+      });
+      const storeFile = AbsolutePath.make(path.join(directory, "store.db"));
+      yield* Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        yield* SqliteMigrator.run({
+          loader: SqliteMigrator.fromRecord({ "0001_initial": initial }),
+        });
+        yield* sql`
+          INSERT INTO workspaces (id, name, platform, default_cwd, created_at)
+          VALUES (${regularWorkspaceId}, 'regular', 'web', ${cwdA}, 1)
+        `;
+        yield* sql`
+          INSERT INTO chats (id, workspace_id, cwd, created_at)
+          VALUES (${chatId(1)}, ${regularWorkspaceId}, ${cwdA}, 2)
+        `;
+      }).pipe(Effect.provide(SqliteClient.layer({ filename: storeFile })), Effect.scoped);
+
+      const selected = { provider: "native", id: "workspace-model" };
+      yield* Effect.gen(function* () {
+        const workspaces = yield* WorkspaceRepository;
+        const chats = yield* ChatRepository;
+        assert.deepStrictEqual(yield* workspaces.list(), [regularWorkspace]);
+        assert.strictEqual(Option.getOrThrow(yield* chats.findById(chatId(1))).cwd, cwdA);
+        yield* workspaces.setModelOverride(regularWorkspaceId, selected);
+        const rebound = yield* workspaces.replaceConfiguration(regularWorkspaceId, {
+          defaultCwd: cwdB,
+          worktree: { branch: "main", prefix: "chat/" },
+        });
+        assert.deepStrictEqual(rebound.modelOverride, selected);
+      }).pipe(Effect.provide(layer(storeFile)), Effect.scoped);
+
+      yield* Effect.sync(() => {
+        const database = new Database(storeFile);
+        try {
+          const update = database.query(
+            "UPDATE workspaces SET model_provider = ?, model_id = ? WHERE id = ?",
+          );
+          for (const [provider, id] of [
+            [null, "model"],
+            ["native", null],
+            ["", "model"],
+            ["native", ""],
+          ] as const) {
+            assert.throws(() => update.run(provider, id, regularWorkspaceId));
+          }
+        } finally {
+          database.close();
+        }
+      });
+      yield* Effect.gen(function* () {
+        const workspaces = yield* WorkspaceRepository;
+        assert.deepStrictEqual(
+          Option.getOrThrow(yield* workspaces.findById(regularWorkspaceId)).modelOverride,
+          selected,
+        );
+        yield* workspaces.setModelOverride(regularWorkspaceId, null);
+      }).pipe(Effect.provide(layer(storeFile)), Effect.scoped);
+      yield* Effect.gen(function* () {
+        const workspaces = yield* WorkspaceRepository;
+        assert.isNull(
+          Option.getOrThrow(yield* workspaces.findById(regularWorkspaceId)).modelOverride,
+        );
+      }).pipe(Effect.provide(layer(storeFile)), Effect.scoped);
+    }).pipe(Effect.provide(platformLayer)),
+  );
+
   it.effect("lists root-scoped workspaces and only their open chats in stable creation order", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;

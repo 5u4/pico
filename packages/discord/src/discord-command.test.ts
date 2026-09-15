@@ -44,6 +44,18 @@ describe("Discord command", () => {
       DiscordCommand.parse("switch", [{ ...option, focused: false, value: "provider/model" }]),
       { kind: "switch", model: "provider/model" },
     );
+    assert.deepStrictEqual(DiscordCommand.parse("set-workspace-model", undefined), {
+      kind: "malformedWorkspaceModel",
+    });
+    assert.deepStrictEqual(DiscordCommand.parse("set-workspace-model", [option]), {
+      kind: "malformedWorkspaceModel",
+    });
+    assert.deepStrictEqual(
+      DiscordCommand.parse("set-workspace-model", [
+        { ...option, focused: false, value: "provider/model" },
+      ]),
+      { kind: "setWorkspaceModel", model: "provider/model" },
+    );
     for (const options of [
       undefined,
       [],

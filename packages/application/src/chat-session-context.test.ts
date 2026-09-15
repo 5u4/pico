@@ -51,6 +51,7 @@ const makeWorkspace = (
   ...identity,
   defaultCwd: cwd,
   worktree: null,
+  modelOverride: null,
   createdAt: 1,
 });
 
@@ -100,6 +101,7 @@ const workspaceLayer = (findById: WorkspaceRepository["Service"]["findById"]) =>
       findById,
       findByBinding: () => Effect.die("unexpected workspace binding lookup"),
       replaceConfiguration: () => Effect.die("unexpected workspace replacement"),
+      setModelOverride: () => Effect.die("unexpected workspace model update"),
     }),
   );
 

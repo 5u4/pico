@@ -5,6 +5,7 @@ import * as Effect from "effect/Effect";
 import * as Encoding from "effect/Encoding";
 
 const encoder = new TextEncoder();
+export const ompDefault = { name: "Use OMP default", value: "pico:omp-default" };
 
 export const label = (model: ModelInfo) => {
   const text = `${model.provider}/${model.id} · ${model.name}`.replace(/\s+/g, " ");
@@ -20,9 +21,13 @@ export const choices = Effect.fn("DiscordModel.choices")(function* (
   crypto: Crypto.Crypto,
   models: readonly ModelInfo[],
   query: string,
+  options?: { readonly includeOmpDefault: boolean },
 ) {
   const search = query.trim().toLowerCase();
   const result: NonNullable<InteractionCallbackData["choices"]> = [];
+  if (options?.includeOmpDefault && ompDefault.name.toLowerCase().includes(search)) {
+    result.push(ompDefault);
+  }
   for (const model of models) {
     if (
       search.length > 0 &&

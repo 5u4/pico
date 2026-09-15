@@ -94,6 +94,7 @@ const smoke = Effect.fn("AgentRuntime.smoke")(function* () {
       externalId: null,
       defaultCwd: cwd,
       worktree: null,
+      modelOverride: null,
       createdAt: 0,
     });
     yield* chats.create(resolvedChat);

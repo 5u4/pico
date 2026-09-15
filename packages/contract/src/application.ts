@@ -15,11 +15,12 @@ import type {
 } from "./agent-runtime.ts";
 import type { Chat, ChatId } from "./chat-model.ts";
 import type { ApplicationError, ChatClosed, GitError, WorkspaceBindingInvalid } from "./errors.ts";
+import type { AbsolutePath } from "./path.ts";
 import { Workspace, WorkspaceBinding, WorkspaceId, WorktreeSettings } from "./workspace-model.ts";
 
 export const CreateWorkspace = Schema.Union([
-  Workspace.members[0].mapFields(Struct.omit(["id", "createdAt"])),
-  Workspace.members[1].mapFields(Struct.omit(["id", "createdAt"])),
+  Workspace.members[0].mapFields(Struct.omit(["id", "createdAt", "modelOverride"])),
+  Workspace.members[1].mapFields(Struct.omit(["id", "createdAt", "modelOverride"])),
 ]);
 export type CreateWorkspace = typeof CreateWorkspace.Type;
 
@@ -74,6 +75,18 @@ export class Application extends Context.Service<
     readonly bindWorkspace: (
       input: BindWorkspace,
     ) => Effect.Effect<Workspace, ApplicationError | GitError | WorkspaceBindingInvalid>;
+
+    /** Platform adapters call this before showing a channel workspace's model picker. */
+    readonly availableWorkspaceModels: (input: {
+      readonly binding: WorkspaceBinding;
+      readonly defaultCwd: AbsolutePath;
+    }) => Effect.Effect<readonly ModelInfo[], ApplicationError>;
+
+    /** Platform adapters call this after resolving a workspace model selection. */
+    readonly setWorkspaceModel: (
+      workspaceId: WorkspaceId,
+      model: ModelRef | null,
+    ) => Effect.Effect<Workspace, ApplicationError>;
 
     /** Web clients call this when selecting or refreshing a workspace. */
     readonly listChats: (

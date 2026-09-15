@@ -83,12 +83,7 @@ export const make = Effect.fn("AgentRuntime.make")(function* ({
     );
   });
 
-  const availableModels = Effect.fn("AgentRuntime.availableModels")(function* (
-    chatId: Chat.ChatId,
-  ) {
-    const { chat } = yield* chatSessionContext.resolve(chatId);
-    return yield* loadAvailableModels(modelRegistry, chat.cwd);
-  });
+  const availableModels = (cwd: AbsolutePath) => loadAvailableModels(modelRegistry, cwd);
   let browsers: AgentBrowserManager | undefined;
   switch (browser.externalBrowser) {
     case "off":

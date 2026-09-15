@@ -171,6 +171,8 @@ describe("discord input", () => {
             askBtw: unused,
             abort: unused,
             contextUsage: unused,
+            availableWorkspaceModels: unused,
+            setWorkspaceModel: unused,
             availableModels: unused,
             switchModel: unused,
             shake: unused,
@@ -299,6 +301,8 @@ describe("discord input", () => {
         } satisfies DiscordInputBot;
 
         const application = Application.of({
+          availableWorkspaceModels: () => Effect.die("unexpected workspace model discovery"),
+          setWorkspaceModel: () => Effect.die("unexpected workspace model update"),
           availableModels: () => Effect.die("unexpected model discovery"),
           switchModel: () => Effect.die("unexpected model switch"),
           askBtw: () => Effect.die("unexpected side question"),
@@ -314,6 +318,7 @@ describe("discord input", () => {
                 externalId: "1.10",
                 defaultCwd,
                 worktree: null,
+                modelOverride: null,
                 createdAt: 0,
               };
             }),
@@ -451,6 +456,8 @@ describe("discord input", () => {
             },
           } satisfies DiscordInputBot;
           const application = Application.of({
+            availableWorkspaceModels: () => Effect.die("unexpected workspace model discovery"),
+            setWorkspaceModel: () => Effect.die("unexpected workspace model update"),
             availableModels: () => Effect.die("unexpected model discovery"),
             switchModel: () => Effect.die("unexpected model switch"),
             askBtw: () => Effect.die("unexpected side question"),
@@ -673,6 +680,8 @@ describe("discord input", () => {
           },
         } satisfies DiscordInputBot;
         const application = Application.of({
+          availableWorkspaceModels: () => Effect.die("unexpected workspace model discovery"),
+          setWorkspaceModel: () => Effect.die("unexpected workspace model update"),
           availableModels: () => Effect.die("unexpected model discovery"),
           switchModel: () => Effect.die("unexpected model switch"),
           askBtw: () => Effect.die("unexpected side question"),
@@ -823,6 +832,8 @@ describe("discord input", () => {
           },
         } satisfies DiscordInputBot;
         const application = Application.of({
+          availableWorkspaceModels: () => Effect.die("unexpected workspace model discovery"),
+          setWorkspaceModel: () => Effect.die("unexpected workspace model update"),
           availableModels: () => Effect.die("unexpected model discovery"),
           switchModel: () => Effect.die("unexpected model switch"),
           askBtw: () => Effect.die("unexpected side question"),
@@ -927,6 +938,8 @@ describe("discord input", () => {
           },
         } satisfies DiscordInputBot;
         const application = Application.of({
+          availableWorkspaceModels: () => Effect.die("unexpected workspace model discovery"),
+          setWorkspaceModel: () => Effect.die("unexpected workspace model update"),
           availableModels: () => Effect.die("unexpected model discovery"),
           switchModel: () => Effect.die("unexpected model switch"),
           askBtw: () => Effect.die("unexpected side question"),
@@ -1032,6 +1045,8 @@ describe("discord input", () => {
           },
         } satisfies DiscordInputBot;
         const application = Application.of({
+          availableWorkspaceModels: () => Effect.die("unexpected workspace model discovery"),
+          setWorkspaceModel: () => Effect.die("unexpected workspace model update"),
           availableModels: () => Effect.die("unexpected model discovery"),
           switchModel: () => Effect.die("unexpected model switch"),
           askBtw: () => Effect.die("unexpected side question"),
@@ -1133,6 +1148,7 @@ describe("discord input", () => {
           externalId: "1.10",
           defaultCwd,
           worktree: null,
+          modelOverride: null,
           createdAt: 0,
         };
         const bot = {
@@ -1161,6 +1177,8 @@ describe("discord input", () => {
           },
         } satisfies DiscordInputBot;
         const application = Application.of({
+          availableWorkspaceModels: () => Effect.die("unexpected workspace model discovery"),
+          setWorkspaceModel: () => Effect.die("unexpected workspace model update"),
           availableModels: () => Effect.die("unexpected model discovery"),
           switchModel: () => Effect.die("unexpected model switch"),
           askBtw: () => Effect.die("unexpected side question"),
@@ -1254,6 +1272,7 @@ describe("discord input", () => {
           externalId: "1.10",
           defaultCwd,
           worktree: null,
+          modelOverride: null,
           createdAt: 0,
         };
         const bot = {
@@ -1280,6 +1299,8 @@ describe("discord input", () => {
           },
         } satisfies DiscordInputBot;
         const application = Application.of({
+          availableWorkspaceModels: () => Effect.die("unexpected workspace model discovery"),
+          setWorkspaceModel: () => Effect.die("unexpected workspace model update"),
           availableModels: () => Effect.die("unexpected model discovery"),
           switchModel: () => Effect.die("unexpected model switch"),
           askBtw: () => Effect.die("unexpected side question"),
@@ -1380,6 +1401,8 @@ describe("discord input", () => {
           },
         } satisfies DiscordInputBot;
         const application = Application.of({
+          availableWorkspaceModels: () => Effect.die("unexpected workspace model discovery"),
+          setWorkspaceModel: () => Effect.die("unexpected workspace model update"),
           availableModels: () => Effect.die("unexpected model discovery"),
           switchModel: () => Effect.die("unexpected model switch"),
           askBtw: () => Effect.die("unexpected side question"),
@@ -1393,6 +1416,7 @@ describe("discord input", () => {
               externalId: "1.10",
               defaultCwd,
               worktree: null,
+              modelOverride: null,
               createdAt: 0,
             }),
           bindWorkspace: () => Effect.die("unexpected workspace binding"),
@@ -1514,6 +1538,8 @@ describe("discord input", () => {
             },
           } satisfies DiscordInputBot;
           const application = Application.of({
+            availableWorkspaceModels: () => Effect.die("unexpected workspace model discovery"),
+            setWorkspaceModel: () => Effect.die("unexpected workspace model update"),
             availableModels: () => Effect.die("unexpected model discovery"),
             switchModel: () => Effect.die("unexpected model switch"),
             askBtw: () => Effect.die("unexpected side question"),
@@ -1527,6 +1553,7 @@ describe("discord input", () => {
                 externalId: "1.10",
                 defaultCwd,
                 worktree: null,
+                modelOverride: null,
                 createdAt: 0,
               }),
             bindWorkspace: () => Effect.die("unexpected workspace binding"),
@@ -1657,6 +1684,8 @@ describe("discord input", () => {
           },
         };
         const application = Application.of({
+          availableWorkspaceModels: () => Effect.die("unexpected workspace model discovery"),
+          setWorkspaceModel: () => Effect.die("unexpected workspace model update"),
           availableModels: () => Effect.die("unexpected model discovery"),
           switchModel: () => Effect.die("unexpected model switch"),
           askBtw: () => Effect.die("unexpected side question"),
@@ -1795,6 +1824,8 @@ describe("discord input", () => {
           },
         };
         const application = Application.of({
+          availableWorkspaceModels: () => Effect.die("unexpected workspace model discovery"),
+          setWorkspaceModel: () => Effect.die("unexpected workspace model update"),
           availableModels: () => Effect.die("unexpected model discovery"),
           switchModel: () => Effect.die("unexpected model switch"),
           askBtw: () => Effect.die("unexpected side question"),
@@ -1935,6 +1966,8 @@ describe("discord input", () => {
           },
         };
         const application = Application.of({
+          availableWorkspaceModels: () => Effect.die("unexpected workspace model discovery"),
+          setWorkspaceModel: () => Effect.die("unexpected workspace model update"),
           availableModels: () => Effect.die("unexpected model discovery"),
           switchModel: () => Effect.die("unexpected model switch"),
           askBtw: () => Effect.die("unexpected side question"),

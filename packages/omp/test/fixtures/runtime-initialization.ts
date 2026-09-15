@@ -14,6 +14,7 @@ import * as Schedule from "@pico/contract/schedule";
 import { WorkspaceId } from "@pico/contract/workspace-model";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import { make as makeSessionStore } from "../../src/agent-session-store.ts";
 import { make } from "../../src/layer.ts";
 
 const root = process.cwd();
@@ -26,7 +27,26 @@ const extensionDir = join(cwd, ".omp", "extensions");
 await mkdir(extensionDir, { recursive: true });
 await writeFile(
   join(cwd, ".omp", "config.yml"),
-  "lsp:\n  enabled: false\nbrowser:\n  enabled: false\nskills:\n  enabled: false\n",
+  "lsp:\n  enabled: false\nbrowser:\n  enabled: false\nskills:\n  enabled: false\nmodelRoles:\n  default: pico-fixture/default\nenabledModels:\n  - pico-fixture/*\n",
+);
+await mkdir(join(root, ".omp", "agent"), { recursive: true });
+await writeFile(
+  join(root, ".omp", "agent", "models.yml"),
+  JSON.stringify({
+    providers: {
+      "pico-fixture": {
+        api: "openai-completions",
+        baseUrl: "http://127.0.0.1:1/v1",
+        apiKey: "fixture-only",
+        models: ["default", "workspace", "switched"].map((id) => ({
+          id,
+          name: id,
+          contextWindow: 32_768,
+          maxTokens: 1_024,
+        })),
+      },
+    },
+  }),
 );
 await writeFile(
   join(extensionDir, "runtime-probe.ts"),
@@ -35,7 +55,7 @@ await writeFile(
     const count = ctx.sessionManager.getEntries().filter(
       (entry) => entry.type === "custom" && entry.customType === "runtime-start",
     ).length;
-    api.appendEntry("runtime-start", { count: count + 1, hasUI: ctx.hasUI });
+    api.appendEntry("runtime-start", { count: count + 1, hasUI: ctx.hasUI, model: ctx.model?.id });
     await api.setActiveTools(["read"]);
     api.appendEntry("runtime-tools", api.getActiveTools());
     await api.setSessionName("extension-ready");
@@ -88,8 +108,8 @@ const readJournal = async () => {
     ),
   };
 };
-const startMarkers = (count: number) => [
-  { type: "runtime-start", data: { count, hasUI: false } },
+const startMarkers = (count: number, model: string) => [
+  { type: "runtime-start", data: { count, hasUI: false, model } },
   { type: "runtime-tools", data: ["read"] },
 ];
 const stopMarker = { type: "runtime-stop", data: { name: "extension-ready" } };
@@ -97,24 +117,36 @@ const stopMarker = { type: "runtime-stop", data: { name: "extension-ready" } };
 await Effect.runPromise(
   Effect.scoped(
     Effect.gen(function* () {
+      const store = yield* makeSessionStore(sessions);
+      yield* store.create({
+        chatId: chat.id,
+        cwd,
+        modelOverride: { provider: "pico-fixture", id: "workspace" },
+      });
       const runtime = yield* make({
         paths: { root: PicoRoot.make(root), sessionsDir: sessions },
         schedules,
         browser: { externalBrowser: "off", idleTimeoutMs: 10_800_000 },
       });
       yield* runtime.contextUsage(chat.id);
-      const started = { title: "extension-ready", markers: startMarkers(1) };
+      const started = { title: "extension-ready", markers: startMarkers(1, "workspace") };
       assert.deepEqual(yield* Effect.promise(readJournal), started);
 
       yield* runtime.contextUsage(chat.id);
       assert.deepEqual(yield* Effect.promise(readJournal), started);
+      const switched = yield* runtime.switchModel(chat.id, {
+        provider: "pico-fixture",
+        id: "switched",
+      });
+      assert.equal(switched.kind, "persisted");
+      assert.equal(switched.model.id, "switched");
 
       yield* runtime.close(chat.id);
       const closed = { ...started, markers: [...started.markers, stopMarker] };
       assert.deepEqual(yield* Effect.promise(readJournal), closed);
 
       yield* runtime.contextUsage(chat.id);
-      const reopened = { ...closed, markers: [...closed.markers, ...startMarkers(2)] };
+      const reopened = { ...closed, markers: [...closed.markers, ...startMarkers(2, "switched")] };
       assert.deepEqual(yield* Effect.promise(readJournal), reopened);
 
       yield* runtime.close(chat.id);

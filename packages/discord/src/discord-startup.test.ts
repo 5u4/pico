@@ -77,17 +77,19 @@ describe("Discord startup", () => {
           ]);
           for (const registration of harness.calls) {
             if (registration.kind !== "guild" || registration.guildId === "3") continue;
-            const command = registration.commands.find(({ name }) => name === "switch");
-            if (command === undefined || !("options" in command)) {
-              throw new Error("Expected a registered model picker");
+            for (const name of ["switch", "set-workspace-model"]) {
+              const command = registration.commands.find((command) => command.name === name);
+              if (command === undefined || !("options" in command)) {
+                throw new Error("Expected a registered model picker");
+              }
+              assert.strictEqual(command.options?.length, 1);
+              const option = command.options?.[0];
+              assert.strictEqual(option?.name, "model");
+              assert.strictEqual(option?.type, ApplicationCommandOptionTypes.String);
+              assert.isTrue(option?.required);
+              assert.isTrue(option?.autocomplete);
+              assert.isUndefined(option?.choices);
             }
-            assert.strictEqual(command?.options?.length, 1);
-            const option = command?.options?.[0];
-            assert.strictEqual(option?.name, "model");
-            assert.strictEqual(option?.type, ApplicationCommandOptionTypes.String);
-            assert.isTrue(option?.required);
-            assert.isTrue(option?.autocomplete);
-            assert.isUndefined(option?.choices);
           }
         }),
       );
