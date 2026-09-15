@@ -92,6 +92,7 @@ export function WorkspaceChat({ state }: { readonly state: State | null }) {
   });
   const [theme, setTheme] = useState<Theme>(readBootstrappedTheme);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [disclosures, setDisclosures] = useState<ReadonlySet<string>>(() => new Set());
   const [recoveryOpen, setRecoveryOpen] = useState(false);
   const groupedAtom = useMemo(
@@ -546,6 +547,7 @@ export function WorkspaceChat({ state }: { readonly state: State | null }) {
               : "Your project conversations"
           }
           conversationKey={selected ? String(selected.key) : null}
+          desktopCollapse={{ collapsed: sidebarCollapsed, onCollapsedChange: setSidebarCollapsed }}
           navigation={presentation}
           onChatSelect={selectChat}
           onChatsRetry={(id) => {
