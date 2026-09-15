@@ -1,12 +1,12 @@
-import { CaretDownIcon, CircleNotchIcon } from "@phosphor-icons/react";
+import { CaretDownIcon, CircleNotchIcon, SparkleIcon } from "@phosphor-icons/react";
 import type { AssistantBlock, AssistantState, TranscriptItem } from "./chat-model.ts";
 
 export function AssistantMessage({
   item,
-  onDisclosureToggle,
+  onDisclosuresChange,
 }: {
   readonly item: Extract<TranscriptItem, { readonly kind: "assistant" }>;
-  readonly onDisclosureToggle: (itemId: string) => void;
+  readonly onDisclosuresChange: (ids: readonly string[], open: boolean) => void;
 }) {
   return (
     <article className="text-copy">
@@ -20,7 +20,7 @@ export function AssistantMessage({
           <AssistantBlockView
             block={block}
             key={block.id}
-            onDisclosureToggle={onDisclosureToggle}
+            onDisclosuresChange={onDisclosuresChange}
           />
         ))}
       </div>
@@ -31,42 +31,38 @@ export function AssistantMessage({
 
 function AssistantBlockView({
   block,
-  onDisclosureToggle,
+  onDisclosuresChange,
 }: {
   readonly block: AssistantBlock;
-  readonly onDisclosureToggle: (itemId: string) => void;
+  readonly onDisclosuresChange: (ids: readonly string[], open: boolean) => void;
 }) {
   switch (block.kind) {
     case "text":
       return <p className="whitespace-pre-wrap text-copy text-foreground">{block.text}</p>;
     case "thinking": {
       const contentId = `${block.id}-content`;
+      const triggerId = `${block.id}-trigger`;
       return (
-        <div className="border-l-2 border-border pl-3">
+        <div>
           <button
             aria-controls={contentId}
             aria-expanded={block.open}
-            className="flex items-center gap-2 text-label font-medium text-muted transition-colors duration-feedback hover:text-foreground"
-            onClick={() => onDisclosureToggle(block.id)}
+            className="trace-disclosure flex max-w-full items-center gap-2 px-1.5 py-1 text-start text-label font-medium text-muted"
+            id={triggerId}
+            onClick={() => onDisclosuresChange([block.id], !block.open)}
             type="button"
           >
+            <SparkleIcon aria-hidden="true" className="shrink-0 text-subtle" size={16} />
+            <span className="min-w-0 break-words">{block.label}</span>
             <CaretDownIcon
               aria-hidden="true"
-              className={`transition-transform duration-feedback ${block.open ? "disclosure-caret-open" : ""}`}
-              size={15}
+              className={`trace-caret ${block.open ? "disclosure-caret-open" : ""}`}
+              size={14}
             />
-            {block.label}
-            <span className={block.phase === "streaming" ? "text-accent" : "text-subtle"}>
-              {block.phase === "streaming"
-                ? "Working"
-                : block.phase === "complete"
-                  ? "Complete"
-                  : "Status unknown"}
-            </span>
           </button>
           <div
-            aria-label={`${block.label} details`}
-            className="pt-2 text-label leading-relaxed text-muted"
+            aria-labelledby={triggerId}
+            className="trace-body mt-1 whitespace-pre-wrap break-words py-1 text-label leading-relaxed text-muted"
             hidden={!block.open}
             id={contentId}
             role="region"

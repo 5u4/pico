@@ -41,7 +41,6 @@ export type AssistantBlock =
       readonly label: string;
       readonly text: string;
       readonly open: boolean;
-      readonly phase: "streaming" | "complete" | "unknown";
     };
 
 export type AssistantState =
@@ -60,6 +59,8 @@ export interface ToolCallPresentation {
   readonly id: string;
   readonly label: string;
   readonly summary: string;
+  readonly arguments?: string | undefined;
+  readonly open: boolean;
   readonly state: ToolState;
   readonly output?: string | undefined;
 }

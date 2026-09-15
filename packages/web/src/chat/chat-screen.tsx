@@ -30,7 +30,7 @@ export interface ChatScreenProps
   readonly onComposerSubmit: () => void;
   readonly onStop: () => void;
   readonly onTranscriptRetry: () => void;
-  readonly onDisclosureToggle: (itemId: string) => void;
+  readonly onDisclosuresChange: (ids: readonly string[], open: boolean) => void;
   readonly onThemeChange: (theme: Theme) => void;
 }
 
@@ -58,7 +58,7 @@ export function ChatScreen({
   onComposerSubmit,
   onStop,
   onTranscriptRetry,
-  onDisclosureToggle,
+  onDisclosuresChange,
   onThemeChange,
 }: ChatScreenProps) {
   const transcriptRef = useRef<HTMLDivElement>(null);
@@ -177,7 +177,7 @@ export function ChatScreen({
             tabIndex={0}
           >
             <Transcript
-              onDisclosureToggle={onDisclosureToggle}
+              onDisclosuresChange={onDisclosuresChange}
               onRetry={onTranscriptRetry}
               presentation={transcript}
             />
