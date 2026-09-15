@@ -26,6 +26,9 @@
   --raw-focus: #2f64d6;
   --raw-selection: #dce7ff;
   --raw-radius-control: 0.625rem;
+  --raw-radius-sidebar: 0.5rem;
+  --raw-sidebar-expanded: 14rem;
+  --raw-sidebar-collapsed: 3.25rem;
   --raw-radius-surface: 0.875rem;
   --raw-radius-bubble: 1rem;
   --raw-radius-round: 9999px;
@@ -34,6 +37,8 @@
   --raw-font-mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
   --raw-duration-feedback: 120ms;
   --raw-ease-feedback: cubic-bezier(0.2, 0, 0, 1);
+  --raw-duration-sidebar: 280ms;
+  --raw-ease-sidebar: cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 :root.dark {
@@ -89,6 +94,7 @@
   --color-focus: var(--raw-focus);
   --color-selection: var(--raw-selection);
   --radius-control: var(--raw-radius-control);
+  --radius-sidebar: var(--raw-radius-sidebar);
   --radius-surface: var(--raw-radius-surface);
   --radius-bubble: var(--raw-radius-bubble);
   --radius-round: var(--raw-radius-round);
@@ -189,6 +195,62 @@ textarea:disabled {
 .transcript-scroll {
   scrollbar-gutter: stable;
 }
+.workspace-sidebar {
+  --sidebar-row-size: 2.75rem;
+}
+
+.workspace-sidebar .sidebar-control,
+.workspace-sidebar .sidebar-row {
+  min-height: var(--sidebar-row-size);
+  height: auto;
+  border-radius: var(--raw-radius-sidebar);
+}
+
+.workspace-sidebar .sidebar-icon-button {
+  width: var(--sidebar-row-size);
+}
+
+.sidebar-hover {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: -1;
+  display: none;
+  border-radius: var(--raw-radius-sidebar);
+  background: var(--raw-surface-hover);
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    transform var(--raw-duration-feedback) var(--raw-ease-feedback),
+    opacity var(--raw-duration-feedback) var(--raw-ease-feedback);
+}
+
+@media (min-width: 48rem) {
+  .chat-screen {
+    grid-template-columns: var(--raw-sidebar-expanded) minmax(0, 1fr);
+    transition: grid-template-columns var(--raw-duration-sidebar) var(--raw-ease-sidebar);
+  }
+
+  .chat-screen[data-sidebar-collapsed="true"] {
+    grid-template-columns: var(--raw-sidebar-collapsed) minmax(0, 1fr);
+  }
+}
+
+@media (min-width: 48rem) and (pointer: fine) {
+  .workspace-sidebar {
+    --sidebar-row-size: 2rem;
+  }
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .sidebar-hover {
+    display: block;
+  }
+
+  .sidebar-row:hover {
+    color: var(--raw-foreground);
+  }
+}
 
 .loading-line {
   height: 0.75rem;
@@ -199,5 +261,6 @@ textarea:disabled {
 @media (prefers-reduced-motion: reduce) {
   :root {
     --raw-duration-feedback: 0ms;
+    --raw-duration-sidebar: 0ms;
   }
 }

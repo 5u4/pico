@@ -2,7 +2,9 @@
 
 Pico adapts [Beautiful UI](https://www.beautifului.dev/)'s quiet, transcript-first character to a developer chat workspace. Its light and dark themes use cool neutrals and one restrained cobalt interaction accent. Assistant prose stays in the reading flow. User messages, tool activity, and thinking use only enough enclosure to clarify their role. The composer is the sole elevated surface.
 
-The accepted screen has a workspace sidebar on the left and one chat column. Mobile widths replace the sidebar with a controlled overlay. There is no right detail pane.
+The accepted screen has a workspace sidebar on the left and one chat column. Desktop collapse leaves a rail for expanding navigation, starting a chat, and adding a workspace. Mobile keeps the full tree in a native dialog, independent of desktop collapse. There is no right detail pane.
+
+The sidebar adapts [Beautiful UI's Sidebar Nav](https://www.beautifului.dev/r/sidebar-nav.json) without replacing the workspace tree with a switcher. Workspace disclosure controls lazy chat loading, not conversation selection. Collapse preserves that state and is not persisted. Hover decoration stays separate from selection and keyboard focus, with no continuous animation work.
 
 When sources disagree, follow them in this order:
 

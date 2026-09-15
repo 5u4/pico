@@ -15,6 +15,7 @@ import { WorkspaceSidebar, type WorkspaceSidebarProps } from "./workspace-sideba
 
 export interface ChatScreenProps
   extends Omit<WorkspaceSidebarProps, "onClose" | "onAddWorkspace" | "contextMenuContainer"> {
+  readonly desktopCollapse: NonNullable<WorkspaceSidebarProps["desktopCollapse"]>;
   readonly conversationKey: string | null;
   readonly title: string;
   readonly contextLabel: string;
@@ -35,6 +36,7 @@ export interface ChatScreenProps
 
 export function ChatScreen({
   navigation,
+  desktopCollapse,
   conversationKey,
   title,
   contextLabel,
@@ -107,7 +109,10 @@ export function ChatScreen({
   const onboarding = navigation.status?.kind === "empty";
 
   return (
-    <div className="grid h-full min-h-0 grid-cols-1 bg-canvas text-foreground md:grid-cols-[16rem_minmax(0,1fr)]">
+    <div
+      className="chat-screen grid h-full min-h-0 grid-cols-1 bg-canvas text-foreground"
+      data-sidebar-collapsed={desktopCollapse.collapsed}
+    >
       <a
         className="sr-only focus:not-sr-only focus:fixed focus:start-4 focus:top-4 focus:z-50 focus:rounded-control focus:border focus:border-border focus:bg-panel focus:px-4 focus:py-2"
         href="#conversation-history"
@@ -115,7 +120,7 @@ export function ChatScreen({
         Skip to conversation
       </a>
       <div className="hidden min-h-0 md:block">
-        <WorkspaceSidebar {...sidebar} />
+        <WorkspaceSidebar {...sidebar} desktopCollapse={desktopCollapse} />
       </div>
       <MobileSidebar {...sidebar} open={sidebarOpen} returnFocus={sidebarOpener} />
 
