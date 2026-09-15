@@ -84,7 +84,7 @@ describe("schedule script runner", () => {
       };
       yield* bootstrap(storage);
       const definition: Schedule.ScheduleDefinition = {
-        version: 1,
+        version: 2,
         revision: Schedule.ScheduleRevision.make("018f47a0-0000-7000-8000-000000000004"),
         name: "invalid protocol",
         ownerWorkspaceId: workspaceId,

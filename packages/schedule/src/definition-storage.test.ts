@@ -6,6 +6,7 @@ import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
+import * as Schema from "effect/Schema";
 import {
   bootstrap,
   loadSchedule,
@@ -13,6 +14,7 @@ import {
   publishDefinition,
   updateDefinition,
 } from "./definition-storage.ts";
+import { publishRun, readRunDefinition, runDirectory } from "./run-storage.ts";
 import { open } from "./schedule.ts";
 import {
   caller,
@@ -22,11 +24,124 @@ import {
   permissionDenied,
   platformLayer,
   prepareSource,
+  resolveTarget,
   workspaceId,
 } from "./schedule-test-fixtures.ts";
 import type { Storage } from "./storage.ts";
 
 describe("definition storage", () => {
+  it.effect(
+    "reads legacy metadata without writes and persists v2 on the next metadata revision",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-legacy-schedule-" });
+        const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
+        const schedules = yield* open(schedulesDir, resolveTarget);
+        const sourceBytes = Uint8Array.from([0, 1, 255, 10]);
+        const created = yield* schedules.create(caller, {
+          name: "Legacy destination",
+          enabled: false,
+          target: { kind: "chat", chatId },
+          trigger: { kind: "once", at: 1_000 },
+          scriptTimeoutMs: 9_876,
+          sourceDirectory: yield* prepareSource({
+            "prompt.md": "Keep the destination.",
+            "asset.bin": sourceBytes,
+          }),
+        });
+        if (created.kind !== "ready") return yield* Effect.die("Schedule creation failed");
+        const legacy = {
+          ...created.definition,
+          version: 1,
+          replyTarget: { platform: "discord", conversationId: "10", messageId: "11" },
+        };
+        const legacySource = `${JSON.stringify(legacy, null, 2)}\n`;
+        const storage: Storage = {
+          fileSystem,
+          path,
+          schedulesDir,
+          temporaryId: () => Effect.succeed("legacy-migration"),
+        };
+        const run: Schedule.ScheduleRunLifecycle = {
+          version: 1,
+          id: Schedule.ScheduleRunId.make(`scheduled-1000-${created.definition.revision}`),
+          scheduleId: created.id,
+          definitionRevision: created.definition.revision,
+          source: { kind: "scheduled", scheduledFor: 1_000 },
+          plannedTarget: { kind: "existing-chat", ownerWorkspaceId: workspaceId, chatId },
+          claimedAt: 1_000,
+          state: { kind: "claimed" },
+        };
+        yield* publishRun(
+          storage,
+          run,
+          created.definition,
+          created.sourceDirectory,
+          "legacy-run",
+          Effect.void,
+        );
+        const snapshotFile = path.join(
+          runDirectory(storage, run.scheduleId, run.id),
+          "input",
+          "definition.json",
+        );
+        const metadataFile = path.join(created.sourceDirectory, "meta.json");
+        yield* fileSystem.writeFileString(snapshotFile, legacySource);
+        yield* fileSystem.writeFileString(metadataFile, legacySource);
+        const loaded = yield* schedules.get(caller, created.id);
+        assert.strictEqual(loaded.kind, "ready");
+        if (loaded.kind !== "ready") return yield* Effect.die("Legacy metadata could not be read");
+        assert.deepStrictEqual(loaded.definition, created.definition);
+        assert.deepStrictEqual(yield* schedules.list(caller), [loaded]);
+        assert.strictEqual(yield* fileSystem.readFileString(metadataFile), legacySource);
+        assert.deepStrictEqual(yield* readRunDefinition(storage, run), created.definition);
+        assert.strictEqual(yield* fileSystem.readFileString(snapshotFile), legacySource);
+
+        const updated = yield* schedules.update(caller, created.id, {
+          name: "Updated destination",
+        });
+        assert.strictEqual(updated.kind, "ready");
+        if (updated.kind !== "ready")
+          return yield* Effect.die("Legacy metadata could not be updated");
+        assert.notStrictEqual(updated.definition.revision, created.definition.revision);
+        assert.deepStrictEqual(updated, {
+          ...loaded,
+          definition: {
+            ...created.definition,
+            name: "Updated destination",
+            revision: updated.definition.revision,
+          },
+        });
+        const strictDefinition = Schema.decodeUnknownSync(
+          Schema.fromJsonString(Schedule.ScheduleDefinition),
+          { onExcessProperty: "error" },
+        );
+        assert.deepStrictEqual(
+          strictDefinition(yield* fileSystem.readFileString(metadataFile)),
+          updated.definition,
+        );
+        assert.deepStrictEqual(yield* readRunDefinition(storage, run), created.definition);
+        assert.strictEqual(yield* fileSystem.readFileString(snapshotFile), legacySource);
+        for (const directory of [created.sourceDirectory, path.dirname(snapshotFile)]) {
+          assert.strictEqual(
+            yield* fileSystem.readFileString(path.join(directory, "prompt.md")),
+            "Keep the destination.",
+          );
+          assert.deepStrictEqual(
+            yield* fileSystem.readFile(path.join(directory, "asset.bin")),
+            sourceBytes,
+          );
+        }
+        yield* fileSystem.writeFileString(
+          metadataFile,
+          JSON.stringify({ ...legacy, unexpected: true }),
+        );
+        assert.strictEqual((yield* schedules.get(caller, created.id)).kind, "invalid");
+      }).pipe(Effect.provide(platformLayer), Effect.scoped),
+  );
+
   it.effect("rejects a symlinked schedule root before writing through it", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
@@ -80,7 +195,7 @@ describe("definition storage", () => {
       };
       const id = Schedule.ScheduleId.make("018f47a0-0000-7000-8000-000000000091");
       const definition: Schedule.ScheduleDefinition = {
-        version: 1,
+        version: 2,
         revision: Schedule.ScheduleRevision.make("018f47a0-0000-7000-8000-000000000092"),
         name: "original",
         ownerWorkspaceId: workspaceId,
@@ -166,7 +281,7 @@ describe("definition storage", () => {
       };
       const id = Schedule.ScheduleId.make("018f47a0-0000-7000-8000-000000000095");
       const definition: Schedule.ScheduleDefinition = {
-        version: 1,
+        version: 2,
         revision: Schedule.ScheduleRevision.make("018f47a0-0000-7000-8000-000000000096"),
         name: "move destination",
         ownerWorkspaceId: workspaceId,
@@ -214,7 +329,7 @@ describe("definition storage", () => {
       yield* bootstrap(storage);
       const id = Schedule.ScheduleId.make("018f47a0-0000-7000-8000-000000000042");
       const original: Schedule.ScheduleDefinition = {
-        version: 1,
+        version: 2,
         revision: Schedule.ScheduleRevision.make("018f47a0-0000-7000-8000-000000000043"),
         name: "original",
         ownerWorkspaceId: workspaceId,
@@ -316,13 +431,13 @@ describe("definition storage", () => {
             return Effect.fail(permissionDenied("remove", "private cleanup cause"));
           },
         });
-        const schedules = yield* open(schedulesDir).pipe(
+        const schedules = yield* open(schedulesDir, resolveTarget).pipe(
           Effect.provideService(FileSystem.FileSystem, failingFileSystem),
         );
         const created = yield* schedules.create(caller, {
           name: "private original",
           enabled: false,
-          target: { kind: "current-chat" },
+          target: { kind: "chat", chatId: caller.chatId },
           trigger: { kind: "once", at: 10_000 },
           sourceDirectory: yield* prepareSource({ "prompt.md": "private original prompt" }),
         });
@@ -364,7 +479,7 @@ describe("definition storage", () => {
         assert.strictEqual(latest.kind, "ready");
         if (latest.kind !== "ready") return;
         assert.strictEqual(latest.state, "enabled");
-        const restarted = yield* open(schedulesDir);
+        const restarted = yield* open(schedulesDir, resolveTarget);
         assert.deepStrictEqual(yield* restarted.get(caller, created.id), latest);
         assert.isFalse(yield* fileSystem.exists(retainedTransaction));
       }).pipe(Effect.provide(platformLayer), Effect.scoped),
@@ -388,13 +503,13 @@ describe("definition storage", () => {
             ? Effect.fail(permissionDenied("rename", from))
             : fileSystem.rename(from, to),
       });
-      const schedules = yield* open(schedulesDir).pipe(
+      const schedules = yield* open(schedulesDir, resolveTarget).pipe(
         Effect.provideService(FileSystem.FileSystem, failingFileSystem),
       );
       const created = yield* schedules.create(caller, {
         name: "keep paused",
         enabled: true,
-        target: { kind: "current-chat" },
+        target: { kind: "chat", chatId: caller.chatId },
         trigger: { kind: "once", at: 10_000 },
         sourceDirectory: yield* prepareSource({ "prompt.md": "Original source." }),
       });
@@ -413,7 +528,7 @@ describe("definition storage", () => {
       if (paused.kind !== "ready") return yield* Effect.die("Paused schedule is invalid");
       assert.strictEqual(paused.state, "disabled");
       assert.deepStrictEqual(paused.definition, created.definition);
-      const restarted = yield* open(schedulesDir);
+      const restarted = yield* open(schedulesDir, resolveTarget);
       assert.deepStrictEqual(yield* restarted.get(caller, created.id), paused);
       assert.strictEqual(
         yield* fileSystem.readFileString(path.join(paused.sourceDirectory, "prompt.md")),
@@ -440,13 +555,13 @@ describe("definition storage", () => {
             ? Effect.fail(permissionDenied("rename", from))
             : fileSystem.rename(from, to),
       });
-      const schedules = yield* open(schedulesDir).pipe(
+      const schedules = yield* open(schedulesDir, resolveTarget).pipe(
         Effect.provideService(FileSystem.FileSystem, failingFileSystem),
       );
       const created = yield* schedules.create(caller, {
         name: "original",
         enabled: true,
-        target: { kind: "current-chat" },
+        target: { kind: "chat", chatId: caller.chatId },
         trigger: { kind: "once", at: 10_000 },
         sourceDirectory: yield* prepareSource({ "prompt.md": "Original source." }),
       });
@@ -475,7 +590,7 @@ describe("definition storage", () => {
       );
       const paused = yield* schedules.update(caller, created.id, { enabled: false });
       assert.strictEqual(paused.state, "disabled");
-      const restarted = yield* open(schedulesDir);
+      const restarted = yield* open(schedulesDir, resolveTarget);
       assert.deepStrictEqual(yield* restarted.get(caller, created.id), paused);
     }).pipe(Effect.provide(platformLayer), Effect.scoped),
   );
@@ -495,7 +610,7 @@ describe("definition storage", () => {
       yield* bootstrap(storage);
       const id = Schedule.ScheduleId.make("018f47a0-0000-7000-8000-000000000101");
       const definition: Schedule.ScheduleDefinition = {
-        version: 1,
+        version: 2,
         revision: Schedule.ScheduleRevision.make("018f47a0-0000-7000-8000-000000000102"),
         name: "original",
         ownerWorkspaceId: workspaceId,
@@ -577,7 +692,7 @@ describe("definition storage", () => {
       yield* bootstrap(storage);
       const id = Schedule.ScheduleId.make("018f47a0-0000-7000-8000-000000000104");
       const definition: Schedule.ScheduleDefinition = {
-        version: 1,
+        version: 2,
         revision: Schedule.ScheduleRevision.make("018f47a0-0000-7000-8000-000000000105"),
         name: "original",
         ownerWorkspaceId: workspaceId,
@@ -625,7 +740,7 @@ describe("definition storage", () => {
         path.join(movedDirectory, "lib/helper.js"),
         "export const value = 2;",
       );
-      const restarted = yield* open(schedulesDir);
+      const restarted = yield* open(schedulesDir, resolveTarget);
       const recovered = yield* restarted.get(caller, id);
       assert.strictEqual(recovered.kind, "ready");
       if (recovered.kind !== "ready") return;
@@ -646,11 +761,11 @@ describe("definition storage", () => {
       const path = yield* Path.Path;
       const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-replace-upgrade-" });
       const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
-      const schedules = yield* open(schedulesDir);
+      const schedules = yield* open(schedulesDir, resolveTarget);
       const created = yield* schedules.create(caller, {
         name: "before upgrade",
         enabled: false,
-        target: { kind: "current-chat" },
+        target: { kind: "chat", chatId: caller.chatId },
         trigger: { kind: "once", at: 10_000 },
         sourceDirectory: yield* prepareSource({ "prompt.md": "Retained source." }),
       });
@@ -672,7 +787,7 @@ describe("definition storage", () => {
       );
       yield* fileSystem.writeFileString(path.join(next, "prompt.md"), "Uncommitted source.");
       yield* fileSystem.rename(created.sourceDirectory, path.join(transaction, "previous"));
-      const restarted = yield* open(schedulesDir);
+      const restarted = yield* open(schedulesDir, resolveTarget);
       const recovered = yield* restarted.get(caller, created.id);
       assert.deepStrictEqual(recovered, created);
       assert.strictEqual(
@@ -680,7 +795,7 @@ describe("definition storage", () => {
         "Retained source.",
       );
       assert.isFalse(yield* fileSystem.exists(transaction));
-      const reopened = yield* open(schedulesDir);
+      const reopened = yield* open(schedulesDir, resolveTarget);
       assert.deepStrictEqual(yield* reopened.get(caller, created.id), recovered);
     }).pipe(Effect.provide(platformLayer), Effect.scoped),
   );
@@ -691,11 +806,11 @@ describe("definition storage", () => {
       const path = yield* Path.Path;
       const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-replace-committed-" });
       const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
-      const schedules = yield* open(schedulesDir);
+      const schedules = yield* open(schedulesDir, resolveTarget);
       const created = yield* schedules.create(caller, {
         name: "committed replacement",
         enabled: true,
-        target: { kind: "current-chat" },
+        target: { kind: "chat", chatId: caller.chatId },
         trigger: { kind: "once", at: 10_000 },
         sourceDirectory: yield* prepareSource({ "prompt.md": "Committed source." }),
       });
@@ -717,7 +832,7 @@ describe("definition storage", () => {
       );
       yield* fileSystem.writeFileString(path.join(previous, "prompt.md"), "Old source.");
       const paused = yield* schedules.update(caller, created.id, { enabled: false });
-      const restarted = yield* open(schedulesDir);
+      const restarted = yield* open(schedulesDir, resolveTarget);
       const recovered = yield* restarted.get(caller, created.id);
       assert.deepStrictEqual(recovered, paused);
       assert.strictEqual(recovered.kind, "ready");
@@ -743,11 +858,11 @@ describe("definition storage", () => {
           prefix: "pico-replace-conflict-",
         });
         const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
-        const schedules = yield* open(schedulesDir);
+        const schedules = yield* open(schedulesDir, resolveTarget);
         const created = yield* schedules.create(caller, {
           name: "conflicted replacement",
           enabled: true,
-          target: { kind: "current-chat" },
+          target: { kind: "chat", chatId: caller.chatId },
           trigger: { kind: "once", at: 10_000 },
           sourceDirectory: yield* prepareSource({ "prompt.md": "Enabled source." }),
         });
@@ -770,7 +885,7 @@ describe("definition storage", () => {
         for (const [file, content] of Object.entries(retained)) {
           yield* fileSystem.writeFileString(file, content);
         }
-        const error = yield* open(schedulesDir).pipe(Effect.flip);
+        const error = yield* open(schedulesDir, resolveTarget).pipe(Effect.flip);
         assert.strictEqual(error.kind, "corrupt");
         for (const [file, content] of Object.entries(retained)) {
           assert.strictEqual(yield* fileSystem.readFileString(file), content);
@@ -789,20 +904,20 @@ describe("definition storage", () => {
       const path = yield* Path.Path;
       const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-replace-journal-" });
       const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
-      yield* open(schedulesDir);
+      yield* open(schedulesDir, resolveTarget);
       const transaction = path.join(schedulesDir, ".staging", "replace-retained");
       const previous = path.join(transaction, "previous");
       yield* fileSystem.makeDirectory(previous, { recursive: true });
       const retained = path.join(previous, "prompt.md");
       yield* fileSystem.writeFileString(retained, "Only retained source.");
-      const missing = yield* open(schedulesDir).pipe(Effect.flip);
+      const missing = yield* open(schedulesDir, resolveTarget).pipe(Effect.flip);
       assert.strictEqual(missing.kind, "corrupt");
       assert.strictEqual(yield* fileSystem.readFileString(retained), "Only retained source.");
       yield* fileSystem.writeFileString(
         path.join(transaction, "transaction.json"),
         '{"kind":"replace"}',
       );
-      const corrupt = yield* open(schedulesDir).pipe(Effect.flip);
+      const corrupt = yield* open(schedulesDir, resolveTarget).pipe(Effect.flip);
       assert.strictEqual(corrupt.kind, "corrupt");
       assert.strictEqual(yield* fileSystem.readFileString(retained), "Only retained source.");
     }).pipe(Effect.provide(platformLayer), Effect.scoped),

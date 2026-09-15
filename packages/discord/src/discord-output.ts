@@ -1,8 +1,7 @@
 import type { AgentEventEnvelope } from "@pico/contract/agent-event";
 import type * as AgentMessage from "@pico/contract/agent-message";
 import type * as Chat from "@pico/contract/chat-model";
-import { AgentError } from "@pico/contract/errors";
-import { ReplyDelivery, type ReplyTarget } from "@pico/contract/reply-target";
+import { ScheduleHostError, type SchedulePlatform } from "@pico/contract/schedule";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -43,19 +42,31 @@ export interface DiscordOutputClient {
 const Snowflake = Schema.BigIntFromString.check(
   Schema.isBetweenBigInt({ minimum: 1n, maximum: 18_446_744_073_709_551_615n }),
 );
-const decodeReplyTarget = Schema.decodeUnknownEffect(
-  Schema.Struct({
-    platform: Schema.Literal("discord"),
-    conversationId: Snowflake,
-    messageId: Snowflake,
-  }),
-);
+const decodeThreadId = Schema.decodeUnknownEffect(Snowflake);
 
-// Discord startup exposes scheduled delivery without retaining a live conversation destination.
-export const makeReplyDelivery = (client: Pick<DiscordOutputClient, "send">) =>
-  ReplyDelivery.of({
-    send: (chatId, target, content) => Effect.scoped(sendReply(client, chatId, target, content)),
-  });
+export const makeScheduledSender = (
+  client: Pick<DiscordOutputClient, "send">,
+): SchedulePlatform["send"] =>
+  Effect.fn("Discord.sendScheduled")(
+    function* (input) {
+      const threadId = yield* decodeThreadId(input.externalId).pipe(
+        Effect.mapError(
+          () => new ScheduleHostError({ message: "Invalid Discord thread destination" }),
+        ),
+      );
+      for (const message of textMessages(input.content, false)) {
+        yield* client.send(threadId, message).pipe(
+          Effect.mapError((error) => {
+            const failure = discordError("send-scheduled-message", error);
+            return new ScheduleHostError({
+              message: `Discord scheduled delivery failed${failure.status === undefined ? "" : `: HTTP ${failure.status}`}${failure.discordCode === undefined ? "" : `, code ${failure.discordCode}`}`,
+            });
+          }),
+        );
+      }
+    },
+    Effect.annotateLogs({ component: "discord", operation: "send-scheduled-message" }),
+  );
 
 interface ToolState {
   readonly presentation: ToolPresentation;
@@ -232,39 +243,6 @@ export const renderAssistant = (
   }
   return rendered;
 };
-
-const sendReply = Effect.fn("Discord.replyDelivery.send")(function* (
-  client: Pick<DiscordOutputClient, "send">,
-  chatId: Chat.ChatId,
-  target: ReplyTarget,
-  content: string,
-) {
-  const destination = yield* decodeReplyTarget(target).pipe(
-    Effect.mapError(() => new AgentError({ message: "Invalid Discord reply destination" })),
-  );
-  yield* Effect.annotateLogsScoped({
-    component: "discord",
-    operation: "send-scheduled-reply",
-    chatId,
-    channelId: destination.conversationId.toString(),
-    messageId: destination.messageId.toString(),
-  });
-  for (const message of textMessages(content, false)) {
-    yield* client
-      .send(destination.conversationId, {
-        ...message,
-        replyTo: destination.messageId,
-      })
-      .pipe(
-        Effect.mapError((error) => {
-          const failure = discordError("send-scheduled-reply", error);
-          return new AgentError({
-            message: `Discord scheduled reply delivery failed${failure.status === undefined ? "" : `: HTTP ${failure.status}`}${failure.discordCode === undefined ? "" : `, code ${failure.discordCode}`}`,
-          });
-        }),
-      );
-  }
-});
 
 const interruptTyping = Effect.fn("Discord.output.interruptTyping")(function* (state: RunState) {
   const typing = state.typing;

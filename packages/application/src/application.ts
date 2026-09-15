@@ -27,7 +27,6 @@ import {
   WorkspaceBindingInvalid,
 } from "@pico/contract/errors";
 import { AbsolutePath } from "@pico/contract/path";
-import type { ReplyTarget } from "@pico/contract/reply-target";
 import * as Schedule from "@pico/contract/schedule";
 import * as Workspace from "@pico/contract/workspace-model";
 import { WorkspaceRepository } from "@pico/contract/workspace-repository";
@@ -655,7 +654,6 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
     runId: Schedule.ScheduleRunId,
     prompt: AgentMessage.AgentPrompt,
     onEvent: (event: AgentEvent.AgentEvent) => Effect.Effect<void, AgentError>,
-    replyTarget?: ReplyTarget,
   ) {
     return yield* Effect.scoped(
       Effect.gen(function* () {
@@ -669,7 +667,7 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
                 chatId,
                 { kind: "captured" },
                 runtime
-                  .sendCaptured(chatId, runId, prompt, onEvent, replyTarget)
+                  .sendCaptured(chatId, runId, prompt, onEvent)
                   .pipe(Effect.mapError(failure("Failed to run scheduled prompt"))),
               ).pipe(Effect.forkIn(operationScope)),
             );
@@ -683,29 +681,23 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
   const deliverScheduled = Effect.fn("Application.deliverScheduled")(function* (
     chatId: Chat.ChatId,
     content: string,
+    localOnly?: true,
   ) {
-    yield* serialized(
-      chatId,
-      Effect.gen(function* () {
-        yield* ensureChatOpen(chatId, "Failed to deliver scheduled result");
-        yield* runtime
-          .deliver(chatId, content)
-          .pipe(Effect.mapError(failure("Failed to deliver scheduled result")));
-      }),
-    );
+    yield* ensureChatOpen(chatId, "Failed to deliver scheduled result");
+    yield* runtime
+      .deliver(chatId, content, localOnly)
+      .pipe(Effect.mapError(failure("Failed to deliver scheduled result")));
   });
 
   const publishScheduled = Effect.fn("Application.publishScheduled")(function* (
     chatId: Chat.ChatId,
     content: string,
+    localOnly?: true,
   ) {
-    yield* serialized(
-      chatId,
-      Effect.gen(function* () {
-        yield* ensureChatOpen(chatId, "Failed to publish scheduled result");
-        yield* runtime.publish(chatId, content);
-      }),
-    ).pipe(
+    yield* Effect.gen(function* () {
+      yield* ensureChatOpen(chatId, "Failed to publish scheduled result");
+      yield* runtime.publish(chatId, content, localOnly);
+    }).pipe(
       Effect.mapError((cause) =>
         cause instanceof ChatClosed ? cause : failure("Failed to publish scheduled result")(cause),
       ),
@@ -789,51 +781,189 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
     switchModel,
     shake,
   });
-  const scheduleHost = Schedule.ScheduleRunHostService.of({
-    prepare: (target) => {
-      switch (target.kind) {
-        case "chat":
-          return resolveScheduledChat(target.chatId).pipe(
-            Effect.map((chat) => ({
-              chatId: chat.id,
-              workspaceId: chat.workspaceId,
-              cwd: chat.cwd,
-            })),
-            Effect.mapError(scheduleHostError),
-          );
-        case "workspace":
-          return createScheduledChat(target.workspaceId, target.newChatId).pipe(
-            Effect.map((chat) => ({
-              chatId: chat.id,
-              workspaceId: chat.workspaceId,
-              cwd: chat.cwd,
-            })),
-            Effect.mapError(scheduleHostError),
-          );
-        default: {
-          const exhaustive: never = target;
-          return exhaustive;
-        }
+  const scheduleHostFactory = Schedule.ScheduleRunHostFactory.of((platform) => {
+    const getWorkspace = Effect.fn("Application.scheduleWorkspace")(function* (
+      workspaceId: Workspace.WorkspaceId,
+    ) {
+      const workspace = yield* workspaces.findById(workspaceId);
+      if (Option.isNone(workspace)) {
+        return yield* new Schedule.ScheduleHostError({ message: "Schedule workspace not found" });
       }
-    },
-    deliver: (chatId, content) =>
-      deliverScheduled(chatId, content).pipe(Effect.mapError(scheduleHostError)),
-    publish: (chatId, content) =>
-      publishScheduled(chatId, content).pipe(Effect.mapError(scheduleHostError)),
-    runPrompt: (chatId, runId, prompt, onEvent, replyTarget) =>
-      runScheduled(
+      return workspace.value;
+    }, Effect.mapError(scheduleHostError));
+
+    const validateWorkspace = Effect.fn("Application.validateScheduleWorkspace")(function* (
+      workspace: Workspace.Workspace,
+      chat?: Chat.Chat,
+    ) {
+      switch (workspace.platform) {
+        case "web":
+        case "desktop":
+        case "mobile":
+          return null;
+        case "discord": {
+          if (platform === null) {
+            return yield* new Schedule.ScheduleHostError({
+              message: "Discord schedule destinations are unavailable",
+            });
+          }
+          if (chat !== undefined && chat.externalId === null) {
+            return yield* new Schedule.ScheduleHostError({
+              message: "Discord schedule chat has no external thread binding",
+            });
+          }
+          yield* platform.validateTarget(
+            chat === undefined || chat.externalId === null
+              ? { kind: "workspace", workspaceExternalId: workspace.externalId }
+              : {
+                  kind: "chat",
+                  workspaceExternalId: workspace.externalId,
+                  chatExternalId: chat.externalId,
+                },
+          );
+          return platform;
+        }
+        default:
+          return yield* new Schedule.ScheduleHostError({
+            message: `Unsupported schedule platform: ${workspace.platform}`,
+          });
+      }
+    });
+
+    const resolveTarget = Effect.fn("Application.resolveScheduleTarget")(function* (
+      input: Schedule.ScheduleTargetInput,
+    ) {
+      if (input.kind === "external-chat" || input.kind === "external-workspace") {
+        if (platform === null) {
+          return yield* new Schedule.ScheduleHostError({
+            message: "Discord schedule destinations are unavailable",
+          });
+        }
+        return yield* platform.resolveTarget(input);
+      }
+      if (input.kind === "chat") {
+        const chat = yield* resolveScheduledChat(input.chatId);
+        yield* validateWorkspace(yield* getWorkspace(chat.workspaceId), chat);
+      } else {
+        yield* validateWorkspace(yield* getWorkspace(input.workspaceId));
+      }
+      return input;
+    }, Effect.mapError(scheduleHostError));
+
+    const prepare = Effect.fn("Application.prepareScheduleTarget")(function* (
+      destination: Schedule.ScheduleRunDestination,
+    ) {
+      let chat: Chat.Chat;
+      if (destination.kind === "chat") {
+        chat = yield* resolveScheduledChat(destination.chatId);
+        yield* validateWorkspace(yield* getWorkspace(chat.workspaceId), chat);
+      } else {
+        const workspace = yield* getWorkspace(destination.workspaceId);
+        yield* validateWorkspace(workspace);
+        chat = yield* serialized(
+          destination.newChatId,
+          createScheduledChat(destination.workspaceId, destination.newChatId),
+        );
+        if (chat.externalId !== null) yield* validateWorkspace(workspace, chat);
+      }
+      return { chatId: chat.id, workspaceId: chat.workspaceId, cwd: chat.cwd };
+    }, Effect.mapError(scheduleHostError));
+
+    const materialize = Effect.fn("Application.materializeScheduleTarget")(function* (
+      input: Parameters<Schedule.ScheduleRunHost["materialize"]>[0],
+    ) {
+      yield* serialized(
+        input.target.chatId,
+        Effect.gen(function* () {
+          const chat = yield* resolveScheduledChat(input.target.chatId);
+          if (
+            chat.workspaceId !== input.target.workspaceId ||
+            (input.destination.kind === "chat"
+              ? chat.id !== input.destination.chatId
+              : chat.id !== input.destination.newChatId ||
+                chat.workspaceId !== input.destination.workspaceId)
+          ) {
+            return yield* new Schedule.ScheduleHostError({
+              message: "Scheduled chat identity does not match its destination",
+            });
+          }
+          const workspace = yield* getWorkspace(chat.workspaceId);
+          const adapter = yield* validateWorkspace(
+            workspace,
+            input.destination.kind === "chat" || chat.externalId !== null ? chat : undefined,
+          );
+          if (workspace.platform !== "discord" || adapter === null || chat.externalId !== null)
+            return;
+          let bound = false;
+          yield* Effect.acquireUseRelease(
+            adapter.createThread({ workspaceExternalId: workspace.externalId, title: input.title }),
+            (externalId) =>
+              Effect.gen(function* () {
+                const binding = yield* chats.bindExternalId({
+                  chatId: chat.id,
+                  workspaceId: chat.workspaceId,
+                  externalId,
+                });
+                if (Option.isNone(binding)) {
+                  return yield* new Schedule.ScheduleHostError({
+                    message: `Could not bind scheduled Discord thread ${externalId}`,
+                  });
+                }
+                bound = true;
+              }).pipe(Effect.uninterruptible),
+            (externalId) =>
+              bound
+                ? Effect.void
+                : adapter
+                    .deleteThread(externalId)
+                    .pipe(
+                      Effect.catchCause((cause) =>
+                        Effect.logError("Failed to roll back scheduled Discord thread", cause).pipe(
+                          Effect.annotateLogs({ chatId: chat.id, externalId }),
+                        ),
+                      ),
+                    ),
+          );
+        }),
+      );
+    }, Effect.mapError(scheduleHostError));
+
+    const sendScheduled = Effect.fn("Application.sendScheduled")(function* (
+      chatId: Chat.ChatId,
+      content: string,
+      publication: "publish" | "deliver",
+    ) {
+      yield* serialized(
         chatId,
-        runId,
-        prompt,
-        (event) =>
+        Effect.gen(function* () {
+          const chat = yield* resolveScheduledChat(chatId);
+          const adapter = yield* validateWorkspace(yield* getWorkspace(chat.workspaceId), chat);
+          const localOnly = adapter === null ? undefined : true;
+          if (publication === "publish") yield* publishScheduled(chatId, content, localOnly);
+          else yield* deliverScheduled(chatId, content, localOnly);
+          if (adapter !== null && chat.externalId !== null) {
+            yield* adapter.send({ chatId, externalId: chat.externalId, content });
+          }
+        }),
+      );
+    }, Effect.mapError(scheduleHostError));
+
+    return {
+      resolveTarget,
+      prepare,
+      materialize,
+      deliver: (chatId, content) => sendScheduled(chatId, content, "deliver"),
+      publish: (chatId, content) => sendScheduled(chatId, content, "publish"),
+      runPrompt: (chatId, runId, prompt, onEvent) =>
+        runScheduled(chatId, runId, prompt, (event) =>
           onEvent(event).pipe(
             Effect.mapError((error) => new AgentError({ message: error.message })),
           ),
-        replyTarget,
-      ).pipe(Effect.mapError(scheduleHostError)),
+        ).pipe(Effect.mapError(scheduleHostError)),
+    };
   });
   return Context.make(Application, application).pipe(
-    Context.add(Schedule.ScheduleRunHostService, scheduleHost),
+    Context.add(Schedule.ScheduleRunHostFactory, scheduleHostFactory),
   );
 });
 

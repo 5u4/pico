@@ -24,6 +24,11 @@ export const chatId = Chat.ChatId.make("018f47a0-0000-7000-8000-000000000002");
 
 export const caller: Schedule.ScheduleCaller = { workspaceId, chatId };
 
+export const resolveTarget: Schedule.ScheduleRunHost["resolveTarget"] = (target) =>
+  target.kind === "chat" || target.kind === "workspace"
+    ? Effect.succeed(target)
+    : Effect.fail(new Schedule.ScheduleHostError({ message: "Unexpected external test target" }));
+
 export const textPrompt = (text: string) => Agent.AgentPrompt.make({ text, attachments: [] });
 
 export const decodeRun = Schema.decodeUnknownEffect(

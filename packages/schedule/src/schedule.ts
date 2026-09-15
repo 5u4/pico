@@ -45,30 +45,6 @@ const MISSED_GRACE_MILLIS = 2 * 60 * 60 * 1_000;
 const scheduleError = (kind: Schedule.ScheduleError["kind"], message: string) =>
   new Schedule.ScheduleError({ kind, message });
 
-const selectTarget = (
-  caller: Schedule.ScheduleCaller,
-  input: Schedule.ScheduleTargetInput,
-): Pick<Schedule.ScheduleDefinition, "target" | "replyTarget"> => {
-  switch (input.kind) {
-    case "current-chat":
-    case "current-workspace":
-      return {
-        target:
-          input.kind === "current-chat"
-            ? { kind: "chat", chatId: caller.chatId }
-            : { kind: "workspace", workspaceId: caller.workspaceId },
-        ...(caller.replyTarget === undefined ? {} : { replyTarget: caller.replyTarget }),
-      };
-    case "chat":
-    case "workspace":
-      return { target: input };
-    default: {
-      const exhaustive: never = input;
-      return exhaustive;
-    }
-  }
-};
-
 const validateTrigger = (trigger: Schedule.ScheduleTrigger): string | undefined => {
   if (trigger.kind === "once") return undefined;
   if (trigger.expression.trim().split(/\s+/u).length !== 5) {
@@ -153,6 +129,7 @@ const latestCronSlot = (
 
 const capture = Effect.fn("Schedules.capture")(function* (
   schedulesDir: AbsolutePath,
+  resolveTarget: Schedule.ScheduleRunHost["resolveTarget"],
   executable = process.execPath,
 ) {
   const fileSystem = yield* FileSystem.FileSystem;
@@ -186,13 +163,15 @@ const capture = Effect.fn("Schedules.capture")(function* (
         const id = Schedule.ScheduleId.make(yield* transactionId());
         const createdAt = yield* Clock.currentTimeMillis;
         const definition: Schedule.ScheduleDefinition = {
-          version: 1,
+          version: 2,
           revision: Schedule.ScheduleRevision.make(yield* transactionId()),
           name: input.name,
           ownerWorkspaceId: caller.workspaceId,
           createdByChatId: caller.chatId,
           createdAt,
-          ...selectTarget(caller, input.target),
+          target: yield* resolveTarget(input.target).pipe(
+            Effect.mapError((error) => scheduleError("invalid", error.message)),
+          ),
           trigger: input.trigger,
           ...(input.scriptTimeoutMs === undefined
             ? {}
@@ -265,14 +244,14 @@ const capture = Effect.fn("Schedules.capture")(function* (
           if (loaded.view.kind !== "ready") {
             return yield* scheduleError("invalid", "Invalid schedules cannot be updated");
           }
-          const { target, replyTarget, ...metadata } = loaded.view.definition;
-          const selection =
-            input.target === undefined
-              ? { target, ...(replyTarget === undefined ? {} : { replyTarget }) }
-              : selectTarget(caller, input.target);
           const definition = {
-            ...metadata,
-            ...selection,
+            ...loaded.view.definition,
+            target:
+              input.target === undefined
+                ? loaded.view.definition.target
+                : yield* resolveTarget(input.target).pipe(
+                    Effect.mapError((error) => scheduleError("invalid", error.message)),
+                  ),
             revision: Schedule.ScheduleRevision.make(yield* transactionId()),
             ...(input.name === undefined ? {} : { name: input.name }),
             ...(input.trigger === undefined ? {} : { trigger: input.trigger }),
@@ -451,23 +430,10 @@ const capture = Effect.fn("Schedules.capture")(function* (
           decision = script.success.decision;
         }
 
-        if (!decision.agent) {
-          if (decision.content === undefined) {
-            yield* complete({ kind: "skipped" });
-            return;
-          }
-          failureStage = "publish";
-          const published = yield* host
-            .publish(target.chatId, decision.content, definition.replyTarget)
-            .pipe(Effect.result);
-          if (Result.isFailure(published)) {
-            yield* fail("publish", published.failure.message);
-            return;
-          }
-          yield* complete({ kind: "published", content: decision.content });
+        if (!decision.agent && decision.content === undefined) {
+          yield* complete({ kind: "skipped" });
           return;
         }
-
         const prompt = input.prompt;
         const request =
           decision.content === undefined
@@ -479,6 +445,31 @@ const capture = Effect.fn("Schedules.capture")(function* (
           yield* fail("protocol", "Script requested an agent run without providing input");
           return;
         }
+        failureStage = "target";
+        const materialized = yield* host
+          .materialize({
+            destination,
+            target,
+            title: definition.name,
+          })
+          .pipe(Effect.result);
+        if (Result.isFailure(materialized)) {
+          yield* fail("target", materialized.failure.message);
+          return;
+        }
+        if (!decision.agent && decision.content !== undefined) {
+          failureStage = "publish";
+          const published = yield* host
+            .publish(target.chatId, decision.content)
+            .pipe(Effect.result);
+          if (Result.isFailure(published)) {
+            yield* fail("publish", published.failure.message);
+            return;
+          }
+          yield* complete({ kind: "published", content: decision.content });
+          return;
+        }
+
         failureStage = "omp";
         yield* writeArtifactString(storage, current, "omp/request.md", request);
         current = {
@@ -515,7 +506,6 @@ const capture = Effect.fn("Schedules.capture")(function* (
                   (error) => new Schedule.ScheduleHostError({ message: error.message }),
                 ),
               ),
-            definition.replyTarget,
           )
           .pipe(Effect.result);
         if (Result.isFailure(captured)) {
@@ -572,9 +562,7 @@ const capture = Effect.fn("Schedules.capture")(function* (
           return;
         }
         failureStage = "publish";
-        const delivery = yield* host
-          .deliver(target.chatId, text, definition.replyTarget)
-          .pipe(Effect.result);
+        const delivery = yield* host.deliver(target.chatId, text).pipe(Effect.result);
         if (Result.isFailure(delivery)) {
           yield* fail("publish", delivery.failure.message);
           return;
@@ -924,19 +912,24 @@ const capture = Effect.fn("Schedules.capture")(function* (
 
 export const make = Effect.fn("Schedules.make")(function* (
   schedulesDir: AbsolutePath,
+  resolveTarget: Schedule.ScheduleRunHost["resolveTarget"],
   executable = process.execPath,
 ) {
-  return (yield* capture(schedulesDir, executable)).service;
+  return (yield* capture(schedulesDir, resolveTarget, executable)).service;
 });
 
 export const open = Effect.fn("Schedules.open")(function* (
   schedulesDir: AbsolutePath,
+  resolveTarget: Schedule.ScheduleRunHost["resolveTarget"],
   executable = process.execPath,
 ) {
-  const captured = yield* capture(schedulesDir, executable);
+  const captured = yield* capture(schedulesDir, resolveTarget, executable);
   yield* captured.initialize;
   return captured.service;
 });
 
-export const layer = (schedulesDir: AbsolutePath, executable = process.execPath) =>
-  Layer.effect(Schedule.Schedules, open(schedulesDir, executable));
+export const layer = (
+  schedulesDir: AbsolutePath,
+  resolveTarget: Schedule.ScheduleRunHost["resolveTarget"],
+  executable = process.execPath,
+) => Layer.effect(Schedule.Schedules, open(schedulesDir, resolveTarget, executable));

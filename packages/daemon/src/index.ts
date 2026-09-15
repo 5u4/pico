@@ -13,9 +13,13 @@ import {
   LoggingError,
   PersistenceError,
 } from "@pico/contract/errors";
-import { EventRouter } from "@pico/contract/event-router";
-import { ReplyDelivery, type ReplyTarget } from "@pico/contract/reply-target";
-import { ScheduleError, ScheduleHostError, ScheduleRunHostService } from "@pico/contract/schedule";
+import {
+  ScheduleError,
+  ScheduleHostError,
+  SchedulePlatformService,
+  type ScheduleRunHost,
+  ScheduleRunHostFactory,
+} from "@pico/contract/schedule";
 import * as DiscordLayer from "@pico/discord/layer";
 import * as EventRouterLayer from "@pico/event-router/layer";
 import * as GitWorktree from "@pico/git/worktree";
@@ -160,7 +164,18 @@ const daemonLayer = (paths: PicoPaths, config: Config.PicoConfig) =>
   Layer.unwrap(
     Effect.gen(function* () {
       const gitWorktree = yield* GitWorktree.make(paths.worktreesDir);
-      const schedules = yield* ScheduleLayer.open(paths.schedulesDir);
+      const scheduleHostReady = yield* Deferred.make<ScheduleRunHost>();
+      const schedules = yield* ScheduleLayer.open(paths.schedulesDir, (input) =>
+        Effect.gen(function* () {
+          const ready = yield* Deferred.poll(scheduleHostReady);
+          if (Option.isNone(ready)) {
+            return yield* new ScheduleHostError({
+              message: "Schedule destinations are not ready",
+            });
+          }
+          return yield* (yield* ready.value).resolveTarget(input);
+        }),
+      );
       const instructions = yield* Instructions.make(paths.root);
       const discord = Option.isSome(config.discord)
         ? { config: config.discord.value, authenticated: yield* Deferred.make<string>() }
@@ -206,38 +221,11 @@ const daemonLayer = (paths: PicoPaths, config: Config.PicoConfig) =>
             }).pipe(Layer.provideMerge(core));
       const scheduler = Layer.effectDiscard(
         Effect.gen(function* () {
-          const host = yield* ScheduleRunHostService;
-          const router = yield* EventRouter;
-          const replies = yield* Effect.serviceOption(ReplyDelivery);
-          const sendReply = (
-            chatId: Parameters<typeof host.deliver>[0],
-            target: ReplyTarget | undefined,
-            content: string,
-          ) =>
-            target === undefined
-              ? router.drain()
-              : Option.isNone(replies)
-                ? Effect.fail(
-                    new ScheduleHostError({
-                      message: "The scheduled reply destination is unavailable",
-                    }),
-                  )
-                : replies.value
-                    .send(chatId, target, content)
-                    .pipe(
-                      Effect.mapError((error) => new ScheduleHostError({ message: error.message })),
-                    );
-          yield* schedules.start({
-            ...host,
-            deliver: (chatId, content, target) =>
-              host
-                .deliver(chatId, content)
-                .pipe(Effect.andThen(sendReply(chatId, target, content))),
-            publish: (chatId, content, target) =>
-              host
-                .publish(chatId, content)
-                .pipe(Effect.andThen(sendReply(chatId, target, content))),
-          });
+          const makeHost = yield* ScheduleRunHostFactory;
+          const platform = yield* Effect.serviceOption(SchedulePlatformService);
+          const host = makeHost(Option.getOrNull(platform));
+          yield* Deferred.succeed(scheduleHostReady, host);
+          yield* schedules.start(host);
         }),
       ).pipe(Layer.provide(surfaces));
 

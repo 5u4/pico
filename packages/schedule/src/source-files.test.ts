@@ -22,6 +22,7 @@ import {
   permissionDenied,
   platformLayer,
   prepareSource,
+  resolveTarget,
   textPrompt,
   workspaceId,
 } from "./schedule-test-fixtures.ts";
@@ -43,14 +44,14 @@ describe("source files", () => {
               ? Effect.die("Assets must not be buffered by the scheduler")
               : fileSystem.readFile(file),
         });
-        const schedules = yield* open(schedulesDir).pipe(
+        const schedules = yield* open(schedulesDir, resolveTarget).pipe(
           Effect.provideService(FileSystem.FileSystem, guardedFileSystem),
         );
         const asset = new Uint8Array([0, 255, 128, 10]);
         const created = yield* schedules.create(caller, {
           name: "native copying",
           enabled: true,
-          target: { kind: "current-chat" },
+          target: { kind: "chat", chatId: caller.chatId },
           trigger: { kind: "once", at: 1_000 },
           sourceDirectory: yield* prepareSource({
             "script.js": [
@@ -69,6 +70,8 @@ describe("source files", () => {
         const requests = yield* Queue.unbounded<Agent.AgentPrompt>();
         yield* TestClock.setTime(1_000);
         yield* schedules.start({
+          resolveTarget,
+          materialize: () => Effect.void,
           prepare: () => Effect.succeed({ chatId, workspaceId, cwd: AbsolutePath.make(root) }),
           deliver: () => Effect.void,
           publish: () => Effect.die("Expected an agent request"),
@@ -111,11 +114,11 @@ describe("source files", () => {
       yield* fileSystem.writeFileString(path.join(sourceDirectory, "prompt.md"), "aliased source");
       yield* fileSystem.symlink(parent, alias);
       const schedulesDir = AbsolutePath.make(path.join(alias, "source", "schedules"));
-      const schedules = yield* open(schedulesDir);
+      const schedules = yield* open(schedulesDir, resolveTarget);
       const created = yield* schedules.create(caller, {
         name: "source contains aliased storage",
         enabled: false,
-        target: { kind: "current-chat" },
+        target: { kind: "chat", chatId: caller.chatId },
         trigger: { kind: "once", at: 1_000 },
         sourceDirectory,
       });
@@ -196,14 +199,14 @@ describe("source files", () => {
             copyFile: (from, to) => fileSystem.copyFile(resolveFile(from), resolveFile(to)),
             chmod: (file, mode) => fileSystem.chmod(resolveFile(file), mode),
           });
-          const schedules = yield* open(schedulesDir).pipe(
+          const schedules = yield* open(schedulesDir, resolveTarget).pipe(
             Effect.provideService(FileSystem.FileSystem, collisionFileSystem),
           );
           const error = yield* schedules
             .create(caller, {
               name: `${first} collides with ${second}`,
               enabled: false,
-              target: { kind: "current-chat" },
+              target: { kind: "chat", chatId: caller.chatId },
               trigger: { kind: "once", at: 1_000 },
               sourceDirectory,
             })
@@ -245,14 +248,14 @@ describe("source files", () => {
             ? Effect.fail(permissionDenied("remove", file))
             : fileSystem.remove(file, options),
       });
-      const schedules = yield* open(schedulesDir).pipe(
+      const schedules = yield* open(schedulesDir, resolveTarget).pipe(
         Effect.provideService(FileSystem.FileSystem, stagedFileSystem),
       );
       const sourceDirectory = yield* prepareSource({ "prompt.md": "valid original prompt" });
       const input: Schedule.CreateSchedule = {
         name: "staged validation",
         enabled: true,
-        target: { kind: "current-chat" },
+        target: { kind: "chat", chatId: caller.chatId },
         trigger: { kind: "once", at: 1_000 },
         sourceDirectory,
       };
@@ -279,6 +282,8 @@ describe("source files", () => {
       const requests = yield* Queue.unbounded<Agent.AgentPrompt>();
       yield* TestClock.setTime(1_000);
       yield* schedules.start({
+        resolveTarget,
+        materialize: () => Effect.void,
         prepare: () => Effect.succeed({ chatId, workspaceId, cwd: AbsolutePath.make(root) }),
         deliver: () => Effect.void,
         publish: () => Effect.die("Expected an agent request"),
@@ -320,14 +325,14 @@ describe("source files", () => {
             ? Effect.fail(permissionDenied("stat", file))
             : fileSystem.stat(file),
       });
-      const schedules = yield* open(schedulesDir).pipe(
+      const schedules = yield* open(schedulesDir, resolveTarget).pipe(
         Effect.provideService(FileSystem.FileSystem, failingFileSystem),
       );
       const error = yield* schedules
         .create(caller, {
           name: "staging inspection",
           enabled: false,
-          target: { kind: "current-chat" },
+          target: { kind: "chat", chatId: caller.chatId },
           trigger: { kind: "once", at: 1_000 },
           sourceDirectory: yield* prepareSource({ "prompt.md": "valid" }),
         })
@@ -353,11 +358,11 @@ describe("source files", () => {
         const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-source-ancestor-" });
         const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
         yield* fileSystem.writeFileString(path.join(root, "prompt.md"), "ancestor source");
-        const schedules = yield* open(schedulesDir);
+        const schedules = yield* open(schedulesDir, resolveTarget);
         const created = yield* schedules.create(caller, {
           name: "ancestor source",
           enabled: false,
-          target: { kind: "current-chat" },
+          target: { kind: "chat", chatId: caller.chatId },
           trigger: { kind: "once", at: 1_000 },
           sourceDirectory: AbsolutePath.make(root),
         });
@@ -398,7 +403,7 @@ describe("source files", () => {
           return fileSystem.copyFile(from, to);
         },
       });
-      const schedules = yield* open(schedulesDir).pipe(
+      const schedules = yield* open(schedulesDir, resolveTarget).pipe(
         Effect.provideService(FileSystem.FileSystem, observedFileSystem),
       );
       const sourceDirectory = yield* prepareSource({
@@ -411,7 +416,7 @@ describe("source files", () => {
         const view = yield* schedules.create(caller, {
           name: enabled ? "not due" : "disabled",
           enabled,
-          target: { kind: "current-chat" },
+          target: { kind: "chat", chatId: caller.chatId },
           trigger: { kind: "once", at: enabled ? 1_000_000 : 0 },
           sourceDirectory,
         });
@@ -425,6 +430,8 @@ describe("source files", () => {
       assert.sameDeepMembers([...(yield* schedules.list(caller))], created);
       yield* TestClock.setTime(1_000);
       yield* schedules.start({
+        resolveTarget,
+        materialize: () => Effect.void,
         prepare: () => Effect.die("Disabled and non-due schedules must not execute"),
         deliver: () => Effect.die("Unexpected delivery"),
         publish: () => Effect.die("Unexpected publication"),
@@ -471,13 +478,13 @@ describe("source files", () => {
             ? Effect.fail(permissionDenied("realPath", file))
             : fileSystem.realPath(file),
       });
-      const schedules = yield* open(schedulesDir).pipe(
+      const schedules = yield* open(schedulesDir, resolveTarget).pipe(
         Effect.provideService(FileSystem.FileSystem, failingFileSystem),
       );
       const input: Schedule.CreateSchedule = {
         name: "source resolution",
         enabled: false,
-        target: { kind: "current-chat" },
+        target: { kind: "chat", chatId: caller.chatId },
         trigger: { kind: "once", at: 1_000 },
         sourceDirectory,
       };
@@ -506,7 +513,7 @@ describe("source files", () => {
         const path = yield* Path.Path;
         const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-source-unsafe-" });
         const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
-        const schedules = yield* open(schedulesDir);
+        const schedules = yield* open(schedulesDir, resolveTarget);
         const outside = path.join(root, "outside.txt");
         yield* fileSystem.writeFileString(outside, "unchanged");
         const outsideDirectory = yield* prepareSource({
@@ -544,7 +551,7 @@ describe("source files", () => {
             .create(caller, {
               name: "unsafe source",
               enabled: false,
-              target: { kind: "current-chat" },
+              target: { kind: "chat", chatId: caller.chatId },
               trigger: { kind: "once", at: 1_000 },
               sourceDirectory,
             })
@@ -567,12 +574,15 @@ describe("source files", () => {
         const fileSystem = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-source-utf8-" });
-        const schedules = yield* open(AbsolutePath.make(path.join(root, "schedules")));
+        const schedules = yield* open(
+          AbsolutePath.make(path.join(root, "schedules")),
+          resolveTarget,
+        );
         const error = yield* schedules
           .create(caller, {
             name: "malformed entrypoint",
             enabled: false,
-            target: { kind: "current-chat" },
+            target: { kind: "chat", chatId: caller.chatId },
             trigger: { kind: "once", at: 1_000 },
             sourceDirectory: yield* prepareSource({
               "script.js": "process.stdout.write(JSON.stringify({agent:false}));",
@@ -594,11 +604,14 @@ describe("source files", () => {
         const fileSystem = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-owned-utf8-" });
-        const schedules = yield* open(AbsolutePath.make(path.join(root, "schedules")));
+        const schedules = yield* open(
+          AbsolutePath.make(path.join(root, "schedules")),
+          resolveTarget,
+        );
         const created = yield* schedules.create(caller, {
           name: "repairable entrypoint",
           enabled: false,
-          target: { kind: "current-chat" },
+          target: { kind: "chat", chatId: caller.chatId },
           trigger: { kind: "once", at: 1_000 },
           sourceDirectory: yield* prepareSource({
             "script.js": "process.stdout.write(JSON.stringify({agent:false}));",
@@ -634,12 +647,15 @@ describe("source files", () => {
         const fileSystem = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-source-reserved-" });
-        const schedules = yield* open(AbsolutePath.make(path.join(root, "schedules")));
+        const schedules = yield* open(
+          AbsolutePath.make(path.join(root, "schedules")),
+          resolveTarget,
+        );
         const error = yield* schedules
           .create(caller, {
             name: "reserved source",
             enabled: false,
-            target: { kind: "current-chat" },
+            target: { kind: "chat", chatId: caller.chatId },
             trigger: { kind: "once", at: 1_000 },
             sourceDirectory: yield* prepareSource({ "prompt.md": "valid", [name]: "{}" }),
           })
@@ -655,11 +671,11 @@ describe("source files", () => {
       const path = yield* Path.Path;
       const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-managed-case-" });
       const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
-      const schedules = yield* open(schedulesDir);
+      const schedules = yield* open(schedulesDir, resolveTarget);
       const created = yield* schedules.create(caller, {
         name: "managed metadata",
         enabled: false,
-        target: { kind: "current-chat" },
+        target: { kind: "chat", chatId: caller.chatId },
         trigger: { kind: "once", at: 1_000 },
         sourceDirectory: yield* prepareSource({ "prompt.md": "valid" }),
       });
@@ -706,11 +722,14 @@ describe("source files", () => {
         const root = yield* fileSystem.makeTempDirectoryScoped({
           prefix: "pico-owned-source-unsafe-",
         });
-        const schedules = yield* open(AbsolutePath.make(path.join(root, "schedules")));
+        const schedules = yield* open(
+          AbsolutePath.make(path.join(root, "schedules")),
+          resolveTarget,
+        );
         const created = yield* schedules.create(caller, {
           name: "owned source",
           enabled: false,
-          target: { kind: "current-chat" },
+          target: { kind: "chat", chatId: caller.chatId },
           trigger: { kind: "once", at: 1_000 },
           sourceDirectory: yield* prepareSource({ "prompt.md": "valid" }, ["lib"]),
         });
@@ -783,7 +802,7 @@ describe("source files", () => {
               return fileSystem.remove(file, options);
             }),
         });
-        const schedules = yield* open(schedulesDir).pipe(
+        const schedules = yield* open(schedulesDir, resolveTarget).pipe(
           Effect.provideService(FileSystem.FileSystem, gatedFileSystem),
         );
         const sourceDirectory = yield* prepareSource({
@@ -794,7 +813,7 @@ describe("source files", () => {
         const input: Schedule.CreateSchedule = {
           name: "interrupted capture",
           enabled: true,
-          target: { kind: "current-chat" },
+          target: { kind: "chat", chatId: caller.chatId },
           trigger: { kind: "once", at: 1_000 },
           sourceDirectory,
         };
@@ -802,6 +821,8 @@ describe("source files", () => {
         let prepared = 0;
         let prompts = 0;
         const host: Schedule.ScheduleRunHost = {
+          resolveTarget,
+          materialize: () => Effect.void,
           prepare: () =>
             Effect.sync(() => {
               prepared++;

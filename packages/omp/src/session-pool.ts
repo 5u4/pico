@@ -13,7 +13,6 @@ import type {
 } from "@pico/contract/agent-runtime";
 import type * as Chat from "@pico/contract/chat-model";
 import { AgentError } from "@pico/contract/errors";
-import type { ReplyTarget } from "@pico/contract/reply-target";
 import type { ScheduleRunId } from "@pico/contract/schedule";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
@@ -66,7 +65,6 @@ export interface SessionFactory {
   readonly open: (
     chatId: Chat.ChatId,
     emit: (event: AgentEvent.AgentEvent) => void,
-    getReplyTarget: () => ReplyTarget | undefined,
   ) => Effect.Effect<OpenedSession, AgentError>;
 }
 
@@ -94,10 +92,13 @@ export interface SessionPool {
     runId: ScheduleRunId,
     prompt: AgentMessage.AgentPrompt,
     onEvent: (event: AgentEvent.AgentEvent) => Effect.Effect<void, AgentError>,
-    replyTarget?: ReplyTarget,
   ) => Effect.Effect<CapturedAgentRun, AgentError>;
-  readonly deliver: (chatId: Chat.ChatId, content: string) => Effect.Effect<void>;
-  readonly publish: (chatId: Chat.ChatId, content: string) => Effect.Effect<void, AgentError>;
+  readonly deliver: (chatId: Chat.ChatId, content: string, localOnly?: true) => Effect.Effect<void>;
+  readonly publish: (
+    chatId: Chat.ChatId,
+    content: string,
+    localOnly?: true,
+  ) => Effect.Effect<void, AgentError>;
 }
 
 interface OpenLifecycle {
@@ -119,7 +120,6 @@ type CaptureHandler = (event: AgentEvent.AgentEvent) => Effect.Effect<void>;
 interface ActiveCapture {
   readonly kind: "captured";
   readonly runId: ScheduleRunId;
-  readonly replyTarget: ReplyTarget | undefined;
   readonly onEvent: CaptureHandler;
   readonly released: Deferred.Deferred<void>;
 }
@@ -390,39 +390,35 @@ const acquireEntry = Effect.fn("SessionPool.acquireEntry")(function* (
   const capture = MutableRef.make<ActiveCapture | null>(null);
   const run = MutableRef.make<ActiveRun | null>(null);
   const events = yield* Queue.unbounded<SessionItem, Cause.Done>();
-  const opened = yield* factory.open(
-    chatId,
-    (event) => {
-      let owner = MutableRef.get(run) ?? MutableRef.get(capture);
-      if (event.type === "run-started") {
-        if (owner === null) {
-          owner = {
-            kind: "ordinary",
-            finished: Deferred.makeUnsafe<void>(),
-            state: { kind: "streaming" },
-          };
-          MutableRef.set(run, owner);
-        } else if (owner.kind === "ordinary") {
-          owner.state =
-            owner.state.kind === "submitting"
-              ? { kind: "submitting", terminal: null }
-              : { kind: "streaming" };
-        }
+  const opened = yield* factory.open(chatId, (event) => {
+    let owner = MutableRef.get(run) ?? MutableRef.get(capture);
+    if (event.type === "run-started") {
+      if (owner === null) {
+        owner = {
+          kind: "ordinary",
+          finished: Deferred.makeUnsafe<void>(),
+          state: { kind: "streaming" },
+        };
+        MutableRef.set(run, owner);
+      } else if (owner.kind === "ordinary") {
+        owner.state =
+          owner.state.kind === "submitting"
+            ? { kind: "submitting", terminal: null }
+            : { kind: "streaming" };
       }
-      if (event.type === "run-finished" && owner !== null) {
-        if (owner.kind === "captured") {
-          MutableRef.set(run, null);
-        } else {
-          owner.state =
-            owner.state.kind === "submitting"
-              ? { kind: "submitting", terminal: event }
-              : { kind: "settled", terminal: event };
-        }
+    }
+    if (event.type === "run-finished" && owner !== null) {
+      if (owner.kind === "captured") {
+        MutableRef.set(run, null);
+      } else {
+        owner.state =
+          owner.state.kind === "submitting"
+            ? { kind: "submitting", terminal: event }
+            : { kind: "settled", terminal: event };
       }
-      Queue.offerUnsafe(events, { kind: "event", event, owner });
-    },
-    () => MutableRef.get(capture)?.replyTarget,
-  );
+    }
+    Queue.offerUnsafe(events, { kind: "event", event, owner });
+  });
   const forwarder = yield* Stream.fromQueue(events).pipe(
     Stream.runForEach((item) =>
       Effect.gen(function* () {
@@ -724,7 +720,6 @@ export const makeSessionPool = Effect.fn("SessionPool.make")(function* (
     runId: ScheduleRunId,
     prompt: AgentMessage.AgentPrompt,
     onEvent: (event: AgentEvent.AgentEvent) => Effect.Effect<void, AgentError>,
-    replyTarget?: ReplyTarget,
   ) {
     return yield* Effect.scoped(
       Effect.gen(function* () {
@@ -738,7 +733,6 @@ export const makeSessionPool = Effect.fn("SessionPool.make")(function* (
         const capture: ActiveCapture = {
           kind: "captured",
           runId,
-          replyTarget,
           released,
           onEvent: (event) =>
             Effect.gen(function* () {
@@ -912,6 +906,7 @@ export const makeSessionPool = Effect.fn("SessionPool.make")(function* (
     chatId: Chat.ChatId,
     content: string,
     timestamp: number,
+    localOnly?: true,
   ) {
     const events: ReadonlyArray<AgentEvent.AgentEvent> = [
       { type: "run-started" },
@@ -929,23 +924,26 @@ export const makeSessionPool = Effect.fn("SessionPool.make")(function* (
       { type: "run-finished", outcome: "completed" },
     ];
     for (const event of events) {
-      yield* Queue.offer(output, { kind: "event", envelope: { chatId, event } }).pipe(
-        Effect.asVoid,
-      );
+      yield* Queue.offer(output, {
+        kind: "event",
+        envelope: { chatId, event, ...(localOnly === undefined ? {} : { localOnly }) },
+      }).pipe(Effect.asVoid);
     }
   });
 
   const deliver = Effect.fn("AgentRuntime.deliver")(function* (
     chatId: Chat.ChatId,
     content: string,
+    localOnly?: true,
   ) {
     const timestamp = yield* Clock.currentTimeMillis;
-    yield* deliverEvents(chatId, content, timestamp);
+    yield* deliverEvents(chatId, content, timestamp, localOnly);
   });
 
   const publish = Effect.fn("AgentRuntime.publish")(function* (
     chatId: Chat.ChatId,
     content: string,
+    localOnly?: true,
   ) {
     const timestamp = yield* Clock.currentTimeMillis;
     const message: OmpAssistantMessage = {
@@ -972,7 +970,7 @@ export const makeSessionPool = Effect.fn("SessionPool.make")(function* (
           entry,
           "Failed to persist scheduled publication",
           () => entry.appendAssistantMessage(message),
-          () => deliverEvents(chatId, content, timestamp),
+          () => deliverEvents(chatId, content, timestamp, localOnly),
         );
       }),
     );

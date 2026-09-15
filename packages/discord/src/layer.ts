@@ -2,7 +2,7 @@ import type { DiscordConfig } from "@pico/config/config";
 import type { AgentEventEnvelope } from "@pico/contract/agent-event";
 import type * as Chat from "@pico/contract/chat-model";
 import { EventRouter } from "@pico/contract/event-router";
-import { ReplyDelivery } from "@pico/contract/reply-target";
+import { SchedulePlatformService } from "@pico/contract/schedule";
 import { type CreateApplicationCommand, createBot, GatewayIntents, MessageFlags } from "discordeno";
 import * as Effect from "effect/Effect";
 import * as FiberSet from "effect/FiberSet";
@@ -112,7 +112,7 @@ export const pumpOutput = Effect.fn("Discord.pumpOutput")(function* (
   resolveThreadId: (chatId: Chat.ChatId) => Effect.Effect<Option.Option<bigint>, unknown>,
   dispatch: (threadId: bigint, envelope: AgentEventEnvelope) => Effect.Effect<unknown, unknown>,
 ) {
-  const route = yield* eventRouter.open(() => true);
+  const route = yield* eventRouter.open((envelope) => envelope.localOnly !== true);
   yield* route.events.pipe(
     Stream.runForEach((envelope) =>
       Effect.scoped(
@@ -243,6 +243,8 @@ const start = Effect.fn("Discord.start")(function* (
             name: true,
             parentId: true,
             type: true,
+            archived: true,
+            locked: true,
           },
           message: {
             author: true,
@@ -302,7 +304,7 @@ const start = Effect.fn("Discord.start")(function* (
     triggerTyping: (threadId) =>
       promiseBoundary("trigger-typing", () => bot.helpers.triggerTypingIndicator(threadId)),
   };
-  const resolveThreadId = yield* DiscordInput.install<InputMessage, InputInteraction>(
+  const { resolveThreadId, schedule } = yield* DiscordInput.install<InputMessage, InputInteraction>(
     bot,
     config,
     () => eventRouter.drain(),
@@ -313,12 +315,15 @@ const start = Effect.fn("Discord.start")(function* (
   yield* pumpOutput(eventRouter, resolveThreadId, dispatch);
 
   yield* openBot(bot, config, joinedGuildIds);
-  return DiscordOutput.makeReplyDelivery(outputClient);
+  return SchedulePlatformService.of({
+    ...schedule,
+    send: DiscordOutput.makeScheduledSender(outputClient),
+  });
 });
 
 // Daemon starts Discord and receives the authenticated bot identity on READY.
 export const layer = (config: DiscordConfig, options: DiscordOptions) =>
-  Layer.effect(ReplyDelivery, start(config, options)).pipe(
+  Layer.effect(SchedulePlatformService, start(config, options)).pipe(
     Layer.provide(
       FetchHttpClient.layer.pipe(
         Layer.provide(Layer.succeed(FetchHttpClient.RequestInit, { redirect: "error" })),

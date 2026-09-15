@@ -85,6 +85,12 @@ const installThreadInput = Effect.fn("test.installThreadInput")(function* (optio
         (async () => {
           throw new Error("btw must not archive its thread");
         }),
+      startThreadWithoutMessage: async () => {
+        throw new Error("unexpected schedule");
+      },
+      deleteChannel: async () => {
+        throw new Error("unexpected schedule cleanup");
+      },
       startThreadWithMessage: async () => {
         throw new Error("btw must not create a thread");
       },
@@ -848,6 +854,12 @@ describe("discord interactions", () => {
             },
             sendMessage: async () => undefined,
             editChannel: async () => undefined,
+            startThreadWithoutMessage: async () => {
+              throw new Error("unexpected schedule");
+            },
+            deleteChannel: async () => {
+              throw new Error("unexpected schedule cleanup");
+            },
             startThreadWithMessage: async () => ({ id: 50n }),
           },
         } satisfies DiscordInputBot;
@@ -1051,6 +1063,12 @@ describe("discord interactions", () => {
               throw new Error("shake must not use Discord sendMessage");
             },
             editChannel: async () => undefined,
+            startThreadWithoutMessage: async () => {
+              throw new Error("unexpected schedule");
+            },
+            deleteChannel: async () => {
+              throw new Error("unexpected schedule cleanup");
+            },
             startThreadWithMessage: async () => {
               throw new Error("shake must not create a thread");
             },
@@ -1235,6 +1253,12 @@ describe("discord interactions", () => {
               throw new Error("context must not use Discord sendMessage");
             },
             editChannel: async () => undefined,
+            startThreadWithoutMessage: async () => {
+              throw new Error("unexpected schedule");
+            },
+            deleteChannel: async () => {
+              throw new Error("unexpected schedule cleanup");
+            },
             startThreadWithMessage: async () => {
               throw new Error("context must not create a thread");
             },
@@ -1383,6 +1407,12 @@ describe("discord interactions", () => {
             editChannel: async () => {
               throw new Error("abort must not archive the thread");
             },
+            startThreadWithoutMessage: async () => {
+              throw new Error("unexpected schedule");
+            },
+            deleteChannel: async () => {
+              throw new Error("unexpected schedule cleanup");
+            },
             startThreadWithMessage: async () => {
               throw new Error("abort must not create a thread");
             },
@@ -1525,6 +1555,12 @@ describe("discord interactions", () => {
             editChannel: async (_channelId, options) => {
               assert.deepStrictEqual(options, { archived: true, locked: true });
               order.push("archive-thread");
+            },
+            startThreadWithoutMessage: async () => {
+              throw new Error("unexpected schedule");
+            },
+            deleteChannel: async () => {
+              throw new Error("unexpected schedule cleanup");
             },
             startThreadWithMessage: async () => {
               throw new Error("close must not create a thread");

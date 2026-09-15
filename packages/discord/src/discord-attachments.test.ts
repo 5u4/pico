@@ -84,6 +84,12 @@ describe("discord attachments", () => {
             }),
             sendMessage: async () => undefined,
             editChannel: async () => undefined,
+            startThreadWithoutMessage: async () => {
+              throw new Error("unexpected schedule");
+            },
+            deleteChannel: async () => {
+              throw new Error("unexpected schedule cleanup");
+            },
             startThreadWithMessage: async (_channelId, _messageId, options) => {
               threadNames.push(options.name);
               return { id: 20n };
@@ -271,6 +277,12 @@ describe("discord attachments", () => {
               resolveReply?.(options.content);
             },
             editChannel: async () => undefined,
+            startThreadWithoutMessage: async () => {
+              throw new Error("unexpected schedule");
+            },
+            deleteChannel: async () => {
+              throw new Error("unexpected schedule cleanup");
+            },
             startThreadWithMessage: async () => {
               throw new Error("rejected input must not create a thread");
             },

@@ -2,8 +2,7 @@ import { assert, describe, it } from "@effect/vitest";
 import type { AgentEvent, AgentEventEnvelope } from "@pico/contract/agent-event";
 import type { AgentAssistantMessage } from "@pico/contract/agent-message";
 import * as Chat from "@pico/contract/chat-model";
-import { AgentError } from "@pico/contract/errors";
-import type { ReplyTarget } from "@pico/contract/reply-target";
+import { ScheduleHostError } from "@pico/contract/schedule";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -14,7 +13,7 @@ import { promiseBoundary, reportFailure } from "./discord-error.ts";
 import {
   type DiscordOutputPolicy,
   make,
-  makeReplyDelivery,
+  makeScheduledSender,
   type RenderedMessage,
   renderAssistant,
 } from "./discord-output.ts";
@@ -60,147 +59,67 @@ const failed = (
 });
 
 describe("Discord output", () => {
-  it.effect("keeps stored reply routes independent of other deliveries and thread output", () =>
-    Effect.scoped(
-      Effect.gen(function* () {
-        const sent: Array<{ readonly channelId: bigint; readonly message: RenderedMessage }> = [];
-        const client = {
-          send: (channelId: bigint, message: RenderedMessage) =>
-            Effect.sync(() => {
-              sent.push({ channelId, message });
-              return BigInt(sent.length);
-            }),
-          edit: () => Effect.die("unexpected reply edit"),
-          renameThread: () => Effect.die("unexpected title"),
-          triggerTyping: () => Effect.void,
-        };
-        const delivery = makeReplyDelivery(client);
-        const dispatch = make(client, yield* Scope.Scope, hiddenPolicy);
-        const routeA: ReplyTarget = {
-          platform: "discord",
-          conversationId: "101",
-          messageId: "1001",
-        };
-        const routeB: ReplyTarget = {
-          platform: "discord",
-          conversationId: "202",
-          messageId: "2002",
-        };
-        yield* delivery.send(chatA, routeA, "scheduled A");
-        yield* delivery.send(chatA, routeB, "scheduled B");
-        yield* dispatch(
-          303n,
-          envelope(chatA, {
-            type: "message-settled",
-            message: completed("stop", [{ type: "text", text: "thread reply" }]),
+  it.effect("stops scheduled delivery after a rejected chunk and returns the transport error", () =>
+    Effect.gen(function* () {
+      const attempted: Array<{ readonly channelId: bigint; readonly message: RenderedMessage }> =
+        [];
+      const send = makeScheduledSender({
+        send: (channelId, message) =>
+          promiseBoundary("send-message", async () => {
+            attempted.push({ channelId, message });
+            if (attempted.length === 2) {
+              throw new Error("private-sdk-wrapper", {
+                cause: { status: 503, body: '{"code":50013,"message":"private-response"}' },
+              });
+            }
+            return BigInt(attempted.length);
           }),
-        );
-        yield* delivery.send(chatA, routeA, "x".repeat(4_500));
-        assert.deepStrictEqual(sent, [
-          { channelId: 101n, message: { content: "scheduled A", silent: false, replyTo: 1001n } },
-          { channelId: 202n, message: { content: "scheduled B", silent: false, replyTo: 2002n } },
-          { channelId: 303n, message: { content: "thread reply", silent: false } },
-          {
-            channelId: 101n,
-            message: { content: "x".repeat(2_000), silent: false, replyTo: 1001n },
-          },
-          {
-            channelId: 101n,
-            message: { content: "x".repeat(2_000), silent: false, replyTo: 1001n },
-          },
-          { channelId: 101n, message: { content: "x".repeat(500), silent: false, replyTo: 1001n } },
-        ]);
-      }),
-    ),
+      });
+      const failure = yield* send({
+        chatId: chatA,
+        externalId: "101",
+        content: "x".repeat(4_500),
+      }).pipe(Effect.flip);
+      assert.instanceOf(failure, ScheduleHostError);
+      assert.include(failure.message, "503");
+      assert.include(failure.message, "50013");
+      assert.notInclude(JSON.stringify(failure), "private-");
+      assert.deepStrictEqual(attempted, [
+        { channelId: 101n, message: { content: "x".repeat(2_000), silent: false } },
+        { channelId: 101n, message: { content: "x".repeat(2_000), silent: false } },
+      ]);
+    }),
   );
 
-  it.effect(
-    "propagates scheduled reply failures without leaking SDK payloads or sending later chunks",
-    () =>
-      Effect.gen(function* () {
-        const attempted: Array<{ readonly channelId: bigint; readonly message: RenderedMessage }> =
-          [];
-        const delivery = makeReplyDelivery({
-          send: (channelId, message) =>
-            promiseBoundary("send-message", async () => {
-              attempted.push({ channelId, message });
-              if (attempted.length === 2) {
-                throw new Error("private-sdk-wrapper", {
-                  cause: { status: 503, body: '{"code":50013,"message":"private-response"}' },
-                });
-              }
-              return BigInt(attempted.length);
-            }),
-        });
-        const failure = yield* delivery
-          .send(
-            chatA,
-            { platform: "discord", conversationId: "101", messageId: "1001" },
-            "x".repeat(4_500),
-          )
-          .pipe(Effect.flip);
-
-        assert.instanceOf(failure, AgentError);
-        assert.include(failure.message, "503");
-        assert.include(failure.message, "50013");
-        assert.notInclude(JSON.stringify(failure), "private-");
-        assert.deepStrictEqual(attempted, [
-          {
-            channelId: 101n,
-            message: { content: "x".repeat(2_000), silent: false, replyTo: 1001n },
-          },
-          {
-            channelId: 101n,
-            message: { content: "x".repeat(2_000), silent: false, replyTo: 1001n },
-          },
-        ]);
-      }),
-  );
-
-  it.effect(
-    "rejects malformed scheduled destinations before transport and preserves full snowflake precision",
-    () =>
-      Effect.gen(function* () {
-        const sent: Array<{ readonly channelId: bigint; readonly message: RenderedMessage }> = [];
-        const delivery = makeReplyDelivery({
-          send: (channelId, message) =>
-            Effect.sync(() => {
-              sent.push({ channelId, message });
-              return 1n;
-            }),
-        });
-        const invalidTargets: ReplyTarget[] = [
-          { platform: "discord", conversationId: " ", messageId: "1" },
-          { platform: "discord", conversationId: "-1", messageId: "1" },
-          { platform: "discord", conversationId: "18446744073709551616", messageId: "1" },
-          { platform: "discord", conversationId: "1", messageId: "0" },
-          { platform: "discord", conversationId: "1", messageId: "1.5" },
-        ];
-        for (const target of invalidTargets) {
-          const failure = yield* delivery.send(chatA, target, "must not be sent").pipe(Effect.flip);
-          assert.instanceOf(failure, AgentError);
-        }
-        assert.deepStrictEqual(sent, []);
-        yield* delivery.send(
-          chatA,
-          {
-            platform: "discord",
-            conversationId: "18446744073709551615",
-            messageId: "1234567890123456789",
-          },
-          "exact destination",
+  it.effect("rejects invalid scheduled thread IDs and retains snowflake precision", () =>
+    Effect.gen(function* () {
+      const sent: Array<{ readonly channelId: bigint; readonly message: RenderedMessage }> = [];
+      const send = makeScheduledSender({
+        send: (channelId, message) =>
+          Effect.sync(() => {
+            sent.push({ channelId, message });
+            return 1n;
+          }),
+      });
+      for (const externalId of [" ", "-1", "18446744073709551616"]) {
+        const failure = yield* send({ chatId: chatA, externalId, content: "not sent" }).pipe(
+          Effect.flip,
         );
-        assert.deepStrictEqual(sent, [
-          {
-            channelId: 18_446_744_073_709_551_615n,
-            message: {
-              content: "exact destination",
-              silent: false,
-              replyTo: 1_234_567_890_123_456_789n,
-            },
-          },
-        ]);
-      }),
+        assert.instanceOf(failure, ScheduleHostError);
+      }
+      assert.deepStrictEqual(sent, []);
+      yield* send({
+        chatId: chatA,
+        externalId: "18446744073709551615",
+        content: "exact destination",
+      });
+      assert.deepStrictEqual(sent, [
+        {
+          channelId: 18_446_744_073_709_551_615n,
+          message: { content: "exact destination", silent: false },
+        },
+      ]);
+    }),
   );
 
   it("renders committed content in order with safe notification policy", () => {

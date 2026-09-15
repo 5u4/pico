@@ -1,9 +1,11 @@
 import * as BunCrypto from "@effect/platform-bun/BunCrypto";
 import { assert, describe, it } from "@effect/vitest";
-import type { MessageDelivery } from "@pico/contract/agent-runtime";
+import type { AgentEventEnvelope } from "@pico/contract/agent-event";
+import { AgentRuntime, type MessageDelivery } from "@pico/contract/agent-runtime";
 import { Application } from "@pico/contract/application";
 import * as Chat from "@pico/contract/chat-model";
 import { ApplicationError, ChatClosed } from "@pico/contract/errors";
+import { EventRouter } from "@pico/contract/event-router";
 import { AbsolutePath } from "@pico/contract/path";
 import * as Workspace from "@pico/contract/workspace-model";
 import { ChannelTypes } from "discordeno";
@@ -11,12 +13,16 @@ import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Logger from "effect/Logger";
 import * as Option from "effect/Option";
+import * as Queue from "effect/Queue";
 import * as Redacted from "effect/Redacted";
 import * as Scope from "effect/Scope";
+import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
+import * as EventRouterLayer from "../../event-router/src/layer.ts";
 import { type DiscordInputBot, install } from "./discord-input.ts";
 import * as DiscordOutput from "./discord-output.ts";
 import type { DiscordMessage } from "./discord-prompt.ts";
+import { pumpOutput } from "./layer.ts";
 
 const workspaceId = Workspace.WorkspaceId.make("018f47a0-0000-7000-8000-000000000001");
 const chatId = Chat.ChatId.make("018f47a0-0000-7000-8000-000000000002");
@@ -55,6 +61,12 @@ const installInput = Effect.fn("test.installDeliveryInput")(function* (options: 
           : { id: 20n, guildId: 1n, type: ChannelTypes.PublicThread, parentId: 10n },
       sendMessage: options.reply ?? (async () => undefined),
       editChannel: async () => undefined,
+      startThreadWithoutMessage: async () => {
+        throw new Error("unexpected schedule");
+      },
+      deleteChannel: async () => {
+        throw new Error("unexpected schedule cleanup");
+      },
       startThreadWithMessage: async () => ({ id: 20n }),
     },
   };
@@ -100,6 +112,109 @@ const installInput = Effect.fn("test.installDeliveryInput")(function* (options: 
 });
 
 describe("Discord message delivery", () => {
+  it.effect(
+    "sends scheduled text once while retaining local transcript and routed title events",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const events = yield* Queue.unbounded<AgentEventEnvelope>();
+          const observed = yield* Deferred.make<void>();
+          const titleDelivered = yield* Deferred.make<void>();
+          const localEvents: AgentEventEnvelope[] = [];
+          const sent: string[] = [];
+          const titles: string[] = [];
+          const unused = () => Effect.die("Unexpected agent operation");
+          const runtime = AgentRuntime.of({
+            events: Stream.fromQueue(events),
+            drain: () => Effect.void,
+            transcript: unused,
+            send: unused,
+            askBtw: unused,
+            sendCaptured: unused,
+            deliver: unused,
+            publish: unused,
+            close: unused,
+            abort: unused,
+            contextUsage: unused,
+            availableModels: unused,
+            switchModel: unused,
+            shake: unused,
+          });
+          yield* Effect.gen(function* () {
+            const router = yield* EventRouter;
+            const local = yield* router.open(() => true);
+            yield* local.events.pipe(
+              Stream.runForEach((envelope) =>
+                Effect.gen(function* () {
+                  localEvents.push(envelope);
+                  if (envelope.event.type === "run-finished")
+                    yield* Deferred.succeed(observed, undefined);
+                }),
+              ),
+              Effect.forkChild,
+            );
+            const client: DiscordOutput.DiscordOutputClient = {
+              send: (_thread, output) =>
+                Effect.sync(() => {
+                  sent.push(output.content);
+                  return 1n;
+                }),
+              edit: () => Effect.die("Unexpected scheduled edit"),
+              renameThread: (_thread, title) =>
+                Effect.gen(function* () {
+                  titles.push(title);
+                  yield* Deferred.succeed(titleDelivered, undefined);
+                }),
+              triggerTyping: () => Effect.void,
+            };
+            const dispatch = DiscordOutput.make(client, yield* Scope.Scope, {
+              showToolCalls: false,
+              showThinking: false,
+            });
+            yield* pumpOutput(router, () => Effect.succeed(Option.some(20n)), dispatch);
+            yield* DiscordOutput.makeScheduledSender(client)({
+              chatId,
+              externalId: "20",
+              content: "scheduled result",
+            });
+            const publication: AgentEventEnvelope = {
+              chatId,
+              localOnly: true,
+              event: {
+                type: "message-settled",
+                message: {
+                  role: "assistant",
+                  status: "completed",
+                  stopReason: "stop",
+                  model: "pico/schedule",
+                  timestamp: 0,
+                  content: [{ type: "text", text: "scheduled result" }],
+                },
+              },
+            };
+            yield* Queue.offer(events, publication);
+            yield* Queue.offer(events, {
+              chatId,
+              event: { type: "title-changed", title: "Scheduled title" },
+            });
+            yield* Queue.offer(events, {
+              chatId,
+              event: { type: "run-finished", outcome: "completed" },
+            });
+            yield* Deferred.await(observed);
+            yield* Deferred.await(titleDelivered);
+            yield* router.drain();
+            assert.deepStrictEqual(sent, ["scheduled result"]);
+            assert.deepStrictEqual(titles, ["Scheduled title"]);
+            assert.deepStrictEqual(localEvents[0], publication);
+          }).pipe(
+            Effect.provide(EventRouterLayer.layer),
+            Effect.provideService(AgentRuntime, runtime),
+          );
+        }),
+      ),
+  );
+
   it.effect("distinguishes chat setup, admission, and completion failures in thread replies", () =>
     Effect.gen(function* () {
       const failure = new ApplicationError({

@@ -7,7 +7,6 @@ import type { AgentPrompt } from "./agent-message.ts";
 import type { CapturedAgentRun } from "./agent-runtime.ts";
 import { ChatId } from "./chat-model.ts";
 import { AbsolutePath } from "./path.ts";
-import { ReplyTarget } from "./reply-target.ts";
 import { WorkspaceId } from "./workspace-model.ts";
 
 export const ScheduleId = Schema.String.check(Schema.isUUID(7)).pipe(
@@ -37,8 +36,16 @@ export const ScheduleTarget = Schema.Union([
 export type ScheduleTarget = typeof ScheduleTarget.Type;
 
 export const ScheduleTargetInput = Schema.Union([
-  Schema.Struct({ kind: Schema.Literal("current-chat") }),
-  Schema.Struct({ kind: Schema.Literal("current-workspace") }),
+  Schema.Struct({
+    kind: Schema.Literal("external-chat"),
+    platform: Schema.Literal("discord"),
+    externalId: Schema.NonEmptyString,
+  }),
+  Schema.Struct({
+    kind: Schema.Literal("external-workspace"),
+    platform: Schema.Literal("discord"),
+    externalId: Schema.NonEmptyString,
+  }),
   ScheduleTarget,
 ]);
 export type ScheduleTargetInput = typeof ScheduleTargetInput.Type;
@@ -73,7 +80,7 @@ export const ScriptDecision = Schema.Struct({
 export type ScriptDecision = typeof ScriptDecision.Type;
 
 export const ScheduleDefinition = Schema.Struct({
-  version: Schema.Literal(1),
+  version: Schema.Literal(2),
   revision: ScheduleRevision,
   name: Schema.NonEmptyString,
   ownerWorkspaceId: WorkspaceId,
@@ -82,7 +89,6 @@ export const ScheduleDefinition = Schema.Struct({
   target: ScheduleTarget,
   trigger: ScheduleTrigger,
   scriptTimeoutMs: Schema.optional(ScriptTimeoutMs),
-  replyTarget: Schema.optional(ReplyTarget),
 });
 export type ScheduleDefinition = typeof ScheduleDefinition.Type;
 
@@ -218,7 +224,6 @@ export type UpdateSchedule = typeof UpdateSchedule.Type;
 export interface ScheduleCaller {
   readonly chatId: typeof ChatId.Type;
   readonly workspaceId: typeof WorkspaceId.Type;
-  readonly replyTarget?: ReplyTarget;
 }
 
 export class ScheduleError extends Schema.TaggedError<ScheduleError>()("ScheduleError", {
@@ -233,32 +238,68 @@ export class ScheduleHostError extends Schema.TaggedError<ScheduleHostError>()(
   },
 ) {}
 
+export interface SchedulePlatform {
+  readonly platform: "discord";
+  readonly resolveTarget: (
+    input: Extract<ScheduleTargetInput, { readonly platform: "discord" }>,
+  ) => Effect.Effect<ScheduleTarget, ScheduleHostError>;
+  readonly validateTarget: (
+    input:
+      | { readonly kind: "workspace"; readonly workspaceExternalId: string }
+      | {
+          readonly kind: "chat";
+          readonly workspaceExternalId: string;
+          readonly chatExternalId: string;
+        },
+  ) => Effect.Effect<void, ScheduleHostError>;
+  readonly createThread: (input: {
+    readonly workspaceExternalId: string;
+    readonly title: string;
+  }) => Effect.Effect<string, ScheduleHostError>;
+  readonly deleteThread: (externalId: string) => Effect.Effect<void, ScheduleHostError>;
+  readonly send: (input: {
+    readonly chatId: typeof ChatId.Type;
+    readonly externalId: string;
+    readonly content: string;
+  }) => Effect.Effect<void, ScheduleHostError>;
+}
+
+export class SchedulePlatformService extends Context.Service<
+  SchedulePlatformService,
+  SchedulePlatform
+>()("@pico/contract/schedule/SchedulePlatform") {}
+
 export interface ScheduleRunHost {
+  readonly resolveTarget: (
+    input: ScheduleTargetInput,
+  ) => Effect.Effect<ScheduleTarget, ScheduleHostError>;
   readonly prepare: (
     destination: ScheduleRunDestination,
   ) => Effect.Effect<ResolvedScheduleRunTarget, ScheduleHostError>;
+  readonly materialize: (input: {
+    readonly destination: ScheduleRunDestination;
+    readonly target: ResolvedScheduleRunTarget;
+    readonly title: string;
+  }) => Effect.Effect<void, ScheduleHostError>;
   readonly deliver: (
     chatId: typeof ChatId.Type,
     content: string,
-    replyTarget?: ReplyTarget,
   ) => Effect.Effect<void, ScheduleHostError>;
   readonly publish: (
     chatId: typeof ChatId.Type,
     content: string,
-    replyTarget?: ReplyTarget,
   ) => Effect.Effect<void, ScheduleHostError>;
   readonly runPrompt: (
     chatId: typeof ChatId.Type,
     runId: ScheduleRunId,
     prompt: AgentPrompt,
     onEvent: (event: AgentEvent) => Effect.Effect<void, ScheduleHostError>,
-    replyTarget?: ReplyTarget,
   ) => Effect.Effect<CapturedAgentRun, ScheduleHostError>;
 }
-export class ScheduleRunHostService extends Context.Service<
-  ScheduleRunHostService,
-  ScheduleRunHost
->()("@pico/contract/schedule/ScheduleRunHost") {}
+export class ScheduleRunHostFactory extends Context.Service<
+  ScheduleRunHostFactory,
+  (platform: SchedulePlatform | null) => ScheduleRunHost
+>()("@pico/contract/schedule/ScheduleRunHostFactory") {}
 
 export class Schedules extends Context.Service<
   Schedules,
