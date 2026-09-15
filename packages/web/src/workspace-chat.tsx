@@ -657,11 +657,13 @@ export function WorkspaceChat({ state }: { readonly state: State | null }) {
             const key = navigationRef.current.selectedKey;
             if (key !== null) updateEntry(key, (entry) => ({ ...entry, value: { text } }));
           }}
-          onDisclosureToggle={(id) =>
+          onDisclosuresChange={(ids, open) =>
             setDisclosures((current) => {
               const next = new Set(current);
-              if (next.has(id)) next.delete(id);
-              else next.add(id);
+              for (const id of ids) {
+                if (open) next.add(id);
+                else next.delete(id);
+              }
               return next;
             })
           }

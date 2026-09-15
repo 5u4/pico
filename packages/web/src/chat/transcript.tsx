@@ -7,10 +7,10 @@ import { ToolGroup } from "./tool-group.tsx";
 export interface TranscriptProps {
   readonly presentation: TranscriptPresentation;
   readonly onRetry: () => void;
-  readonly onDisclosureToggle: (itemId: string) => void;
+  readonly onDisclosuresChange: (ids: readonly string[], open: boolean) => void;
 }
 
-export function Transcript({ presentation, onRetry, onDisclosureToggle }: TranscriptProps) {
+export function Transcript({ presentation, onRetry, onDisclosuresChange }: TranscriptProps) {
   switch (presentation.state) {
     case "loading":
       return <LoadingTranscript label={presentation.label} />;
@@ -39,7 +39,7 @@ export function Transcript({ presentation, onRetry, onDisclosureToggle }: Transc
               <TranscriptItemView
                 item={item}
                 key={item.id}
-                onDisclosureToggle={onDisclosureToggle}
+                onDisclosuresChange={onDisclosuresChange}
               />
             ))}
           </div>
@@ -125,10 +125,10 @@ function ErrorTranscript({
 
 function TranscriptItemView({
   item,
-  onDisclosureToggle,
+  onDisclosuresChange,
 }: {
   readonly item: TranscriptItem;
-  readonly onDisclosureToggle: (itemId: string) => void;
+  readonly onDisclosuresChange: (ids: readonly string[], open: boolean) => void;
 }) {
   switch (item.kind) {
     case "user":
@@ -139,9 +139,9 @@ function TranscriptItemView({
         </article>
       );
     case "assistant":
-      return <AssistantMessage item={item} onDisclosureToggle={onDisclosureToggle} />;
+      return <AssistantMessage item={item} onDisclosuresChange={onDisclosuresChange} />;
     case "tool-group":
-      return <ToolGroup item={item} onDisclosureToggle={onDisclosureToggle} />;
+      return <ToolGroup item={item} onDisclosuresChange={onDisclosuresChange} />;
     case "notice":
       return <Notice item={item} />;
     default: {

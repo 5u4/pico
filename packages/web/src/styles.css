@@ -135,6 +135,33 @@
   transform: rotate(180deg);
 }
 
+.trace-disclosure {
+  min-height: 2rem;
+  border-radius: var(--raw-radius-control);
+  transition:
+    background-color var(--raw-duration-feedback) var(--raw-ease-feedback),
+    color var(--raw-duration-feedback) var(--raw-ease-feedback);
+}
+
+.trace-caret {
+  flex-shrink: 0;
+  color: var(--raw-subtle);
+  transition: transform var(--raw-duration-feedback) var(--raw-ease-feedback);
+}
+
+.trace-body {
+  margin-inline-start: 0.875rem;
+  border-inline-start: 1px solid var(--raw-border);
+  padding-inline-start: 1rem;
+}
+
+@media (hover: hover) {
+  .trace-disclosure:hover {
+    background-color: var(--raw-surface);
+    color: var(--raw-foreground);
+  }
+}
+
 * {
   box-sizing: border-box;
 }
