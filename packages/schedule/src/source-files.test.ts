@@ -116,6 +116,59 @@ describe("source files", () => {
       }).pipe(Effect.provide(platformLayer), Effect.scoped),
   );
 
+  it.effect("keeps script outputs separate from run metadata across restarts", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-run-metadata-" });
+      const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
+      const schedules = yield* open(schedulesDir, resolveTarget);
+      const created = yield* schedules.create(caller, {
+        name: "metadata collision",
+        enabled: true,
+        target: { kind: "chat", chatId },
+        trigger: { kind: "once", at: 1_000 },
+        sourceDirectory: yield* prepareSource({
+          "script.js": [
+            'import { writeFileSync } from "node:fs";',
+            'writeFileSync("definition.json", "script output");',
+            "process.stdout.write(JSON.stringify({agent:false}));",
+          ].join("\n"),
+        }),
+      });
+      if (created.kind !== "ready") return yield* Effect.die("Created schedule is invalid");
+      const runId = `scheduled-1000-${created.definition.revision}`;
+      const directory = path.join(schedulesDir, "runs", created.id, runId);
+      const host: Schedule.ScheduleRunHost = {
+        resolveTarget,
+        prepare: () => Effect.succeed({ chatId, workspaceId, cwd: AbsolutePath.make(root) }),
+        materialize: () => Effect.die("Unexpected materialization"),
+        deliver: () => Effect.die("Unexpected delivery"),
+        publish: () => Effect.die("Unexpected publication"),
+        runPrompt: () => Effect.die("Unexpected agent request"),
+      };
+      yield* TestClock.setTime(1_000);
+      yield* Effect.gen(function* () {
+        yield* schedules.start(host);
+        const finished = yield* awaitFinished(fileSystem, path.join(directory, "run.json"));
+        assert.strictEqual(
+          finished.state.kind === "finished" && finished.state.outcome.kind,
+          "skipped",
+        );
+      }).pipe(Effect.scoped);
+      for (let restart = 0; restart < 2; restart++) {
+        yield* Effect.gen(function* () {
+          const reopened = yield* open(schedulesDir, resolveTarget);
+          yield* reopened.start(host);
+          assert.strictEqual(
+            yield* fileSystem.readFileString(path.join(directory, "input", "definition.json")),
+            "script output",
+          );
+        }).pipe(Effect.scoped);
+      }
+    }).pipe(Effect.provide(platformLayer), Effect.scoped),
+  );
+
   it.effect("skips its staging directory through an ancestor path alias", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
