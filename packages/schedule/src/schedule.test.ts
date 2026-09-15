@@ -792,7 +792,11 @@ describe("Schedules", () => {
         "run.json",
       );
       const originalRun = yield* awaitFinished(fileSystem, runFile);
-      assert.strictEqual(yield* fileSystem.readFileString(path.join(cwd, "ran.txt")), workspaceId);
+      assert.strictEqual(
+        yield* fileSystem.readFileString(path.join(path.dirname(runFile), "input", "ran.txt")),
+        workspaceId,
+      );
+      assert.isFalse(yield* fileSystem.exists(path.join(cwd, "ran.txt")));
       assert.isFalse(yield* fileSystem.exists(path.join(destinationCwd, "ran.txt")));
       assert.strictEqual(
         yield* fileSystem.readFileString(
@@ -824,9 +828,13 @@ describe("Schedules", () => {
         ),
       );
       assert.strictEqual(
-        yield* fileSystem.readFileString(path.join(destinationCwd, "ran.txt")),
+        yield* fileSystem.readFileString(
+          path.join(schedulesDir, "runs", created.id, nextRun.id, "input", "ran.txt"),
+        ),
         destinationWorkspaceId,
       );
+      assert.isFalse(yield* fileSystem.exists(path.join(cwd, "ran.txt")));
+      assert.isFalse(yield* fileSystem.exists(path.join(destinationCwd, "ran.txt")));
       assert.strictEqual(
         yield* fileSystem.readFileString(path.join(root, `${nextRun.plannedTarget.chatId}.txt`)),
         "old run",

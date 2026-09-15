@@ -57,8 +57,9 @@ describe("source files", () => {
             "script.js": [
               'import { content } from "./lib/helper.js";',
               'import { readFileSync, writeFileSync } from "node:fs";',
-              'const bytes = readFileSync(new URL("./assets/data.bin", import.meta.url));',
-              'writeFileSync(new URL("./prompt.md", import.meta.url), "script changed prompt");',
+              'const bytes = readFileSync("./assets/data.bin");',
+              'writeFileSync("./prompt.md", "script changed prompt");',
+              'writeFileSync("./cwd.txt", process.cwd());',
               'process.stdout.write(JSON.stringify({agent:true,content:content+":"+[...bytes]}));',
             ].join("\n"),
             "prompt.md": "original prompt",
@@ -99,6 +100,19 @@ describe("source files", () => {
           yield* fileSystem.readFile(path.join(directory, "input", "assets/data.bin")),
           asset,
         );
+        const scriptCwd = yield* fileSystem.readFileString(
+          path.join(directory, "input", "cwd.txt"),
+        );
+        assert.strictEqual(
+          yield* fileSystem.realPath(scriptCwd),
+          yield* fileSystem.realPath(path.join(directory, "input")),
+        );
+        assert.strictEqual(
+          yield* fileSystem.readFileString(path.join(created.sourceDirectory, "prompt.md")),
+          "original prompt",
+        );
+        assert.isFalse(yield* fileSystem.exists(path.join(root, "prompt.md")));
+        assert.isFalse(yield* fileSystem.exists(path.join(root, "cwd.txt")));
       }).pipe(Effect.provide(platformLayer), Effect.scoped),
   );
 

@@ -26,7 +26,7 @@ Schedules stay owned and managed by the workspace that created them. Supply one 
 | `{ kind: "external-chat", platform: "discord", externalId }` | An existing open Pico-bound Discord thread. |
 | `{ kind: "external-workspace", platform: "discord", externalId }` | A Discord text channel. |
 
-Use Pico UUIDv7 IDs for `chatId` and `workspaceId`. Use a Discord thread ID for `external-chat` or a channel ID for `external-workspace`. Creation and retargeting resolve these selectors to canonical Pico IDs. An omitted update target keeps the current destination. Scripts and the agent use the destination chat's workspace and working directory, not the owner's context.
+Use Pico UUIDv7 IDs for `chatId` and `workspaceId`. Use a Discord thread ID for `external-chat` or a channel ID for `external-workspace`. Creation and retargeting resolve these selectors to canonical Pico IDs. An omitted update target keeps the current destination. The agent uses the destination chat's workspace and working directory, not the owner's context.
 
 Workspace targets prepare a new local chat and its working directory per run, even when the script skips. Native web, desktop, and mobile destinations stay local. Discord workspace targets create a public thread named after the schedule only when the run publishes text or starts the agent. A skipped run or an invalid agent decision creates no Discord thread.
 
@@ -68,7 +68,7 @@ Pico reads v1 metadata as a reply-free v2 model while preserving the canonical t
 
 ## Write script.js
 
-Write a Bun JavaScript program. Pico runs a snapshot with the target chat's working directory as `process.cwd()`. Relative data paths use that directory, but relative imports use the script snapshot's directory.
+Write a Bun JavaScript program. Pico sets `process.cwd()` to the per-run snapshot directory containing `script.js`. Relative data paths and root script imports resolve inside that snapshot, not the chat's working directory or the editable `sourceDirectory`. Relative writes stay in that run's snapshot and do not carry over to future runs. Use an explicit absolute path to access files outside the snapshot.
 
 When needed, read run context with `JSON.parse(await Bun.stdin.text())`. It contains:
 
@@ -93,11 +93,12 @@ The default script timeout is 60 seconds. `scriptTimeoutMs` controls only the sc
 
 ### Review only when the working tree has changes
 
-Save this script as `script.js`. In `prompt.md`, write `Review the working-tree status above and inspect relevant diffs. Summarize risks without modifying files.` The script checks the current state on each run, not changes since the previous run.
+Save this script as `script.js`. Save the absolute path of the repository to review in `repository.txt` beside it. In `prompt.md`, write `Review the working-tree status above and inspect relevant diffs. Summarize risks without modifying files.` The script checks the current state on each run, not changes since the previous run.
 
 ```js
+const repository = (await Bun.file("./repository.txt").text()).trim();
 const result = Bun.spawnSync(["git", "status", "--short"], {
-	cwd: process.cwd(),
+	cwd: repository,
 	stdout: "pipe",
 	stderr: "pipe",
 });
@@ -108,7 +109,7 @@ if (result.exitCode !== 0) {
 const status = new TextDecoder().decode(result.stdout).trim();
 console.log(JSON.stringify(status === ""
 	? { agent: false }
-	: { agent: true, content: `Working-tree status:\n${status}` }));
+	: { agent: true, content: `Repository: ${repository}\nWorking-tree status:\n${status}` }));
 ```
 
 Run a new script in a temporary directory with representative inputs before enabling its schedule. Check stdout and exit status. A script can affect real files and external services, so use disposable inputs rather than the user's live data.
