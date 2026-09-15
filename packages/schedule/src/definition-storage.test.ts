@@ -84,7 +84,6 @@ describe("definition storage", () => {
         );
         const snapshotFile = path.join(
           runDirectory(storage, run.scheduleId, run.id),
-          "input",
           "definition.json",
         );
         const metadataFile = path.join(created.sourceDirectory, "meta.json");
@@ -124,7 +123,10 @@ describe("definition storage", () => {
         );
         assert.deepStrictEqual(yield* readRunDefinition(storage, run), created.definition);
         assert.strictEqual(yield* fileSystem.readFileString(snapshotFile), legacySource);
-        for (const directory of [created.sourceDirectory, path.dirname(snapshotFile)]) {
+        for (const directory of [
+          created.sourceDirectory,
+          path.join(path.dirname(snapshotFile), "input"),
+        ]) {
           assert.strictEqual(
             yield* fileSystem.readFileString(path.join(directory, "prompt.md")),
             "Keep the destination.",

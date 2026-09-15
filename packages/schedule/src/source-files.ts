@@ -54,11 +54,6 @@ export const inspectSource = Effect.fn("Schedules.inspectSource")(function* (
             "meta.json is reserved for Pico metadata; remove it from sourceDirectory",
           );
         }
-        if (rootName === "definition.json") {
-          return yield* invalid(
-            "definition.json is reserved for run metadata; rename the source asset",
-          );
-        }
       }
       const relative = storage.path.join(relativeDirectory, name);
       const asset = storage.path.join(directory, relative);

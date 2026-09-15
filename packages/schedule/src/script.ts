@@ -218,7 +218,7 @@ export const runScript = Effect.fn("Schedules.runScript")(
         try: () => {
           const child = Bun.spawn({
             cmd: [executable, scriptPath],
-            cwd: target.cwd,
+            cwd: storage.path.dirname(scriptPath),
             env: curatedEnvironment(run, target),
             stdin: "pipe",
             stdout: "pipe",

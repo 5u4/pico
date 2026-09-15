@@ -129,9 +129,7 @@ describe("Schedules", () => {
           kind: "published",
           content: "done",
         });
-        assert.isTrue(
-          yield* fileSystem.exists(path.join(runDirectory, "input", "definition.json")),
-        );
+        assert.isTrue(yield* fileSystem.exists(path.join(runDirectory, "definition.json")));
         assert.isTrue(yield* fileSystem.exists(path.join(runDirectory, "input", "script.js")));
         for (const artifact of [
           "script/stdin.json",
@@ -671,7 +669,7 @@ describe("Schedules", () => {
         );
         assert.deepStrictEqual(
           yield* decodeDefinition(
-            yield* fileSystem.readFileString(path.join(directory, "input", "definition.json")),
+            yield* fileSystem.readFileString(path.join(directory, "definition.json")),
           ),
           created.definition,
         );
@@ -792,7 +790,11 @@ describe("Schedules", () => {
         "run.json",
       );
       const originalRun = yield* awaitFinished(fileSystem, runFile);
-      assert.strictEqual(yield* fileSystem.readFileString(path.join(cwd, "ran.txt")), workspaceId);
+      assert.strictEqual(
+        yield* fileSystem.readFileString(path.join(path.dirname(runFile), "input", "ran.txt")),
+        workspaceId,
+      );
+      assert.isFalse(yield* fileSystem.exists(path.join(cwd, "ran.txt")));
       assert.isFalse(yield* fileSystem.exists(path.join(destinationCwd, "ran.txt")));
       assert.strictEqual(
         yield* fileSystem.readFileString(
@@ -801,7 +803,7 @@ describe("Schedules", () => {
         "old run",
       );
       assert.strictEqual(originalRun.plannedTarget.ownerWorkspaceId, workspaceId);
-      const snapshotFile = path.join(path.dirname(runFile), "input", "definition.json");
+      const snapshotFile = path.join(path.dirname(runFile), "definition.json");
       const snapshotBefore = yield* fileSystem.readFileString(snapshotFile);
       const frozen = yield* decodeDefinition(snapshotBefore);
       assert.deepStrictEqual(frozen.target, { kind: "workspace", workspaceId });
@@ -824,9 +826,13 @@ describe("Schedules", () => {
         ),
       );
       assert.strictEqual(
-        yield* fileSystem.readFileString(path.join(destinationCwd, "ran.txt")),
+        yield* fileSystem.readFileString(
+          path.join(schedulesDir, "runs", created.id, nextRun.id, "input", "ran.txt"),
+        ),
         destinationWorkspaceId,
       );
+      assert.isFalse(yield* fileSystem.exists(path.join(cwd, "ran.txt")));
+      assert.isFalse(yield* fileSystem.exists(path.join(destinationCwd, "ran.txt")));
       assert.strictEqual(
         yield* fileSystem.readFileString(path.join(root, `${nextRun.plannedTarget.chatId}.txt`)),
         "old run",
