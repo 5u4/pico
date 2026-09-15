@@ -343,7 +343,6 @@ function LiveRoute({ state }: { readonly state: State | null }) {
       updateEntry(key, (value) => ({
         ...value,
         target: { kind: "chat", chat },
-        submission: { kind: "sending" },
       }));
     } else {
       chat = entry.target.chat;
@@ -352,15 +351,19 @@ function LiveRoute({ state }: { readonly state: State | null }) {
         registry.get(state.live(chat.id)).run.kind === "running"
       )
         return;
-      updateEntry(key, (value) => ({ ...value, submission: { kind: "sending" } }));
     }
+    updateEntry(key, (value) => ({
+      ...value,
+      value: value.value === sentValue ? emptyDraft : value.value,
+      submission: { kind: "sending" },
+    }));
     const exit = await runCommand(registry, state.send(chat.id), {
       text: sentValue.text,
       attachments: [],
     });
     updateEntry(key, (value) => ({
       ...value,
-      value: Exit.isSuccess(exit) && value.value === sentValue ? emptyDraft : value.value,
+      value: Exit.isFailure(exit) && value.value === emptyDraft ? sentValue : value.value,
       submission: Exit.isSuccess(exit)
         ? { kind: "idle" }
         : {
