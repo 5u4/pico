@@ -42,7 +42,7 @@ Write the source files in a directory, then pass its absolute path as `sourceDir
 
 At least one root entrypoint, `script.js` or `prompt.md`, must exist. Every entrypoint present must contain valid UTF-8 text with at least one non-whitespace character. Helpers, binary assets, nested directories, and empty directories are allowed. Symlinks and special files are rejected anywhere in the tree.
 
-Do not author root `meta.json` or `definition.json`, including case variants such as `Meta.json` and `Definition.json`. Pico owns the exact root `meta.json` and reserves `definition.json` case-insensitively for run snapshot metadata. These names are allowed inside nested directories.
+Do not author root `meta.json`, including case variants such as `Meta.json`. Pico owns that metadata file. Nested `meta.json` files and source assets named `definition.json` are allowed.
 
 Creation copies the complete supported source tree into Pico's managed directory. Later edits to the original directory do not affect that owned copy. Put every helper and asset the script needs inside the source directory. Pico does not crawl imports or copy dependencies from outside it.
 
@@ -69,6 +69,8 @@ Pico reads v1 metadata as a reply-free v2 model while preserving the canonical t
 ## Write script.js
 
 Write a Bun JavaScript program. Pico sets `process.cwd()` to the per-run snapshot directory containing `script.js`. Relative data paths and root script imports resolve inside that snapshot, not the chat's working directory or the editable `sourceDirectory`. Relative writes stay in that run's snapshot and do not carry over to future runs. Use an explicit absolute path to access files outside the snapshot.
+
+Pico stores run metadata outside the script directory. On startup, older run snapshots migrate to that layout without rewriting definition or lifecycle bytes. Migration can resume after interruption. Already-corrupt history remains an error rather than being reconstructed from the current schedule.
 
 When needed, read run context with `JSON.parse(await Bun.stdin.text())`. It contains:
 

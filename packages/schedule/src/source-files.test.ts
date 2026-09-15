@@ -169,6 +169,70 @@ describe("source files", () => {
     }).pipe(Effect.provide(platformLayer), Effect.scoped),
   );
 
+  it.effect.each([
+    "definition.json",
+    "Definition.json",
+    "definition.json/data.bin",
+    "Definition.json/data.bin",
+  ])("preserves authored %s through managed sources and run capture", (asset) =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-source-definition-" });
+      const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
+      const schedules = yield* open(schedulesDir, resolveTarget);
+      const bytes = new Uint8Array([0, 255, 128, 10]);
+      const created = yield* schedules.create(caller, {
+        name: "definition source asset",
+        enabled: false,
+        target: { kind: "chat", chatId },
+        trigger: { kind: "once", at: 1_000 },
+        sourceDirectory: yield* prepareSource({ "prompt.md": "asset prompt", [asset]: bytes }),
+      });
+      if (created.kind !== "ready") return yield* Effect.die("Created schedule is invalid");
+      assert.deepStrictEqual(
+        yield* fileSystem.readFile(path.join(created.sourceDirectory, asset)),
+        bytes,
+      );
+      assert.deepStrictEqual(yield* schedules.get(caller, created.id), created);
+      const storage: Storage = {
+        fileSystem,
+        path,
+        schedulesDir,
+        temporaryId: () => Effect.succeed("source-definition"),
+      };
+      const run: Schedule.ScheduleRunLifecycle = {
+        version: 1,
+        id: Schedule.ScheduleRunId.make(`scheduled-1000-${created.definition.revision}`),
+        scheduleId: created.id,
+        definitionRevision: created.definition.revision,
+        source: { kind: "scheduled", scheduledFor: 1_000 },
+        plannedTarget: { kind: "existing-chat", ownerWorkspaceId: workspaceId, chatId },
+        claimedAt: 1_000,
+        state: { kind: "claimed" },
+      };
+      yield* publishRun(
+        storage,
+        run,
+        created.definition,
+        created.sourceDirectory,
+        "source-definition",
+        Effect.void,
+      );
+      const directory = path.join(schedulesDir, "runs", run.scheduleId, run.id);
+      assert.deepStrictEqual(
+        yield* fileSystem.readFile(path.join(directory, "input", asset)),
+        bytes,
+      );
+      assert.deepStrictEqual(
+        yield* decodeDefinition(
+          yield* fileSystem.readFileString(path.join(directory, "definition.json")),
+        ),
+        created.definition,
+      );
+    }).pipe(Effect.provide(platformLayer), Effect.scoped),
+  );
+
   it.effect("skips its staging directory through an ancestor path alias", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
@@ -592,9 +656,7 @@ describe("source files", () => {
           yield* prepareSource({ "prompt.md": " \n\t" }),
           yield* prepareSource({ "script.js": "\n" }),
           yield* prepareSource({ "prompt.md": "valid", "meta.json": "{}" }),
-          yield* prepareSource({ "script.js": "void 0;", "definition.json": "{}" }),
           yield* prepareSource({ "prompt.md": "valid" }, ["meta.json"]),
-          yield* prepareSource({ "prompt.md": "valid" }, ["definition.json"]),
           yield* prepareSource({}, ["prompt.md"]),
         ];
         for (const link of [
@@ -707,29 +769,24 @@ describe("source files", () => {
       }).pipe(Effect.provide(platformLayer), Effect.scoped),
   );
 
-  it.effect.each(["Meta.json", "Definition.json"])(
-    "rejects authored %s before publishing metadata",
-    (name) =>
-      Effect.gen(function* () {
-        const fileSystem = yield* FileSystem.FileSystem;
-        const path = yield* Path.Path;
-        const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-source-reserved-" });
-        const schedules = yield* open(
-          AbsolutePath.make(path.join(root, "schedules")),
-          resolveTarget,
-        );
-        const error = yield* schedules
-          .create(caller, {
-            name: "reserved source",
-            enabled: false,
-            target: { kind: "chat", chatId: caller.chatId },
-            trigger: { kind: "once", at: 1_000 },
-            sourceDirectory: yield* prepareSource({ "prompt.md": "valid", [name]: "{}" }),
-          })
-          .pipe(Effect.flip);
-        assert.strictEqual(error.kind, "invalid");
-        assert.deepStrictEqual(yield* schedules.list(caller), []);
-      }).pipe(Effect.provide(platformLayer), Effect.scoped),
+  it.effect("rejects authored Meta.json before publishing metadata", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-source-reserved-" });
+      const schedules = yield* open(AbsolutePath.make(path.join(root, "schedules")), resolveTarget);
+      const error = yield* schedules
+        .create(caller, {
+          name: "reserved source",
+          enabled: false,
+          target: { kind: "chat", chatId: caller.chatId },
+          trigger: { kind: "once", at: 1_000 },
+          sourceDirectory: yield* prepareSource({ "prompt.md": "valid", "Meta.json": "{}" }),
+        })
+        .pipe(Effect.flip);
+      assert.strictEqual(error.kind, "invalid");
+      assert.deepStrictEqual(yield* schedules.list(caller), []);
+    }).pipe(Effect.provide(platformLayer), Effect.scoped),
   );
 
   it.effect("rejects mixed-case metadata rather than skipping it in managed sources", () =>
@@ -780,56 +837,43 @@ describe("source files", () => {
     }).pipe(Effect.provide(platformLayer), Effect.scoped),
   );
 
-  it.effect(
-    "rejects dangling helper links and reserved snapshot names added to owned sources",
-    () =>
-      Effect.gen(function* () {
-        const fileSystem = yield* FileSystem.FileSystem;
-        const path = yield* Path.Path;
-        const root = yield* fileSystem.makeTempDirectoryScoped({
-          prefix: "pico-owned-source-unsafe-",
-        });
-        const schedules = yield* open(
-          AbsolutePath.make(path.join(root, "schedules")),
-          resolveTarget,
-        );
-        const created = yield* schedules.create(caller, {
-          name: "owned source",
-          enabled: false,
-          target: { kind: "chat", chatId: caller.chatId },
-          trigger: { kind: "once", at: 1_000 },
-          sourceDirectory: yield* prepareSource({ "prompt.md": "valid" }, ["lib"]),
-        });
-        assert.strictEqual(created.kind, "ready");
-        if (created.kind !== "ready") return;
-        const dangling = path.join(created.sourceDirectory, "lib/helper.js");
-        yield* fileSystem.symlink(path.join(root, "missing.js"), dangling);
-        const invalid = yield* schedules.get(caller, created.id);
-        assert.strictEqual(invalid.kind, "invalid");
-        assert.strictEqual(invalid.sourceDirectory, created.sourceDirectory);
-        const error = yield* schedules
-          .update(caller, created.id, {
-            enabled: true,
-            trigger: { kind: "cron", expression: "0 9 * * *", timeZone: "UTC" },
-          })
-          .pipe(Effect.flip);
-        assert.strictEqual(error.kind, "invalid");
-        assert.deepStrictEqual(
-          yield* decodeDefinition(
-            yield* fileSystem.readFileString(path.join(created.sourceDirectory, "meta.json")),
-          ),
-          created.definition,
-        );
-        yield* fileSystem.remove(dangling);
-        for (const name of ["definition.json", "Definition.json"]) {
-          const asset = path.join(created.sourceDirectory, name);
-          yield* fileSystem.writeFileString(asset, "{}", { flag: "wx" });
-          assert.strictEqual((yield* schedules.get(caller, created.id)).kind, "invalid");
-          assert.strictEqual((yield* schedules.list(caller))[0]?.kind, "invalid");
-          yield* fileSystem.remove(asset);
-          assert.strictEqual((yield* schedules.get(caller, created.id)).kind, "ready");
-        }
-      }).pipe(Effect.provide(platformLayer), Effect.scoped),
+  it.effect("rejects dangling helper links added to owned sources", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "pico-owned-source-unsafe-",
+      });
+      const schedules = yield* open(AbsolutePath.make(path.join(root, "schedules")), resolveTarget);
+      const created = yield* schedules.create(caller, {
+        name: "owned source",
+        enabled: false,
+        target: { kind: "chat", chatId: caller.chatId },
+        trigger: { kind: "once", at: 1_000 },
+        sourceDirectory: yield* prepareSource({ "prompt.md": "valid" }, ["lib"]),
+      });
+      assert.strictEqual(created.kind, "ready");
+      if (created.kind !== "ready") return;
+      const dangling = path.join(created.sourceDirectory, "lib/helper.js");
+      yield* fileSystem.symlink(path.join(root, "missing.js"), dangling);
+      const invalid = yield* schedules.get(caller, created.id);
+      assert.strictEqual(invalid.kind, "invalid");
+      assert.strictEqual(invalid.sourceDirectory, created.sourceDirectory);
+      const error = yield* schedules
+        .update(caller, created.id, {
+          enabled: true,
+          trigger: { kind: "cron", expression: "0 9 * * *", timeZone: "UTC" },
+        })
+        .pipe(Effect.flip);
+      assert.strictEqual(error.kind, "invalid");
+      assert.deepStrictEqual(
+        yield* decodeDefinition(
+          yield* fileSystem.readFileString(path.join(created.sourceDirectory, "meta.json")),
+        ),
+        created.definition,
+      );
+      yield* fileSystem.remove(dangling);
+    }).pipe(Effect.provide(platformLayer), Effect.scoped),
   );
 
   for (const phase of ["definition", "run"]) {

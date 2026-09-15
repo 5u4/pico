@@ -23,6 +23,17 @@ const decodeRun = Schema.decodeUnknownEffect(runJson, { onExcessProperty: "error
 
 const decodeRunId = Schema.decodeUnknownOption(Schedule.ScheduleRunId);
 
+const snapshotLayout = Schema.Struct({
+  version: Schema.Literal(1),
+  layout: Schema.Literal("run-root"),
+});
+const snapshotLayoutSource = JSON.stringify(
+  snapshotLayout.make({ version: 1, layout: "run-root" }),
+);
+const decodeSnapshotLayout = Schema.decodeUnknownEffect(Schema.fromJsonString(snapshotLayout), {
+  onExcessProperty: "error",
+});
+
 export const ensureRunAsset = Effect.fn("Schedules.ensureRunAsset")(function* (
   storage: Storage,
   run: Schedule.ScheduleRunLifecycle,
@@ -77,7 +88,7 @@ export const publishRun = Effect.fn("Schedules.publishRun")(function* (
           .pipe(mapIo("Failed to stage run lifecycle"));
         yield* storage.fileSystem
           .writeFileString(
-            storage.path.join(input, "definition.json"),
+            storage.path.join(stage, "definition.json"),
             JSON.stringify(definition),
             {
               flag: "wx",
@@ -85,6 +96,12 @@ export const publishRun = Effect.fn("Schedules.publishRun")(function* (
             },
           )
           .pipe(mapIo("Failed to snapshot run definition"));
+        yield* storage.fileSystem
+          .writeFileString(storage.path.join(stage, "snapshot-layout.json"), snapshotLayoutSource, {
+            flag: "wx",
+            mode: 0o600,
+          })
+          .pipe(mapIo("Failed to stage run snapshot layout"));
         const execution = yield* inspectSource(storage, sourceDirectory, true, input);
         const parent = storage.path.join(value.runs, run.scheduleId);
         yield* ensureDirectPath(storage, value.runs, "run storage directory");
@@ -273,14 +290,51 @@ export const readRunDefinition = Effect.fn("Schedules.readRunDefinition")(functi
   storage: Storage,
   run: Schedule.ScheduleRunLifecycle,
 ) {
-  const file = storage.path.join(
-    runDirectory(storage, run.scheduleId, run.id),
-    "input",
-    "definition.json",
-  );
-  yield* ensureRunAsset(storage, run, "input/definition.json");
+  const directory = runDirectory(storage, run.scheduleId, run.id);
+  yield* ensureDirectPath(storage, directory, "run directory");
+  const entries = yield* storage.fileSystem
+    .readDirectory(directory)
+    .pipe(mapIo("Failed to inspect run snapshot layout"));
+  const marked = entries.includes("snapshot-layout.json");
+  let relative = "definition.json";
+  if (marked) {
+    yield* ensureRunAsset(storage, run, "snapshot-layout.json");
+    const marker = yield* readDirectFileString(
+      storage,
+      storage.path.join(directory, "snapshot-layout.json"),
+      "run snapshot layout",
+    );
+    yield* decodeSnapshotLayout(marker).pipe(
+      Effect.mapError(
+        () =>
+          new Schedule.ScheduleError({
+            kind: "corrupt",
+            message: "Invalid run snapshot layout",
+          }),
+      ),
+    );
+  } else {
+    let legacyExists = false;
+    if (entries.includes("input")) {
+      const input = storage.path.join(directory, "input");
+      yield* ensureDirectPath(storage, input, "run input directory");
+      const inputEntries = yield* storage.fileSystem
+        .readDirectory(input)
+        .pipe(mapIo("Failed to inspect legacy run snapshot"));
+      legacyExists = inputEntries.includes("definition.json");
+    }
+    if (entries.includes("definition.json") && legacyExists) {
+      return yield* new Schedule.ScheduleError({
+        kind: "corrupt",
+        message: "Run has both canonical and legacy definition snapshots",
+      });
+    }
+    if (legacyExists) relative = "input/definition.json";
+  }
+  yield* ensureRunAsset(storage, run, relative);
+  const file = storage.path.join(directory, relative);
   const source = yield* readDirectFileString(storage, file, "run definition snapshot");
-  return yield* decodeDefinition(source).pipe(
+  const definition = yield* decodeDefinition(source).pipe(
     Effect.mapError(
       () =>
         new Schedule.ScheduleError({
@@ -289,6 +343,29 @@ export const readRunDefinition = Effect.fn("Schedules.readRunDefinition")(functi
         }),
     ),
   );
+  if (definition.revision !== run.definitionRevision) {
+    return yield* new Schedule.ScheduleError({
+      kind: "corrupt",
+      message: "Run definition snapshot revision does not match its lifecycle",
+    });
+  }
+  if (!marked) {
+    yield* Effect.gen(function* () {
+      if (relative === "input/definition.json") {
+        yield* storage.fileSystem
+          .rename(file, storage.path.join(directory, "definition.json"))
+          .pipe(mapIo("Failed to migrate run definition snapshot"));
+      }
+      yield* writeRunFile(
+        storage,
+        run,
+        "snapshot-layout.json",
+        new TextEncoder().encode(snapshotLayoutSource),
+        yield* storage.temporaryId(),
+      );
+    }).pipe(Effect.uninterruptible);
+  }
+  return definition;
 });
 
 export const writeArtifactString = Effect.fn("Schedules.writeArtifactString")(function* (
