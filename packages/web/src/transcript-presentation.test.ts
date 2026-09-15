@@ -2,6 +2,7 @@ import { assert, describe, it } from "@effect/vitest";
 import {
   type AgentAssistantMessage,
   AgentMessageId,
+  type AgentToolResultMessage,
   type AgentTranscript,
 } from "@pico/contract/agent-message";
 import * as AsyncResult from "effect/unstable/reactivity/AsyncResult";
@@ -37,53 +38,144 @@ const items = (transcript: AgentTranscript, live: LiveChat, disclosures = new Se
 };
 
 describe("transcript identity", () => {
-  it("keeps thinking and tool disclosures through live-first snapshot handoff without duplicate anchors", () => {
-    const running = reduceLiveChat(emptyLiveChat(), {
+  it("keeps thinking and tool disclosures open from running through settlement and snapshot handoff", () => {
+    const draft = reduceLiveChat(emptyLiveChat(), {
+      type: "thinking-delta",
+      messageId: firstId,
+      contentIndex: 0,
+      text: "plan",
+    });
+    const running = reduceLiveChat(draft, {
       type: "tool-started",
       toolCallId: "read-file",
       toolName: "read",
       argumentsJson: '{"path":"file.ts"}',
     });
-    const live = reduceLiveChat(running, { type: "message-settled", message: toolMessage });
-    const pending = items([], live);
+    const pending = items([], running);
     assert.deepStrictEqual(
       pending.map((item) => item.kind),
-      ["assistant", "tool-group", "assistant"],
+      ["assistant", "tool-group"],
     );
     const disclosures = new Set(
       pending.flatMap((item) =>
         item.kind === "assistant" ? item.blocks.map((block) => block.id) : [item.id],
       ),
     );
-    const acknowledged = acknowledgeTranscript(live, [toolMessage]);
-    const snapshot = items([toolMessage], acknowledged, disclosures);
+    const opened = items([], running, disclosures);
     assert.deepStrictEqual(
-      snapshot.map((item) => item.id),
-      pending.map((item) => item.id),
-    );
-    assert.deepStrictEqual(
-      snapshot.flatMap((item) =>
-        item.kind === "assistant" ? item.blocks.map((block) => block.text) : [],
+      opened.flatMap((item) =>
+        item.kind === "tool-group"
+          ? [{ open: item.open, states: item.calls.map((call) => call.state.kind) }]
+          : [],
       ),
-      ["plan", "after tool"],
+      [{ open: true, states: ["running"] }],
     );
     assert.deepStrictEqual(
-      snapshot.flatMap((item) =>
+      opened.flatMap((item) =>
         item.kind === "assistant"
           ? item.blocks.flatMap((block) => (block.kind === "thinking" ? [block.open] : []))
           : [],
       ),
       [true],
     );
+    const live = reduceLiveChat(running, { type: "message-settled", message: toolMessage });
+    const settled = items([], live, disclosures);
+    const acknowledged = acknowledgeTranscript(live, [toolMessage]);
+    const snapshot = items([toolMessage], acknowledged, disclosures);
+    for (const presentation of [settled, snapshot]) {
+      assert.deepStrictEqual(
+        presentation.map((item) => item.kind),
+        ["assistant", "tool-group", "assistant"],
+      );
+      assert.deepStrictEqual(
+        presentation.flatMap((item) => (item.kind === "tool-group" ? [item] : [])),
+        opened.flatMap((item) => (item.kind === "tool-group" ? [item] : [])),
+      );
+      assert.deepStrictEqual(
+        presentation.flatMap((item) =>
+          item.kind === "assistant"
+            ? item.blocks.flatMap((block) =>
+                block.kind === "thinking" ? [{ id: block.id, open: block.open }] : [],
+              )
+            : [],
+        ),
+        opened.flatMap((item) =>
+          item.kind === "assistant"
+            ? item.blocks.flatMap((block) =>
+                block.kind === "thinking" ? [{ id: block.id, open: block.open }] : [],
+              )
+            : [],
+        ),
+      );
+      assert.deepStrictEqual(
+        presentation.flatMap((item) =>
+          item.kind === "assistant" ? item.blocks.map((block) => block.text) : [],
+        ),
+        ["plan", "after tool"],
+      );
+    }
     assert.deepStrictEqual(
-      snapshot.flatMap((item) => (item.kind === "tool-group" ? [item.open] : [])),
-      [true],
+      snapshot.map((item) => item.id),
+      settled.map((item) => item.id),
+    );
+  });
+
+  it("keeps a result-only tool disclosure open when its assistant anchor arrives without merging distinct calls", () => {
+    const running = reduceLiveChat(emptyLiveChat(), {
+      type: "tool-started",
+      toolCallId: "read-file",
+      toolName: "read",
+      argumentsJson: '{"path":"file.ts"}',
+    });
+    const pending = items([], running);
+    const disclosures = new Set(pending.map((item) => item.id));
+    const result: AgentToolResultMessage = {
+      role: "tool-result",
+      toolCallId: "read-file",
+      toolName: "read",
+      content: [{ type: "text", text: "file contents" }],
+      status: "succeeded",
+      timestamp: 2,
+    };
+    const fallback = items([result], running, disclosures);
+    assert.deepStrictEqual(
+      fallback.map((item) => item.id),
+      pending.map((item) => item.id),
     );
     assert.deepStrictEqual(
-      snapshot.flatMap((item) =>
-        item.kind === "tool-group" ? item.calls.map((call) => call.state.kind) : [],
+      fallback.flatMap((item) =>
+        item.kind === "tool-group"
+          ? [{ open: item.open, outputs: item.calls.map((call) => call.output) }]
+          : [],
       ),
-      ["running"],
+      [{ open: true, outputs: ["file contents"] }],
+    );
+    const message: AgentAssistantMessage = {
+      ...toolMessage,
+      content: [
+        ...toolMessage.content,
+        {
+          type: "tool-call",
+          id: "read-file-again",
+          name: "read",
+          argumentsJson: '{"path":"file.ts"}',
+        },
+      ],
+    };
+    const transcript = [message, result];
+    const snapshot = items(transcript, acknowledgeTranscript(running, transcript), disclosures);
+    assert.deepStrictEqual(
+      snapshot.map((item) => item.kind),
+      ["assistant", "tool-group", "assistant", "tool-group"],
+    );
+    const tools = snapshot.filter((item) => item.kind === "tool-group");
+    assert.deepStrictEqual(tools[0], fallback[0]);
+    assert.notStrictEqual(tools[0]?.id, tools[1]?.id);
+    assert.notStrictEqual(tools[0]?.calls[0]?.id, tools[1]?.calls[0]?.id);
+    assert.strictEqual(tools[1]?.open, false);
+    assert.deepStrictEqual(
+      tools.map((item) => item.calls.map((call) => call.label)),
+      [["read"], ["read"]],
     );
   });
 
