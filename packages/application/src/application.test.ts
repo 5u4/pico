@@ -10,7 +10,7 @@ import {
   type ShakeResult,
 } from "@pico/contract/agent-runtime";
 import { AgentSessionStore } from "@pico/contract/agent-session-store";
-import { Application } from "@pico/contract/application";
+import { Application, type UpdateWorkspace } from "@pico/contract/application";
 import * as Chat from "@pico/contract/chat-model";
 import { ChatRepository } from "@pico/contract/chat-repository";
 import {
@@ -18,10 +18,12 @@ import {
   ApplicationError,
   type ChatClosed,
   PersistenceError,
+  WorkspaceBindingInvalid,
 } from "@pico/contract/errors";
 import { AbsolutePath } from "@pico/contract/path";
 import * as Schedule from "@pico/contract/schedule";
 import * as Workspace from "@pico/contract/workspace-model";
+import { WorkspaceRepository } from "@pico/contract/workspace-repository";
 import type { CreateWorktreeOptions, GitWorktree } from "@pico/contract/worktree";
 import * as Persistence from "@pico/persistence/layer";
 import * as Effect from "effect/Effect";
@@ -64,7 +66,7 @@ const assertApplicationError = (
 };
 
 describe("Application", () => {
-  it.effect("creates chats, resolves platform identities, and delegates agent operations", () =>
+  it.effect("updates workspaces and manages chats across platforms", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
@@ -190,7 +192,14 @@ describe("Application", () => {
         }),
       );
       const gitWorktree: GitWorktree = {
-        validate: () => Effect.void,
+        validate: ({ settings }) =>
+          settings.branch === "missing"
+            ? Effect.fail(
+                new WorkspaceBindingInvalid({
+                  issue: { field: "branch", reason: "not-commit" },
+                }),
+              )
+            : Effect.void,
         create: (options, use) =>
           Effect.sync(() => {
             createdWorktrees.push(options);
@@ -480,9 +489,15 @@ describe("Application", () => {
           finalAssistantText: `captured:${regularChat.id}`,
         });
         yield* scheduleHost.deliver(regularChat.id, "scheduled delivery");
-        assert.deepInclude(sentMessages, { chatId: regularChat.id, content: "scheduled delivery" });
+        assert.deepInclude(sentMessages, {
+          chatId: regularChat.id,
+          content: "scheduled delivery",
+        });
         yield* scheduleHost.publish(regularChat.id, "scheduled publish");
-        assert.deepInclude(sentMessages, { chatId: regularChat.id, content: "scheduled publish" });
+        assert.deepInclude(sentMessages, {
+          chatId: regularChat.id,
+          content: "scheduled publish",
+        });
 
         const remoteThreads = new Set(["thread-1"]);
         const deletedThreads: string[] = [];
@@ -611,6 +626,131 @@ describe("Application", () => {
         assert.isTrue(
           Option.isNone(yield* application.findChatPlatformBinding(failedTarget.chatId)),
         );
+
+        const workspaces = yield* WorkspaceRepository;
+        const updatedCwd = AbsolutePath.make(path.join(temporaryDirectory, "updated-workspace"));
+        yield* fileSystem.makeDirectory(updatedCwd);
+        const editableWorkspace = yield* application.createWorkspace({
+          name: "editable",
+          platform: "web",
+          externalId: null,
+          defaultCwd,
+          worktree: null,
+        });
+        const configuredWorkspace = yield* application.setWorkspaceModel(editableWorkspace.id, {
+          provider: "native",
+          id: "workspace-model",
+        });
+        const originalChat = yield* application.createChat({
+          workspaceId: editableWorkspace.id,
+          externalId: null,
+        });
+        assert.strictEqual(originalChat.cwd, defaultCwd);
+
+        const updatedWorktree = yield* application.updateWorkspace({
+          workspaceId: editableWorkspace.id,
+          configuration: {
+            kind: "worktree",
+            repository: `${updatedCwd}/.`,
+            settings: { branch: "main", prefix: "updated/" },
+          },
+        });
+        assert.deepStrictEqual(updatedWorktree, {
+          ...configuredWorkspace,
+          defaultCwd: updatedCwd,
+          worktree: { branch: "main", prefix: "updated/" },
+        });
+        assert.deepStrictEqual(
+          Option.getOrThrow(yield* workspaces.findById(editableWorkspace.id)),
+          updatedWorktree,
+        );
+        assert.deepStrictEqual(
+          Option.getOrThrow(yield* chats.findById(originalChat.id)),
+          originalChat,
+        );
+        const updatedWorktreeChat = yield* application.createChat({
+          workspaceId: editableWorkspace.id,
+          externalId: null,
+        });
+        assert.strictEqual(updatedWorktreeChat.cwd, worktreeCwd);
+
+        const workspacesBeforeRejectedUpdates = yield* application.listWorkspaces();
+        const chatsBeforeRejectedUpdates = yield* application.listChats(editableWorkspace.id);
+        const unknownWorkspace = yield* application
+          .updateWorkspace({
+            workspaceId: missingWorkspaceId,
+            configuration: { kind: "direct", cwd: updatedCwd },
+          })
+          .pipe(Effect.flip);
+        if (!(unknownWorkspace instanceof ApplicationError)) {
+          return yield* Effect.die(`Unexpected update failure: ${unknownWorkspace._tag}`);
+        }
+        assertApplicationError(unknownWorkspace, "not-found");
+        assert.deepStrictEqual(
+          yield* application.listWorkspaces(),
+          workspacesBeforeRejectedUpdates,
+        );
+
+        for (const invalid of [
+          {
+            configuration: {
+              kind: "direct",
+              cwd: path.join(temporaryDirectory, "missing"),
+            },
+            issue: { field: "cwd", reason: "not-found" },
+          },
+          {
+            configuration: {
+              kind: "worktree",
+              repository: updatedCwd,
+              settings: { branch: "missing", prefix: "updated/" },
+            },
+            issue: { field: "branch", reason: "not-commit" },
+          },
+        ] satisfies ReadonlyArray<{
+          readonly configuration: UpdateWorkspace["configuration"];
+          readonly issue: WorkspaceBindingInvalid["issue"];
+        }>) {
+          const error = yield* application
+            .updateWorkspace({
+              workspaceId: editableWorkspace.id,
+              configuration: invalid.configuration,
+            })
+            .pipe(Effect.flip);
+          if (!(error instanceof WorkspaceBindingInvalid)) {
+            return yield* Effect.die(`Unexpected update failure: ${error._tag}`);
+          }
+          assert.deepStrictEqual(error.issue, invalid.issue);
+          assert.deepStrictEqual(
+            Option.getOrThrow(yield* workspaces.findById(editableWorkspace.id)),
+            updatedWorktree,
+          );
+          assert.deepStrictEqual(
+            yield* application.listChats(editableWorkspace.id),
+            chatsBeforeRejectedUpdates,
+          );
+        }
+
+        const updatedDirect = yield* application.updateWorkspace({
+          workspaceId: editableWorkspace.id,
+          configuration: { kind: "direct", cwd: `${defaultCwd}/.` },
+        });
+        assert.deepStrictEqual(updatedDirect, configuredWorkspace);
+        assert.deepStrictEqual(
+          Option.getOrThrow(yield* workspaces.findById(editableWorkspace.id)),
+          updatedDirect,
+        );
+        for (const existingChat of [originalChat, updatedWorktreeChat]) {
+          assert.deepStrictEqual(
+            Option.getOrThrow(yield* chats.findById(existingChat.id)),
+            existingChat,
+          );
+        }
+        const updatedDirectChat = yield* application.createChat({
+          workspaceId: editableWorkspace.id,
+          externalId: null,
+        });
+        assert.strictEqual(updatedDirectChat.cwd, defaultCwd);
 
         yield* fileSystem.remove(defaultCwd, { recursive: true });
         assertApplicationError(

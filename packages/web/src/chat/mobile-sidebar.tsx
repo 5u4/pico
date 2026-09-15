@@ -1,18 +1,21 @@
-import { useEffect, useRef } from "react";
+import { type RefObject, useEffect, useState } from "react";
 import { WorkspaceSidebar, type WorkspaceSidebarProps } from "./workspace-sidebar.tsx";
 
 export function MobileSidebar({
   open,
+  returnFocus,
   ...sidebar
-}: WorkspaceSidebarProps & { readonly open: boolean }) {
-  const dialogRef = useRef<HTMLDialogElement>(null);
+}: WorkspaceSidebarProps & {
+  readonly open: boolean;
+  readonly returnFocus: RefObject<HTMLButtonElement | null>;
+}) {
+  const [dialog, setDialog] = useState<HTMLDialogElement | null>(null);
 
   useEffect(() => {
-    const dialog = dialogRef.current;
     if (!dialog) return;
     if (open && !dialog.open) dialog.showModal();
     else if (!open && dialog.open) dialog.close();
-  }, [open]);
+  }, [open, dialog]);
 
   useEffect(() => {
     const desktop = window.matchMedia("(min-width: 48rem)");
@@ -31,9 +34,26 @@ export function MobileSidebar({
         event.preventDefault();
         sidebar.onClose();
       }}
-      ref={dialogRef}
+      ref={setDialog}
     >
-      <WorkspaceSidebar {...sidebar} />
+      {open && (
+        <WorkspaceSidebar
+          {...sidebar}
+          contextMenuContainer={dialog}
+          onEditWorkspace={
+            sidebar.onEditWorkspace
+              ? (workspaceId, origin) => {
+                  const edit = () =>
+                    sidebar.onEditWorkspace?.(workspaceId, returnFocus.current ?? origin);
+                  if (dialog?.open) {
+                    dialog.addEventListener("close", edit, { once: true });
+                    sidebar.onClose();
+                  } else edit();
+                }
+              : undefined
+          }
+        />
+      )}
     </dialog>
   );
 }
