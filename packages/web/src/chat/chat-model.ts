@@ -41,19 +41,6 @@ export type AssistantBlock =
       readonly text: string;
       readonly open: boolean;
       readonly phase: "streaming" | "complete" | "unknown";
-    }
-  | {
-      readonly kind: "code";
-      readonly id: string;
-      readonly languageLabel: string;
-      readonly code: string;
-    }
-  | {
-      readonly kind: "image";
-      readonly id: string;
-      readonly src: string;
-      readonly alt: string;
-      readonly caption: string;
     };
 
 export type AssistantState =
@@ -66,12 +53,10 @@ export type ToolState =
   | { readonly kind: "running"; readonly label: string }
   | { readonly kind: "succeeded"; readonly label: string }
   | { readonly kind: "failed"; readonly label: string }
-  | { readonly kind: "unknown"; readonly label: string }
-  | { readonly kind: "canceled"; readonly label: string };
+  | { readonly kind: "unknown"; readonly label: string };
 
 export interface ToolCallPresentation {
   readonly id: string;
-  readonly icon: "file" | "search" | "terminal" | "edit" | "network" | "generic";
   readonly label: string;
   readonly summary: string;
   readonly state: ToolState;
