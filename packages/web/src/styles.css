@@ -177,6 +177,15 @@ textarea:disabled {
   scrollbar-width: thin;
 }
 
+.composer:has(> .composer-input:focus-visible) {
+  outline: 2px solid var(--raw-focus);
+  outline-offset: -2px;
+}
+
+.composer:has(> .composer-input:focus-visible) > .composer-input {
+  outline: none;
+}
+
 .transcript-scroll {
   scrollbar-gutter: stable;
 }

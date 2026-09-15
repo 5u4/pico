@@ -38,7 +38,7 @@ export function Composer({ presentation, onValueChange, onSubmit, onStop }: Comp
 
   return (
     <form
-      className="rounded-surface border border-border-strong bg-panel shadow-composer"
+      className="composer rounded-surface border border-border-strong bg-panel shadow-composer"
       onSubmit={submit}
     >
       <label className="sr-only" htmlFor="chat-composer">
