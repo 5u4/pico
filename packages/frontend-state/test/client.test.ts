@@ -44,6 +44,7 @@ const webWorkspace: Workspace = {
   platform: "web",
   externalId: null,
   worktree: null,
+  modelOverride: null,
   createdAt: 1,
 };
 const message = { role: "user", content: [{ type: "text", text: "same" }], timestamp: 1 } as const;
@@ -112,6 +113,8 @@ const fixture = Effect.fnUntraced(function* (
     findChatByPlatformId: () => Effect.die("unexpected chat lookup"),
     findChatPlatformBinding: () => Effect.die("unexpected chat binding lookup"),
     contextUsage: () => Effect.die("unexpected context read"),
+    availableWorkspaceModels: () => Effect.die("unexpected workspace model discovery"),
+    setWorkspaceModel: () => Effect.die("unexpected workspace model update"),
     availableModels: () => Effect.die("unexpected model discovery"),
     switchModel: () => Effect.die("unexpected model switch"),
     shake: () => Effect.die("unexpected chat shake"),

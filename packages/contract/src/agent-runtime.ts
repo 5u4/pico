@@ -1,16 +1,19 @@
 import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
 import type * as Stream from "effect/Stream";
 import type { AgentEventEnvelope } from "./agent-event.ts";
 import type { AgentPrompt, AgentTranscript } from "./agent-message.ts";
 import type { ChatId } from "./chat-model.ts";
 import type { AgentError } from "./errors.ts";
+import type { AbsolutePath } from "./path.ts";
 import type { ScheduleRunId } from "./schedule.ts";
 
-export interface ModelRef {
-  readonly provider: string;
-  readonly id: string;
-}
+export const ModelRef = Schema.Struct({
+  provider: Schema.NonEmptyString,
+  id: Schema.NonEmptyString,
+});
+export type ModelRef = typeof ModelRef.Type;
 
 export interface ModelInfo extends ModelRef {
   readonly name: string;
@@ -108,7 +111,9 @@ export class AgentRuntime extends Context.Service<
     readonly contextUsage: (chatId: ChatId) => Effect.Effect<ContextUsage, AgentError>;
 
     /** Application calls this for model discovery without opening a session. */
-    readonly availableModels: (chatId: ChatId) => Effect.Effect<readonly ModelInfo[], AgentError>;
+    readonly availableModels: (
+      cwd: AbsolutePath,
+    ) => Effect.Effect<readonly ModelInfo[], AgentError>;
 
     /** Application calls this to switch one chat and report whether persistence was confirmed. */
     readonly switchModel: (

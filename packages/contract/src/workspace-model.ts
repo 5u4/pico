@@ -1,4 +1,5 @@
 import * as Schema from "effect/Schema";
+import { ModelRef } from "./agent-runtime.ts";
 import { AbsolutePath } from "./path.ts";
 
 export const WorkspaceId = Schema.String.check(Schema.isUUID(7)).pipe(
@@ -47,6 +48,7 @@ const workspaceFields = {
   id: WorkspaceId,
   name: Schema.NonEmptyString,
   ...WorkspaceConfiguration.fields,
+  modelOverride: Schema.NullOr(ModelRef),
   createdAt: Schema.Natural,
 };
 

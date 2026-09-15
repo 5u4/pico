@@ -1,6 +1,7 @@
 import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
 import type * as Option from "effect/Option";
+import type { ModelRef } from "./agent-runtime.ts";
 import type { PersistenceError } from "./errors.ts";
 import type {
   Workspace,
@@ -33,6 +34,12 @@ export class WorkspaceRepository extends Context.Service<
     readonly replaceConfiguration: (
       id: WorkspaceId,
       configuration: WorkspaceConfiguration,
+    ) => Effect.Effect<Workspace, PersistenceError>;
+
+    /** Application calls this when a workspace model override is selected or cleared. */
+    readonly setModelOverride: (
+      id: WorkspaceId,
+      model: ModelRef | null,
     ) => Effect.Effect<Workspace, PersistenceError>;
   }
 >()("@pico/contract/workspace/WorkspaceRepository") {}

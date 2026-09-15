@@ -169,6 +169,7 @@
         "@effect/platform-bun": "catalog:",
         "@effect/vitest": "catalog:",
         "@oh-my-pi/pi-agent-core": "catalog:",
+        "@pico/application": "workspace:*",
         "@pico/persistence": "workspace:*",
       },
     },

@@ -9,7 +9,7 @@ import {
   type ShakeMode,
   type ShakeResult,
 } from "@pico/contract/agent-runtime";
-import { AgentSessionStore, type CreateAgentSession } from "@pico/contract/agent-session-store";
+import { AgentSessionStore } from "@pico/contract/agent-session-store";
 import { Application } from "@pico/contract/application";
 import * as Chat from "@pico/contract/chat-model";
 import { ChatRepository } from "@pico/contract/chat-repository";
@@ -75,7 +75,6 @@ describe("Application", () => {
       const defaultCwd = AbsolutePath.make(path.join(temporaryDirectory, "workspace"));
       const worktreeCwd = AbsolutePath.make(path.join(temporaryDirectory, "worktree"));
       yield* fileSystem.makeDirectory(defaultCwd);
-      const createdSessions: Array<CreateAgentSession> = [];
       const createdWorktrees: Array<CreateWorktreeOptions> = [];
       const sentMessages: Array<{
         readonly chatId: string;
@@ -97,7 +96,6 @@ describe("Application", () => {
                 assert.isTrue(
                   Option.isNone(yield* chats.findById(input.chatId).pipe(Effect.orDie)),
                 );
-                createdSessions.push(input);
               }),
             remove: () => Effect.void,
           });
@@ -249,10 +247,6 @@ describe("Application", () => {
         assert.strictEqual(regularChat.cwd, defaultCwd);
         assert.strictEqual(regularChat.createdAt, 2_000);
         assert.strictEqual(regularChat.archivedAt, null);
-        assert.deepStrictEqual(createdSessions[0], {
-          chatId: regularChat.id,
-          cwd: defaultCwd,
-        });
 
         yield* TestClock.setTime(3_000);
         const worktreeWorkspace = yield* application.createWorkspace({
@@ -278,10 +272,6 @@ describe("Application", () => {
             settings: { branch: "main", prefix: "chat/" },
           },
         ]);
-        assert.deepStrictEqual(createdSessions[1], {
-          chatId: worktreeChat.id,
-          cwd: worktreeCwd,
-        });
 
         yield* TestClock.setTime(5_000);
         const discordWorkspace = yield* application.createWorkspace({

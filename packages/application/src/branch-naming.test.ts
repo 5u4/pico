@@ -42,6 +42,7 @@ describe("BranchNaming", () => {
             externalId: null,
             defaultCwd: directCwd,
             worktree: null,
+            modelOverride: null,
             createdAt: 1,
           },
         ],
@@ -54,6 +55,7 @@ describe("BranchNaming", () => {
             externalId: null,
             defaultCwd: directCwd,
             worktree: { branch: "main", prefix: "chat/" },
+            modelOverride: null,
             createdAt: 1,
           },
         ],
@@ -125,6 +127,7 @@ describe("BranchNaming", () => {
             findById: (id) => Effect.succeed(Option.fromUndefinedOr(workspaces.get(id))),
             findByBinding: () => Effect.die("unexpected workspace binding lookup"),
             replaceConfiguration: () => Effect.die("unexpected workspace replacement"),
+            setModelOverride: () => Effect.die("unexpected workspace model update"),
           }),
         ),
       );
@@ -206,6 +209,7 @@ describe("BranchNaming", () => {
         externalId: null,
         defaultCwd: AbsolutePath.make("/tmp/pico-repository"),
         worktree: { branch: "main", prefix: "chat/" },
+        modelOverride: null,
         createdAt: 1,
       };
       let chatReads = 0;
@@ -245,6 +249,7 @@ describe("BranchNaming", () => {
               }),
             findByBinding: () => Effect.die("unexpected workspace binding lookup"),
             replaceConfiguration: () => Effect.die("unexpected workspace replacement"),
+            setModelOverride: () => Effect.die("unexpected workspace model update"),
           }),
         ),
       );
@@ -356,6 +361,7 @@ describe("BranchNaming", () => {
         externalId: null,
         defaultCwd: AbsolutePath.make("/tmp/pico-repository"),
         worktree: { branch: "main", prefix: "chat/" },
+        modelOverride: null,
         createdAt: 1,
       };
       const repositoryFailureObserved = Promise.withResolvers<void>();
@@ -399,6 +405,7 @@ describe("BranchNaming", () => {
             findById: () => Effect.succeed(Option.some(workspace)),
             findByBinding: () => Effect.die("unexpected workspace binding lookup"),
             replaceConfiguration: () => Effect.die("unexpected workspace replacement"),
+            setModelOverride: () => Effect.die("unexpected workspace model update"),
           }),
         ),
       );

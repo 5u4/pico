@@ -76,6 +76,19 @@ export const applicationCommands = [
     ],
   },
   {
+    name: "set-workspace-model",
+    description: "Choose the model for new chats in this channel",
+    options: [
+      {
+        name: "model",
+        description: "Model for new chats, or Use OMP default",
+        type: ApplicationCommandOptionTypes.String,
+        required: true,
+        autocomplete: true,
+      },
+    ],
+  },
+  {
     name: "btw",
     description: "Ask a side question without changing this chat's conversation",
     options: [
@@ -134,11 +147,16 @@ export type SwitchCommand =
   | { readonly kind: "switch"; readonly model: string }
   | { readonly kind: "malformedSwitch" };
 
+export type WorkspaceModelCommand =
+  | { readonly kind: "setWorkspaceModel"; readonly model: string }
+  | { readonly kind: "malformedWorkspaceModel" };
+
 export type Command =
   | BindCommand
   | ShakeCommand
   | BtwCommand
   | SwitchCommand
+  | WorkspaceModelCommand
   | { readonly kind: "abort" }
   | { readonly kind: "context" }
   | { readonly kind: "close" };
@@ -154,8 +172,16 @@ export const parse = (
       return parseShake(options);
     case "btw":
       return parseBtw(options);
-    case "switch":
-      return parseSwitch(options);
+    case "switch": {
+      const model = parseModelSelection(options);
+      return model === undefined ? { kind: "malformedSwitch" } : { kind: "switch", model };
+    }
+    case "set-workspace-model": {
+      const model = parseModelSelection(options);
+      return model === undefined
+        ? { kind: "malformedWorkspaceModel" }
+        : { kind: "setWorkspaceModel", model };
+    }
     case "abort":
       return { kind: "abort" };
     case "context":
@@ -201,7 +227,7 @@ export const parseModelQuery = (options: ReadonlyArray<CommandOption> | undefine
   return model?.focused === true ? model.value : undefined;
 };
 
-const parseSwitch = (options: ReadonlyArray<CommandOption> | undefined): SwitchCommand => {
+const parseModelSelection = (options: ReadonlyArray<CommandOption> | undefined) => {
   const model = modelOption(options);
   if (
     model === undefined ||
@@ -209,9 +235,9 @@ const parseSwitch = (options: ReadonlyArray<CommandOption> | undefined): SwitchC
     model.value.trim().length === 0 ||
     model.value.length > 100
   ) {
-    return { kind: "malformedSwitch" };
+    return undefined;
   }
-  return { kind: "switch", model: model.value };
+  return model.value;
 };
 
 const parseBind = (options: ReadonlyArray<CommandOption> | undefined): BindCommand => {

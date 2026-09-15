@@ -3,12 +3,14 @@ import { assert, describe, it } from "@effect/vitest";
 import type {
   ContextUsage,
   MessageDelivery,
+  ModelInfo,
   ModelSwitchResult,
 } from "@pico/contract/agent-runtime";
 import { Application, type BindWorkspace } from "@pico/contract/application";
 import * as Chat from "@pico/contract/chat-model";
 import { ApplicationError, ChatClosed, WorkspaceBindingInvalid } from "@pico/contract/errors";
 import { AbsolutePath } from "@pico/contract/path";
+import type * as Workspace from "@pico/contract/workspace-model";
 import {
   ApplicationCommandOptionTypes,
   ButtonStyles,
@@ -58,6 +60,9 @@ const installThreadInput = Effect.fn("test.installThreadInput")(function* (optio
   readonly sendMessage?: Application["Service"]["sendMessage"];
   readonly closeChat?: Application["Service"]["closeChat"];
   readonly availableModels?: Application["Service"]["availableModels"];
+  readonly availableWorkspaceModels?: Application["Service"]["availableWorkspaceModels"];
+  readonly setWorkspaceModel?: Application["Service"]["setWorkspaceModel"];
+  readonly getOrCreateWorkspaceByBinding?: Application["Service"]["getOrCreateWorkspaceByBinding"];
   readonly switchModel?: Application["Service"]["switchModel"];
   readonly getChannel?: DiscordInputBot["helpers"]["getChannel"];
   readonly editChannel?: DiscordInputBot["helpers"]["editChannel"];
@@ -97,11 +102,17 @@ const installThreadInput = Effect.fn("test.installThreadInput")(function* (optio
     },
   };
   const application = Application.of({
+    availableWorkspaceModels:
+      options.availableWorkspaceModels ??
+      (() => Effect.die("unexpected workspace model discovery")),
+    setWorkspaceModel:
+      options.setWorkspaceModel ?? (() => Effect.die("unexpected workspace model update")),
     availableModels: options.availableModels ?? (() => Effect.die("unexpected model discovery")),
     switchModel: options.switchModel ?? (() => Effect.die("unexpected model switch")),
     listWorkspaces: () => Effect.die("unexpected workspace list"),
     createWorkspace: () => Effect.die("btw must not create a workspace"),
-    getOrCreateWorkspaceByBinding: () => Effect.succeed(boundWorkspace),
+    getOrCreateWorkspaceByBinding:
+      options.getOrCreateWorkspaceByBinding ?? (() => Effect.succeed(boundWorkspace)),
     bindWorkspace: () => Effect.die("btw must not bind a workspace"),
     listChats: () => Effect.die("unexpected chat list"),
     createChat: () => Effect.die("btw must not create a chat"),
@@ -136,6 +147,179 @@ const installThreadInput = Effect.fn("test.installThreadInput")(function* (optio
 });
 
 describe("discord interactions", () => {
+  it.effect(
+    "keeps workspace autocomplete read-only and rejects stale selections before clearing",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const longModel = {
+            provider: "native",
+            id: "long-model-".repeat(20),
+            name: "Long model",
+          };
+          const sentinelLikeModel = {
+            provider: "pico:omp-default",
+            id: "real-model",
+            name: "Real model",
+          };
+          let models: readonly ModelInfo[] = [
+            longModel,
+            sentinelLikeModel,
+            ...Array.from({ length: 30 }, (_, index) => ({
+              provider: "native",
+              id: `model-${index}`,
+              name: `Model ${index}`,
+            })),
+          ];
+          let workspace: Workspace.Workspace = boundWorkspace;
+          let creations = 0;
+          let writes = 0;
+          let catalogUnavailable = false;
+          const bot = yield* installThreadInput({
+            availableWorkspaceModels: () =>
+              catalogUnavailable
+                ? Effect.fail(
+                    new ApplicationError({ reason: "operation", message: "Catalog offline" }),
+                  )
+                : Effect.succeed(models),
+            getOrCreateWorkspaceByBinding: () =>
+              Effect.sync(() => {
+                creations += 1;
+                return workspace;
+              }),
+            setWorkspaceModel: (id, modelOverride) =>
+              Effect.sync(() => {
+                if (workspace.id !== id) throw new Error("Missing workspace");
+                writes += 1;
+                workspace = { ...workspace, modelOverride };
+                return workspace;
+              }),
+          });
+          const query = (value: string) =>
+            modelSuggestions(
+              bot,
+              interaction({
+                channelId: 10n,
+                data: { name: "set-workspace-model", options: modelOptions(value, true) },
+              }),
+            );
+          const select = (value: string) =>
+            privateCommandReply(
+              bot,
+              interaction({
+                channelId: 10n,
+                data: { name: "set-workspace-model", options: modelOptions(value) },
+              }),
+            );
+          const suggestions = yield* query("");
+          assert.strictEqual(suggestions.length, 25);
+          for (const choice of suggestions) {
+            assert.isAtMost(choice.name.length, 100);
+            assert.isAtMost(String(choice.value).length, 100);
+          }
+          const inherited = suggestions.find(({ name }) => name === "Use OMP default");
+          const selected = (yield* query("LONG-MODEL"))[0];
+          if (inherited === undefined || selected === undefined) {
+            return yield* Effect.die("Missing workspace model choices");
+          }
+          assert.deepStrictEqual(yield* query(" OMP DEFAULT "), [inherited]);
+          assert.deepStrictEqual(yield* query("no-match"), []);
+          assert.strictEqual(creations, 0);
+          assert.strictEqual(writes, 0);
+          assert.match(String(selected.value), /^sha256:/);
+          const reply = yield* select(String(selected.value));
+          assert.match(reply, /Only new chats/i);
+          assert.include(reply, "native/long-model-");
+          assert.strictEqual(creations, 1);
+          assert.deepStrictEqual(workspace.modelOverride, {
+            provider: longModel.provider,
+            id: longModel.id,
+          });
+          models = [sentinelLikeModel];
+          const beforeInvalid = workspace;
+          assert.match(yield* select(String(selected.value)), /unavailable/i);
+          assert.strictEqual(workspace, beforeInvalid);
+          assert.strictEqual(writes, 1);
+          const sentinelLikeChoice = (yield* query("real-model"))[0];
+          if (sentinelLikeChoice === undefined)
+            return yield* Effect.die("Missing real model choice");
+          assert.notStrictEqual(sentinelLikeChoice.value, inherited.value);
+          yield* select(String(sentinelLikeChoice.value));
+          assert.deepStrictEqual(workspace.modelOverride, {
+            provider: sentinelLikeModel.provider,
+            id: sentinelLikeModel.id,
+          });
+          catalogUnavailable = true;
+          const cleared = yield* select(String(inherited.value));
+          assert.match(cleared, /inherit the OMP default/i);
+          assert.match(cleared, /Only new chats/i);
+          assert.isNull(workspace.modelOverride);
+        }),
+      ),
+  );
+
+  it.effect("rejects workspace model commands outside configured ordinary text channels", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        let mutations = 0;
+        let catalogReads = 0;
+        const channelTypes = new Map([
+          [20n, ChannelTypes.PublicThread],
+          [21n, ChannelTypes.PrivateThread],
+          [22n, ChannelTypes.AnnouncementThread],
+          [23n, ChannelTypes.GuildAnnouncement],
+          [24n, ChannelTypes.GuildForum],
+          [25n, ChannelTypes.DM],
+        ]);
+        const bot = yield* installThreadInput({
+          getChannel: async (id) => ({
+            id,
+            guildId: id === 26n ? 2n : 1n,
+            type: channelTypes.get(id) ?? ChannelTypes.GuildText,
+            parentId: 10n,
+          }),
+          availableWorkspaceModels: () =>
+            Effect.sync(() => {
+              catalogReads += 1;
+              return [];
+            }),
+          getOrCreateWorkspaceByBinding: () =>
+            Effect.sync(() => {
+              mutations += 1;
+              return boundWorkspace;
+            }),
+          setWorkspaceModel: () =>
+            Effect.sync(() => {
+              mutations += 1;
+              return boundWorkspace;
+            }),
+        });
+        const guildless = interaction({ channelId: 10n });
+        Reflect.deleteProperty(guildless, "guildId");
+        for (const target of [
+          guildless,
+          interaction({ guildId: 2n, channelId: 10n }),
+          ...[20n, 21n, 22n, 23n, 24n, 25n, 26n].map((channelId) => interaction({ channelId })),
+        ]) {
+          assert.deepStrictEqual(
+            yield* modelSuggestions(bot, {
+              ...target,
+              data: { name: "set-workspace-model", options: modelOptions("", true) },
+            }),
+            [],
+          );
+          const reply = yield* privateCommandReply(bot, {
+            ...target,
+            data: { name: "set-workspace-model", options: modelOptions("native/model") },
+          });
+          assert.match(reply, /configured server text channel/i);
+        }
+        assert.strictEqual(catalogReads, 0);
+        assert.strictEqual(mutations, 0);
+      }),
+    ),
+  );
+
   it.effect("ignores guild-less commands and autocomplete before resolving a conversation", () =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -864,6 +1048,8 @@ describe("discord interactions", () => {
           },
         } satisfies DiscordInputBot;
         const application = Application.of({
+          availableWorkspaceModels: () => Effect.die("unexpected workspace model discovery"),
+          setWorkspaceModel: () => Effect.die("unexpected workspace model update"),
           availableModels: () => Effect.die("unexpected model discovery"),
           switchModel: () => Effect.die("unexpected model switch"),
           askBtw: () => Effect.die("unexpected side question"),
@@ -884,6 +1070,7 @@ describe("discord interactions", () => {
                 ...input.binding,
                 defaultCwd: AbsolutePath.make(input.configuration.cwd),
                 worktree: null,
+                modelOverride: null,
                 createdAt: 0,
               });
             }
@@ -910,6 +1097,7 @@ describe("discord interactions", () => {
               ...input.binding,
               defaultCwd: AbsolutePath.make(input.configuration.repository),
               worktree: input.configuration.settings,
+              modelOverride: null,
               createdAt: 0,
             });
           },
@@ -1084,6 +1272,8 @@ describe("discord interactions", () => {
         };
         const failedChat = { ...chat, id: failingChatId, externalId: "22" };
         const application = Application.of({
+          availableWorkspaceModels: () => Effect.die("unexpected workspace model discovery"),
+          setWorkspaceModel: () => Effect.die("unexpected workspace model update"),
           availableModels: () => Effect.die("unexpected model discovery"),
           switchModel: () => Effect.die("unexpected model switch"),
           askBtw: () => Effect.die("unexpected side question"),
@@ -1273,6 +1463,8 @@ describe("discord interactions", () => {
           archivedAt: null,
         });
         const application = Application.of({
+          availableWorkspaceModels: () => Effect.die("unexpected workspace model discovery"),
+          setWorkspaceModel: () => Effect.die("unexpected workspace model update"),
           availableModels: () => Effect.die("unexpected model discovery"),
           switchModel: () => Effect.die("unexpected model switch"),
           askBtw: () => Effect.die("unexpected side question"),
@@ -1419,6 +1611,8 @@ describe("discord interactions", () => {
           },
         } satisfies DiscordInputBot;
         const application = Application.of({
+          availableWorkspaceModels: () => Effect.die("unexpected workspace model discovery"),
+          setWorkspaceModel: () => Effect.die("unexpected workspace model update"),
           availableModels: () => Effect.die("unexpected model discovery"),
           switchModel: () => Effect.die("unexpected model switch"),
           askBtw: () => Effect.die("unexpected side question"),
@@ -1576,6 +1770,8 @@ describe("discord interactions", () => {
           archivedAt: null,
         };
         const application = Application.of({
+          availableWorkspaceModels: () => Effect.die("unexpected workspace model discovery"),
+          setWorkspaceModel: () => Effect.die("unexpected workspace model update"),
           availableModels: () => Effect.die("unexpected model discovery"),
           switchModel: () => Effect.die("unexpected model switch"),
           askBtw: () => Effect.die("unexpected side question"),

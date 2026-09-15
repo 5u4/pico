@@ -24,6 +24,7 @@ export const boundWorkspace: Workspace.Workspace = {
   externalId: "1.10",
   defaultCwd,
   worktree: null,
+  modelOverride: null,
   createdAt: 0,
 };
 

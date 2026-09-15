@@ -1,3 +1,4 @@
+import { ModelRef } from "@pico/contract/agent-runtime";
 import { PersistenceError } from "@pico/contract/errors";
 import * as Workspace from "@pico/contract/workspace-model";
 import { WorkspaceRepository } from "@pico/contract/workspace-repository";
@@ -14,14 +15,20 @@ const worktreeColumns = {
   worktreeBranch: Schema.NullOr(Workspace.WorktreeSettings.fields.branch),
   worktreePrefix: Schema.NullOr(Workspace.WorktreeSettings.fields.prefix),
 };
+const modelColumns = {
+  modelProvider: Schema.NullOr(ModelRef.fields.provider),
+  modelId: Schema.NullOr(ModelRef.fields.id),
+};
 const WorkspaceRow = Workspace.Workspace.mapMembers(([native, foreign]) => [
   native.mapFields((fields) => ({
-    ...Struct.omit(fields, ["worktree"]),
+    ...Struct.omit(fields, ["worktree", "modelOverride"]),
     ...worktreeColumns,
+    ...modelColumns,
   })),
   foreign.mapFields((fields) => ({
-    ...Struct.omit(fields, ["worktree"]),
+    ...Struct.omit(fields, ["worktree", "modelOverride"]),
     ...worktreeColumns,
+    ...modelColumns,
   })),
 ]);
 type WorkspaceRow = typeof WorkspaceRow.Type;
@@ -33,10 +40,15 @@ const ReplaceConfiguration = Schema.Struct({
   configuration: Workspace.WorkspaceConfiguration,
 });
 
+const SetModelOverride = Schema.Struct({
+  id: Workspace.WorkspaceId,
+  model: Schema.NullOr(ModelRef),
+});
+
 const decodeWorkspace = Effect.fn("WorkspaceRepository.decodeWorkspace")(function* (
   row: WorkspaceRow,
 ) {
-  const { worktreeBranch, worktreePrefix, ...workspace } = row;
+  const { worktreeBranch, worktreePrefix, modelProvider, modelId, ...workspace } = row;
   let worktree: Workspace.WorktreeSettings | null;
   if (worktreeBranch === null && worktreePrefix === null) {
     worktree = null;
@@ -48,7 +60,18 @@ const decodeWorkspace = Effect.fn("WorkspaceRepository.decodeWorkspace")(functio
     );
   }
 
-  return { ...workspace, worktree };
+  let modelOverride: ModelRef | null;
+  if (modelProvider === null && modelId === null) {
+    modelOverride = null;
+  } else if (modelProvider !== null && modelId !== null) {
+    modelOverride = { provider: modelProvider, id: modelId };
+  } else {
+    return yield* Effect.fail(
+      new PersistenceError({ message: "invalid stored workspace model column pair" }),
+    );
+  }
+
+  return { ...workspace, worktree, modelOverride };
 });
 
 const make = Effect.fn("WorkspaceRepository.make")(function* () {
@@ -66,6 +89,8 @@ const make = Effect.fn("WorkspaceRepository.make")(function* () {
         default_cwd AS "defaultCwd",
         worktree_branch AS "worktreeBranch",
         worktree_prefix AS "worktreePrefix",
+        model_provider AS "modelProvider",
+        model_id AS "modelId",
         created_at AS "createdAt"
       FROM workspaces
       ORDER BY created_at DESC, id DESC
@@ -84,6 +109,8 @@ const make = Effect.fn("WorkspaceRepository.make")(function* () {
         default_cwd,
         worktree_branch,
         worktree_prefix,
+        model_provider,
+        model_id,
         created_at
       ) VALUES (
         ${workspace.id},
@@ -93,6 +120,8 @@ const make = Effect.fn("WorkspaceRepository.make")(function* () {
         ${workspace.defaultCwd},
         ${workspace.worktree?.branch ?? null},
         ${workspace.worktree?.prefix ?? null},
+        ${workspace.modelOverride?.provider ?? null},
+        ${workspace.modelOverride?.id ?? null},
         ${workspace.createdAt}
       )
       RETURNING
@@ -103,6 +132,8 @@ const make = Effect.fn("WorkspaceRepository.make")(function* () {
         default_cwd AS "defaultCwd",
         worktree_branch AS "worktreeBranch",
         worktree_prefix AS "worktreePrefix",
+        model_provider AS "modelProvider",
+        model_id AS "modelId",
         created_at AS "createdAt"
     `,
   });
@@ -118,6 +149,8 @@ const make = Effect.fn("WorkspaceRepository.make")(function* () {
         default_cwd,
         worktree_branch,
         worktree_prefix,
+        model_provider,
+        model_id,
         created_at
       ) VALUES (
         ${workspace.id},
@@ -127,6 +160,8 @@ const make = Effect.fn("WorkspaceRepository.make")(function* () {
         ${workspace.defaultCwd},
         ${workspace.worktree?.branch ?? null},
         ${workspace.worktree?.prefix ?? null},
+        ${workspace.modelOverride?.provider ?? null},
+        ${workspace.modelOverride?.id ?? null},
         ${workspace.createdAt}
       )
       ON CONFLICT(platform, external_id) DO NOTHING
@@ -145,6 +180,8 @@ const make = Effect.fn("WorkspaceRepository.make")(function* () {
         default_cwd AS "defaultCwd",
         worktree_branch AS "worktreeBranch",
         worktree_prefix AS "worktreePrefix",
+        model_provider AS "modelProvider",
+        model_id AS "modelId",
         created_at AS "createdAt"
       FROM workspaces
       WHERE id = ${id}
@@ -163,6 +200,8 @@ const make = Effect.fn("WorkspaceRepository.make")(function* () {
         default_cwd AS "defaultCwd",
         worktree_branch AS "worktreeBranch",
         worktree_prefix AS "worktreePrefix",
+        model_provider AS "modelProvider",
+        model_id AS "modelId",
         created_at AS "createdAt"
       FROM workspaces
       WHERE platform = ${platform} AND external_id = ${externalId}
@@ -189,6 +228,29 @@ const make = Effect.fn("WorkspaceRepository.make")(function* () {
         default_cwd AS "defaultCwd",
         worktree_branch AS "worktreeBranch",
         worktree_prefix AS "worktreePrefix",
+        model_provider AS "modelProvider",
+        model_id AS "modelId",
+        created_at AS "createdAt"
+    `,
+  });
+
+  const setStoredModelOverride = SqlSchema.findOne({
+    Request: SetModelOverride,
+    Result: WorkspaceRow,
+    execute: ({ id, model }) => sql`
+      UPDATE workspaces
+      SET model_provider = ${model?.provider ?? null}, model_id = ${model?.id ?? null}
+      WHERE id = ${id}
+      RETURNING
+        id,
+        name,
+        platform,
+        external_id AS "externalId",
+        default_cwd AS "defaultCwd",
+        worktree_branch AS "worktreeBranch",
+        worktree_prefix AS "worktreePrefix",
+        model_provider AS "modelProvider",
+        model_id AS "modelId",
         created_at AS "createdAt"
     `,
   });
@@ -246,6 +308,13 @@ const make = Effect.fn("WorkspaceRepository.make")(function* () {
     Effect.mapError(failure("workspace.replaceConfiguration")),
   );
 
+  const setModelOverride = Effect.fn("WorkspaceRepository.setModelOverride")(
+    function* (id: Workspace.WorkspaceId, model: ModelRef | null) {
+      return yield* decodeWorkspace(yield* setStoredModelOverride({ id, model }));
+    },
+    Effect.mapError(failure("workspace.setModelOverride")),
+  );
+
   return WorkspaceRepository.of({
     list,
     create,
@@ -253,6 +322,7 @@ const make = Effect.fn("WorkspaceRepository.make")(function* () {
     findById,
     findByBinding,
     replaceConfiguration,
+    setModelOverride,
   });
 });
 

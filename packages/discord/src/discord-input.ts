@@ -185,7 +185,7 @@ export const install = Effect.fn("DiscordInput.install")(function* <
       knownThread: boolean;
     }
   >();
-  const bindLocks = new Map<bigint, Semaphore.Semaphore>();
+  const workspaceLocks = new Map<bigint, Semaphore.Semaphore>();
   const closeConfirmations = new Map<string, CloseConfirmation>();
   const allowedMentions = { parse: [], repliedUser: false } satisfies {
     parse: [];
@@ -368,6 +368,25 @@ export const install = Effect.fn("DiscordInput.install")(function* <
   );
 
   // Effect.fn restores Context on return, so request helpers must stay in the terminal log scope.
+  const resolveCommandChannel = Effect.fnUntraced(function* (interaction: Interaction) {
+    const guildId = interaction.guildId;
+    const channelId = interaction.channelId;
+    if (
+      guildId === undefined ||
+      channelId === undefined ||
+      !allowedGuildIds.has(guildId.toString())
+    ) {
+      return Option.none();
+    }
+    yield* Effect.annotateLogsScoped({ phase: "resolve-interaction-channel" });
+    const channel = yield* promiseBoundary("resolve-interaction-channel", () =>
+      bot.helpers.getChannel(channelId),
+    );
+    return channel.guildId === guildId && channel.type === ChannelTypes.GuildText
+      ? Option.some({ guildId, channel })
+      : Option.none();
+  });
+
   const resolveCommandThread = Effect.fnUntraced(function* (interaction: Interaction) {
     const guildId = interaction.guildId;
     const channelId = interaction.channelId;
@@ -426,6 +445,16 @@ export const install = Effect.fn("DiscordInput.install")(function* <
     const request = yield* Effect.gen(function* () {
       const query = DiscordCommand.parseModelQuery(interaction.data?.options);
       if (query === undefined) return [];
+      if (interaction.data?.name === "set-workspace-model") {
+        const target = yield* resolveCommandChannel(interaction);
+        if (Option.isNone(target)) return [];
+        const { guildId, channel } = target.value;
+        const models = yield* application.availableWorkspaceModels({
+          binding: { platform: "discord", externalId: workspaceExternalId(guildId, channel.id) },
+          defaultCwd: config.defaultCwd,
+        });
+        return yield* DiscordModel.choices(crypto, models, query, { includeOmpDefault: true });
+      }
       const chatId = yield* resolveModelChatId(interaction);
       if (Option.isNone(chatId)) return [];
       const models = yield* application.availableModels(chatId.value);
@@ -664,23 +693,11 @@ export const install = Effect.fn("DiscordInput.install")(function* <
     interaction: Interaction,
     command: DiscordCommand.BindCommand,
   ) {
-    const guildId = interaction.guildId;
-    const channelId = interaction.channelId;
-    if (
-      guildId === undefined ||
-      channelId === undefined ||
-      !allowedGuildIds.has(guildId.toString())
-    ) {
+    const target = yield* resolveCommandChannel(interaction);
+    if (Option.isNone(target)) {
       return "This command can only be used in a configured server text channel.";
     }
-
-    yield* Effect.annotateLogsScoped({ phase: "resolve-interaction-channel" });
-    const channel = yield* promiseBoundary("resolve-interaction-channel", () =>
-      bot.helpers.getChannel(channelId),
-    );
-    if (channel.guildId !== guildId || channel.type !== ChannelTypes.GuildText) {
-      return "This command can only be used in a configured server text channel.";
-    }
+    const { guildId, channel } = target.value;
 
     yield* Effect.annotateLogsScoped({ phase: "bind-workspace" });
     switch (command.kind) {
@@ -721,6 +738,36 @@ export const install = Effect.fn("DiscordInput.install")(function* <
         return exhaustive;
       }
     }
+  });
+
+  const workspaceModelResponse = Effect.fnUntraced(function* (
+    interaction: Interaction,
+    command: DiscordCommand.WorkspaceModelCommand,
+  ) {
+    const target = yield* resolveCommandChannel(interaction);
+    if (Option.isNone(target)) {
+      return "This command can only be used in a configured server text channel.";
+    }
+    if (command.kind === "malformedWorkspaceModel") {
+      return "Choose a model from the /set-workspace-model suggestions.";
+    }
+    const { guildId, channel } = target.value;
+    const workspaceId = yield* resolveWorkspace(channel.id, guildId, channel.name);
+    yield* Effect.annotateLogsScoped({ phase: "set-workspace-model", workspaceId });
+    if (command.model === DiscordModel.ompDefault.value) {
+      yield* application.setWorkspaceModel(workspaceId, null);
+      return "New chats will inherit the OMP default model. Only new chats are affected.";
+    }
+    const models = yield* application.availableWorkspaceModels({
+      binding: { platform: "discord", externalId: workspaceExternalId(guildId, channel.id) },
+      defaultCwd: config.defaultCwd,
+    });
+    const model = yield* DiscordModel.resolve(crypto, models, command.model);
+    if (model === undefined) {
+      return "That model is unavailable. Choose a model from the suggestions.";
+    }
+    yield* application.setWorkspaceModel(workspaceId, { provider: model.provider, id: model.id });
+    return `Workspace model set to ${DiscordModel.label(model)}. Only new chats are affected.`;
   });
 
   const formatShakeResult = (result: ShakeResult) => {
@@ -1065,6 +1112,15 @@ export const install = Effect.fn("DiscordInput.install")(function* <
               ),
             ),
           );
+        case "setWorkspaceModel":
+        case "malformedWorkspaceModel":
+          return workspaceModelResponse(interaction, command).pipe(
+            Effect.catchCause((cause) =>
+              reportFailure("set-workspace-model", cause).pipe(
+                Effect.as("pico could not update this workspace's model. Please try again."),
+              ),
+            ),
+          );
         case "shake":
         case "malformedShake":
           return shakeResponse(interaction, command).pipe(
@@ -1172,7 +1228,8 @@ export const install = Effect.fn("DiscordInput.install")(function* <
   };
 
   bot.events.interactionCreate = (interaction) => {
-    if (interaction.guildId === undefined) return;
+    if (interaction.guildId === undefined && interaction.data?.name !== "set-workspace-model")
+      return;
     const customId = interaction.data?.customId;
     const closeNonce =
       interaction.type === InteractionTypes.MessageComponent &&
@@ -1180,14 +1237,17 @@ export const install = Effect.fn("DiscordInput.install")(function* <
         ? customId.slice(closeConfirmationPrefix.length)
         : undefined;
     const name = interaction.data?.name;
-    if (interaction.type === InteractionTypes.ApplicationCommandAutocomplete && name === "switch") {
+    if (
+      interaction.type === InteractionTypes.ApplicationCommandAutocomplete &&
+      (name === "switch" || name === "set-workspace-model")
+    ) {
       run(
         Effect.scoped(autocompleteModels(interaction)).pipe(
           Effect.catchCause((cause) => reportFailure("autocomplete-models", cause)),
           Effect.annotateLogs({
             component: "discord",
             eventType: "interactionCreate",
-            command: "switch",
+            command: name,
             interactionId: interaction.id?.toString(),
             guildId: interaction.guildId?.toString(),
             channelId: interaction.channelId?.toString(),
@@ -1255,11 +1315,11 @@ export const install = Effect.fn("DiscordInput.install")(function* <
           yield* effect;
           return;
         }
-        if (closeNonce === undefined && name === "bind") {
-          let semaphore = bindLocks.get(channelId);
+        if (closeNonce === undefined && (name === "bind" || name === "set-workspace-model")) {
+          let semaphore = workspaceLocks.get(channelId);
           if (semaphore === undefined) {
             semaphore = Semaphore.makeUnsafe(1);
-            bindLocks.set(channelId, semaphore);
+            workspaceLocks.set(channelId, semaphore);
           }
           yield* semaphore.withPermit(effect);
           return;

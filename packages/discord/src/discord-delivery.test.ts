@@ -71,6 +71,8 @@ const installInput = Effect.fn("test.installDeliveryInput")(function* (options: 
     },
   };
   const application = Application.of({
+    availableWorkspaceModels: () => Effect.die("unexpected workspace model discovery"),
+    setWorkspaceModel: () => Effect.die("unexpected workspace model update"),
     availableModels: () => Effect.die("unexpected model discovery"),
     switchModel: () => Effect.die("unexpected model switch"),
     askBtw: () => Effect.die("unexpected side question"),
@@ -84,6 +86,7 @@ const installInput = Effect.fn("test.installDeliveryInput")(function* (options: 
         externalId: "1.10",
         defaultCwd: cwd,
         worktree: null,
+        modelOverride: null,
         createdAt: 0,
       }),
     bindWorkspace: () => Effect.die("unexpected workspace binding"),
