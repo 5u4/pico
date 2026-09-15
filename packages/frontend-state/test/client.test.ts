@@ -70,7 +70,7 @@ const fixture = Effect.fnUntraced(function* (
     Partial<
       Pick<
         Application["Service"],
-        "listWorkspaces" | "listChats" | "createWorkspace" | "createChat"
+        "listWorkspaces" | "listChats" | "createWorkspace" | "updateWorkspace" | "createChat"
       >
     >,
 ) {
@@ -106,6 +106,7 @@ const fixture = Effect.fnUntraced(function* (
     listChats: () => Effect.die("unexpected chat list"),
     askBtw: () => Effect.die("unexpected side question"),
     createWorkspace: () => Effect.die("unexpected workspace creation"),
+    updateWorkspace: () => Effect.die("unexpected workspace update"),
     getOrCreateWorkspaceByBinding: () => Effect.die("unexpected workspace creation"),
     bindWorkspace: () => Effect.die("unexpected workspace binding"),
     createChat: () => Effect.die("unexpected chat creation"),
@@ -250,6 +251,56 @@ describe("frontend state over WebSocket", () => {
           assert.strictEqual(reads, 2);
         }).pipe(Effect.scoped, Effect.provide(server.layer));
       }),
+  );
+
+  it.live("keeps saved workspace settings visible while the list refresh waits or fails", () =>
+    Effect.gen(function* () {
+      const refreshed = yield* Deferred.make<readonly Workspace[], ApplicationError>();
+      const saved = { ...webWorkspace, worktree: { branch: "main", prefix: "pico/" } };
+      let reads = 0;
+      const server = yield* fixture({
+        transcript: () => Effect.succeed([]),
+        sendMessage: () => Effect.succeed({ kind: "handled" }),
+        abort: () => Effect.void,
+        listWorkspaces: () =>
+          Effect.suspend(() =>
+            ++reads === 1 ? Effect.succeed([webWorkspace]) : Deferred.await(refreshed),
+          ),
+        updateWorkspace: () => Effect.succeed(saved),
+      });
+      yield* Effect.gen(function* () {
+        const state = make({ url: yield* endpoint });
+        const registry = yield* registryInScope;
+        registry.mount(state.workspaces);
+        yield* AtomRegistry.getResult(registry, state.workspaces);
+        registry.set(state.updateWorkspace, {
+          workspaceId: webWorkspace.id,
+          configuration: {
+            kind: "worktree",
+            repository: webWorkspace.defaultCwd,
+            settings: saved.worktree,
+          },
+        });
+        yield* AtomRegistry.getResult(registry, state.updateWorkspace, { suspendOnWaiting: true });
+        assert.deepStrictEqual(
+          Option.getOrThrow(AsyncResult.value(registry.get(state.workspaces))),
+          [saved],
+        );
+        yield* Deferred.fail(
+          refreshed,
+          new ApplicationError({ reason: "operation", message: "Read failed" }),
+        );
+        yield* waitFor(
+          registry,
+          state.workspaces,
+          (value) => value._tag === "Failure" && !value.waiting,
+        );
+        assert.deepStrictEqual(
+          Option.getOrThrow(AsyncResult.value(registry.get(state.workspaces))),
+          [saved],
+        );
+      }).pipe(Effect.scoped, Effect.provide(server.layer));
+    }),
   );
   it.live("retains workspace lists through refresh failures and fences superseded reads", () =>
     Effect.gen(function* () {

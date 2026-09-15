@@ -2,6 +2,7 @@ export interface WorkspaceSummary {
   readonly id: string;
   readonly name: string;
   readonly contextLabel: string;
+  readonly canEditConfiguration?: boolean | undefined;
 }
 
 export interface ChatSummary {

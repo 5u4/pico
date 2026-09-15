@@ -7,9 +7,14 @@ import { Composer } from "./composer.tsx";
 import { MobileSidebar } from "./mobile-sidebar.tsx";
 import { Transcript } from "./transcript.tsx";
 import { WorkspaceDialog, type WorkspaceFormProps } from "./workspace-dialog.tsx";
+import {
+  WorkspaceSettingsDialog,
+  type WorkspaceSettingsProps,
+} from "./workspace-settings-dialog.tsx";
 import { WorkspaceSidebar, type WorkspaceSidebarProps } from "./workspace-sidebar.tsx";
 
-export interface ChatScreenProps extends Omit<WorkspaceSidebarProps, "onClose" | "onAddWorkspace"> {
+export interface ChatScreenProps
+  extends Omit<WorkspaceSidebarProps, "onClose" | "onAddWorkspace" | "contextMenuContainer"> {
   readonly conversationKey: string | null;
   readonly title: string;
   readonly contextLabel: string;
@@ -18,6 +23,7 @@ export interface ChatScreenProps extends Omit<WorkspaceSidebarProps, "onClose" |
   readonly sidebarOpen: boolean;
   readonly theme: Theme;
   readonly workspaceForm: WorkspaceFormProps;
+  readonly workspaceSettings?: WorkspaceSettingsProps | undefined;
   readonly onSidebarOpenChange: (open: boolean) => void;
   readonly onComposerValueChange: (value: string) => void;
   readonly onComposerSubmit: () => void;
@@ -37,6 +43,9 @@ export function ChatScreen({
   sidebarOpen,
   theme,
   workspaceForm,
+  workspaceSettings,
+  onEditWorkspace,
+  workspaceEditPending,
   onSidebarOpenChange,
   onWorkspaceToggle,
   onWorkspaceRetry,
@@ -53,6 +62,7 @@ export function ChatScreen({
   const transcriptRef = useRef<HTMLDivElement>(null);
   const scroll = useRef({ key: conversationKey, following: true });
   const [showJump, setShowJump] = useState(false);
+  const sidebarOpener = useRef<HTMLButtonElement>(null);
 
   useLayoutEffect(() => {
     const element = transcriptRef.current;
@@ -78,6 +88,8 @@ export function ChatScreen({
     onWorkspaceToggle,
     onWorkspaceRetry,
     onChatsRetry,
+    onEditWorkspace,
+    workspaceEditPending,
     onChatSelect: (workspaceId, chatId) => {
       onChatSelect(workspaceId, chatId);
       closeSidebar();
@@ -105,14 +117,17 @@ export function ChatScreen({
       <div className="hidden min-h-0 md:block">
         <WorkspaceSidebar {...sidebar} />
       </div>
-      <MobileSidebar {...sidebar} open={sidebarOpen} />
+      <MobileSidebar {...sidebar} open={sidebarOpen} returnFocus={sidebarOpener} />
 
       <main className="flex min-h-0 min-w-0 flex-col">
         <header className="flex min-h-14 shrink-0 items-center gap-3 border-b border-border bg-canvas px-4 py-2 md:px-6">
           <Button
             aria-label="Open sidebar"
             className="md:hidden"
-            onClick={() => onSidebarOpenChange(true)}
+            onClick={(event) => {
+              sidebarOpener.current = event.currentTarget;
+              onSidebarOpenChange(true);
+            }}
             size="icon"
             tone="ghost"
           >
@@ -199,6 +214,13 @@ export function ChatScreen({
         </div>
       </main>
       <WorkspaceDialog {...workspaceForm} />
+      {workspaceSettings?.editor.kind === "open" && (
+        <WorkspaceSettingsDialog
+          {...workspaceSettings}
+          editor={workspaceSettings.editor}
+          key={workspaceSettings.editor.session}
+        />
+      )}
     </div>
   );
 }

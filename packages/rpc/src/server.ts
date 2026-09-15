@@ -60,6 +60,17 @@ const handlers = PicoRpcs.toLayer(
             requestId: String(requestId),
           }),
         ),
+      UpdateWorkspace: (input, { requestId }) =>
+        requireWebWorkspace(workspaces, input.workspaceId).pipe(
+          Effect.andThen(() => application.updateWorkspace(input)),
+          Effect.tapCause(reportFailure),
+          Effect.annotateLogs({
+            component: "rpc",
+            procedure: "UpdateWorkspace",
+            workspaceId: input.workspaceId,
+            requestId: String(requestId),
+          }),
+        ),
       CreateChat: (input, { requestId }) =>
         requireWebWorkspace(workspaces, input.workspaceId).pipe(
           Effect.andThen(() => application.createChat(input)),
