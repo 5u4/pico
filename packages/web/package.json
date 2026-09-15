@@ -15,6 +15,7 @@
     "@phosphor-icons/react": "catalog:",
     "@pico/contract": "workspace:*",
     "@pico/frontend-state": "workspace:*",
+    "@radix-ui/react-context-menu": "catalog:",
     "@tailwindcss/vite": "catalog:",
     "@vitejs/plugin-react": "catalog:",
     "effect": "catalog:",

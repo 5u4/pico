@@ -1,5 +1,5 @@
 import { AgentPrompt, type AgentTranscript } from "@pico/contract/agent-message";
-import type { CreateChat, CreateWorkspace } from "@pico/contract/application";
+import type { CreateChat, CreateWorkspace, UpdateWorkspace } from "@pico/contract/application";
 import type { Chat, ChatId } from "@pico/contract/chat-model";
 import type { ApplicationError } from "@pico/contract/errors";
 import type { Workspace, WorkspaceId } from "@pico/contract/workspace-model";
@@ -157,11 +157,13 @@ export const make = ({ url }: { readonly url: string }) => {
         Effect.asVoid,
       );
     }).pipe(Atom.keepAlive, Atom.setLazy(false));
-    return Atom.readable(
+    return Atom.writable(
       (get) => {
         if (!get.registry.getNodes().has(read)) get.once(read);
         return get(result);
       },
+      (context, update: (value: A) => A) =>
+        context.set(result, AsyncResult.map(context.get(result), update)),
       (refresh) => refresh(read),
     ).pipe(Atom.keepAlive);
   };
@@ -176,6 +178,20 @@ export const make = ({ url }: { readonly url: string }) => {
       yield* session.available;
       const workspace = yield* session.client.CreateWorkspace(input);
       session.recordResponse();
+      get.registry.refresh(workspaces);
+      return workspace;
+    }),
+  ).pipe(Atom.keepAlive, Atom.setLazy(false));
+  /** Web clients call this when saving workspace settings. */
+  const updateWorkspace = Atom.fn<UpdateWorkspace>()((input, get) =>
+    Effect.gen(function* () {
+      const session = yield* get.result(owner);
+      yield* session.available;
+      const workspace = yield* session.client.UpdateWorkspace(input);
+      session.recordResponse();
+      get.set(workspaces, (current) =>
+        current.map((existing) => (existing.id === workspace.id ? workspace : existing)),
+      );
       get.registry.refresh(workspaces);
       return workspace;
     }),
@@ -344,6 +360,7 @@ export const make = ({ url }: { readonly url: string }) => {
     workspaces,
     chats,
     createWorkspace,
+    updateWorkspace,
     createChat,
     transcript,
     live,

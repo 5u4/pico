@@ -72,6 +72,7 @@ const installInput = Effect.fn("test.installDeliveryInput")(function* (options: 
     },
   };
   const application = Application.of({
+    updateWorkspace: () => Effect.die("unexpected workspace update"),
     availableWorkspaceModels: () => Effect.die("unexpected workspace model discovery"),
     setWorkspaceModel: () => Effect.die("unexpected workspace model update"),
     availableModels: () => Effect.die("unexpected model discovery"),

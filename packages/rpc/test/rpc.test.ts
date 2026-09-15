@@ -96,6 +96,7 @@ const secondEvent: AgentEvent.AgentEventEnvelope = {
 };
 
 const unusedApplication = Application.of({
+  updateWorkspace: () => Effect.die("unexpected workspace update"),
   listWorkspaces: () => Effect.die("unexpected workspace list"),
   askBtw: () => Effect.die("unexpected side question"),
   createWorkspace: () => Effect.die("unexpected workspace creation"),
@@ -172,6 +173,18 @@ describe("RPC", () => {
 
       const application = Application.of({
         ...unusedApplication,
+        updateWorkspace: ({ workspaceId, configuration }) =>
+          ownership.workspaces
+            .replaceConfiguration(
+              workspaceId,
+              configuration.kind === "direct"
+                ? { defaultCwd: AbsolutePath.make(configuration.cwd), worktree: null }
+                : {
+                    defaultCwd: AbsolutePath.make(configuration.repository),
+                    worktree: configuration.settings,
+                  },
+            )
+            .pipe(Effect.orDie),
         listWorkspaces: () => ownership.workspaces.list().pipe(Effect.orDie),
         listChats: (workspaceId) =>
           ownership.chats.listOpenByWorkspace(workspaceId).pipe(Effect.orDie),
@@ -264,16 +277,33 @@ describe("RPC", () => {
           yield* client.ListChats({ workspaceId: webWorkspace.id }),
           yield* ownership.chats.listOpenByWorkspace(webWorkspace.id),
         );
+        const updatedCwd = AbsolutePath.make("/tmp/pico-rpc-updated");
         for (const id of [discordWorkspace.id, workspaceId(10), workspaceId(99)]) {
+          const before = yield* ownership.workspaces.findById(id);
           for (const request of [
             client.ListChats({ workspaceId: id }).pipe(Effect.asVoid),
             client.CreateChat({ workspaceId: id, externalId: null }).pipe(Effect.asVoid),
+            client
+              .UpdateWorkspace({
+                workspaceId: id,
+                configuration: { kind: "direct", cwd: updatedCwd },
+              })
+              .pipe(Effect.asVoid),
           ]) {
             const rejected = yield* request.pipe(Effect.flip);
             assert.instanceOf(rejected, ApplicationError);
             assert.strictEqual(rejected.reason, "not-found");
           }
+          assert.deepStrictEqual(yield* ownership.workspaces.findById(id), before);
         }
+        yield* client.UpdateWorkspace({
+          workspaceId: webWorkspace.id,
+          configuration: { kind: "direct", cwd: updatedCwd },
+        });
+        assert.deepStrictEqual(
+          yield* ownership.workspaces.findById(webWorkspace.id),
+          Option.some({ ...webWorkspace, defaultCwd: updatedCwd }),
+        );
         for (const chatId of [foreignChatId, missingChatId]) {
           for (const request of [
             client.Transcript({ chatId }).pipe(Effect.asVoid),

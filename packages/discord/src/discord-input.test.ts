@@ -158,6 +158,7 @@ describe("discord input", () => {
           let registrations = 0;
           const unused = () => Effect.die("Unexpected application operation");
           const application = Application.of({
+            updateWorkspace: unused,
             listWorkspaces: unused,
             createWorkspace: unused,
             bindWorkspace: unused,
@@ -301,6 +302,7 @@ describe("discord input", () => {
         } satisfies DiscordInputBot;
 
         const application = Application.of({
+          updateWorkspace: () => Effect.die("unexpected workspace update"),
           availableWorkspaceModels: () => Effect.die("unexpected workspace model discovery"),
           setWorkspaceModel: () => Effect.die("unexpected workspace model update"),
           availableModels: () => Effect.die("unexpected model discovery"),
@@ -456,6 +458,7 @@ describe("discord input", () => {
             },
           } satisfies DiscordInputBot;
           const application = Application.of({
+            updateWorkspace: () => Effect.die("unexpected workspace update"),
             availableWorkspaceModels: () => Effect.die("unexpected workspace model discovery"),
             setWorkspaceModel: () => Effect.die("unexpected workspace model update"),
             availableModels: () => Effect.die("unexpected model discovery"),
@@ -681,6 +684,7 @@ describe("discord input", () => {
           },
         } satisfies DiscordInputBot;
         const application = Application.of({
+          updateWorkspace: () => Effect.die("unexpected workspace update"),
           availableWorkspaceModels: () => Effect.die("unexpected workspace model discovery"),
           setWorkspaceModel: () => Effect.die("unexpected workspace model update"),
           availableModels: () => Effect.die("unexpected model discovery"),
@@ -833,6 +837,7 @@ describe("discord input", () => {
           },
         } satisfies DiscordInputBot;
         const application = Application.of({
+          updateWorkspace: () => Effect.die("unexpected workspace update"),
           availableWorkspaceModels: () => Effect.die("unexpected workspace model discovery"),
           setWorkspaceModel: () => Effect.die("unexpected workspace model update"),
           availableModels: () => Effect.die("unexpected model discovery"),
@@ -939,6 +944,7 @@ describe("discord input", () => {
           },
         } satisfies DiscordInputBot;
         const application = Application.of({
+          updateWorkspace: () => Effect.die("unexpected workspace update"),
           availableWorkspaceModels: () => Effect.die("unexpected workspace model discovery"),
           setWorkspaceModel: () => Effect.die("unexpected workspace model update"),
           availableModels: () => Effect.die("unexpected model discovery"),
@@ -1046,6 +1052,7 @@ describe("discord input", () => {
           },
         } satisfies DiscordInputBot;
         const application = Application.of({
+          updateWorkspace: () => Effect.die("unexpected workspace update"),
           availableWorkspaceModels: () => Effect.die("unexpected workspace model discovery"),
           setWorkspaceModel: () => Effect.die("unexpected workspace model update"),
           availableModels: () => Effect.die("unexpected model discovery"),
@@ -1178,6 +1185,7 @@ describe("discord input", () => {
           },
         } satisfies DiscordInputBot;
         const application = Application.of({
+          updateWorkspace: () => Effect.die("unexpected workspace update"),
           availableWorkspaceModels: () => Effect.die("unexpected workspace model discovery"),
           setWorkspaceModel: () => Effect.die("unexpected workspace model update"),
           availableModels: () => Effect.die("unexpected model discovery"),
@@ -1300,6 +1308,7 @@ describe("discord input", () => {
           },
         } satisfies DiscordInputBot;
         const application = Application.of({
+          updateWorkspace: () => Effect.die("unexpected workspace update"),
           availableWorkspaceModels: () => Effect.die("unexpected workspace model discovery"),
           setWorkspaceModel: () => Effect.die("unexpected workspace model update"),
           availableModels: () => Effect.die("unexpected model discovery"),
@@ -1402,6 +1411,7 @@ describe("discord input", () => {
           },
         } satisfies DiscordInputBot;
         const application = Application.of({
+          updateWorkspace: () => Effect.die("unexpected workspace update"),
           availableWorkspaceModels: () => Effect.die("unexpected workspace model discovery"),
           setWorkspaceModel: () => Effect.die("unexpected workspace model update"),
           availableModels: () => Effect.die("unexpected model discovery"),
@@ -1539,6 +1549,7 @@ describe("discord input", () => {
             },
           } satisfies DiscordInputBot;
           const application = Application.of({
+            updateWorkspace: () => Effect.die("unexpected workspace update"),
             availableWorkspaceModels: () => Effect.die("unexpected workspace model discovery"),
             setWorkspaceModel: () => Effect.die("unexpected workspace model update"),
             availableModels: () => Effect.die("unexpected model discovery"),
@@ -1685,6 +1696,7 @@ describe("discord input", () => {
           },
         };
         const application = Application.of({
+          updateWorkspace: () => Effect.die("unexpected workspace update"),
           availableWorkspaceModels: () => Effect.die("unexpected workspace model discovery"),
           setWorkspaceModel: () => Effect.die("unexpected workspace model update"),
           availableModels: () => Effect.die("unexpected model discovery"),
@@ -1825,6 +1837,7 @@ describe("discord input", () => {
           },
         };
         const application = Application.of({
+          updateWorkspace: () => Effect.die("unexpected workspace update"),
           availableWorkspaceModels: () => Effect.die("unexpected workspace model discovery"),
           setWorkspaceModel: () => Effect.die("unexpected workspace model update"),
           availableModels: () => Effect.die("unexpected model discovery"),
@@ -1967,6 +1980,7 @@ describe("discord input", () => {
           },
         };
         const application = Application.of({
+          updateWorkspace: () => Effect.die("unexpected workspace update"),
           availableWorkspaceModels: () => Effect.die("unexpected workspace model discovery"),
           setWorkspaceModel: () => Effect.die("unexpected workspace model update"),
           availableModels: () => Effect.die("unexpected model discovery"),
