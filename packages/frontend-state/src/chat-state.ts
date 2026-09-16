@@ -36,7 +36,6 @@ export interface LiveChat {
   readonly snapshotIds: ReadonlySet<AgentMessageId>;
   readonly tools: ReadonlyMap<string, LiveTool>;
   readonly notices: ReadonlyArray<Event<"notice">>;
-  readonly title: string | null;
 }
 
 export const emptyLiveChat = (): LiveChat => ({
@@ -45,7 +44,6 @@ export const emptyLiveChat = (): LiveChat => ({
   snapshotIds: new Set(),
   tools: new Map(),
   notices: [],
-  title: null,
 });
 
 const retainDrafts = (messages: LiveChat["assistant"]): LiveChat["assistant"] => {
@@ -81,12 +79,13 @@ export const acknowledgeTranscript = (state: LiveChat, transcript: AgentTranscri
     : state;
 };
 
-export const reduceLiveChat = (state: LiveChat, event: AgentEvent): LiveChat => {
+export const reduceLiveChat = (
+  state: LiveChat,
+  event: Exclude<AgentEvent, { readonly type: "title-changed" }>,
+): LiveChat => {
   switch (event.type) {
     case "notice":
       return { ...state, notices: [...state.notices, event] };
-    case "title-changed":
-      return { ...state, title: event.title };
     case "run-started":
       return {
         ...state,

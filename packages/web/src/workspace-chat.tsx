@@ -15,8 +15,12 @@ import * as Atom from "effect/unstable/reactivity/Atom";
 import * as AtomRegistry from "effect/unstable/reactivity/AtomRegistry";
 import { useContext, useEffect, useMemo, useRef, useState } from "react";
 import type {
+  ChatTabPresentation,
   ComposerPresentation,
   NavigationPresentation,
+  PromptSuggestion,
+  SidebarSearchPresentation,
+  ToolCallPresentation,
   TranscriptPresentation,
 } from "./chat/chat-model.ts";
 import { ChatScreen } from "./chat/chat-screen.tsx";
@@ -44,13 +48,48 @@ interface DraftEntry {
 }
 interface NavigationState {
   readonly selectedKey: number | null;
+  readonly openKeys: readonly number[];
   readonly entries: ReadonlyMap<number, DraftEntry>;
   readonly expanded: ReadonlySet<WorkspaceId>;
 }
 const emptyDraft: DraftValue = { text: "" };
 const workspaceStorageKey = "pico-last-workspace";
 const openingConnection = Atom.make<FrontendState.Connection>({ kind: "opening" });
+const emptyTitles = Atom.make<ReadonlyMap<ChatId, string>>(new Map());
 const decodeWorkspace = Schema.decodeUnknownOption(CreateWorkspace);
+
+const suggestionPool: readonly PromptSuggestion[] = [
+  {
+    kind: "explain",
+    label: "Explain how this project is organized",
+    text: "Inspect this project and explain its structure, main components, and entry points. Cite the relevant files. Do not change any files.",
+  },
+  {
+    kind: "review",
+    label: "Review recent changes for potential bugs",
+    text: "Review this project's uncommitted changes, or its latest commit if there are none. Look for correctness issues and missing edge cases. Cite the relevant files and lines, and do not change any files.",
+  },
+  {
+    kind: "fix",
+    label: "Find a bug worth investigating",
+    text: "Inspect this project's code for a concrete bug worth investigating. Explain the evidence, a safe way to reproduce it, and a possible fix. Do not invent an issue if none is supported, and do not change any files.",
+  },
+  {
+    kind: "explain",
+    label: "Trace the main application flow",
+    text: "Inspect this project and trace a main user action from its entry point through the application. Explain the key functions and data flow with file references. Do not change any files.",
+  },
+  {
+    kind: "review",
+    label: "Review how this project handles errors",
+    text: "Review error handling in this project's main execution paths. Identify concrete risks involving lost errors, incomplete cleanup, or misleading recovery behavior, with file references. Do not change any files.",
+  },
+  {
+    kind: "fix",
+    label: "Investigate gaps in the test coverage",
+    text: "Inspect this project's tests and the code they cover. Identify an important behavior or edge case that may be untested, explain the evidence, and suggest a focused regression test. Do not change any files.",
+  },
+];
 
 function reconcileWorkspaceSnapshots(
   current: NavigationState,
@@ -92,6 +131,7 @@ export function WorkspaceChat({ state }: { readonly state: State | null }) {
   const connection = useAtomValue(state?.connection ?? openingConnection);
   const [navigation, setNavigation] = useState<NavigationState>(() => ({
     selectedKey: null,
+    openKeys: [],
     entries: new Map(),
     expanded: new Set(),
   }));
@@ -117,6 +157,16 @@ export function WorkspaceChat({ state }: { readonly state: State | null }) {
   const [theme, setTheme] = useState<Theme>(readBootstrappedTheme);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [search, setSearch] = useState<SidebarSearchPresentation>({ kind: "closed" });
+  const [suggestionOffset, setSuggestionOffset] = useState(0);
+  const suggestions = useMemo(
+    () => suggestionPool.slice(suggestionOffset, suggestionOffset + 3),
+    [suggestionOffset],
+  );
+  const [toolSelection, setToolSelection] = useState<{
+    readonly conversationKey: number;
+    readonly callId: string;
+  } | null>(null);
   const [disclosures, setDisclosures] = useState<ReadonlySet<string>>(() => new Set());
   const [recoveryOpen, setRecoveryOpen] = useState(false);
   const groupedAtom = useMemo(
@@ -129,15 +179,16 @@ export function WorkspaceChat({ state }: { readonly state: State | null }) {
           groups: workspaces.map((workspace) => ({
             workspace,
             chats:
-              state && navigation.expanded.has(workspace.id)
+              state && (search.kind === "open" || navigation.expanded.has(workspace.id))
                 ? get(state.chats(workspace.id))
                 : null,
           })),
         };
       }),
-    [state, navigation.expanded],
+    [state, navigation.expanded, search.kind],
   );
   const { result: workspaces, groups } = useAtomValue(groupedAtom);
+  const titles = useAtomValue(state?.titles ?? emptyTitles);
   const selected =
     navigation.selectedKey === null ? undefined : navigation.entries.get(navigation.selectedKey);
   const chatId = selected?.target.kind === "chat" ? selected.target.chat.id : null;
@@ -191,8 +242,13 @@ export function WorkspaceChat({ state }: { readonly state: State | null }) {
       submission: { kind: "idle" },
     };
     navigationVersion.current++;
+    if (current.selectedKey !== entry.key) setToolSelection(null);
     updateNavigation((value) => ({
+      ...value,
       selectedKey: entry.key,
+      openKeys: value.openKeys.includes(entry.key)
+        ? value.openKeys
+        : [...value.openKeys, entry.key],
       entries: existing ? value.entries : new Map(value.entries).set(entry.key, entry),
       expanded: new Set(value.expanded).add(workspace.id),
     }));
@@ -203,13 +259,17 @@ export function WorkspaceChat({ state }: { readonly state: State | null }) {
     if (state && registry.get(state.workspaces) !== workspaces) return;
     updateNavigation((current) => reconcileWorkspaceSnapshots(current, workspaces.value));
     const current = navigationRef.current;
-    const entry =
+    if (current.selectedKey === null && navigationVersion.current > 0) return;
+    const selectedEntry =
       current.selectedKey === null ? undefined : current.entries.get(current.selectedKey);
-    if (entry && workspaces.value.some((workspace) => workspace.id === entry.workspace.id)) {
+    if (
+      selectedEntry &&
+      workspaces.value.some((workspace) => workspace.id === selectedEntry.workspace.id)
+    ) {
       try {
-        window.localStorage.setItem(workspaceStorageKey, entry.workspace.id);
+        window.localStorage.setItem(workspaceStorageKey, selectedEntry.workspace.id);
       } catch {}
-      preferredWorkspace.current = entry.workspace.id;
+      preferredWorkspace.current = selectedEntry.workspace.id;
       return;
     }
     const workspace =
@@ -337,7 +397,9 @@ export function WorkspaceChat({ state }: { readonly state: State | null }) {
       current.selectedKey === null ? undefined : current.entries.get(current.selectedKey);
     const workspace = workspaceId
       ? groups.find((group) => group.workspace.id === workspaceId)?.workspace
-      : (entry?.workspace ?? groups[0]?.workspace);
+      : (entry?.workspace ??
+        groups.find((group) => group.workspace.id === preferredWorkspace.current)?.workspace ??
+        groups[0]?.workspace);
     if (workspace) selectDraft(workspace);
     else setWorkspaceOpen(true);
   };
@@ -346,7 +408,10 @@ export function WorkspaceChat({ state }: { readonly state: State | null }) {
     if (!group) return;
     const current = navigationRef.current;
     const existing = [...current.entries.values()].find(
-      (entry) => entry.target.kind === "chat" && entry.target.chat.id === id,
+      (entry) =>
+        entry.workspace.id === workspaceId &&
+        entry.target.kind === "chat" &&
+        entry.target.chat.id === id,
     );
     const chat =
       existing?.target.kind === "chat"
@@ -362,11 +427,50 @@ export function WorkspaceChat({ state }: { readonly state: State | null }) {
       submission: { kind: "idle" },
     };
     navigationVersion.current++;
+    if (current.selectedKey !== entry.key) setToolSelection(null);
     updateNavigation((value) => ({
       ...value,
       selectedKey: entry.key,
+      openKeys: value.openKeys.includes(entry.key)
+        ? value.openKeys
+        : [...value.openKeys, entry.key],
       entries: existing ? value.entries : new Map(value.entries).set(entry.key, entry),
     }));
+  };
+  const selectTab = (id: string) => {
+    const current = navigationRef.current;
+    const key = current.openKeys.find((key) => String(key) === id);
+    if (key === undefined || key === current.selectedKey) return;
+    navigationVersion.current++;
+    setToolSelection(null);
+    updateNavigation((value) => ({ ...value, selectedKey: key }));
+  };
+  const closeTab = (id: string) => {
+    const current = navigationRef.current;
+    const index = current.openKeys.findIndex((key) => String(key) === id);
+    if (index === -1) return;
+    const key = current.openKeys[index];
+    const openKeys = current.openKeys.filter((openKey) => openKey !== key);
+    navigationVersion.current++;
+    if (current.selectedKey === key) setToolSelection(null);
+    updateNavigation((value) => ({
+      ...value,
+      openKeys,
+      selectedKey:
+        value.selectedKey === key
+          ? (openKeys[Math.min(index, openKeys.length - 1)] ?? null)
+          : value.selectedKey,
+    }));
+  };
+  const changeSearch = (next: SidebarSearchPresentation) => {
+    if (state && search.kind === "closed" && next.kind === "open") {
+      for (const { workspace } of groups) {
+        const chats = state.chats(workspace.id);
+        const result = registry.get(chats);
+        if (result._tag !== "Initial" && !result.waiting) registry.refresh(chats);
+      }
+    }
+    setSearch(next);
   };
   const submitDraft = async () => {
     if (!state || registry.get(state.connection).kind !== "active") return;
@@ -434,6 +538,29 @@ export function WorkspaceChat({ state }: { readonly state: State | null }) {
           },
     }));
   };
+  const selectSuggestion = (text: string) => {
+    if (!state || registry.get(state.connection).kind !== "active") return;
+    const current = navigationRef.current;
+    const entry =
+      current.selectedKey === null ? undefined : current.entries.get(current.selectedKey);
+    if (
+      !entry ||
+      entry.key !== selected?.key ||
+      entry.submission.kind === "creating" ||
+      entry.submission.kind === "sending"
+    )
+      return;
+    if (entry.target.kind === "new") {
+      if (creatingChats.current.has(entry.workspace.id)) return;
+    } else if (
+      registry.get(state.send(entry.target.chat.id)).waiting ||
+      registry.get(state.live(entry.target.chat.id)).run.kind === "running"
+    ) {
+      return;
+    }
+    updateEntry(entry.key, (value) => ({ ...value, value: { text } }));
+    void submitDraft();
+  };
   const stop = async () => {
     if (!state || registry.get(state.connection).kind !== "active") return;
     const current = navigationRef.current;
@@ -461,6 +588,52 @@ export function WorkspaceChat({ state }: { readonly state: State | null }) {
     else if (state && chatId) registry.refresh(state.transcript(chatId));
     else if (state) registry.refresh(state.workspaces);
   };
+  const query = search.kind === "open" ? search.query.trim().toLocaleLowerCase() : "";
+  const navigationGroups = groups
+    .map(({ workspace, chats }): NavigationPresentation["groups"][number] => {
+      const records = chats ? [...Option.getOrElse(AsyncResult.value(chats), () => [])] : [];
+      if (chats) {
+        for (const entry of navigation.entries.values()) {
+          if (entry.workspace.id !== workspace.id || entry.target.kind !== "chat") continue;
+          const chat = entry.target.chat;
+          if (!records.some((record) => record.id === chat.id)) records.unshift(chat);
+        }
+      }
+      const summaries = records.map((chat) => ({
+        id: chat.id,
+        title: titles.get(chat.id) ?? `Chat ${chat.id.slice(-8)}`,
+      }));
+      const matchesWorkspace = workspace.name.toLocaleLowerCase().includes(query);
+      return {
+        workspace: {
+          id: workspace.id,
+          name: workspace.name,
+          contextLabel: workspace.defaultCwd,
+          canEditConfiguration: workspace.platform === "web",
+        },
+        expanded: search.kind === "open" || navigation.expanded.has(workspace.id),
+        chats:
+          search.kind === "open" && !matchesWorkspace
+            ? summaries.filter((chat) => chat.title.toLocaleLowerCase().includes(query))
+            : summaries,
+        status:
+          chats?._tag === "Failure"
+            ? { kind: "error", label: errorMessage(chats.cause) }
+            : chats && (chats.waiting || chats._tag === "Initial")
+              ? { kind: "pending", label: "Loading chats..." }
+              : chats && records.length === 0
+                ? { kind: "empty", label: "No chats yet." }
+                : undefined,
+      };
+    })
+    .filter(
+      (group) =>
+        search.kind === "closed" ||
+        group.workspace.name.toLocaleLowerCase().includes(query) ||
+        group.chats.length > 0 ||
+        group.status?.kind === "pending" ||
+        group.status?.kind === "error",
+    );
   const presentation: NavigationPresentation = {
     activeWorkspaceId: selected?.workspace.id ?? null,
     activeChatId: chatId,
@@ -471,47 +644,31 @@ export function WorkspaceChat({ state }: { readonly state: State | null }) {
           ? { kind: "pending", label: "Loading workspaces..." }
           : groups.length === 0
             ? { kind: "empty", label: "No workspaces yet." }
-            : undefined,
-    groups: groups.map(({ workspace, chats }) => {
-      const records = chats ? [...Option.getOrElse(AsyncResult.value(chats), () => [])] : [];
-      if (chats) {
-        for (const entry of navigation.entries.values()) {
-          if (entry.workspace.id !== workspace.id || entry.target.kind !== "chat") continue;
-          const chat = entry.target.chat;
-          if (!records.some((record) => record.id === chat.id)) records.unshift(chat);
-        }
-      }
-      return {
-        workspace: {
-          id: workspace.id,
-          name: workspace.name,
-          contextLabel: workspace.defaultCwd,
-          canEditConfiguration: workspace.platform === "web",
-        },
-        expanded: navigation.expanded.has(workspace.id),
-        chats: records.map((chat) => ({
-          id: chat.id,
-          title:
-            chat.id === chatId && conversation?.live.title
-              ? conversation.live.title
-              : `Chat ${chat.id.slice(-8)}`,
-        })),
-        status:
-          chats?._tag === "Failure"
-            ? { kind: "error", label: errorMessage(chats.cause) }
-            : chats && (chats.waiting || chats._tag === "Initial")
-              ? { kind: "pending", label: "Loading chats..." }
-              : chats && records.length === 0
-                ? { kind: "empty", label: "No chats yet." }
-                : undefined,
-      };
-    }),
+            : search.kind === "open" && navigationGroups.length === 0
+              ? { kind: "empty", label: "No matching chats or workspaces." }
+              : undefined,
+    groups: navigationGroups,
   };
+  const tabs: ChatTabPresentation[] = [];
+  for (const key of navigation.openKeys) {
+    const entry = navigation.entries.get(key);
+    if (!entry) continue;
+    tabs.push({
+      id: String(key),
+      title:
+        entry.target.kind === "chat"
+          ? (titles.get(entry.target.chat.id) ?? `Chat ${entry.target.chat.id.slice(-8)}`)
+          : "New chat",
+      contextLabel: `${entry.workspace.name} · ${entry.target.kind === "chat" ? entry.target.chat.cwd : entry.workspace.defaultCwd}`,
+    });
+  }
   const creating = selected?.submission.kind === "creating";
   const sending = selected?.submission.kind === "sending" || conversation?.sending.waiting;
   const running = conversation?.live.run.kind === "running";
   const statusLabel = !selected
-    ? "Add a workspace to start a chat"
+    ? groups.length > 0
+      ? "Choose a chat or start a new one"
+      : "Add a workspace to start a chat"
     : connection.kind === "opening"
       ? "Opening connection. Draft kept."
       : !available
@@ -548,7 +705,9 @@ export function WorkspaceChat({ state }: { readonly state: State | null }) {
           value: selected?.value.text ?? "",
           placeholder: selected
             ? "Ask pico to help with your project..."
-            : "Add a workspace to start",
+            : groups.length > 0
+              ? "Choose a chat or start a new one"
+              : "Add a workspace to start",
           editable: !!selected,
           canSubmit: available && !!selected && !creating && selected.value.text.trim().length > 0,
           statusLabel,
@@ -572,10 +731,26 @@ export function WorkspaceChat({ state }: { readonly state: State | null }) {
           ? { state: "loading", label: "Loading workspaces..." }
           : {
               state: "empty",
-              title: "Bring your project to pico",
+              title: groups.length > 0 ? "What are you working on?" : "Bring your project to pico",
               description:
-                "Add a workspace to chat about your code. Your conversations stay together in its project directory.",
+                groups.length > 0
+                  ? "Start a new chat or reopen a conversation from the sidebar. Your drafts are kept."
+                  : "Add a workspace to chat about your code. Your conversations stay together in its project directory.",
             };
+  let toolPane: ToolCallPresentation | null = null;
+  if (
+    toolSelection &&
+    toolSelection.conversationKey === selected?.key &&
+    transcript.state === "ready"
+  ) {
+    for (const item of transcript.items) {
+      if (item.kind !== "tool-group") continue;
+      const call = item.calls.find((call) => call.id === toolSelection.callId);
+      if (!call) continue;
+      toolPane = call;
+      break;
+    }
+  }
 
   return (
     <div className="flex h-dvh min-h-0 flex-col bg-canvas text-foreground">
@@ -669,17 +844,32 @@ export function WorkspaceChat({ state }: { readonly state: State | null }) {
           }
           onEditWorkspace={editWorkspace}
           onNewChat={newChat}
+          onSearchChange={changeSearch}
           onSidebarOpenChange={setSidebarOpen}
           onStop={stop}
+          onSuggestionSelect={selectSuggestion}
+          onSuggestionsShuffle={() =>
+            setSuggestionOffset((offset) => (offset + 3) % suggestionPool.length)
+          }
+          onTabClose={closeTab}
+          onTabSelect={selectTab}
           onThemeChange={(next) => {
             applyThemePreference(next);
             setTheme(next);
+          }}
+          onToolSelect={(id) => {
+            const key = navigationRef.current.selectedKey;
+            if (key !== selected?.key) return;
+            setToolSelection(
+              id === null || key === null ? null : { conversationKey: key, callId: id },
+            );
           }}
           onTranscriptRetry={retryTranscript}
           onWorkspaceRetry={() => {
             if (state) registry.refresh(state.workspaces);
           }}
           onWorkspaceToggle={(id) => {
+            if (search.kind === "open") return;
             const workspace = groups.find((group) => group.workspace.id === id)?.workspace;
             if (!workspace) return;
             updateNavigation((current) => {
@@ -689,9 +879,15 @@ export function WorkspaceChat({ state }: { readonly state: State | null }) {
               return { ...current, expanded };
             });
           }}
+          search={search}
           sidebarOpen={sidebarOpen}
+          suggestions={
+            available && selected && !creating && !sending && !running ? suggestions : []
+          }
+          tabs={tabs}
           theme={theme}
-          title={chatId ? (conversation?.live.title ?? `Chat ${chatId.slice(-8)}`) : "New chat"}
+          title={chatId ? (titles.get(chatId) ?? `Chat ${chatId.slice(-8)}`) : "New chat"}
+          toolPane={toolPane}
           transcript={transcript}
           workspaceEditPending={
             workspaceEditor.kind === "dismissed" ||
