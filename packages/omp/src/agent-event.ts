@@ -246,18 +246,19 @@ export const normalizeAgentEvent = (event: AgentSessionEvent): AgentEvent | unde
       };
     case "notice":
       return { type: "notice", level: event.level, message: event.message };
+    case "auto_compaction_end":
+    case "model_changed":
+      return { type: "context-invalidated" };
     case "turn_start":
     case "turn_end":
     case "message_start":
     case "tool_execution_update":
     case "tool_stream_update":
     case "auto_compaction_start":
-    case "auto_compaction_end":
     case "auto_retry_start":
     case "auto_retry_end":
     case "retry_fallback_applied":
     case "retry_fallback_succeeded":
-    case "model_changed":
     case "config_warnings_changed":
     case "advisor_cost_changed":
     case "advisor_yielded":

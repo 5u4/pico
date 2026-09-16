@@ -36,3 +36,9 @@ Live thinking and gaps before the next activity use [Beautiful UI's Dots loading
 Assistant prose adapts [Beautiful UI's streaming text](https://www.beautifului.dev/r/streaming-text.json) with a live caret after the final rendered Markdown block. The caret is CSS-only so it does not alter the source or split Markdown syntax. No demo playback timer delays tokens or replays settled history. Message settlement removes its live treatment; run completion or connection loss removes waiting.
 
 The trace uses actual execution states, not demo timers or invented elapsed time. The web event stream has no thinking-end event, so thinking remains active until a later content block, message settlement, run completion, or connection loss. Live tool events lack positions within assistant content, so live calls retain their trailing position until settlement. Interaction transitions stop after feedback and respect reduced motion.
+
+The quiet ring below the composer opens current context estimates, not cumulative billed usage. History and context share one snapshot request. Reading an absent or archived session never initializes OMP, so unavailable is not 0%. Compaction and model changes invalidate the snapshot without polling. Percentages may exceed 100%; only the ring is clamped.
+
+Context-estimate failures leave loaded history readable and show an error in the details. Disconnected selection and disclosure keep the cached estimate without attempting a refresh.
+
+Context details use a controlled native popover above the footer, outside the composer's clipping form. The card stays mounted through refreshes and closes on chat selection. Disconnected values are labeled as the last snapshot. Category estimates may not add up exactly to the provider-derived total.

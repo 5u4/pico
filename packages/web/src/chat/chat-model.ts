@@ -177,3 +177,21 @@ export type ComposerPresentation =
       readonly canStop: boolean;
       readonly statusLabel: string;
     };
+
+export type ContextUsagePresentation =
+  | {
+      readonly kind: "loading" | "unavailable" | "error";
+      readonly label: string;
+      readonly description: string;
+    }
+  | {
+      readonly kind: "available";
+      readonly label: string;
+      readonly percentage: string;
+      readonly fraction: number;
+      readonly used: string;
+      readonly capacity: string;
+      readonly remaining: string;
+      readonly categories: readonly { readonly label: string; readonly tokens: string }[];
+      readonly description: string;
+    };

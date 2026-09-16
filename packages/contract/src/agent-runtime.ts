@@ -3,7 +3,7 @@ import type * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import type * as Stream from "effect/Stream";
 import type { AgentEventEnvelope } from "./agent-event.ts";
-import type { AgentAssistantMessage, AgentPrompt, AgentTranscript } from "./agent-message.ts";
+import { type AgentAssistantMessage, type AgentPrompt, AgentTranscript } from "./agent-message.ts";
 import type { ChatId } from "./chat-model.ts";
 import type { AgentError } from "./errors.ts";
 import type { AbsolutePath } from "./path.ts";
@@ -44,18 +44,27 @@ export type ShakeResult =
       readonly tokensFreed: number;
     };
 
-export type ContextUsage =
-  | { readonly kind: "unavailable" }
-  | {
-      readonly kind: "available";
-      readonly contextWindow: number;
-      readonly usedTokens: number;
-      readonly systemPromptTokens: number;
-      readonly systemToolsTokens: number;
-      readonly systemContextTokens: number;
-      readonly skillsTokens: number;
-      readonly messagesTokens: number;
-    };
+export const ContextUsage = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("unavailable") }),
+  Schema.Struct({
+    kind: Schema.Literal("available"),
+    contextWindow: Schema.Number,
+    usedTokens: Schema.Number,
+    systemPromptTokens: Schema.Number,
+    systemToolsTokens: Schema.Number,
+    systemContextTokens: Schema.Number,
+    skillsTokens: Schema.Number,
+    messagesTokens: Schema.Number,
+  }),
+]);
+export type ContextUsage = typeof ContextUsage.Type;
+
+export const TranscriptSnapshot = Schema.Struct({
+  messages: AgentTranscript,
+  contextUsage: Schema.Union([ContextUsage, Schema.Struct({ kind: Schema.Literal("error") })]),
+});
+export type TranscriptSnapshot = typeof TranscriptSnapshot.Type;
+
 export interface CapturedAgentRun {
   readonly runId: ScheduleRunId;
   readonly outcome: "completed" | "failed" | "aborted";
@@ -78,7 +87,8 @@ export class AgentRuntime extends Context.Service<
     readonly events: Stream.Stream<AgentEventEnvelope>;
     readonly drain: () => Effect.Effect<void>;
 
-    readonly transcript: (chatId: ChatId) => Effect.Effect<AgentTranscript, AgentError>;
+    /** Application reads history and context without initializing an absent session. */
+    readonly transcript: (chatId: ChatId) => Effect.Effect<TranscriptSnapshot, AgentError>;
 
     readonly send: (
       chatId: ChatId,

@@ -1,4 +1,5 @@
-import { AgentPrompt, type AgentTranscript } from "@pico/contract/agent-message";
+import { AgentPrompt } from "@pico/contract/agent-message";
+import type { TranscriptSnapshot } from "@pico/contract/agent-runtime";
 import type {
   CloseChatOptions,
   CreateChat,
@@ -39,7 +40,7 @@ type Client = Effect.Success<ReturnType<typeof RpcClient.make>>;
 interface ChatRecord {
   readonly live: LiveChat;
   readonly transcriptResult: AsyncResult.AsyncResult<
-    AgentTranscript,
+    TranscriptSnapshot,
     ApplicationError | RpcClientError
   >;
 }
@@ -104,7 +105,11 @@ export const make = ({ url }: { readonly url: string }) => {
                 live: reduceLiveChat(state.live, event),
               }));
             }
-            if (event.type === "message-settled" || event.type === "run-finished") {
+            if (
+              event.type === "message-settled" ||
+              event.type === "run-finished" ||
+              event.type === "context-invalidated"
+            ) {
               lifecycle.refresh(chatId);
             }
           }),
@@ -257,9 +262,9 @@ export const make = ({ url }: { readonly url: string }) => {
       return Effect.gen(function* () {
         const session = yield* get.resultOnce(owner);
         yield* session.available;
-        const messages = yield* session.client.Transcript({ chatId });
+        const snapshot = yield* session.client.Transcript({ chatId });
         session.recordResponse();
-        return messages;
+        return snapshot;
       }).pipe(
         Effect.onExit((exit) =>
           Effect.sync(() => {
@@ -270,7 +275,7 @@ export const make = ({ url }: { readonly url: string }) => {
                 cell,
                 Exit.isSuccess(exit)
                   ? {
-                      live: acknowledgeTranscript(current.live, exit.value),
+                      live: acknowledgeTranscript(current.live, exit.value.messages),
                       transcriptResult: AsyncResult.success(exit.value),
                     }
                   : {
@@ -288,7 +293,7 @@ export const make = ({ url }: { readonly url: string }) => {
     }).pipe(Atom.keepAlive, Atom.setLazy(false)),
   );
 
-  const transcript = Atom.family((chatId: ChatId) =>
+  const snapshot = Atom.family((chatId: ChatId) =>
     Atom.readable(
       (get) => {
         const read = transcriptRead(chatId);
@@ -296,6 +301,19 @@ export const make = ({ url }: { readonly url: string }) => {
         return get(chatCell(chatId)).transcriptResult;
       },
       (refresh) => refresh(transcriptRead(chatId)),
+    ).pipe(Atom.keepAlive),
+  );
+
+  const transcript = Atom.family((chatId: ChatId) =>
+    Atom.readable(
+      (get) => AsyncResult.map(get(snapshot(chatId)), (value) => value.messages),
+      (refresh) => refresh(snapshot(chatId)),
+    ).pipe(Atom.keepAlive),
+  );
+  const contextUsage = Atom.family((chatId: ChatId) =>
+    Atom.readable(
+      (get) => AsyncResult.map(get(snapshot(chatId)), (value) => value.contextUsage),
+      (refresh) => refresh(snapshot(chatId)),
     ).pipe(Atom.keepAlive),
   );
 
@@ -398,6 +416,7 @@ export const make = ({ url }: { readonly url: string }) => {
     createChat,
     closeChat,
     transcript,
+    contextUsage,
     live,
     send,
     abort,

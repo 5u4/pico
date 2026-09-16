@@ -1,5 +1,6 @@
 import { useAtomValue } from "@effect/atom-react/Hooks";
 import { RegistryContext } from "@effect/atom-react/RegistryContext";
+import type { TranscriptSnapshot } from "@pico/contract/agent-runtime";
 import { CreateWorkspace } from "@pico/contract/application";
 import type { Chat, ChatId } from "@pico/contract/chat-model";
 import { GitError, WorkspaceBindingInvalid } from "@pico/contract/errors";
@@ -18,6 +19,7 @@ import type {
   ChatTabPresentation,
   CloseChatPresentation,
   ComposerPresentation,
+  ContextUsagePresentation,
   NavigationPresentation,
   PromptSuggestion,
   SidebarSearchPresentation,
@@ -79,6 +81,77 @@ const workspaceStorageKey = "pico-last-workspace";
 const openingConnection = Atom.make<FrontendState.Connection>({ kind: "opening" });
 const emptyTitles = Atom.make<ReadonlyMap<ChatId, string>>(new Map());
 const decodeWorkspace = Schema.decodeUnknownOption(CreateWorkspace);
+const tokenFormat = new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 });
+const percentageFormat = new Intl.NumberFormat("en-US", { maximumFractionDigits: 1 });
+
+function presentContextUsage(
+  result: AsyncResult.AsyncResult<TranscriptSnapshot["contextUsage"], unknown> | undefined,
+  connection: FrontendState.Connection,
+): ContextUsagePresentation {
+  if (!result) {
+    return {
+      kind: "unavailable",
+      label: "Context estimate unavailable",
+      description: "Context usage appears after this chat opens an agent session.",
+    };
+  }
+  if (result._tag === "Initial") {
+    return connection.kind === "unavailable"
+      ? {
+          kind: "unavailable",
+          label: "Context estimate unavailable",
+          description: "Connection unavailable. Reconnect to read context usage.",
+        }
+      : {
+          kind: "loading",
+          label: "Loading context estimate",
+          description: "Reading the current context estimate.",
+        };
+  }
+  if (result._tag === "Failure" || result.value.kind === "error") {
+    return {
+      kind: "error",
+      label: "Context estimate unavailable",
+      description:
+        connection.kind === "unavailable"
+          ? "Connection unavailable. Reconnect to read context usage."
+          : "Could not refresh context usage. Reopen these details to try again.",
+    };
+  }
+  const usage = result.value;
+  if (usage.kind === "unavailable") {
+    return {
+      kind: "unavailable",
+      label: "Context estimate unavailable",
+      description:
+        "No context estimate is available for this chat. Viewing history does not open an agent session.",
+    };
+  }
+  const fraction = usage.usedTokens / usage.contextWindow;
+  const percentage = `${percentageFormat.format(fraction * 100)}%`;
+  return {
+    kind: "available",
+    label: `Context estimate ${percentage}`,
+    percentage,
+    fraction: Math.max(0, Math.min(1, fraction)),
+    used: tokenFormat.format(usage.usedTokens),
+    capacity: tokenFormat.format(usage.contextWindow),
+    remaining: tokenFormat.format(Math.max(0, usage.contextWindow - usage.usedTokens)),
+    categories: [
+      { label: "Messages", tokens: tokenFormat.format(usage.messagesTokens) },
+      { label: "System prompt", tokens: tokenFormat.format(usage.systemPromptTokens) },
+      { label: "Tools", tokens: tokenFormat.format(usage.systemToolsTokens) },
+      { label: "Project context", tokens: tokenFormat.format(usage.systemContextTokens) },
+      { label: "Skills", tokens: tokenFormat.format(usage.skillsTokens) },
+    ],
+    description:
+      connection.kind === "unavailable"
+        ? "Connection unavailable. Showing the last context snapshot, not billable token totals."
+        : result.waiting
+          ? "Refreshing. Showing the last context snapshot, not billable token totals."
+          : "Current context estimate at the last snapshot, not billable token totals.",
+  };
+}
 
 const suggestionPool: readonly PromptSuggestion[] = [
   {
@@ -173,6 +246,7 @@ function runCommand<A, E, Input>(
 export function WorkspaceChat({ state }: { readonly state: State | null }) {
   const registry = useContext(RegistryContext);
   const connection = useAtomValue(state?.connection ?? openingConnection);
+  const available = connection.kind === "active";
   const [navigation, setNavigation] = useState<NavigationState>(() => ({
     selectedKey: null,
     openKeys: [],
@@ -216,6 +290,7 @@ export function WorkspaceChat({ state }: { readonly state: State | null }) {
     readonly callId: string;
   } | null>(null);
   const [recoveryOpen, setRecoveryOpen] = useState(false);
+  const [contextDetailsKey, setContextDetailsKey] = useState<number | null>();
   const groupedAtom = useMemo(
     () =>
       Atom.make((get) => {
@@ -265,6 +340,7 @@ export function WorkspaceChat({ state }: { readonly state: State | null }) {
           ? {
               snapshot: get(state.transcript(chatId)),
               live: get(state.live(chatId)),
+              contextUsage: get(state.contextUsage(chatId)),
               sending: get(state.send(chatId)),
               stopping: get(state.abort(chatId)),
             }
@@ -273,6 +349,17 @@ export function WorkspaceChat({ state }: { readonly state: State | null }) {
     [state, chatId],
   );
   const conversation = useAtomValue(conversationAtom);
+
+  useEffect(() => {
+    setContextDetailsKey(undefined);
+  }, [selected?.key]);
+
+  useEffect(() => {
+    if (!state || !chatId || !available) return;
+    const snapshot = state.transcript(chatId);
+    const current = registry.get(snapshot);
+    if (current._tag !== "Initial" && !current.waiting) registry.refresh(snapshot);
+  }, [state, registry, chatId, available]);
 
   const updateNavigation = (change: (current: NavigationState) => NavigationState) => {
     const current = navigationRef.current;
@@ -780,7 +867,6 @@ export function WorkspaceChat({ state }: { readonly state: State | null }) {
     (entry) => entry.value.text.length > 0,
   );
   const unavailable = connection.kind === "unavailable";
-  const available = connection.kind === "active";
   const closePresentation: CloseChatPresentation =
     closeFlow.kind === "idle"
       ? closeFlow
@@ -1054,6 +1140,16 @@ export function WorkspaceChat({ state }: { readonly state: State | null }) {
           onCloseChatDismiss={dismissCloseChat}
           onCloseChatRetry={retryCloseChat}
           composer={composer}
+          contextUsage={presentContextUsage(conversation?.contextUsage, connection)}
+          contextDetailsOpen={
+            contextDetailsKey !== undefined && contextDetailsKey === (selected?.key ?? null)
+          }
+          onContextDetailsOpenChange={(open) => {
+            setContextDetailsKey(open ? (selected?.key ?? null) : undefined);
+            if (open && state && chatId && registry.get(state.connection).kind === "active") {
+              registry.refresh(state.transcript(chatId));
+            }
+          }}
           contextLabel={
             selected
               ? `${selected.workspace.name} · ${selected.target.kind === "chat" ? selected.target.chat.cwd : selected.workspace.defaultCwd}`

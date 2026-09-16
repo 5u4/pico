@@ -3,7 +3,7 @@ import * as BunFileSystem from "@effect/platform-bun/BunFileSystem";
 import * as BunPath from "@effect/platform-bun/BunPath";
 import { assert, describe, it } from "@effect/vitest";
 import * as AgentMessage from "@pico/contract/agent-message";
-import { AgentRuntime } from "@pico/contract/agent-runtime";
+import { AgentRuntime, type TranscriptSnapshot } from "@pico/contract/agent-runtime";
 import { AgentSessionStore } from "@pico/contract/agent-session-store";
 import { Application } from "@pico/contract/application";
 import * as Chat from "@pico/contract/chat-model";
@@ -44,13 +44,16 @@ const scheduledReply: AgentMessage.AgentAssistantMessage = {
   timestamp: 7,
 };
 
-const runtimeTranscript: AgentMessage.AgentTranscript = [
-  {
-    role: "user",
-    content: [{ type: "text", text: "hello" }],
-    timestamp: 7,
-  },
-];
+const runtimeTranscript: TranscriptSnapshot = {
+  messages: [
+    {
+      role: "user",
+      content: [{ type: "text", text: "hello" }],
+      timestamp: 7,
+    },
+  ],
+  contextUsage: { kind: "unavailable" },
+};
 
 const assertApplicationError = (
   error: ApplicationError | ChatClosed,
@@ -642,7 +645,7 @@ describe("Chat close", () => {
           askBtw: () => Effect.die("unexpected side question"),
           events: Stream.empty,
           drain: () => Effect.void,
-          transcript: () => Effect.succeed([]),
+          transcript: () => Effect.succeed({ messages: [], contextUsage: { kind: "unavailable" } }),
           send: () => Effect.die("unexpected ordinary send"),
           sendCaptured: (_chatId, runId) =>
             Deferred.succeed(started, undefined).pipe(
@@ -777,7 +780,8 @@ describe("Chat close", () => {
             askBtw: () => Effect.die("unexpected side question"),
             events: Stream.empty,
             drain: () => Effect.void,
-            transcript: () => Effect.succeed([]),
+            transcript: () =>
+              Effect.succeed({ messages: [], contextUsage: { kind: "unavailable" } }),
             send: () => Effect.die("unexpected send"),
             sendCaptured: () => Effect.die("unexpected captured runtime send"),
             deliver: () => Effect.die("unexpected scheduled delivery"),

@@ -9,6 +9,7 @@ import {
   AgentPrompt,
   type AgentTranscript,
 } from "@pico/contract/agent-message";
+import type { ContextUsage, TranscriptSnapshot } from "@pico/contract/agent-runtime";
 import { Application } from "@pico/contract/application";
 import { ChatId, type ChatListEntry } from "@pico/contract/chat-model";
 import { ChatRepository } from "@pico/contract/chat-repository";
@@ -55,6 +56,10 @@ const webWorkspace: Workspace = {
 };
 const message = { role: "user", content: [{ type: "text", text: "same" }], timestamp: 1 } as const;
 const prompt = (text: string) => AgentPrompt.make({ text, attachments: [] });
+const snapshot = (
+  messages: AgentTranscript = [],
+  contextUsage: ContextUsage = { kind: "unavailable" },
+): TranscriptSnapshot => ({ messages, contextUsage });
 const assistant = (id: AgentMessageId, text: string): AgentAssistantMessage => ({
   id,
   role: "assistant",
@@ -209,6 +214,7 @@ const snapshotFixture = Effect.fnUntraced(function* () {
         pending.push(reply);
         yield* Queue.offer(requests, { reply, returned });
         return yield* Deferred.await(reply).pipe(
+          Effect.map((messages) => snapshot(messages)),
           Effect.ensuring(Deferred.succeed(returned, undefined)),
           Effect.uninterruptible,
         );
@@ -224,6 +230,91 @@ const snapshotFixture = Effect.fnUntraced(function* () {
 });
 
 describe("frontend state over WebSocket", () => {
+  it.live("refreshes changed context without losing drafts or mixing chats", () =>
+    Effect.gen(function* () {
+      let usage: ContextUsage = {
+        kind: "available",
+        contextWindow: 200_000,
+        usedTokens: 120_000,
+        messagesTokens: 110_000,
+        systemPromptTokens: 3_000,
+        systemToolsTokens: 4_000,
+        systemContextTokens: 2_000,
+        skillsTokens: 1_000,
+      };
+      const server = yield* fixture({
+        transcript: (chatId) =>
+          Effect.sync(() =>
+            snapshot([message], chatId === firstChat ? usage : { kind: "unavailable" }),
+          ),
+        sendMessage: () => Effect.succeed({ kind: "handled" }),
+        abort: () => Effect.void,
+      });
+      yield* Effect.gen(function* () {
+        const state = make({ url: yield* endpoint });
+        const registry = yield* registryInScope;
+        registry.mount(state.contextUsage(firstChat));
+        registry.mount(state.contextUsage(secondChat));
+        const route = yield* Queue.take(server.opened);
+        yield* waitFor(registry, state.contextUsage(firstChat), AsyncResult.isSuccess);
+        yield* waitFor(registry, state.contextUsage(secondChat), AsyncResult.isSuccess);
+        yield* Queue.offer(route.queue, {
+          chatId: firstChat,
+          event: {
+            type: "text-delta",
+            messageId: firstMessageId,
+            contentIndex: 0,
+            text: "keep this draft",
+          },
+        });
+        yield* waitFor(
+          registry,
+          state.live(firstChat),
+          (live) => draftBlock(live, firstMessageId, 0)?.text === "keep this draft",
+        );
+        usage = {
+          kind: "available",
+          contextWindow: 100_000,
+          usedTokens: 35_000,
+          messagesTokens: 25_000,
+          systemPromptTokens: 3_000,
+          systemToolsTokens: 4_000,
+          systemContextTokens: 2_000,
+          skillsTokens: 1_000,
+        };
+        yield* Queue.offer(route.queue, {
+          chatId: firstChat,
+          event: { type: "context-invalidated" },
+        });
+        yield* waitFor(
+          registry,
+          state.contextUsage(firstChat),
+          (result) =>
+            result._tag === "Success" &&
+            !result.waiting &&
+            result.value.kind === "available" &&
+            result.value.usedTokens === 35_000,
+        );
+        assert.deepStrictEqual(
+          AsyncResult.getOrThrow(registry.get(state.contextUsage(firstChat))),
+          usage,
+        );
+        assert.deepStrictEqual(
+          AsyncResult.getOrThrow(registry.get(state.contextUsage(secondChat))),
+          { kind: "unavailable" },
+        );
+        assert.deepStrictEqual(AsyncResult.getOrThrow(registry.get(state.transcript(firstChat))), [
+          message,
+        ]);
+        assert.strictEqual(
+          draftBlock(registry.get(state.live(firstChat)), firstMessageId, 0)?.text,
+          "keep this draft",
+        );
+        assert.strictEqual(registry.get(state.live(firstChat)).run.kind, "running");
+      }).pipe(Effect.scoped, Effect.provide(server.layer));
+    }),
+  );
+
   it.live(
     "activates the connection after an initial list rejection and allows a successful retry",
     () =>
@@ -232,7 +323,7 @@ describe("frontend state over WebSocket", () => {
         const rejection = new ApplicationError({ reason: "operation", message: "Read failed" });
         let reads = 0;
         const server = yield* fixture({
-          transcript: () => Effect.succeed([]),
+          transcript: () => Effect.succeed(snapshot()),
           sendMessage: () => Effect.succeed({ kind: "handled" }),
           abort: () => Effect.void,
           listWorkspaces: () =>
@@ -277,7 +368,7 @@ describe("frontend state over WebSocket", () => {
       const saved = { ...webWorkspace, worktree: { branch: "main", prefix: "pico/" } };
       let reads = 0;
       const server = yield* fixture({
-        transcript: () => Effect.succeed([]),
+        transcript: () => Effect.succeed(snapshot()),
         sendMessage: () => Effect.succeed({ kind: "handled" }),
         abort: () => Effect.void,
         listWorkspaces: () =>
@@ -334,7 +425,7 @@ describe("frontend state over WebSocket", () => {
       }));
       let reads = 0;
       const server = yield* fixture({
-        transcript: () => Effect.succeed([]),
+        transcript: () => Effect.succeed(snapshot()),
         sendMessage: () => Effect.succeed({ kind: "handled" }),
         abort: () => Effect.void,
         listChats: () =>
@@ -392,7 +483,7 @@ describe("frontend state over WebSocket", () => {
       });
       let archived = false;
       const server = yield* fixture({
-        transcript: () => Effect.succeed([]),
+        transcript: () => Effect.succeed(snapshot()),
         sendMessage: () => Effect.succeed({ kind: "handled" }),
         abort: () => Effect.void,
         listChats: () => Effect.sync(() => (archived ? [] : [chat])),
@@ -429,7 +520,7 @@ describe("frontend state over WebSocket", () => {
       }>();
       const pending: Array<Deferred.Deferred<readonly Workspace[], ApplicationError>> = [];
       const server = yield* fixture({
-        transcript: () => Effect.succeed([]),
+        transcript: () => Effect.succeed(snapshot()),
         sendMessage: () => Effect.succeed({ kind: "handled" }),
         abort: () => Effect.void,
         listWorkspaces: () =>
@@ -507,12 +598,12 @@ describe("frontend state over WebSocket", () => {
             if (reads === 1) {
               yield* Deferred.succeed(firstRead, undefined);
               return yield* Deferred.await(releaseStale).pipe(
-                Effect.as([]),
+                Effect.as(snapshot()),
                 Effect.ensuring(Deferred.succeed(staleReturned, undefined)),
                 Effect.uninterruptible,
               );
             }
-            return stored;
+            return snapshot(stored);
           }),
         sendMessage: (chatId, input) =>
           Effect.gen(function* () {
@@ -677,7 +768,7 @@ describe("frontend state over WebSocket", () => {
         transcript: () =>
           Effect.sync(() => {
             transcriptReads++;
-            return [];
+            return snapshot();
           }),
         sendMessage: () => Effect.succeed({ kind: "handled" }),
         abort: () => Effect.void,
@@ -805,7 +896,7 @@ describe("frontend state over WebSocket", () => {
       Effect.gen(function* () {
         let sends = 0;
         const server = yield* fixture({
-          transcript: () => Effect.succeed([]),
+          transcript: () => Effect.succeed(snapshot()),
           sendMessage: () =>
             Effect.sync(() => {
               sends += 1;
@@ -901,7 +992,7 @@ describe("frontend state over WebSocket", () => {
     Effect.gen(function* () {
       let sends = 0;
       const server = yield* fixture({
-        transcript: () => Effect.succeed([]),
+        transcript: () => Effect.succeed(snapshot()),
         sendMessage: () =>
           Effect.sync(() => {
             sends += 1;
@@ -966,7 +1057,7 @@ describe("frontend state over WebSocket", () => {
       const sent = yield* Queue.unbounded<string>();
       const release = yield* Deferred.make<void>();
       const server = yield* fixture({
-        transcript: () => Effect.succeed([]),
+        transcript: () => Effect.succeed(snapshot()),
         sendMessage: (_chatId, input) =>
           Effect.gen(function* () {
             yield* Queue.offer(sent, input.text);

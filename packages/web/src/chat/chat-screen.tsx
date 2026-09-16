@@ -16,12 +16,14 @@ import type {
   ChatTabPresentation,
   CloseChatPresentation,
   ComposerPresentation,
+  ContextUsagePresentation,
   PromptSuggestion,
   ToolCallPresentation,
   TranscriptPresentation,
 } from "./chat-model.ts";
 import { CloseChatDialog } from "./close-chat-dialog.tsx";
 import { Composer } from "./composer.tsx";
+import { ContextUsage } from "./context-usage.tsx";
 import { MobileSidebar } from "./mobile-sidebar.tsx";
 import { ToolDetailPane } from "./tool-detail-pane.tsx";
 import { Transcript } from "./transcript.tsx";
@@ -49,6 +51,9 @@ export interface ChatScreenProps
   readonly toolPane: ToolCallPresentation | null;
   readonly transcript: TranscriptPresentation;
   readonly composer: ComposerPresentation;
+  readonly contextUsage: ContextUsagePresentation;
+  readonly contextDetailsOpen: boolean;
+  readonly onContextDetailsOpenChange: (open: boolean) => void;
   readonly sidebarOpen: boolean;
   readonly theme: Theme;
   readonly workspaceForm: WorkspaceFormProps;
@@ -83,6 +88,9 @@ export function ChatScreen({
   toolPane,
   transcript,
   composer,
+  contextUsage,
+  contextDetailsOpen,
+  onContextDetailsOpenChange,
   sidebarOpen,
   theme,
   workspaceForm,
@@ -532,6 +540,11 @@ export function ChatScreen({
                     onSubmit={onComposerSubmit}
                     onValueChange={onComposerValueChange}
                     presentation={composer}
+                  />
+                  <ContextUsage
+                    onOpenChange={onContextDetailsOpenChange}
+                    open={contextDetailsOpen}
+                    presentation={contextUsage}
                   />
                 </div>
                 {transcript.state === "empty" && (
