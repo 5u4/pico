@@ -104,6 +104,11 @@ export type TranscriptItem =
       readonly open: boolean;
     }
   | {
+      readonly kind: "waiting";
+      readonly id: string;
+      readonly label: string;
+    }
+  | {
       readonly kind: "notice";
       readonly id: string;
       readonly tone: "info" | "warning" | "error";

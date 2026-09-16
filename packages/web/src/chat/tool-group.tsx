@@ -28,7 +28,7 @@ export function ToolGroup({
   const triggerId = `${item.id}-trigger`;
   const failed = item.calls.some((call) => call.state.kind === "failed");
   return (
-    <section className="w-full max-w-80 pb-1">
+    <section className="w-full max-w-80">
       <button
         aria-controls={contentId}
         aria-expanded={item.open}
@@ -67,8 +67,8 @@ export function ToolGroup({
         inert={!item.open}
         role="region"
       >
-        <div className="-mx-1 min-h-0 overflow-hidden px-1.5 pb-1">
-          <div className="mt-1.5 flex flex-col gap-1">
+        <div className="-mx-1 min-h-0 overflow-hidden px-1.5">
+          <div className="mt-1.5 flex flex-col gap-1 pb-1">
             {item.calls.map((call, index) => (
               <ToolCall
                 call={call}
