@@ -38,6 +38,8 @@ export function presentTranscript(
   connection: FrontendState.Connection,
 ): TranscriptPresentation {
   const messages = Option.getOrElse(AsyncResult.value(snapshot), () => []);
+  const activeRun = live.run.kind === "running" && connection.kind === "active";
+  let hasLiveFeedback = false;
   const results = new Map<string, AgentToolResultMessage[]>();
   const anchoredTools = new Set<string>();
   const indexAnchors = (message: AgentAssistantMessage) => {
@@ -83,11 +85,10 @@ export function presentTranscript(
             kind: activity.end.status,
             label: activity.end.status === "failed" ? "Failed" : "Complete",
           }
-        : activity?.kind === "running" &&
-            live.run.kind === "running" &&
-            connection.kind === "active"
+        : activity?.kind === "running" && activeRun
           ? { kind: "running", label: "Running" }
           : { kind: "unknown", label: "Status unknown" };
+    if (state.kind === "running") hasLiveFeedback = true;
     const argumentsText = argumentsJson ?? activity?.start?.argumentsJson;
     const call: ToolCallPresentation = {
       id: key,
@@ -186,8 +187,8 @@ export function presentTranscript(
     key: string,
   ) => {
     flushTools();
-    const active =
-      draft.phase === "streaming" && live.run.kind === "running" && connection.kind === "active";
+    const active = draft.phase === "streaming" && activeRun;
+    if (active && draft.blocks.size > 0) hasLiveFeedback = true;
     items.push({
       kind: "assistant",
       id: `${key}-part-0`,
@@ -236,11 +237,13 @@ export function presentTranscript(
       text: notice.message,
     });
   }
+  if (activeRun && !hasLiveFeedback)
+    items.push({ kind: "waiting", id: "run-waiting", label: "Thinking" });
   if (items.length > 0)
     return {
       state: "ready",
       items,
-      liveLabel: live.run.kind === "running" ? "Response in progress" : "Conversation",
+      liveLabel: activeRun ? "Response in progress" : "Conversation",
     };
   if (snapshot._tag === "Failure")
     return {

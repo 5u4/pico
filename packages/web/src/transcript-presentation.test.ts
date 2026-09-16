@@ -5,6 +5,7 @@ import {
   type AgentToolResultMessage,
   type AgentTranscript,
 } from "@pico/contract/agent-message";
+import * as Cause from "effect/Cause";
 import * as AsyncResult from "effect/unstable/reactivity/AsyncResult";
 import {
   acknowledgeTranscript,
@@ -192,7 +193,7 @@ describe("transcript identity", () => {
     };
     const fallback = items([result], running, disclosures);
     assert.deepStrictEqual(
-      fallback.map((item) => item.id),
+      fallback.filter((item) => item.kind !== "waiting").map((item) => item.id),
       pending.map((item) => item.id),
     );
     assert.deepStrictEqual(
@@ -218,7 +219,7 @@ describe("transcript identity", () => {
     const transcript = [message, result];
     const snapshot = items(transcript, acknowledgeTranscript(running, transcript), disclosures);
     assert.deepStrictEqual(
-      snapshot.map((item) => item.kind),
+      snapshot.filter((item) => item.kind !== "waiting").map((item) => item.kind),
       ["assistant", "tool-group", "assistant", "tool-group"],
     );
     const tools = snapshot.filter((item) => item.kind === "tool-group");
@@ -283,7 +284,7 @@ describe("transcript identity", () => {
       acknowledgeTranscript(settled, [message, { ...message, id: secondId }]),
     );
     assert.deepStrictEqual(
-      handedOff.map((item) => item.id),
+      handedOff.filter((item) => item.kind !== "waiting").map((item) => item.id),
       snapshot.map((item) => item.id),
     );
   });
@@ -297,6 +298,10 @@ describe("transcript identity", () => {
     });
     const finished = reduceLiveChat(partial, { type: "run-finished", outcome: "aborted" });
     const running = reduceLiveChat(finished, { type: "run-started" });
+    assert.deepStrictEqual(
+      items([], running).map((item) => (item.kind === "assistant" ? item.state.kind : item.kind)),
+      ["unknown", "waiting"],
+    );
     const next = reduceLiveChat(running, {
       type: "text-delta",
       messageId: secondId,
@@ -314,6 +319,134 @@ describe("transcript identity", () => {
         { state: "unknown", text: ["orphan plan"] },
         { state: "streaming", text: ["next answer"] },
       ],
+    );
+  });
+});
+
+describe("response activity", () => {
+  it("shows waiting from an active run before history or a first delta and removes it when activity ends", () => {
+    const running = reduceLiveChat(emptyLiveChat(), { type: "run-started" });
+    const waiting = presentTranscript(AsyncResult.initial(), running, new Set(), {
+      kind: "active",
+    });
+    assert.strictEqual(waiting.state, "ready");
+    if (waiting.state !== "ready") return;
+    assert.deepStrictEqual(
+      waiting.items.map((item) => item.kind),
+      ["waiting"],
+    );
+
+    const disconnected = presentTranscript(AsyncResult.success([]), running, new Set(), {
+      kind: "unavailable",
+      cause: Cause.empty,
+    });
+    assert.strictEqual(disconnected.state, "empty");
+    const reconnecting = presentTranscript(AsyncResult.success([]), running, new Set(), {
+      kind: "opening",
+    });
+    assert.strictEqual(reconnecting.state, "empty");
+    const completed = reduceLiveChat(running, { type: "run-finished", outcome: "completed" });
+    assert.deepStrictEqual(items([], completed), []);
+  });
+
+  it("lets drafts and running tools replace waiting and resumes waiting between completed activities", () => {
+    const running = reduceLiveChat(emptyLiveChat(), { type: "run-started" });
+    const draft = reduceLiveChat(running, {
+      type: "thinking-delta",
+      messageId: firstId,
+      contentIndex: 0,
+      text: "Planning",
+    });
+    assert.deepStrictEqual(
+      items([], draft).map((item) => item.kind),
+      ["assistant"],
+    );
+    const settled = reduceLiveChat(draft, { type: "message-settled", message: toolMessage });
+    assert.deepStrictEqual(
+      items([], settled).map((item) => (item.kind === "assistant" ? item.state.kind : item.kind)),
+      ["complete", "tool-group", "complete", "waiting"],
+    );
+    const toolRunning = reduceLiveChat(settled, {
+      type: "tool-started",
+      toolCallId: "read-file",
+      toolName: "read",
+      argumentsJson: "{}",
+    });
+    assert.deepStrictEqual(
+      items([], toolRunning).map((item) => item.kind),
+      ["assistant", "tool-group", "assistant"],
+    );
+    const toolFinished = reduceLiveChat(toolRunning, {
+      type: "tool-finished",
+      toolCallId: "read-file",
+      toolName: "read",
+      status: "succeeded",
+    });
+    const afterTool = items([], toolFinished);
+    assert.deepStrictEqual(
+      afterTool.map((item) => item.kind),
+      ["assistant", "tool-group", "assistant", "waiting"],
+    );
+    assert.deepStrictEqual(
+      items([toolMessage], acknowledgeTranscript(toolFinished, [toolMessage])),
+      afterTool,
+    );
+    const result = toolResult("read-file", [{ type: "text", text: "file content" }]);
+    assert.deepStrictEqual(
+      items([result], toolRunning).map((item) => item.kind),
+      ["assistant", "tool-group", "assistant", "waiting"],
+    );
+  });
+
+  it("settles or interrupts live feedback without changing received text or replaying retained blocks", () => {
+    const text = "  first\n\tsecond 😀 ";
+    const draft = reduceLiveChat(emptyLiveChat(), {
+      type: "text-delta",
+      messageId: firstId,
+      contentIndex: 0,
+      text,
+    });
+    const active = items([], draft);
+    assert.deepStrictEqual(
+      active.map((item) => (item.kind === "assistant" ? item.state.kind : item.kind)),
+      ["streaming"],
+    );
+    const disconnected = presentTranscript(AsyncResult.success([]), draft, new Set(), {
+      kind: "unavailable",
+      cause: Cause.empty,
+    });
+    assert.strictEqual(disconnected.state, "ready");
+    if (disconnected.state !== "ready") return;
+    const aborted = reduceLiveChat(draft, { type: "run-finished", outcome: "aborted" });
+    for (const presentation of [disconnected.items, items([], aborted)]) {
+      assert.deepStrictEqual(
+        presentation.map((item) => (item.kind === "assistant" ? item.state.kind : item.kind)),
+        ["unknown"],
+      );
+      assert.deepStrictEqual(
+        presentation.flatMap((item) =>
+          item.kind === "assistant" ? item.blocks.map((block) => block.text) : [],
+        ),
+        [text],
+      );
+    }
+    const message: AgentAssistantMessage = {
+      ...toolMessage,
+      stopReason: "stop",
+      content: [{ type: "text", text }],
+    };
+    const settled = reduceLiveChat(draft, { type: "message-settled", message });
+    const finished = reduceLiveChat(settled, { type: "run-finished", outcome: "completed" });
+    const snapshot = items([message], acknowledgeTranscript(finished, [message]));
+    assert.deepStrictEqual(
+      snapshot.map((item) => (item.kind === "assistant" ? item.state.kind : item.kind)),
+      ["complete"],
+    );
+    assert.deepStrictEqual(
+      snapshot.flatMap((item) =>
+        item.kind === "assistant" ? item.blocks.map((block) => block.text) : [],
+      ),
+      [text],
     );
   });
 });
