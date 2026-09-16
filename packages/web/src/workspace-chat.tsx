@@ -214,7 +214,7 @@ export function WorkspaceChat({ state }: { readonly state: State | null }) {
     readonly conversationKey: number;
     readonly callId: string;
   } | null>(null);
-  const [disclosures, setDisclosures] = useState<ReadonlySet<string>>(() => new Set());
+  const [disclosures, setDisclosures] = useState<ReadonlyMap<string, boolean>>(() => new Map());
   const [recoveryOpen, setRecoveryOpen] = useState(false);
   const groupedAtom = useMemo(
     () =>
@@ -1065,11 +1065,8 @@ export function WorkspaceChat({ state }: { readonly state: State | null }) {
           }}
           onDisclosuresChange={(ids, open) =>
             setDisclosures((current) => {
-              const next = new Set(current);
-              for (const id of ids) {
-                if (open) next.add(id);
-                else next.delete(id);
-              }
+              const next = new Map(current);
+              for (const id of ids) next.set(id, open);
               return next;
             })
           }

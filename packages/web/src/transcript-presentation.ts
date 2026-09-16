@@ -34,7 +34,7 @@ export function errorMessage(cause: Cause.Cause<unknown>): string {
 export function presentTranscript(
   snapshot: AsyncResult.AsyncResult<AgentTranscript, unknown>,
   live: FrontendState.LiveChat,
-  disclosures: ReadonlySet<string>,
+  disclosures: ReadonlyMap<string, boolean>,
   connection: FrontendState.Connection,
 ): TranscriptPresentation {
   const messages = Option.getOrElse(AsyncResult.value(snapshot), () => []);
@@ -67,7 +67,7 @@ export function presentTranscript(
       id: tools[0].id,
       title: toolGroupTitle(tools),
       calls: tools,
-      open: tools.some((call) => disclosures.has(call.id)),
+      open: tools.some((call) => disclosures.get(call.id) ?? call.state.kind === "running"),
     });
     tools = undefined;
   };
@@ -95,7 +95,7 @@ export function presentTranscript(
       label: name,
       summary: toolSummary(argumentsText),
       arguments: argumentsText,
-      open: disclosures.has(`details-${key}`),
+      open: disclosures.get(`details-${key}`) ?? false,
       state,
       output: output
         ?.flatMap((message) =>
@@ -154,7 +154,7 @@ export function presentTranscript(
             id,
             label: message.status === "failed" ? "Thinking interrupted" : "Thought",
             text: content.text,
-            open: disclosures.has(id),
+            open: disclosures.get(id) ?? false,
           });
           break;
         case "image":
@@ -199,17 +199,18 @@ export function presentTranscript(
         : { kind: "unknown", label: "Partial response retained" },
       blocks: [...draft.blocks.values()]
         .sort((a, b) => a.contentIndex - b.contentIndex)
-        .map((block): AssistantBlock => {
+        .map((block, index, blocks): AssistantBlock => {
           const id = `${key}-content-${block.contentIndex}`;
-          return block.type === "text-delta"
-            ? { kind: "text", id, text: block.text }
-            : {
-                kind: "thinking",
-                id,
-                label: active ? "Thinking" : "Thinking status unknown",
-                text: block.text,
-                open: disclosures.has(id),
-              };
+          if (block.type === "text-delta") return { kind: "text", id, text: block.text };
+          const last = index === blocks.length - 1;
+          const thinking = active && last;
+          return {
+            kind: "thinking",
+            id,
+            label: thinking ? "Thinking" : last ? "Thinking status unknown" : "Thought",
+            text: block.text,
+            open: disclosures.get(id) ?? thinking,
+          };
         }),
     });
   };
