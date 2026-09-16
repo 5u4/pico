@@ -82,6 +82,17 @@ const handlers = PicoRpcs.toLayer(
             requestId: String(requestId),
           }),
         ),
+      CloseChat: ({ chatId, allowDirtyWorktree }, { requestId }) =>
+        requireWebChat(workspaces, chats, chatId).pipe(
+          Effect.andThen(() => application.closeChat(chatId, { allowDirtyWorktree })),
+          Effect.tapCause(reportFailure),
+          Effect.annotateLogs({
+            component: "rpc",
+            procedure: "CloseChat",
+            chatId,
+            requestId: String(requestId),
+          }),
+        ),
       Transcript: ({ chatId }, { requestId }) =>
         requireWebChat(workspaces, chats, chatId).pipe(
           Effect.andThen(() => application.transcript(chatId)),

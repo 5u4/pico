@@ -16,6 +16,7 @@ import * as AtomRegistry from "effect/unstable/reactivity/AtomRegistry";
 import { useContext, useEffect, useMemo, useRef, useState } from "react";
 import type {
   ChatTabPresentation,
+  CloseChatPresentation,
   ComposerPresentation,
   NavigationPresentation,
   PromptSuggestion,
@@ -52,6 +53,26 @@ interface NavigationState {
   readonly entries: ReadonlyMap<number, DraftEntry>;
   readonly expanded: ReadonlySet<WorkspaceId>;
 }
+interface CloseChatTarget {
+  readonly chatId: ChatId;
+  readonly workspaceId: WorkspaceId;
+  readonly title: string;
+  readonly workspaceName: string;
+}
+type CloseChatFlow =
+  | { readonly kind: "idle" }
+  | { readonly kind: "closing"; readonly target: CloseChatTarget }
+  | {
+      readonly kind: "confirmation";
+      readonly target: CloseChatTarget;
+      readonly warning: string | null;
+    }
+  | {
+      readonly kind: "error";
+      readonly target: CloseChatTarget;
+      readonly outcome: "closed" | "unconfirmed";
+      readonly message: string;
+    };
 const emptyDraft: DraftValue = { text: "" };
 const workspaceStorageKey = "pico-last-workspace";
 const openingConnection = Atom.make<FrontendState.Connection>({ kind: "opening" });
@@ -107,6 +128,28 @@ function reconcileWorkspaceSnapshots(
   return entries ? { ...current, entries } : current;
 }
 
+function removeClosedChat(current: NavigationState, chatId: ChatId): NavigationState {
+  let nextEntries: Map<number, DraftEntry> | undefined;
+  for (const [key, entry] of current.entries) {
+    if (entry.target.kind !== "chat" || entry.target.chat.id !== chatId) continue;
+    nextEntries ??= new Map(current.entries);
+    nextEntries.delete(key);
+  }
+  if (!nextEntries) return current;
+  const entries = nextEntries;
+  const openKeys = current.openKeys.filter((key) => entries.has(key));
+  let selectedKey = current.selectedKey;
+  if (selectedKey !== null && !entries.has(selectedKey)) {
+    let nextIndex = 0;
+    for (const key of current.openKeys) {
+      if (key === selectedKey) break;
+      if (entries.has(key)) nextIndex++;
+    }
+    selectedKey = openKeys[nextIndex] ?? openKeys[nextIndex - 1] ?? null;
+  }
+  return { ...current, entries, openKeys, selectedKey };
+}
+
 function readWorkspacePreference(): string | null {
   try {
     return window.localStorage.getItem(workspaceStorageKey);
@@ -154,6 +197,10 @@ export function WorkspaceChat({ state }: { readonly state: State | null }) {
   });
   const workspaceEditorRef = useRef(workspaceEditor);
   const nextWorkspaceEditorSession = useRef(0);
+  const [closeFlow, setCloseFlow] = useState<CloseChatFlow>({ kind: "idle" });
+  const closeFlowRef = useRef(closeFlow);
+  const unsettledCloseMembership = useRef(new Map<ChatId, WorkspaceId>());
+  const closingWorkspaceId = closeFlow.kind === "idle" ? null : closeFlow.target.workspaceId;
   const [theme, setTheme] = useState<Theme>(readBootstrappedTheme);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -186,13 +233,14 @@ export function WorkspaceChat({ state }: { readonly state: State | null }) {
               state &&
               (search.kind === "open" ||
                 navigation.expanded.has(workspace.id) ||
+                workspace.id === closingWorkspaceId ||
                 retainedWorkspaces.has(workspace.id))
                 ? get(state.chats(workspace.id))
                 : null,
           })),
         };
       }),
-    [state, navigation.expanded, navigation.entries, search.kind],
+    [state, navigation.expanded, navigation.entries, search.kind, closingWorkspaceId],
   );
   const { result: workspaces, groups } = useAtomValue(groupedAtom);
   const liveTitles = useAtomValue(state?.titles ?? emptyTitles);
@@ -246,6 +294,16 @@ export function WorkspaceChat({ state }: { readonly state: State | null }) {
       if (!entry) return current;
       return { ...current, entries: new Map(current.entries).set(key, change(entry)) };
     });
+  };
+  const pruneClosedChat = (chatId: ChatId) => {
+    const current = navigationRef.current;
+    const next = removeClosedChat(current, chatId);
+    if (next === current) return;
+    navigationVersion.current++;
+    updateNavigation(() => next);
+    setToolSelection((selection) =>
+      selection && !next.entries.has(selection.conversationKey) ? null : selection,
+    );
   };
   const selectDraft = (workspace: Workspace) => {
     const current = navigationRef.current;
@@ -302,6 +360,17 @@ export function WorkspaceChat({ state }: { readonly state: State | null }) {
       } catch {}
     }
   }, [workspaces, selected?.workspace.id]);
+
+  useEffect(() => {
+    if (!state) return;
+    for (const [chatId, workspaceId] of unsettledCloseMembership.current) {
+      const result = groups.find((group) => group.workspace.id === workspaceId)?.chats;
+      if (result?._tag !== "Success" || result.waiting) continue;
+      if (registry.get(state.chats(workspaceId)) !== result) continue;
+      unsettledCloseMembership.current.delete(chatId);
+      if (!result.value.some((chat) => chat.id === chatId)) pruneClosedChat(chatId);
+    }
+  }, [closeFlow, groups]);
 
   const setWorkspaceOpen = (open: boolean) => {
     openWorkspaceDialog.current = open ? ++workspaceDialogVersion.current : null;
@@ -480,6 +549,119 @@ export function WorkspaceChat({ state }: { readonly state: State | null }) {
           : value.selectedKey,
     }));
   };
+  const updateCloseFlow = (next: CloseChatFlow) => {
+    closeFlowRef.current = next;
+    setCloseFlow(next);
+  };
+  const runCloseChat = async (target: CloseChatTarget, allowDirtyWorktree: boolean) => {
+    if (!state) return;
+    updateCloseFlow({ kind: "closing", target });
+    const exit = await runCommand(registry, state.closeChat(target.workspaceId), {
+      chatId: target.chatId,
+      allowDirtyWorktree,
+    });
+    if (Exit.isSuccess(exit) && exit.value.kind === "closed") {
+      unsettledCloseMembership.current.delete(target.chatId);
+      pruneClosedChat(target.chatId);
+    }
+    const refresh = await Effect.runPromiseExit(
+      AtomRegistry.getResult(registry, state.chats(target.workspaceId), {
+        suspendOnWaiting: true,
+      }),
+    );
+    if (Exit.isSuccess(refresh)) {
+      unsettledCloseMembership.current.delete(target.chatId);
+      if (!refresh.value.some((chat) => chat.id === target.chatId)) pruneClosedChat(target.chatId);
+    } else if (Exit.isFailure(exit) || exit.value.kind !== "closed") {
+      unsettledCloseMembership.current.set(target.chatId, target.workspaceId);
+    }
+    const warning = Exit.isFailure(refresh)
+      ? `The chat list could not be refreshed. ${errorMessage(refresh.cause)}`
+      : null;
+    if (Exit.isFailure(exit)) {
+      updateCloseFlow({
+        kind: "error",
+        target,
+        outcome: "unconfirmed",
+        message: `${errorMessage(exit.cause)} The chat may already be archived, with cleanup unfinished.${warning ? ` ${warning}` : ""}`,
+      });
+      return;
+    }
+    switch (exit.value.kind) {
+      case "worktree-confirmation-required":
+        updateCloseFlow({ kind: "confirmation", target, warning });
+        return;
+      case "closed":
+        updateCloseFlow(
+          warning
+            ? { kind: "error", target, outcome: "closed", message: `Chat closed. ${warning}` }
+            : { kind: "idle" },
+        );
+        return;
+      default: {
+        const exhaustive: never = exit.value;
+        return exhaustive;
+      }
+    }
+  };
+  const closeChat = (workspaceId: string, id: string) => {
+    if (
+      !state ||
+      closeFlowRef.current.kind !== "idle" ||
+      registry.get(state.connection).kind !== "active"
+    )
+      return;
+    const group = groups.find((group) => group.workspace.id === workspaceId);
+    if (!group) return;
+    const existing = [...navigationRef.current.entries.values()].find(
+      (entry) =>
+        entry.workspace.id === workspaceId &&
+        entry.target.kind === "chat" &&
+        entry.target.chat.id === id,
+    );
+    const chat =
+      existing?.target.kind === "chat"
+        ? existing.target.chat
+        : group.chats &&
+          Option.getOrElse(AsyncResult.value(group.chats), () => []).find((chat) => chat.id === id);
+    if (!chat) return;
+    void runCloseChat(
+      {
+        chatId: chat.id,
+        workspaceId: group.workspace.id,
+        title: titles.get(chat.id) ?? `Chat ${chat.id.slice(-8)}`,
+        workspaceName: group.workspace.name,
+      },
+      false,
+    );
+  };
+  const confirmCloseChat = () => {
+    const current = closeFlowRef.current;
+    if (
+      !state ||
+      current.kind !== "confirmation" ||
+      registry.get(state.connection).kind !== "active"
+    )
+      return;
+    void runCloseChat(current.target, true);
+  };
+  const retryCloseChat = () => {
+    const current = closeFlowRef.current;
+    if (
+      !state ||
+      current.kind !== "error" ||
+      current.outcome === "closed" ||
+      registry.get(state.connection).kind !== "active"
+    )
+      return;
+    void runCloseChat(current.target, false);
+  };
+  const dismissCloseChat = () => {
+    const current = closeFlowRef.current;
+    if (current.kind === "confirmation" || current.kind === "error") {
+      updateCloseFlow({ kind: "idle" });
+    }
+  };
   const changeSearch = (next: SidebarSearchPresentation) => {
     if (state && search.kind === "closed" && next.kind === "open") {
       for (const { workspace } of groups) {
@@ -597,6 +779,30 @@ export function WorkspaceChat({ state }: { readonly state: State | null }) {
   );
   const unavailable = connection.kind === "unavailable";
   const available = connection.kind === "active";
+  const closePresentation: CloseChatPresentation =
+    closeFlow.kind === "idle"
+      ? closeFlow
+      : closeFlow.kind === "closing"
+        ? {
+            kind: "closing",
+            title: closeFlow.target.title,
+            workspaceName: closeFlow.target.workspaceName,
+          }
+        : closeFlow.kind === "confirmation"
+          ? {
+              kind: "confirmation",
+              title: closeFlow.target.title,
+              workspaceName: closeFlow.target.workspaceName,
+              warning: closeFlow.warning,
+              canConfirm: available,
+            }
+          : {
+              kind: "error",
+              title: closeFlow.target.title,
+              workspaceName: closeFlow.target.workspaceName,
+              message: closeFlow.message,
+              retry: closeFlow.outcome === "unconfirmed" ? { enabled: available } : null,
+            };
   const onReload = () => {
     if (draftValues.length > 0) setRecoveryOpen(true);
     else window.location.reload();
@@ -832,6 +1038,12 @@ export function WorkspaceChat({ state }: { readonly state: State | null }) {
       )}
       <div className="min-h-0 flex-1">
         <ChatScreen
+          closeChat={closePresentation}
+          chatCloseDisabled={!available || closeFlow.kind !== "idle"}
+          onChatClose={closeChat}
+          onCloseChatConfirm={confirmCloseChat}
+          onCloseChatDismiss={dismissCloseChat}
+          onCloseChatRetry={retryCloseChat}
           composer={composer}
           contextLabel={
             selected

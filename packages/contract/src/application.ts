@@ -59,9 +59,11 @@ export interface CloseChatOptions {
   readonly allowDirtyWorktree: boolean;
 }
 
-export type CloseChatResult =
-  | { readonly kind: "closed" }
-  | { readonly kind: "worktree-confirmation-required" };
+export const CloseChatResult = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("closed") }),
+  Schema.Struct({ kind: Schema.Literal("worktree-confirmation-required") }),
+]);
+export type CloseChatResult = typeof CloseChatResult.Type;
 
 export class Application extends Context.Service<
   Application,

@@ -323,6 +323,7 @@ describe("RPC", () => {
               prompt: AgentMessage.AgentPrompt.make({ text: "foreign", attachments: [] }),
             }),
             client.Abort({ chatId }),
+            client.CloseChat({ chatId, allowDirtyWorktree: true }).pipe(Effect.asVoid),
           ]) {
             const rejected = yield* request.pipe(Effect.flip);
             assert.instanceOf(rejected, ApplicationError);

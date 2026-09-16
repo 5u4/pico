@@ -1,5 +1,10 @@
 import { AgentPrompt, type AgentTranscript } from "@pico/contract/agent-message";
-import type { CreateChat, CreateWorkspace, UpdateWorkspace } from "@pico/contract/application";
+import type {
+  CloseChatOptions,
+  CreateChat,
+  CreateWorkspace,
+  UpdateWorkspace,
+} from "@pico/contract/application";
 import type { ChatId, ChatListEntry } from "@pico/contract/chat-model";
 import type { ApplicationError } from "@pico/contract/errors";
 import type { Workspace, WorkspaceId } from "@pico/contract/workspace-model";
@@ -218,6 +223,24 @@ export const make = ({ url }: { readonly url: string }) => {
       }),
     ).pipe(Atom.keepAlive, Atom.setLazy(false)),
   );
+  const closeChat = Atom.family((workspaceId: WorkspaceId) =>
+    Atom.fn<CloseChatOptions & { readonly chatId: ChatId }>()((input, get) =>
+      Effect.gen(function* () {
+        const session = yield* get.result(owner);
+        yield* session.available;
+        const result = yield* session.client
+          .CloseChat(input)
+          .pipe(Effect.tapErrorTag("ApplicationError", () => Effect.sync(session.recordResponse)));
+        session.recordResponse();
+        if (result.kind === "closed") {
+          get.set(chats(workspaceId), (current) =>
+            current.filter((chat) => chat.id !== input.chatId),
+          );
+        }
+        return result;
+      }).pipe(Effect.onExit(() => Effect.sync(() => get.registry.refresh(chats(workspaceId))))),
+    ).pipe(Atom.keepAlive, Atom.setLazy(false)),
+  );
 
   const transcriptRead = Atom.family((chatId: ChatId) =>
     Atom.make((get) => {
@@ -373,6 +396,7 @@ export const make = ({ url }: { readonly url: string }) => {
     createWorkspace,
     updateWorkspace,
     createChat,
+    closeChat,
     transcript,
     live,
     send,
