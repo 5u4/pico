@@ -337,17 +337,12 @@ export function ChatScreen({
             </Button>
           </header>
 
-          <div
-            aria-label="Conversation"
-            className="relative min-h-0 flex-1"
-            id="conversation-history"
-            role="tabpanel"
-            tabIndex={0}
-          >
+          <div className="relative min-h-0 flex-1">
             <div
               aria-label="Conversation history"
               className="transcript-scroll h-full overflow-y-auto overscroll-contain"
               hidden={welcome}
+              id={welcome ? undefined : "conversation-history"}
               onScroll={(event) => {
                 const element = event.currentTarget;
                 const following =
@@ -356,7 +351,7 @@ export function ChatScreen({
                 setShowJump(!following);
               }}
               ref={transcriptRef}
-              role="region"
+              role="tabpanel"
               tabIndex={0}
             >
               <div ref={contentRef} style={{ paddingBottom: composerHeight + 16 }}>
@@ -393,12 +388,16 @@ export function ChatScreen({
               </div>
             )}
             <div
+              aria-label={welcome ? "Conversation" : undefined}
               className={
                 welcome
                   ? "absolute inset-0 overflow-y-auto overscroll-contain"
                   : "absolute inset-x-0 bottom-0 px-4 pb-6 sm:px-8 lg:px-12"
               }
+              id={welcome ? "conversation-history" : undefined}
               ref={composerRef}
+              role={welcome ? "tabpanel" : undefined}
+              tabIndex={welcome ? 0 : undefined}
             >
               <div
                 className={

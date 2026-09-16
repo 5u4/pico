@@ -102,7 +102,6 @@ function ToolCall({
   const detailsId = `details-${call.id}`;
   const contentId = `${detailsId}-content`;
   const triggerId = `${detailsId}-trigger`;
-  const previewId = `${detailsId}-preview`;
   const chipRef = useRef<HTMLButtonElement>(null);
   const previewRef = useRef<HTMLDivElement>(null);
   const [preview, setPreview] = useState<PreviewPosition | null>(null);
@@ -178,8 +177,7 @@ function ToolCall({
           <span className="sr-only">{call.state.label}</span>
         </button>
         <button
-          aria-describedby={preview && visible ? previewId : undefined}
-          aria-label={`Open tool details for ${call.label}: ${call.summary}`}
+          aria-label={`Open tool details for ${call.label}`}
           className="flex min-h-7 min-w-0 flex-1 items-center rounded-chip text-start"
           onBlur={() => setPreview(null)}
           onClick={() => {
@@ -251,6 +249,7 @@ function ToolCall({
         visible &&
         createPortal(
           <div
+            aria-hidden="true"
             className={`fixed z-50 w-72 max-w-[calc(100vw-24px)] ${preview.edge === "top" ? "pt-1.5" : "pb-1.5"}`}
             onPointerLeave={(event) => leavePreview(event.relatedTarget)}
             ref={previewRef}
@@ -262,8 +261,6 @@ function ToolCall({
           >
             <div
               className="tool-preview-enter overflow-hidden rounded-card bg-panel shadow-overlay"
-              id={previewId}
-              role="tooltip"
               style={{ transformOrigin: preview.edge === "top" ? "top left" : "bottom left" }}
             >
               <div className="flex items-center justify-between gap-3 border-b border-border px-2.5 py-1.5 text-[11px]">
