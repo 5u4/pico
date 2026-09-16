@@ -45,6 +45,7 @@
       },
       "dependencies": {
         "@effect/platform-bun": "catalog:",
+        "@oh-my-pi/pi-coding-agent": "catalog:",
         "@oh-my-pi/pi-utils": "catalog:",
         "@pico/contract": "workspace:*",
         "@pico/daemon": "workspace:*",

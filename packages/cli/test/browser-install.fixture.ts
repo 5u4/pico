@@ -25,6 +25,7 @@ export const runInstallFixture = async (mode: "failure" | "success") => {
     ]);
     for (const name of [
       "@effect/platform-bun",
+      "@oh-my-pi/pi-coding-agent",
       "@oh-my-pi/pi-utils",
       "@pico/contract",
       "@pico/daemon",
@@ -36,6 +37,7 @@ export const runInstallFixture = async (mode: "failure" | "success") => {
     }
     await Promise.all([
       copyFile(main, join(directory, "main.ts")),
+      copyFile(join(dirname(main), "commands.ts"), join(directory, "commands.ts")),
       copyFile(join(dirname(main), "runtime.ts"), join(directory, "runtime.ts")),
       copyFile(installer, join(omp, "agent-browser", "install.ts")),
       copyFile(launcher, join(omp, "agent-browser", "cli.ts")),
