@@ -40,6 +40,7 @@ interface DraftEntry {
   readonly key: number;
   readonly workspace: Workspace;
   readonly value: DraftValue;
+  readonly disclosures: ReadonlyMap<string, boolean>;
   readonly target: { readonly kind: "new" } | { readonly kind: "chat"; readonly chat: Chat };
   readonly submission:
     | { readonly kind: "idle" }
@@ -214,7 +215,6 @@ export function WorkspaceChat({ state }: { readonly state: State | null }) {
     readonly conversationKey: number;
     readonly callId: string;
   } | null>(null);
-  const [disclosures, setDisclosures] = useState<ReadonlyMap<string, boolean>>(() => new Map());
   const [recoveryOpen, setRecoveryOpen] = useState(false);
   const groupedAtom = useMemo(
     () =>
@@ -314,6 +314,7 @@ export function WorkspaceChat({ state }: { readonly state: State | null }) {
       key: nextDraftKey.current++,
       workspace,
       value: emptyDraft,
+      disclosures: new Map(),
       target: { kind: "new" },
       submission: { kind: "idle" },
     };
@@ -510,6 +511,7 @@ export function WorkspaceChat({ state }: { readonly state: State | null }) {
       key: nextDraftKey.current++,
       workspace: group.workspace,
       value: emptyDraft,
+      disclosures: new Map(),
       target: { kind: "chat", chat },
       submission: { kind: "idle" },
     };
@@ -937,31 +939,38 @@ export function WorkspaceChat({ state }: { readonly state: State | null }) {
           canSubmit: available && !!selected && !creating && selected.value.text.trim().length > 0,
           statusLabel,
         };
-  const transcript: TranscriptPresentation = conversation
-    ? presentTranscript(conversation.snapshot, conversation.live, disclosures, connection)
-    : selected
-      ? {
-          state: "empty",
-          title: "What are you working on?",
-          description: `Start a conversation in ${selected.workspace.name}.`,
-        }
-      : workspaces._tag === "Failure"
+  const transcript: TranscriptPresentation =
+    conversation && selected
+      ? presentTranscript(
+          conversation.snapshot,
+          conversation.live,
+          selected.disclosures,
+          connection,
+        )
+      : selected
         ? {
-            state: "error",
-            title: "Workspaces unavailable",
-            description: errorMessage(workspaces.cause),
-            retryLabel: unavailable ? "Reload" : "Retry workspaces",
+            state: "empty",
+            title: "What are you working on?",
+            description: `Start a conversation in ${selected.workspace.name}.`,
           }
-        : workspaces._tag === "Initial" || workspaces.waiting
-          ? { state: "loading", label: "Loading workspaces..." }
-          : {
-              state: "empty",
-              title: groups.length > 0 ? "What are you working on?" : "Bring your project to pico",
-              description:
-                groups.length > 0
-                  ? "Start a new chat or reopen a conversation from the sidebar. Your drafts are kept."
-                  : "Add a workspace to chat about your code. Your conversations stay together in its project directory.",
-            };
+        : workspaces._tag === "Failure"
+          ? {
+              state: "error",
+              title: "Workspaces unavailable",
+              description: errorMessage(workspaces.cause),
+              retryLabel: unavailable ? "Reload" : "Retry workspaces",
+            }
+          : workspaces._tag === "Initial" || workspaces.waiting
+            ? { state: "loading", label: "Loading workspaces..." }
+            : {
+                state: "empty",
+                title:
+                  groups.length > 0 ? "What are you working on?" : "Bring your project to pico",
+                description:
+                  groups.length > 0
+                    ? "Start a new chat or reopen a conversation from the sidebar. Your drafts are kept."
+                    : "Add a workspace to chat about your code. Your conversations stay together in its project directory.",
+              };
   let toolPane: ToolCallPresentation | null = null;
   if (
     toolSelection &&
@@ -1063,13 +1072,14 @@ export function WorkspaceChat({ state }: { readonly state: State | null }) {
             const key = navigationRef.current.selectedKey;
             if (key !== null) updateEntry(key, (entry) => ({ ...entry, value: { text } }));
           }}
-          onDisclosuresChange={(ids, open) =>
-            setDisclosures((current) => {
-              const next = new Map(current);
-              for (const id of ids) next.set(id, open);
-              return next;
-            })
-          }
+          onDisclosuresChange={(ids, open) => {
+            if (!selected || navigationRef.current.selectedKey !== selected.key) return;
+            updateEntry(selected.key, (entry) => {
+              const disclosures = new Map(entry.disclosures);
+              for (const id of ids) disclosures.set(id, open);
+              return { ...entry, disclosures };
+            });
+          }}
           onEditWorkspace={editWorkspace}
           onNewChat={newChat}
           onSearchChange={changeSearch}
