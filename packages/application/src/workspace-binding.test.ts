@@ -73,6 +73,7 @@ describe("Workspace binding", () => {
             Effect.sync(() => {
               createdSessions.push(input);
             }),
+          readTitle: () => Effect.succeed(null),
           remove: () => Effect.void,
         }),
       );
@@ -351,6 +352,7 @@ describe("Workspace binding", () => {
         AgentSessionStore,
         AgentSessionStore.of({
           create: () => Effect.void,
+          readTitle: () => Effect.succeed(null),
           remove: () => Effect.void,
         }),
       );

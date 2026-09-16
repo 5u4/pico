@@ -99,6 +99,7 @@ describe("Application", () => {
                   Option.isNone(yield* chats.findById(input.chatId).pipe(Effect.orDie)),
                 );
               }),
+            readTitle: () => Effect.succeed(null),
             remove: () => Effect.void,
           });
         }),
@@ -305,11 +306,15 @@ describe("Application", () => {
           regularWorkspace,
         ]);
         assert.deepStrictEqual(yield* application.listChats(regularWorkspace.id), [
-          unboundChat,
-          regularChat,
+          { ...unboundChat, title: null },
+          { ...regularChat, title: null },
         ]);
-        assert.deepStrictEqual(yield* application.listChats(discordWorkspace.id), [discordChat]);
-        assert.deepStrictEqual(yield* application.listChats(worktreeWorkspace.id), [worktreeChat]);
+        assert.deepStrictEqual(yield* application.listChats(discordWorkspace.id), [
+          { ...discordChat, title: null },
+        ]);
+        assert.deepStrictEqual(yield* application.listChats(worktreeWorkspace.id), [
+          { ...worktreeChat, title: null },
+        ]);
 
         assert.deepStrictEqual(
           Option.getOrThrow(yield* application.findWorkspaceByPlatformId("discord", "1.10")),
@@ -845,6 +850,7 @@ describe("Application", () => {
                   .pipe(Effect.orDie),
               ),
             ),
+          readTitle: () => Effect.succeed(null),
           remove: (chatId) =>
             removalFails
               ? Effect.fail(new AgentError({ message: "private cleanup details" }))

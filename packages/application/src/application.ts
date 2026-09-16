@@ -435,7 +435,10 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
           message: "Workspace not found",
         });
       }
-      return yield* chats.listOpenByWorkspace(workspaceId);
+      const openChats = yield* chats.listOpenByWorkspace(workspaceId);
+      return yield* Effect.forEach(openChats, (chat) =>
+        sessions.readTitle(chat.id).pipe(Effect.map((title) => ({ ...chat, title }))),
+      );
     },
     Effect.mapError(failure("Failed to list chats")),
   );

@@ -15,11 +15,11 @@ export function readBootstrappedTheme(): Theme {
 
   try {
     if (typeof window.matchMedia === "function") {
-      return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+      return window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
     }
   } catch {}
 
-  return "light";
+  return "dark";
 }
 
 export function applyThemePreference(theme: Theme): void {

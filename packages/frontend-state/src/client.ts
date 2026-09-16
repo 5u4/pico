@@ -1,6 +1,6 @@
 import { AgentPrompt, type AgentTranscript } from "@pico/contract/agent-message";
 import type { CreateChat, CreateWorkspace, UpdateWorkspace } from "@pico/contract/application";
-import type { Chat, ChatId } from "@pico/contract/chat-model";
+import type { ChatId, ChatListEntry } from "@pico/contract/chat-model";
 import type { ApplicationError } from "@pico/contract/errors";
 import type { Workspace, WorkspaceId } from "@pico/contract/workspace-model";
 import * as RpcClient from "@pico/rpc/client";
@@ -43,6 +43,7 @@ const decodePrompt = Schema.decodeUnknownEffect(AgentPrompt);
 /** Construct once per page and dispose its registry at page shutdown. */
 export const make = ({ url }: { readonly url: string }) => {
   const status = Atom.make<Connection>({ kind: "opening" }).pipe(Atom.keepAlive);
+  const titleCell = Atom.make<ReadonlyMap<ChatId, string>>(new Map()).pipe(Atom.keepAlive);
   const chatCell = Atom.family((_chatId: ChatId) =>
     Atom.make<ChatRecord>({
       live: emptyLiveChat(),
@@ -87,6 +88,10 @@ export const make = ({ url }: { readonly url: string }) => {
         Stream.runForEach(({ chatId, event }) =>
           Effect.sync(() => {
             lifecycle.recordResponse();
+            if (event.type === "title-changed") {
+              lifecycle.update(titleCell, (titles) => new Map(titles).set(chatId, event.title));
+              return;
+            }
             const cell = chatCell(chatId);
             if (get.registry.getNodes().has(cell)) {
               lifecycle.update(cell, (state) => ({
@@ -118,6 +123,11 @@ export const make = ({ url }: { readonly url: string }) => {
   const connection = Atom.readable((get): Connection => {
     const session = get(owner);
     return session._tag === "Failure" ? { kind: "unavailable", cause: session.cause } : get(status);
+  }).pipe(Atom.keepAlive);
+
+  const titles = Atom.readable((get): ReadonlyMap<ChatId, string> => {
+    get(owner);
+    return get(titleCell);
   }).pipe(Atom.keepAlive);
 
   const list = <A>(
@@ -170,7 +180,7 @@ export const make = ({ url }: { readonly url: string }) => {
 
   const workspaces = list<readonly Workspace[]>((client) => client.ListWorkspaces());
   const chats = Atom.family((workspaceId: WorkspaceId) =>
-    list<readonly Chat[]>((client) => client.ListChats({ workspaceId })),
+    list<readonly ChatListEntry[]>((client) => client.ListChats({ workspaceId })),
   );
   const createWorkspace = Atom.fn<CreateWorkspace>()((input, get) =>
     Effect.gen(function* () {
@@ -359,6 +369,7 @@ export const make = ({ url }: { readonly url: string }) => {
     connection,
     workspaces,
     chats,
+    titles,
     createWorkspace,
     updateWorkspace,
     createChat,

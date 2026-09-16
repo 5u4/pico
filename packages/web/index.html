@@ -12,16 +12,16 @@
         storedTheme = window.localStorage.getItem(themeStorageKey);
       } catch {}
 
-      let theme = "light";
+      let theme = "dark";
       if (storedTheme === "light" || storedTheme === "dark") {
         theme = storedTheme;
       } else {
         try {
           if (
             typeof window.matchMedia === "function" &&
-            window.matchMedia("(prefers-color-scheme: dark)").matches
+            window.matchMedia("(prefers-color-scheme: light)").matches
           ) {
-            theme = "dark";
+            theme = "light";
           }
         } catch {}
       }

@@ -6,8 +6,8 @@ export type ButtonProps = ComponentPropsWithoutRef<"button"> & {
 };
 
 const toneClasses = {
-  primary: "bg-accent text-on-accent hover:bg-accent-hover",
-  secondary: "border border-border-strong bg-panel text-foreground hover:bg-surface",
+  primary: "bg-foreground text-canvas shadow-filled hover:opacity-90",
+  secondary: "bg-panel text-foreground shadow-btn hover:bg-surface aria-expanded:bg-surface-hover",
   ghost: "text-muted hover:bg-surface-hover hover:text-foreground",
   danger: "bg-danger-soft text-danger hover:bg-surface-hover",
 } satisfies Record<NonNullable<ButtonProps["tone"]>, string>;
@@ -26,7 +26,7 @@ export function Button({
   ...props
 }: ButtonProps) {
   const classes = [
-    "press-feedback inline-flex shrink-0 items-center justify-center gap-2 rounded-control font-medium transition-colors duration-feedback ease-feedback disabled:pointer-events-none disabled:opacity-50",
+    "press-feedback inline-flex shrink-0 items-center justify-center gap-2 rounded-control font-medium transition-[transform,background-color,color,opacity] duration-feedback ease-feedback disabled:pointer-events-none disabled:opacity-50",
     toneClasses[tone],
     sizeClasses[size],
     className,

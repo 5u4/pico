@@ -10,6 +10,22 @@ export interface ChatSummary {
   readonly title: string;
 }
 
+export interface ChatTabPresentation {
+  readonly id: string;
+  readonly title: string;
+  readonly contextLabel: string;
+}
+
+export interface PromptSuggestion {
+  readonly label: string;
+  readonly text: string;
+  readonly kind: "explain" | "review" | "fix";
+}
+
+export type SidebarSearchPresentation =
+  | { readonly kind: "closed" }
+  | { readonly kind: "open"; readonly query: string };
+
 export type ListStatus =
   | { readonly kind: "pending"; readonly label: string }
   | { readonly kind: "empty"; readonly label: string }

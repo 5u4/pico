@@ -1,4 +1,4 @@
-import { CaretDownIcon, CircleNotchIcon, SparkleIcon } from "@phosphor-icons/react";
+import { CaretDownIcon, SparkleIcon } from "@phosphor-icons/react";
 import type { AssistantBlock, AssistantState, TranscriptItem } from "./chat-model.ts";
 
 export function AssistantMessage({
@@ -9,65 +9,101 @@ export function AssistantMessage({
   readonly onDisclosuresChange: (ids: readonly string[], open: boolean) => void;
 }) {
   return (
-    <article className="text-copy">
-      <header className="mb-3 flex items-center gap-2 text-meta text-subtle">
-        <span className="font-semibold text-muted">{item.modelLabel}</span>
-        <span aria-hidden="true">·</span>
-        <span>{item.timestampLabel}</span>
+    <article className="transcript-assistant-enter min-w-0">
+      <header className="sr-only">
+        {item.modelLabel} · {item.timestampLabel}
       </header>
       <div className="space-y-4">
-        {item.blocks.map((block) => (
+        {item.blocks.map((block, index) => (
           <AssistantBlockView
             block={block}
             key={block.id}
+            live={item.state.kind === "streaming" && index === item.blocks.length - 1}
             onDisclosuresChange={onDisclosuresChange}
           />
         ))}
       </div>
-      <AssistantStateView state={item.state} />
+      <AssistantStateView hasContent={item.blocks.length > 0} state={item.state} />
     </article>
   );
 }
 
 function AssistantBlockView({
   block,
+  live,
   onDisclosuresChange,
 }: {
   readonly block: AssistantBlock;
+  readonly live: boolean;
   readonly onDisclosuresChange: (ids: readonly string[], open: boolean) => void;
 }) {
   switch (block.kind) {
-    case "text":
-      return <p className="whitespace-pre-wrap text-copy text-foreground">{block.text}</p>;
+    case "text": {
+      let tailStart = live ? Math.max(0, block.text.length - 6) : block.text.length;
+      const code = block.text.charCodeAt(tailStart);
+      if (code >= 0xdc00 && code <= 0xdfff) tailStart -= 1;
+      return (
+        <p className="max-w-[620px] whitespace-pre-wrap text-[13.5px] leading-[1.65] text-foreground [overflow-wrap:anywhere]">
+          {block.text.slice(0, tailStart)}
+          {tailStart < block.text.length && (
+            <span className="stream-tail" key={block.text.length}>
+              {block.text.slice(tailStart)}
+            </span>
+          )}
+        </p>
+      );
+    }
     case "thinking": {
       const contentId = `${block.id}-content`;
       const triggerId = `${block.id}-trigger`;
       return (
-        <div>
+        <div className="w-full max-w-95">
           <button
             aria-controls={contentId}
             aria-expanded={block.open}
-            className="trace-disclosure flex max-w-full items-center gap-2 px-1.5 py-1 text-start text-label font-medium text-muted"
+            className="-mx-1.5 flex min-h-7 max-w-full items-center gap-2 rounded-control px-1.5 py-1 text-start transition-colors duration-100 hover:bg-surface-hover"
             id={triggerId}
             onClick={() => onDisclosuresChange([block.id], !block.open)}
             type="button"
           >
-            <SparkleIcon aria-hidden="true" className="shrink-0 text-subtle" size={16} />
-            <span className="min-w-0 break-words">{block.label}</span>
+            <SparkleIcon
+              aria-hidden="true"
+              className={`shrink-0 ${live ? "text-muted" : "text-subtle"}`}
+              size={16}
+              weight="fill"
+            />
+            <span
+              className={`min-w-0 break-words text-[13px] font-medium ${live ? "thinking-shimmer" : "text-muted"}`}
+            >
+              {block.label}
+            </span>
             <CaretDownIcon
               aria-hidden="true"
-              className={`trace-caret ${block.open ? "disclosure-caret-open" : ""}`}
+              className="thinking-caret shrink-0 text-subtle"
+              data-open={block.open}
               size={14}
             />
           </button>
           <div
+            aria-hidden={!block.open}
             aria-labelledby={triggerId}
-            className="trace-body mt-1 whitespace-pre-wrap break-words py-1 text-label leading-relaxed text-muted"
-            hidden={!block.open}
+            className="thinking-expansion"
+            data-open={block.open}
             id={contentId}
+            inert={!block.open}
             role="region"
           >
-            {block.text}
+            <div className="min-h-0 overflow-hidden">
+              <div className="relative ml-[5px] mt-1 pl-4">
+                <span
+                  aria-hidden="true"
+                  className="absolute -top-2 bottom-1 left-[3px] w-px bg-border"
+                />
+                <p className="whitespace-pre-wrap py-1 text-[12.5px] leading-relaxed text-muted [overflow-wrap:anywhere]">
+                  {block.text}
+                </p>
+              </div>
+            </div>
           </div>
         </div>
       );
@@ -79,22 +115,29 @@ function AssistantBlockView({
   }
 }
 
-function AssistantStateView({ state }: { readonly state: AssistantState }) {
+function AssistantStateView({
+  hasContent,
+  state,
+}: {
+  readonly hasContent: boolean;
+  readonly state: AssistantState;
+}) {
   switch (state.kind) {
     case "complete":
       return null;
     case "streaming":
-      return (
-        <p className="mt-3 flex items-center gap-2 text-meta font-medium text-accent">
-          <CircleNotchIcon aria-hidden="true" size={14} />
-          {state.label}
-        </p>
+      return hasContent ? (
+        <p className="sr-only">{state.label}</p>
+      ) : (
+        <p className="thinking-shimmer min-h-6 text-[13px] font-medium">{state.label}</p>
       );
     case "unknown":
-      return <p className="mt-3 text-meta text-muted">{state.label}</p>;
+      return <p className="mt-3 text-[12px] text-muted">{state.label}</p>;
     case "interrupted":
       return (
-        <p className="mt-4 border-l-2 border-warning pl-3 text-label text-warning">{state.label}</p>
+        <p className="mt-4 border-l-2 border-warning pl-3 text-[12.5px] text-warning">
+          {state.label}
+        </p>
       );
     default: {
       const exhaustive: never = state;

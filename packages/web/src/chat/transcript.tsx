@@ -8,9 +8,15 @@ export interface TranscriptProps {
   readonly presentation: TranscriptPresentation;
   readonly onRetry: () => void;
   readonly onDisclosuresChange: (ids: readonly string[], open: boolean) => void;
+  readonly onToolSelect: (id: string | null) => void;
 }
 
-export function Transcript({ presentation, onRetry, onDisclosuresChange }: TranscriptProps) {
+export function Transcript({
+  presentation,
+  onRetry,
+  onDisclosuresChange,
+  onToolSelect,
+}: TranscriptProps) {
   switch (presentation.state) {
     case "loading":
       return <LoadingTranscript label={presentation.label} />;
@@ -27,19 +33,17 @@ export function Transcript({ presentation, onRetry, onDisclosuresChange }: Trans
       );
     case "ready":
       return (
-        <section
-          aria-label="Conversation"
-          className="mx-auto w-full max-w-3xl px-4 py-8 md:px-8 md:py-12"
-        >
+        <section aria-label="Conversation" className="w-full px-4 pt-8 sm:px-8 lg:px-12">
           <p aria-live="polite" className="sr-only">
             {presentation.liveLabel}
           </p>
-          <div className="space-y-7">
+          <div className="mx-auto flex w-full max-w-[720px] flex-col gap-8">
             {presentation.items.map((item) => (
               <TranscriptItemView
                 item={item}
                 key={item.id}
                 onDisclosuresChange={onDisclosuresChange}
+                onToolSelect={onToolSelect}
               />
             ))}
           </div>
@@ -57,10 +61,10 @@ function LoadingTranscript({ label }: { readonly label: string }) {
     <section
       aria-busy="true"
       aria-label={label}
-      className="mx-auto w-full max-w-3xl px-4 py-10 md:px-8 md:py-14"
+      className="mx-auto w-full max-w-[816px] px-4 pt-8 sm:px-8 lg:px-12"
     >
       <div className="space-y-8">
-        <div className="ml-auto w-3/5 rounded-bubble bg-surface p-4">
+        <div className="ml-auto w-3/5 rounded-xl bg-field px-3.5 py-2 shadow-hairline">
           <div className="loading-line w-full" />
           <div className="loading-line mt-3 w-4/5" />
         </div>
@@ -126,22 +130,32 @@ function ErrorTranscript({
 function TranscriptItemView({
   item,
   onDisclosuresChange,
+  onToolSelect,
 }: {
   readonly item: TranscriptItem;
   readonly onDisclosuresChange: (ids: readonly string[], open: boolean) => void;
+  readonly onToolSelect: (id: string | null) => void;
 }) {
   switch (item.kind) {
     case "user":
       return (
-        <article className="ml-auto max-w-[82%] rounded-bubble bg-surface px-4 py-3 md:max-w-[72%]">
-          <p className="whitespace-pre-wrap text-copy">{item.text}</p>
-          <p className="mt-2 text-right text-meta text-muted">{item.timestampLabel}</p>
+        <article className="transcript-user-enter flex justify-end pl-10 sm:pl-24">
+          <div className="min-w-0 rounded-xl bg-field px-3.5 py-2 text-[13px] leading-relaxed text-foreground shadow-hairline">
+            <p className="whitespace-pre-wrap [overflow-wrap:anywhere]">{item.text}</p>
+            <p className="sr-only">{item.timestampLabel}</p>
+          </div>
         </article>
       );
     case "assistant":
       return <AssistantMessage item={item} onDisclosuresChange={onDisclosuresChange} />;
     case "tool-group":
-      return <ToolGroup item={item} onDisclosuresChange={onDisclosuresChange} />;
+      return (
+        <ToolGroup
+          item={item}
+          onDisclosuresChange={onDisclosuresChange}
+          onToolSelect={onToolSelect}
+        />
+      );
     case "notice":
       return <Notice item={item} />;
     default: {

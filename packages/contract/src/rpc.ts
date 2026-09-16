@@ -16,7 +16,7 @@ export const PicoRpcs = RpcGroup.make(
   }),
   Rpc.make("ListChats", {
     payload: { workspaceId: Workspace.WorkspaceId },
-    success: Schema.Array(Chat.Chat),
+    success: Schema.Array(Chat.ChatListEntry),
     error: Errors.ApplicationError,
   }),
   Rpc.make("CreateWorkspace", {

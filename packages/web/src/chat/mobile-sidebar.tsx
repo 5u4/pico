@@ -26,13 +26,32 @@ export function MobileSidebar({
     return () => desktop.removeEventListener("change", closeOnDesktop);
   }, [open, sidebar.onClose]);
 
+  const afterClose = (action: () => void) => {
+    if (dialog?.open) {
+      dialog.addEventListener("close", action, { once: true });
+      sidebar.onClose();
+    } else action();
+  };
+
   return (
     <dialog
       aria-label="Workspace navigation"
-      className="fixed inset-y-0 left-0 z-30 m-0 h-dvh max-h-none w-[min(19rem,88vw)] max-w-none overscroll-contain border-0 bg-transparent p-0 backdrop:bg-overlay md:hidden"
+      className="fixed inset-y-2.5 left-2.5 z-30 m-0 h-[calc(100dvh-20px)] max-h-none w-[min(224px,calc(100vw-20px))] max-w-none overscroll-contain rounded-window border-0 bg-canvas px-0 py-2.5 shadow-overlay backdrop:bg-overlay md:hidden"
       onCancel={(event) => {
         event.preventDefault();
         sidebar.onClose();
+      }}
+      onClick={(event) => {
+        if (event.target !== event.currentTarget) return;
+        const bounds = event.currentTarget.getBoundingClientRect();
+        if (
+          event.clientX < bounds.left ||
+          event.clientX > bounds.right ||
+          event.clientY < bounds.top ||
+          event.clientY > bounds.bottom
+        ) {
+          sidebar.onClose();
+        }
       }}
       ref={setDialog}
     >
@@ -40,18 +59,19 @@ export function MobileSidebar({
         <WorkspaceSidebar
           {...sidebar}
           contextMenuContainer={dialog}
+          onAddWorkspace={
+            sidebar.onAddWorkspace ? () => afterClose(() => sidebar.onAddWorkspace?.()) : undefined
+          }
           onEditWorkspace={
             sidebar.onEditWorkspace
               ? (workspaceId, origin) => {
-                  const edit = () =>
-                    sidebar.onEditWorkspace?.(workspaceId, returnFocus.current ?? origin);
-                  if (dialog?.open) {
-                    dialog.addEventListener("close", edit, { once: true });
-                    sidebar.onClose();
-                  } else edit();
+                  afterClose(() =>
+                    sidebar.onEditWorkspace?.(workspaceId, returnFocus.current ?? origin),
+                  );
                 }
               : undefined
           }
+          onNewChat={(workspaceId) => afterClose(() => sidebar.onNewChat(workspaceId))}
         />
       )}
     </dialog>

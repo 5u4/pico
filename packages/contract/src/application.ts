@@ -13,7 +13,7 @@ import type {
   ShakeMode,
   ShakeResult,
 } from "./agent-runtime.ts";
-import type { Chat, ChatId } from "./chat-model.ts";
+import type { Chat, ChatId, ChatListEntry } from "./chat-model.ts";
 import type { ApplicationError, ChatClosed, GitError, WorkspaceBindingInvalid } from "./errors.ts";
 import type { AbsolutePath } from "./path.ts";
 import { Workspace, WorkspaceBinding, WorkspaceId, WorktreeSettings } from "./workspace-model.ts";
@@ -102,7 +102,7 @@ export class Application extends Context.Service<
     /** Web clients call this when selecting or refreshing a workspace. */
     readonly listChats: (
       workspaceId: WorkspaceId,
-    ) => Effect.Effect<readonly Chat[], ApplicationError>;
+    ) => Effect.Effect<readonly ChatListEntry[], ApplicationError>;
 
     readonly createChat: (input: CreateChat) => Effect.Effect<Chat, ApplicationError>;
     readonly findWorkspaceByPlatformId: (

@@ -117,6 +117,7 @@ const makeScheduledDeliveryFixture = Effect.fn("makeScheduledDeliveryFixture")(f
     AgentSessionStore,
     AgentSessionStore.of({
       create: () => Effect.void,
+      readTitle: () => Effect.succeed(null),
       remove: () => Effect.die("unexpected session removal"),
     }),
   );
@@ -400,6 +401,7 @@ describe("Chat close", () => {
               AgentSessionStore,
               AgentSessionStore.of({
                 create: () => Effect.void,
+                readTitle: () => Effect.succeed(null),
                 remove: () => Effect.void,
               }),
             ),
@@ -489,6 +491,7 @@ describe("Chat close", () => {
         AgentSessionStore,
         AgentSessionStore.of({
           create: () => Effect.void,
+          readTitle: () => Effect.succeed(null),
           remove: () => Effect.void,
         }),
       );
@@ -668,6 +671,7 @@ describe("Chat close", () => {
         AgentSessionStore,
         AgentSessionStore.of({
           create: () => Effect.void,
+          readTitle: () => Effect.succeed(null),
           remove: () => Effect.void,
         }),
       );
@@ -796,6 +800,7 @@ describe("Chat close", () => {
         AgentSessionStore,
         AgentSessionStore.of({
           create: () => Effect.void,
+          readTitle: () => Effect.succeed(null),
           remove: () => Effect.void,
         }),
       );

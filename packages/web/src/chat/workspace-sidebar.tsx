@@ -2,6 +2,7 @@ import {
   CaretDownIcon,
   CaretRightIcon,
   FolderSimpleIcon,
+  MagnifyingGlassIcon,
   PencilSimpleLineIcon,
   PlusIcon,
   SidebarSimpleIcon,
@@ -16,10 +17,12 @@ import {
   ContextMenuItem,
   ContextMenuTrigger,
 } from "../components/ui/context-menu.tsx";
-import type { NavigationPresentation } from "./chat-model.ts";
+import type { NavigationPresentation, SidebarSearchPresentation } from "./chat-model.ts";
 
 export interface WorkspaceSidebarProps {
   readonly navigation: NavigationPresentation;
+  readonly search: SidebarSearchPresentation;
+  readonly onSearchChange: (search: SidebarSearchPresentation) => void;
   readonly desktopCollapse?: {
     readonly collapsed: boolean;
     readonly onCollapsedChange: (collapsed: boolean) => void;
@@ -38,6 +41,8 @@ export interface WorkspaceSidebarProps {
 
 export function WorkspaceSidebar({
   navigation,
+  search,
+  onSearchChange,
   desktopCollapse,
   onWorkspaceToggle,
   onWorkspaceRetry,
@@ -52,6 +57,11 @@ export function WorkspaceSidebar({
 }: WorkspaceSidebarProps) {
   const id = useId();
   const collapsed = desktopCollapse?.collapsed ?? false;
+  const searchOpen = search.kind === "open";
+  const searchInput = useRef<HTMLInputElement>(null);
+  const searchOpener = useRef<HTMLButtonElement>(null);
+  const collapseControl = useRef<HTMLButtonElement>(null);
+  const expandControl = useRef<HTMLButtonElement>(null);
   const navigationRef = useRef<HTMLElement>(null);
   const hoverRef = useRef<HTMLDivElement>(null);
   const hoveredRow = useRef<{ readonly row: HTMLElement; x: number; y: number } | null>(null);
@@ -98,6 +108,24 @@ export function WorkspaceSidebar({
     return () => window.removeEventListener("resize", clearHover);
   }, [clearHover]);
 
+  useLayoutEffect(() => {
+    if (collapsed && document.activeElement === collapseControl.current) {
+      expandControl.current?.focus({ preventScroll: true });
+    } else if (!collapsed && document.activeElement === expandControl.current) {
+      collapseControl.current?.focus({ preventScroll: true });
+    }
+  }, [collapsed]);
+
+  useEffect(() => {
+    const input = searchInput.current;
+    if (searchOpen && !collapsed && input && input.getClientRects().length > 0) input.focus();
+  }, [searchOpen, collapsed]);
+
+  const closeSearch = () => {
+    onSearchChange({ kind: "closed" });
+    searchOpener.current?.focus({ preventScroll: true });
+  };
+
   const showHover = (event: PointerEvent<HTMLElement>) => {
     const row = event.target instanceof Element ? event.target.closest("[data-sidebar-row]") : null;
     if (!(row instanceof HTMLElement) || event.pointerType === "touch") {
@@ -119,175 +147,276 @@ export function WorkspaceSidebar({
   };
 
   return (
-    <aside className="workspace-sidebar flex h-full min-h-0 w-full flex-col border-r border-border bg-sidebar">
-      <div className="flex min-h-14 shrink-0 items-center justify-center gap-2 px-2 py-2">
-        <div className={`${collapsed ? "hidden" : "flex"} min-w-0 flex-1 items-center gap-2 px-2`}>
-          <SparkleIcon aria-hidden="true" className="shrink-0" size={20} weight="fill" />
-          <span className="text-title font-semibold tracking-tight">pico</span>
+    <aside
+      aria-label="Workspace navigation"
+      className="workspace-sidebar relative flex h-full min-h-0 w-full overflow-hidden bg-canvas"
+      data-sidebar-collapsed={collapsed}
+    >
+      <div className="flex min-h-0 w-[224px] shrink-0 flex-col">
+        <div className="relative mb-2.5 h-10 shrink-0">
+          <div
+            aria-hidden={collapsed}
+            className="absolute left-2 top-1 flex h-8 w-[164px] items-center px-2"
+          >
+            <span className="sidebar-logo flex size-5 shrink-0 items-center justify-center">
+              <SparkleIcon aria-hidden="true" size={18} weight="fill" />
+            </span>
+            <span className="sidebar-copy ml-1.5 min-w-0 flex-1 truncate text-[14px] font-medium text-muted">
+              pico
+            </span>
+          </div>
+          {desktopCollapse ? (
+            <>
+              <button
+                aria-controls={`${id}-workspaces`}
+                aria-expanded={!collapsed}
+                aria-hidden={collapsed}
+                aria-label="Collapse sidebar"
+                className="sidebar-collapse-control absolute right-2 top-1 flex size-8 items-center justify-center rounded-control text-subtle transition-colors hover:bg-surface-hover-strong hover:text-foreground"
+                onClick={() => {
+                  onSearchChange({ kind: "closed" });
+                  desktopCollapse.onCollapsedChange(true);
+                }}
+                ref={collapseControl}
+                tabIndex={collapsed ? -1 : 0}
+                title="Collapse sidebar"
+                type="button"
+              >
+                <SidebarSimpleIcon aria-hidden="true" size={18} />
+              </button>
+              <button
+                aria-controls={`${id}-workspaces`}
+                aria-expanded={!collapsed}
+                aria-hidden={!collapsed}
+                aria-label="Expand sidebar"
+                className="sidebar-expand-control absolute left-2 top-0.5 flex size-9 items-center justify-center rounded-control text-subtle transition-colors hover:bg-surface-hover-strong hover:text-foreground"
+                onClick={() => desktopCollapse.onCollapsedChange(false)}
+                ref={expandControl}
+                tabIndex={collapsed ? 0 : -1}
+                title="Expand sidebar"
+                type="button"
+              >
+                <SidebarSimpleIcon aria-hidden="true" className="rotate-180" size={18} />
+              </button>
+            </>
+          ) : (
+            <button
+              aria-label="Close sidebar"
+              className="absolute right-2 top-1 flex size-8 items-center justify-center rounded-control text-subtle hover:bg-surface-hover-strong hover:text-foreground"
+              onClick={onClose}
+              title="Close sidebar"
+              type="button"
+            >
+              <XIcon aria-hidden="true" size={18} />
+            </button>
+          )}
         </div>
-        {desktopCollapse ? (
-          <Button
-            aria-controls={`${id}-workspaces`}
-            aria-expanded={!collapsed}
-            aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-            className="sidebar-control sidebar-icon-button"
-            onClick={() => desktopCollapse.onCollapsedChange(!collapsed)}
-            size="icon"
-            title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-            tone="ghost"
-          >
-            <SidebarSimpleIcon aria-hidden="true" size={18} />
-          </Button>
-        ) : (
-          <Button
-            aria-label="Close sidebar"
-            className="sidebar-control sidebar-icon-button md:hidden"
-            onClick={onClose}
-            size="icon"
-            title="Close sidebar"
-            tone="ghost"
-          >
-            <XIcon aria-hidden="true" size={18} />
-          </Button>
-        )}
-      </div>
 
-      <div className="flex shrink-0 justify-center px-2 pb-3">
-        <Button
+        <button
           aria-label="New chat"
-          className={`sidebar-control ${collapsed ? "sidebar-icon-button px-0" : "w-full justify-start px-2"}`}
+          className="sidebar-control sidebar-rail-row relative mx-2 flex shrink-0 items-center rounded-control px-2 text-left text-muted transition-colors hover:bg-surface-hover-strong hover:text-foreground active:scale-[0.98] disabled:opacity-50"
           disabled={navigation.groups.length === 0 && !onAddWorkspace}
           onClick={() => onNewChat()}
           title="New chat"
-          tone="ghost"
+          type="button"
         >
-          <PencilSimpleLineIcon aria-hidden="true" className="shrink-0" size={18} />
-          {!collapsed && <span>New chat</span>}
-        </Button>
-      </div>
+          <span className="flex size-5 shrink-0 items-center justify-center">
+            <PencilSimpleLineIcon aria-hidden="true" size={18} />
+          </span>
+          <span className="sidebar-copy ml-1.5 min-w-0 flex-1 truncate text-[14px] font-medium">
+            New chat
+          </span>
+        </button>
 
-      <nav
-        aria-label="Workspaces"
-        className="relative isolate min-h-0 flex-1 overflow-y-auto overscroll-contain px-2 pb-4"
-        hidden={collapsed}
-        id={`${id}-workspaces`}
-        inert={collapsed}
-        onPointerLeave={clearHover}
-        onPointerMove={showHover}
-        onScroll={clearHover}
-        ref={navigationRef}
-      >
-        <div aria-hidden="true" className="sidebar-hover" ref={hoverRef} />
-        <div className="mb-1 flex min-h-8 items-center px-2">
-          <h2 className="text-meta font-medium text-subtle">Workspaces</h2>
-        </div>
-        {navigation.status && (
-          <div className="px-2 py-2 text-label text-muted">
-            <p
-              className="break-words"
-              role={navigation.status.kind === "error" ? "alert" : "status"}
+        <nav
+          aria-label={searchOpen ? "Chat search results" : "Workspaces"}
+          className="sidebar-copy relative isolate mt-3 min-h-0 flex-1 overflow-y-auto overscroll-contain pb-4"
+          id={`${id}-workspaces`}
+          inert={collapsed}
+          onPointerLeave={clearHover}
+          onPointerMove={showHover}
+          onScroll={clearHover}
+          ref={navigationRef}
+        >
+          <div aria-hidden="true" className="sidebar-hover" ref={hoverRef} />
+          <div className="relative mx-2 mb-1 h-8">
+            <h2
+              aria-hidden={searchOpen}
+              className={`absolute inset-0 flex items-center gap-1.5 px-2 text-[12.5px] font-medium text-subtle transition-[opacity,transform] duration-180 ease-[cubic-bezier(.16,1,.3,1)] ${searchOpen ? "pointer-events-none -translate-x-1 opacity-0" : "translate-x-0 opacity-100"}`}
             >
-              {navigation.status.label}
-            </p>
-            {navigation.status.kind === "error" && (
-              <Button
-                className="sidebar-control mt-2 max-w-full whitespace-normal"
-                onClick={onWorkspaceRetry}
-                size="small"
-                tone="secondary"
+              <CaretDownIcon aria-hidden="true" size={16} />
+              Workspaces
+            </h2>
+            <button
+              aria-expanded={searchOpen}
+              aria-hidden={searchOpen}
+              aria-label="Search chats"
+              className={`absolute right-0 top-0 z-10 flex size-8 items-center justify-center rounded-control text-subtle transition-[opacity,background-color,color,transform] duration-180 hover:bg-surface-hover-strong hover:text-foreground active:scale-[0.96] ${searchOpen ? "pointer-events-none opacity-0" : "opacity-100"}`}
+              onClick={() => onSearchChange({ kind: "open", query: "" })}
+              ref={searchOpener}
+              tabIndex={searchOpen ? -1 : 0}
+              title="Search chats"
+              type="button"
+            >
+              <MagnifyingGlassIcon aria-hidden="true" size={16} />
+            </button>
+            <div
+              aria-hidden={!searchOpen}
+              className={`absolute right-0 top-0 z-20 flex h-8 items-center overflow-hidden rounded-control bg-field text-subtle shadow-hairline transition-[width,opacity] duration-180 ease-[cubic-bezier(.16,1,.3,1)] focus-within:text-muted ${searchOpen ? "pointer-events-auto w-full opacity-100" : "pointer-events-none w-7 opacity-0"}`}
+              inert={!searchOpen}
+            >
+              <MagnifyingGlassIcon aria-hidden="true" className="ml-2 shrink-0" size={15} />
+              <input
+                aria-label="Search chat history"
+                className="ml-1.5 min-w-0 flex-1 bg-transparent text-base font-medium text-foreground outline-none placeholder:text-subtle md:text-[13px]"
+                onChange={(event) => onSearchChange({ kind: "open", query: event.target.value })}
+                onKeyDown={(event) => {
+                  if (event.key !== "Escape") return;
+                  event.preventDefault();
+                  event.stopPropagation();
+                  closeSearch();
+                }}
+                placeholder="Search chats"
+                ref={searchInput}
+                type="search"
+                value={search.kind === "open" ? search.query : ""}
+              />
+              <button
+                aria-label="Close chat search"
+                className="flex size-8 shrink-0 items-center justify-center rounded-control text-subtle transition-colors duration-150 hover:bg-surface-hover-strong hover:text-foreground"
+                onClick={closeSearch}
+                title="Close chat search"
+                type="button"
               >
-                Retry workspaces
-              </Button>
-            )}
+                <XIcon aria-hidden="true" size={16} />
+              </button>
+            </div>
+          </div>
+          {navigation.status && (
+            <div className="px-4 py-2 text-label text-muted">
+              <p
+                className="break-words"
+                role={navigation.status.kind === "error" ? "alert" : "status"}
+              >
+                {navigation.status.label}
+              </p>
+              {navigation.status.kind === "error" && (
+                <Button
+                  className="sidebar-control mt-2 max-w-full whitespace-normal"
+                  onClick={onWorkspaceRetry}
+                  size="small"
+                  tone="secondary"
+                >
+                  Retry workspaces
+                </Button>
+              )}
+            </div>
+          )}
+          <ul className="mx-2 space-y-px">
+            {navigation.groups.map(({ workspace, expanded, chats, status }) => {
+              const active = workspace.id === navigation.activeWorkspaceId;
+              const listId = `${id}-${workspace.id}`;
+              return (
+                <li key={workspace.id}>
+                  <div className="sidebar-row flex items-center gap-0.5" data-sidebar-row="">
+                    <WorkspaceToggle
+                      active={active}
+                      contextMenuContainer={contextMenuContainer}
+                      expanded={expanded}
+                      listId={listId}
+                      onEditWorkspace={onEditWorkspace}
+                      onWorkspaceToggle={onWorkspaceToggle}
+                      searching={searchOpen}
+                      workspace={workspace}
+                      workspaceEditPending={workspaceEditPending}
+                    />
+                    {searchOpen && workspace.canEditConfiguration && onEditWorkspace && (
+                      <button
+                        aria-label={`Edit ${workspace.name}`}
+                        className="sidebar-row sidebar-icon-button inline-flex shrink-0 items-center justify-center text-subtle hover:text-foreground"
+                        disabled={workspaceEditPending}
+                        onClick={(event) => onEditWorkspace(workspace.id, event.currentTarget)}
+                        title={`Edit ${workspace.name}`}
+                        type="button"
+                      >
+                        <PencilSimpleLineIcon aria-hidden="true" size={15} />
+                      </button>
+                    )}
+                    <button
+                      aria-label={`New chat in ${workspace.name}`}
+                      className="sidebar-row sidebar-icon-button inline-flex shrink-0 items-center justify-center text-subtle hover:text-foreground"
+                      onClick={() => onNewChat(workspace.id)}
+                      title={`New chat in ${workspace.name}`}
+                      type="button"
+                    >
+                      <PlusIcon aria-hidden="true" size={15} />
+                    </button>
+                  </div>
+                  <div hidden={!expanded} id={listId}>
+                    {status && (
+                      <div className="py-2 pl-7 pr-2 text-meta text-muted">
+                        <p
+                          className="break-words"
+                          role={status.kind === "error" ? "alert" : "status"}
+                        >
+                          {status.label}
+                        </p>
+                        {status.kind === "error" && (
+                          <Button
+                            className="sidebar-control mt-2 max-w-full whitespace-normal"
+                            onClick={() => onChatsRetry(workspace.id)}
+                            size="small"
+                            tone="secondary"
+                          >
+                            Retry chats
+                          </Button>
+                        )}
+                      </div>
+                    )}
+                    <ul className="space-y-px">
+                      {chats.map((chat) => {
+                        const selected = active && chat.id === navigation.activeChatId;
+                        return (
+                          <li key={chat.id}>
+                            <button
+                              aria-current={selected ? "page" : undefined}
+                              className={`sidebar-row flex w-full items-center py-1 pl-7 pr-2 text-left text-[14px] font-medium ${selected ? "bg-surface-hover-strong text-foreground" : "text-muted"}`}
+                              data-sidebar-row=""
+                              onClick={() => onChatSelect(workspace.id, chat.id)}
+                              title={chat.title}
+                              type="button"
+                            >
+                              <span className="truncate">{chat.title}</span>
+                            </button>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        </nav>
+        {onAddWorkspace && (
+          <div className="mx-2 mt-3 shrink-0 border-t border-border pt-3">
+            <button
+              aria-label="Add workspace"
+              className="sidebar-control sidebar-rail-row flex items-center rounded-control px-2 text-left text-muted transition-colors hover:bg-surface-hover-strong hover:text-foreground"
+              onClick={onAddWorkspace}
+              title="Add workspace"
+              type="button"
+            >
+              <span className="flex size-5 shrink-0 items-center justify-center">
+                <PlusIcon aria-hidden="true" size={18} />
+              </span>
+              <span className="sidebar-copy ml-1.5 min-w-0 flex-1 truncate text-[14px] font-medium">
+                Add workspace
+              </span>
+            </button>
           </div>
         )}
-        <ul className="space-y-0.5">
-          {navigation.groups.map(({ workspace, expanded, chats, status }) => {
-            const active = workspace.id === navigation.activeWorkspaceId;
-            const listId = `${id}-${workspace.id}`;
-            return (
-              <li key={workspace.id}>
-                <div className="sidebar-row flex items-center gap-0.5" data-sidebar-row="">
-                  <WorkspaceToggle
-                    active={active}
-                    contextMenuContainer={contextMenuContainer}
-                    expanded={expanded}
-                    listId={listId}
-                    onEditWorkspace={onEditWorkspace}
-                    onWorkspaceToggle={onWorkspaceToggle}
-                    workspace={workspace}
-                    workspaceEditPending={workspaceEditPending}
-                  />
-                  <button
-                    aria-label={`New chat in ${workspace.name}`}
-                    className="sidebar-row sidebar-icon-button inline-flex shrink-0 items-center justify-center text-muted"
-                    onClick={() => onNewChat(workspace.id)}
-                    title={`New chat in ${workspace.name}`}
-                    type="button"
-                  >
-                    <PlusIcon aria-hidden="true" size={15} />
-                  </button>
-                </div>
-                <div hidden={!expanded} id={listId}>
-                  {status && (
-                    <div className="py-2 pl-7 pr-2 text-meta text-muted">
-                      <p
-                        className="break-words"
-                        role={status.kind === "error" ? "alert" : "status"}
-                      >
-                        {status.label}
-                      </p>
-                      {status.kind === "error" && (
-                        <Button
-                          className="sidebar-control mt-2 max-w-full whitespace-normal"
-                          onClick={() => onChatsRetry(workspace.id)}
-                          size="small"
-                          tone="secondary"
-                        >
-                          Retry chats
-                        </Button>
-                      )}
-                    </div>
-                  )}
-                  <ul className="space-y-0.5">
-                    {chats.map((chat) => {
-                      const selected = chat.id === navigation.activeChatId;
-                      return (
-                        <li key={chat.id}>
-                          <button
-                            aria-current={selected ? "page" : undefined}
-                            className={`sidebar-row flex w-full items-center py-1 pl-7 pr-2 text-left text-label ${selected ? "bg-surface-hover font-medium text-foreground" : "text-muted"}`}
-                            data-sidebar-row=""
-                            onClick={() => onChatSelect(workspace.id, chat.id)}
-                            title={chat.title}
-                            type="button"
-                          >
-                            <span className="truncate">{chat.title}</span>
-                          </button>
-                        </li>
-                      );
-                    })}
-                  </ul>
-                </div>
-              </li>
-            );
-          })}
-        </ul>
-      </nav>
-      {onAddWorkspace && (
-        <div className="mt-auto flex shrink-0 justify-center border-t border-border p-2">
-          <Button
-            aria-label="Add workspace"
-            className={`sidebar-control ${collapsed ? "sidebar-icon-button px-0" : "w-full justify-start px-2"}`}
-            onClick={onAddWorkspace}
-            title="Add workspace"
-            tone="ghost"
-          >
-            <PlusIcon aria-hidden="true" className="shrink-0" size={18} />
-            {!collapsed && <span>Add workspace</span>}
-          </Button>
-        </div>
-      )}
+      </div>
     </aside>
   );
 }
@@ -297,6 +426,7 @@ function WorkspaceToggle({
   expanded,
   active,
   listId,
+  searching,
   onWorkspaceToggle,
   onEditWorkspace,
   workspaceEditPending,
@@ -309,10 +439,22 @@ function WorkspaceToggle({
   readonly expanded: boolean;
   readonly active: boolean;
   readonly listId: string;
+  readonly searching: boolean;
 }) {
   const trigger = useRef<HTMLButtonElement>(null);
   const pendingEdit = useRef<HTMLElement | null>(null);
   const editable = workspace.canEditConfiguration && onEditWorkspace !== undefined;
+  if (searching) {
+    return (
+      <div
+        className="flex min-w-0 flex-1 items-center gap-2 px-2 text-[12.5px] font-medium text-subtle"
+        title={workspace.contextLabel}
+      >
+        <FolderSimpleIcon aria-hidden="true" className="shrink-0" size={15} />
+        <span className="truncate">{workspace.name}</span>
+      </div>
+    );
+  }
   const toggle = (
     <button
       aria-controls={listId}
