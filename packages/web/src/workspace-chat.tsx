@@ -1,6 +1,6 @@
 import { useAtomValue } from "@effect/atom-react/Hooks";
 import { RegistryContext } from "@effect/atom-react/RegistryContext";
-import type { ContextUsage } from "@pico/contract/agent-runtime";
+import type { TranscriptSnapshot } from "@pico/contract/agent-runtime";
 import { CreateWorkspace } from "@pico/contract/application";
 import type { Chat, ChatId } from "@pico/contract/chat-model";
 import { GitError, WorkspaceBindingInvalid } from "@pico/contract/errors";
@@ -85,7 +85,7 @@ const tokenFormat = new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 })
 const percentageFormat = new Intl.NumberFormat("en-US", { maximumFractionDigits: 1 });
 
 function presentContextUsage(
-  result: AsyncResult.AsyncResult<ContextUsage, unknown> | undefined,
+  result: AsyncResult.AsyncResult<TranscriptSnapshot["contextUsage"], unknown> | undefined,
   connection: FrontendState.Connection,
 ): ContextUsagePresentation {
   if (!result) {
@@ -93,16 +93,6 @@ function presentContextUsage(
       kind: "unavailable",
       label: "Context estimate unavailable",
       description: "Context usage appears after this chat opens an agent session.",
-    };
-  }
-  if (result._tag === "Failure") {
-    return {
-      kind: "error",
-      label: "Context estimate unavailable",
-      description:
-        connection.kind === "unavailable"
-          ? "Connection unavailable. Reconnect to read context usage."
-          : "Could not refresh context usage. Reopen these details to try again.",
     };
   }
   if (result._tag === "Initial") {
@@ -117,6 +107,16 @@ function presentContextUsage(
           label: "Loading context estimate",
           description: "Reading the current context estimate.",
         };
+  }
+  if (result._tag === "Failure" || result.value.kind === "error") {
+    return {
+      kind: "error",
+      label: "Context estimate unavailable",
+      description:
+        connection.kind === "unavailable"
+          ? "Connection unavailable. Reconnect to read context usage."
+          : "Could not refresh context usage. Reopen these details to try again.",
+    };
   }
   const usage = result.value;
   if (usage.kind === "unavailable") {
@@ -246,6 +246,7 @@ function runCommand<A, E, Input>(
 export function WorkspaceChat({ state }: { readonly state: State | null }) {
   const registry = useContext(RegistryContext);
   const connection = useAtomValue(state?.connection ?? openingConnection);
+  const available = connection.kind === "active";
   const [navigation, setNavigation] = useState<NavigationState>(() => ({
     selectedKey: null,
     openKeys: [],
@@ -351,11 +352,14 @@ export function WorkspaceChat({ state }: { readonly state: State | null }) {
 
   useEffect(() => {
     setContextDetailsKey(undefined);
-    if (!state || !chatId) return;
+  }, [selected?.key]);
+
+  useEffect(() => {
+    if (!state || !chatId || !available) return;
     const snapshot = state.transcript(chatId);
     const current = registry.get(snapshot);
     if (current._tag !== "Initial" && !current.waiting) registry.refresh(snapshot);
-  }, [state, registry, chatId, selected?.key]);
+  }, [state, registry, chatId, available]);
 
   const updateNavigation = (change: (current: NavigationState) => NavigationState) => {
     const current = navigationRef.current;
@@ -863,7 +867,6 @@ export function WorkspaceChat({ state }: { readonly state: State | null }) {
     (entry) => entry.value.text.length > 0,
   );
   const unavailable = connection.kind === "unavailable";
-  const available = connection.kind === "active";
   const closePresentation: CloseChatPresentation =
     closeFlow.kind === "idle"
       ? closeFlow
@@ -1143,7 +1146,9 @@ export function WorkspaceChat({ state }: { readonly state: State | null }) {
           }
           onContextDetailsOpenChange={(open) => {
             setContextDetailsKey(open ? (selected?.key ?? null) : undefined);
-            if (open && state && chatId) registry.refresh(state.transcript(chatId));
+            if (open && state && chatId && registry.get(state.connection).kind === "active") {
+              registry.refresh(state.transcript(chatId));
+            }
           }}
           contextLabel={
             selected

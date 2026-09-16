@@ -7,33 +7,47 @@ interface ContextUsageProps {
   readonly onOpenChange: (open: boolean) => void;
 }
 
+function positionContextUsage(trigger: HTMLButtonElement | null, card: HTMLDivElement | null) {
+  if (!trigger || !card) return;
+  const bounds = trigger.getBoundingClientRect();
+  const viewportWidth = document.documentElement.clientWidth;
+  const width = Number.parseFloat(getComputedStyle(card).width);
+  card.style.right = `${Math.max(12, Math.min(viewportWidth - bounds.right, viewportWidth - width - 12))}px`;
+  card.style.bottom = `${window.innerHeight - bounds.top + 8}px`;
+  card.style.maxHeight = `${Math.max(0, bounds.top - 20)}px`;
+}
+
 export function ContextUsage({ presentation, open, onOpenChange }: ContextUsageProps) {
   const id = useId();
   const trigger = useRef<HTMLButtonElement>(null);
   const card = useRef<HTMLDivElement>(null);
-  const position = () => {
-    const button = trigger.current;
-    const element = card.current;
-    if (!button || !element) return;
-    const bounds = button.getBoundingClientRect();
-    const viewportWidth = document.documentElement.clientWidth;
-    const width = Number.parseFloat(getComputedStyle(element).width);
-    element.style.right = `${Math.max(12, Math.min(viewportWidth - bounds.right, viewportWidth - width - 12))}px`;
-    element.style.bottom = `${window.innerHeight - bounds.top + 8}px`;
-    element.style.maxHeight = `${Math.max(0, bounds.top - 20)}px`;
-  };
+
+  useLayoutEffect(() => {
+    if (open) positionContextUsage(trigger.current, card.current);
+  });
 
   useLayoutEffect(() => {
     const element = card.current;
     if (!element) return;
     if (open) {
-      position();
+      const position = () => positionContextUsage(trigger.current, card.current);
+      const repositionAfterAnimation = (event: AnimationEvent) => {
+        if (
+          event.target instanceof Element &&
+          trigger.current &&
+          event.target.contains(trigger.current)
+        ) {
+          position();
+        }
+      };
       element.showPopover();
       window.addEventListener("resize", position);
       window.addEventListener("scroll", position, true);
+      window.addEventListener("animationend", repositionAfterAnimation, true);
       return () => {
         window.removeEventListener("resize", position);
         window.removeEventListener("scroll", position, true);
+        window.removeEventListener("animationend", repositionAfterAnimation, true);
       };
     }
     element.hidePopover();
@@ -87,7 +101,7 @@ export function ContextUsage({ presentation, open, onOpenChange }: ContextUsageP
         className="fixed inset-auto m-0 w-[min(20rem,calc(100vw-24px))] overflow-y-auto overscroll-contain rounded-card border-0 bg-panel p-4 text-label text-foreground shadow-overlay"
         id={id}
         onBeforeToggle={(event) => {
-          if (event.newState === "open") position();
+          if (event.newState === "open") positionContextUsage(trigger.current, card.current);
           else if (card.current?.contains(document.activeElement)) trigger.current?.focus();
         }}
         onToggle={(event) => {

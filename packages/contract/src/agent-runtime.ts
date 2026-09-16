@@ -61,7 +61,7 @@ export type ContextUsage = typeof ContextUsage.Type;
 
 export const TranscriptSnapshot = Schema.Struct({
   messages: AgentTranscript,
-  contextUsage: ContextUsage,
+  contextUsage: Schema.Union([ContextUsage, Schema.Struct({ kind: Schema.Literal("error") })]),
 });
 export type TranscriptSnapshot = typeof TranscriptSnapshot.Type;
 

@@ -566,13 +566,18 @@ export const makeSessionPool = Effect.fn("SessionPool.make")(function* (
               );
             }
             const messages = yield* options.loadTranscript(chatId);
-            const contextUsage: ContextUsage = open
-              ? yield* Effect.try({
-                  try: entry.value.contextUsage,
-                  catch: (cause) => agentError("Failed to read OMP context", cause),
-                })
-              : { kind: "unavailable" };
-            return { messages, contextUsage };
+            return {
+              messages,
+              contextUsage: open
+                ? yield* Effect.sync((): TranscriptSnapshot["contextUsage"] => {
+                    try {
+                      return entry.value.contextUsage();
+                    } catch {
+                      return { kind: "error" };
+                    }
+                  })
+                : { kind: "unavailable" },
+            } satisfies TranscriptSnapshot;
           }),
         );
       }),

@@ -420,6 +420,15 @@ describe("AgentRuntime", () => {
         let sends = 0;
         let contextReads = 0;
         let throwContext = false;
+        let transcriptFailure: AgentError | undefined;
+        let persistenceFailure: AgentError | undefined;
+        const messages: Agent.AgentTranscript = [
+          {
+            role: "user",
+            content: [{ type: "text", text: "Keep this history readable." }],
+            timestamp: 1,
+          },
+        ];
         let contextValue: ContextUsage = {
           kind: "available",
           contextWindow: 200_000,
@@ -437,7 +446,10 @@ describe("AgentRuntime", () => {
               session: {
                 isStreaming: false,
                 waitForIdle: async () => {},
-                settleInFlightMessagePersistence: () => Promise.resolve(),
+                settleInFlightMessagePersistence: () =>
+                  persistenceFailure === undefined
+                    ? Promise.resolve()
+                    : Promise.reject(persistenceFailure),
                 abort: () => Promise.resolve(),
                 beginDispose: () => {},
                 dispose: () => Promise.resolve(),
@@ -469,11 +481,14 @@ describe("AgentRuntime", () => {
         };
         const pool = yield* makeSessionPool({
           factory,
-          loadTranscript: () => Effect.succeed([]),
+          loadTranscript: () =>
+            transcriptFailure === undefined
+              ? Effect.succeed(messages)
+              : Effect.fail(transcriptFailure),
         });
 
         assert.deepStrictEqual(yield* pool.transcript(chatId), {
-          messages: [],
+          messages,
           contextUsage: { kind: "unavailable" },
         });
         assert.strictEqual(acquisitions, 0);
@@ -524,7 +539,18 @@ describe("AgentRuntime", () => {
         assert.strictEqual(acquisitions, 1);
         assert.strictEqual(sends, 0);
         assert.strictEqual(contextReads, 4);
-        assert.instanceOf(yield* pool.transcript(chatId).pipe(Effect.flip), AgentError);
+        assert.deepStrictEqual(yield* pool.transcript(chatId), {
+          messages,
+          contextUsage: { kind: "error" },
+        });
+
+        transcriptFailure = new AgentError({ message: "History read failed" });
+        assert.strictEqual(yield* pool.transcript(chatId).pipe(Effect.flip), transcriptFailure);
+        transcriptFailure = undefined;
+
+        persistenceFailure = new AgentError({ message: "History persistence failed" });
+        assert.strictEqual(yield* pool.transcript(chatId).pipe(Effect.flip), persistenceFailure);
+        persistenceFailure = undefined;
 
         const sendFailure = yield* pool.send(chatId, prompt("reject")).pipe(Effect.flip);
         assert.instanceOf(sendFailure, AgentError);
