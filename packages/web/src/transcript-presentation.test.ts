@@ -54,15 +54,24 @@ const toolResult = (
   timestamp: 2,
 });
 
-const items = (transcript: AgentTranscript, live: LiveChat, disclosures = new Set<string>()) => {
+const items = (
+  transcript: AgentTranscript,
+  live: LiveChat,
+  disclosures: ReadonlyMap<string, boolean> = new Map(),
+) => {
   const presentation = presentTranscript(AsyncResult.success(transcript), live, disclosures, {
     kind: "active",
   });
   return presentation.state === "ready" ? presentation.items : [];
 };
 
+const thinkingBlocks = (presentation: ReturnType<typeof items>) =>
+  presentation.flatMap((item) =>
+    item.kind === "assistant" ? item.blocks.filter((block) => block.kind === "thinking") : [],
+  );
+
 describe("transcript identity", () => {
-  it("keeps thinking and tool disclosures open from running through settlement and snapshot handoff", () => {
+  it("keeps manually opened thinking and tool disclosures through settlement and snapshot handoff", () => {
     const draft = reduceLiveChat(emptyLiveChat(), {
       type: "thinking-delta",
       messageId: firstId,
@@ -80,14 +89,16 @@ describe("transcript identity", () => {
       pending.map((item) => item.kind),
       ["assistant", "tool-group"],
     );
-    const disclosures = new Set(
-      pending.flatMap((item) =>
-        item.kind === "assistant"
-          ? item.blocks.map((block) => block.id)
-          : item.kind === "tool-group"
-            ? item.calls.flatMap((call) => [call.id, `details-${call.id}`])
-            : [],
-      ),
+    const disclosures = new Map(
+      pending
+        .flatMap((item) =>
+          item.kind === "assistant"
+            ? item.blocks.map((block) => block.id)
+            : item.kind === "tool-group"
+              ? item.calls.flatMap((call) => [call.id, `details-${call.id}`])
+              : [],
+        )
+        .map((id) => [id, true]),
     );
     const opened = items([], running, disclosures);
     assert.deepStrictEqual(
@@ -182,7 +193,7 @@ describe("transcript identity", () => {
       argumentsJson: '{"path":"file.ts"}',
     });
     const pending = items([], running);
-    const disclosures = new Set(pending.map((item) => item.id));
+    const disclosures = new Map(pending.map((item) => [item.id, true]));
     const result: AgentToolResultMessage = {
       role: "tool-result",
       toolCallId: "read-file",
@@ -320,13 +331,158 @@ describe("transcript identity", () => {
         { state: "streaming", text: ["next answer"] },
       ],
     );
+    assert.deepInclude(thinkingBlocks(presentation)[0], {
+      open: false,
+      label: "Thinking status unknown",
+    });
+  });
+});
+
+describe("disclosure lifecycle", () => {
+  it("follows the final sorted thinking block until later content or settlement unless manually closed", () => {
+    const current = reduceLiveChat(emptyLiveChat(), {
+      type: "thinking-delta",
+      messageId: firstId,
+      contentIndex: 2,
+      text: "current plan",
+    });
+    const draft = reduceLiveChat(current, {
+      type: "thinking-delta",
+      messageId: firstId,
+      contentIndex: 0,
+      text: "earlier plan",
+    });
+    assert.deepStrictEqual(
+      thinkingBlocks(items([], draft)).map((block) => ({
+        text: block.text,
+        label: block.label,
+        open: block.open,
+      })),
+      [
+        { text: "earlier plan", label: "Thought", open: false },
+        { text: "current plan", label: "Thinking", open: true },
+      ],
+    );
+    const closed = new Map([["assistant-first-content-2", false]]);
+    const continued = reduceLiveChat(draft, {
+      type: "thinking-delta",
+      messageId: firstId,
+      contentIndex: 2,
+      text: " continued",
+    });
+    assert.deepInclude(thinkingBlocks(items([], continued, closed))[1], {
+      text: "current plan continued",
+      label: "Thinking",
+      open: false,
+    });
+    const disconnected = presentTranscript(AsyncResult.success([]), draft, new Map(), {
+      kind: "unavailable",
+      cause: Cause.empty,
+    });
+    assert.strictEqual(disconnected.state, "ready");
+    if (disconnected.state !== "ready") return;
+    assert.deepStrictEqual(
+      thinkingBlocks(disconnected.items).map((block) => ({ label: block.label, open: block.open })),
+      [
+        { label: "Thought", open: false },
+        { label: "Thinking status unknown", open: false },
+      ],
+    );
+    const answering = reduceLiveChat(draft, {
+      type: "text-delta",
+      messageId: firstId,
+      contentIndex: 3,
+      text: "answer",
+    });
+    const message: AgentAssistantMessage = {
+      ...toolMessage,
+      content: [
+        { type: "thinking", text: "earlier plan" },
+        { type: "text", text: "context" },
+        { type: "thinking", text: "current plan" },
+      ],
+    };
+    const settled = reduceLiveChat(draft, { type: "message-settled", message });
+    for (const presentation of [
+      items([], answering),
+      items([], settled),
+      items([message], acknowledgeTranscript(settled, [message])),
+    ]) {
+      assert.deepStrictEqual(
+        thinkingBlocks(presentation).map((block) => ({ label: block.label, open: block.open })),
+        [
+          { label: "Thought", open: false },
+          { label: "Thought", open: false },
+        ],
+      );
+    }
+  });
+
+  it("keeps tool groups open for running siblings while preserving each member's manual choice", () => {
+    const first = reduceLiveChat(emptyLiveChat(), {
+      type: "tool-started",
+      toolCallId: "a",
+      toolName: "read",
+      argumentsJson: "{}",
+    });
+    const closed = new Map([["tool-a", false]]);
+    assert.strictEqual(
+      items([], first, closed).find((item) => item.kind === "tool-group")?.open,
+      false,
+    );
+    const siblings = reduceLiveChat(first, {
+      type: "tool-started",
+      toolCallId: "b",
+      toolName: "read",
+      argumentsJson: "{}",
+    });
+    const expanded = items([], siblings, closed).find((item) => item.kind === "tool-group");
+    assert.strictEqual(expanded?.open, true);
+    assert.deepStrictEqual(
+      expanded?.calls.map((call) => call.open),
+      [false, false],
+    );
+    closed.set("tool-b", false);
+    assert.strictEqual(
+      items([], siblings, closed).find((item) => item.kind === "tool-group")?.open,
+      false,
+    );
+    const oneFinished = reduceLiveChat(siblings, {
+      type: "tool-finished",
+      toolCallId: "a",
+      toolName: "read",
+      status: "succeeded",
+    });
+    assert.strictEqual(
+      items([], oneFinished).find((item) => item.kind === "tool-group")?.open,
+      true,
+    );
+    const finished = reduceLiveChat(oneFinished, {
+      type: "tool-finished",
+      toolCallId: "b",
+      toolName: "read",
+      status: "failed",
+    });
+    assert.strictEqual(items([], finished).find((item) => item.kind === "tool-group")?.open, false);
+    const opened = new Map([["tool-a", true]]);
+    const transcript = [
+      { ...toolMessage, content: [toolCall("a"), toolCall("b")] },
+      toolResult("a", []),
+      toolResult("b", [], "failed"),
+    ];
+    for (const presentation of [
+      items([], finished, opened),
+      items(transcript, acknowledgeTranscript(finished, transcript), opened),
+    ]) {
+      assert.strictEqual(presentation.find((item) => item.kind === "tool-group")?.open, true);
+    }
   });
 });
 
 describe("response activity", () => {
   it("shows waiting from an active run before history or a first delta and removes it when activity ends", () => {
     const running = reduceLiveChat(emptyLiveChat(), { type: "run-started" });
-    const waiting = presentTranscript(AsyncResult.initial(), running, new Set(), {
+    const waiting = presentTranscript(AsyncResult.initial(), running, new Map(), {
       kind: "active",
     });
     assert.strictEqual(waiting.state, "ready");
@@ -336,12 +492,12 @@ describe("response activity", () => {
       ["waiting"],
     );
 
-    const disconnected = presentTranscript(AsyncResult.success([]), running, new Set(), {
+    const disconnected = presentTranscript(AsyncResult.success([]), running, new Map(), {
       kind: "unavailable",
       cause: Cause.empty,
     });
     assert.strictEqual(disconnected.state, "empty");
-    const reconnecting = presentTranscript(AsyncResult.success([]), running, new Set(), {
+    const reconnecting = presentTranscript(AsyncResult.success([]), running, new Map(), {
       kind: "opening",
     });
     assert.strictEqual(reconnecting.state, "empty");
@@ -411,7 +567,7 @@ describe("response activity", () => {
       active.map((item) => (item.kind === "assistant" ? item.state.kind : item.kind)),
       ["streaming"],
     );
-    const disconnected = presentTranscript(AsyncResult.success([]), draft, new Set(), {
+    const disconnected = presentTranscript(AsyncResult.success([]), draft, new Map(), {
       kind: "unavailable",
       cause: Cause.empty,
     });
@@ -552,10 +708,11 @@ describe("tool trace grouping", () => {
       });
     }
     const pending = items([], running).filter((item) => item.kind === "tool-group");
-    const disclosures = new Set([
-      ...pending.flatMap((group) => group.calls.map((call) => call.id)),
-      "details-tool-b",
-    ]);
+    const disclosures = new Map(
+      [...pending.flatMap((group) => group.calls.map((call) => call.id)), "details-tool-b"].map(
+        (id) => [id, true],
+      ),
+    );
     const opened = items([], running, disclosures).filter((item) => item.kind === "tool-group");
     assert.deepStrictEqual(
       opened.map((group) => ({ id: group.id, open: group.open })),
@@ -587,9 +744,9 @@ describe("tool trace grouping", () => {
     const regrouped = items([message], snapshot, disclosures).filter(
       (item) => item.kind === "tool-group",
     );
-    const closed = new Set(disclosures);
+    const closed = new Map(disclosures);
     for (const group of regrouped) {
-      for (const call of group.calls) closed.delete(call.id);
+      for (const call of group.calls) closed.set(call.id, false);
     }
     const closedGroups = items([message], snapshot, closed).filter(
       (item) => item.kind === "tool-group",
@@ -645,7 +802,7 @@ describe("tool trace content", () => {
     };
     const transcript = [message, toolResult("failed", [], "failed")];
     const group = items(transcript, live).find((item) => item.kind === "tool-group");
-    assert.strictEqual(group?.open, false);
+    assert.strictEqual(group?.open, true);
     assert.deepStrictEqual(
       group?.calls.map((call) => ({ state: call.state.kind, output: call.output })),
       [
@@ -658,7 +815,7 @@ describe("tool trace content", () => {
     for (const state of ["failed", "running", "unknown", "complete"]) {
       assert.include(group?.title ?? "", state);
     }
-    const reconnecting = presentTranscript(AsyncResult.success(transcript), live, new Set(), {
+    const reconnecting = presentTranscript(AsyncResult.success(transcript), live, new Map(), {
       kind: "opening",
     });
     const reconnectingCalls =

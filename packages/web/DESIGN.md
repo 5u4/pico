@@ -23,6 +23,10 @@ Tool arguments remain literal. Tool output has no format metadata, so both inlin
 
 Thinking and tool activity adapt [Beautiful UI's Thinking trace](https://www.beautifului.dev/r/thinking-state.json). Quiet disclosure headers reveal an indented trace without enclosing each step in a card. Tool groups reveal compact rows first, then each call's full arguments and output. Collapsed groups still expose failures, running calls, and unknown states.
 
+Thinking and tool groups expand during activity and collapse when it ends. Manual toggles override automatic expansion, including after completion, so updates do not close a trace someone chose to inspect. Individual tool arguments and output remain collapsed until opened.
+
+Disclosure preferences belong to each retained conversation entry, because message and tool IDs can repeat across chats. Switching chats or closing and reopening a tab preserves that conversation's choices. Closing the chat removes them with its entry.
+
 Group only consecutive tool calls within one assistant message. Prose, thinking, images, and message boundaries end a group so grouping never moves content across the conversation. Keep unanchored snapshot results and live calls in separate groups until an assistant message supplies their position. Group expansion follows member call IDs through settlement. Closing a group preserves individual detail preferences.
 
 Assistant message fragments share one visual flow. Compact thinking and tool boundaries stay together, while prose has more space and user messages separate turns. Layout derives those boundaries from the rendered block kinds without regrouping or reordering transcript records.
@@ -31,4 +35,4 @@ Live thinking and gaps before the next activity use [Beautiful UI's Dots loading
 
 Assistant prose adapts [Beautiful UI's streaming text](https://www.beautifului.dev/r/streaming-text.json) with a live caret after the final rendered Markdown block. The caret is CSS-only so it does not alter the source or split Markdown syntax. No demo playback timer delays tokens or replays settled history. Message settlement removes its live treatment; run completion or connection loss removes waiting.
 
-The trace uses actual execution states, not demo timers or invented elapsed time. Live tool events lack positions within assistant content, so live calls retain their trailing position until settlement. Interaction transitions stop after feedback and respect reduced motion.
+The trace uses actual execution states, not demo timers or invented elapsed time. The web event stream has no thinking-end event, so thinking remains active until a later content block, message settlement, run completion, or connection loss. Live tool events lack positions within assistant content, so live calls retain their trailing position until settlement. Interaction transitions stop after feedback and respect reduced motion.
