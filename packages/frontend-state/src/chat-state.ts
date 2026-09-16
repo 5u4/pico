@@ -84,6 +84,8 @@ export const reduceLiveChat = (
   event: Exclude<AgentEvent, { readonly type: "title-changed" }>,
 ): LiveChat => {
   switch (event.type) {
+    case "context-invalidated":
+      return state;
     case "notice":
       return { ...state, notices: [...state.notices, event] };
     case "run-started":

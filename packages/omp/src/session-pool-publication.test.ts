@@ -129,7 +129,7 @@ describe("session pool publication", () => {
             return yield* Effect.die("Publication missed live context");
 
           yield* pool.close(chatId);
-          const transcript = yield* pool.transcript(chatId);
+          const { messages: transcript } = yield* pool.transcript(chatId);
           const published = transcript[0];
           if (published === undefined) return yield* Effect.die("Publication missed transcript");
           assert.deepInclude(published, {
@@ -354,7 +354,7 @@ describe("session pool publication", () => {
         assert.deepStrictEqual(observed, ["run-started", "message-settled", "run-finished"]);
         yield* Fiber.interrupt(delivery);
         yield* pool.close(chatId);
-        const transcript = yield* pool.transcript(chatId);
+        const { messages: transcript } = yield* pool.transcript(chatId);
         assert.strictEqual(transcript.length, 1);
         assert.deepStrictEqual(transcript[0], settled.message);
         assert.deepInclude(transcript[0], {

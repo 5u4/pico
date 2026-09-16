@@ -385,6 +385,7 @@ export const make = (
         case "text-delta":
         case "thinking-delta":
         case "notice":
+        case "context-invalidated":
           return;
         case "title-changed":
           yield* client

@@ -3,7 +3,7 @@ import type * as Effect from "effect/Effect";
 import type * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Struct from "effect/Struct";
-import type { AgentPrompt, AgentTranscript } from "./agent-message.ts";
+import type { AgentPrompt } from "./agent-message.ts";
 import type {
   ContextUsage,
   MessageDelivery,
@@ -12,6 +12,7 @@ import type {
   ModelSwitchResult,
   ShakeMode,
   ShakeResult,
+  TranscriptSnapshot,
 } from "./agent-runtime.ts";
 import type { Chat, ChatId, ChatListEntry } from "./chat-model.ts";
 import type { ApplicationError, ChatClosed, GitError, WorkspaceBindingInvalid } from "./errors.ts";
@@ -123,7 +124,8 @@ export class Application extends Context.Service<
       chatId: ChatId,
     ) => Effect.Effect<Option.Option<ChatPlatformBinding>, ApplicationError>;
 
-    readonly transcript: (chatId: ChatId) => Effect.Effect<AgentTranscript, ApplicationError>;
+    /** Platform adapters read history and the retained session's context estimate. */
+    readonly transcript: (chatId: ChatId) => Effect.Effect<TranscriptSnapshot, ApplicationError>;
 
     readonly closeChat: (
       chatId: ChatId,

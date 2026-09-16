@@ -134,7 +134,7 @@ const smoke = Effect.fn("AgentRuntime.smoke")(function* () {
       return yield* Effect.fail(new Error("OMP smoke run did not complete successfully"));
     }
 
-    const transcript = yield* runtime.transcript(chatId);
+    const { messages: transcript, contextUsage } = yield* runtime.transcript(chatId);
     const hasMarker = transcript.some(
       (message) =>
         message.role === "assistant" &&
@@ -147,7 +147,6 @@ const smoke = Effect.fn("AgentRuntime.smoke")(function* () {
       );
     }
 
-    const contextUsage = yield* runtime.contextUsage(chatId);
     assert.strictEqual(contextUsage.kind, "available");
     if (contextUsage.kind === "available") {
       assert.isAbove(contextUsage.contextWindow, 0);

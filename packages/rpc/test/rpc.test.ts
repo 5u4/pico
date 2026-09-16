@@ -4,6 +4,7 @@ import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import { assert, describe, it } from "@effect/vitest";
 import type * as AgentEvent from "@pico/contract/agent-event";
 import * as AgentMessage from "@pico/contract/agent-message";
+import type { TranscriptSnapshot } from "@pico/contract/agent-runtime";
 import { Application } from "@pico/contract/application";
 import * as Chat from "@pico/contract/chat-model";
 import { ChatRepository } from "@pico/contract/chat-repository";
@@ -75,17 +76,20 @@ const ownershipFixture = Effect.fnUntraced(function* () {
   }
   return { workspaces, chats, storeFile, layer: Layer.succeedContext(context) };
 }, Effect.provide(BunFileSystem.layer));
-const transcript: AgentMessage.AgentTranscript = [
-  {
-    role: "assistant",
-    id: AgentMessage.AgentMessageId.make("transcript-ready"),
-    status: "completed",
-    stopReason: "stop",
-    content: [{ type: "text", text: "ready" }],
-    model: "integration-test",
-    timestamp: 1,
-  },
-];
+const transcript: TranscriptSnapshot = {
+  messages: [
+    {
+      role: "assistant",
+      id: AgentMessage.AgentMessageId.make("transcript-ready"),
+      status: "completed",
+      stopReason: "stop",
+      content: [{ type: "text", text: "ready" }],
+      model: "integration-test",
+      timestamp: 1,
+    },
+  ],
+  contextUsage: { kind: "unavailable" },
+};
 const firstEvent: AgentEvent.AgentEventEnvelope = {
   chatId: firstChatId,
   event: { type: "notice", level: "info", message: "first" },

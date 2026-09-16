@@ -8,6 +8,7 @@ import {
   type ContextUsage,
   type ShakeMode,
   type ShakeResult,
+  type TranscriptSnapshot,
 } from "@pico/contract/agent-runtime";
 import { AgentSessionStore } from "@pico/contract/agent-session-store";
 import { Application, type UpdateWorkspace } from "@pico/contract/application";
@@ -46,13 +47,16 @@ const missingChatId = Chat.ChatId.make("018f47a0-0000-7000-8000-000000000098");
 
 const textPrompt = (text: string) => AgentMessage.AgentPrompt.make({ text, attachments: [] });
 
-const runtimeTranscript: AgentMessage.AgentTranscript = [
-  {
-    role: "user",
-    content: [{ type: "text", text: "hello" }],
-    timestamp: 7,
-  },
-];
+const runtimeTranscript: TranscriptSnapshot = {
+  messages: [
+    {
+      role: "user",
+      content: [{ type: "text", text: "hello" }],
+      timestamp: 7,
+    },
+  ],
+  contextUsage: { kind: "unavailable" },
+};
 
 const assertApplicationError = (
   error: ApplicationError | ChatClosed,

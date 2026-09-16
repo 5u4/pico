@@ -10,6 +10,7 @@ import type {
   ModelSwitchResult,
   ShakeMode,
   ShakeResult,
+  TranscriptSnapshot,
 } from "@pico/contract/agent-runtime";
 import type * as Chat from "@pico/contract/chat-model";
 import { AgentError } from "@pico/contract/errors";
@@ -72,9 +73,7 @@ export interface SessionFactory {
 export interface SessionPool {
   readonly events: Stream.Stream<AgentEvent.AgentEventEnvelope>;
   readonly drain: () => Effect.Effect<void>;
-  readonly transcript: (
-    chatId: Chat.ChatId,
-  ) => Effect.Effect<AgentMessage.AgentTranscript, AgentError>;
+  readonly transcript: (chatId: Chat.ChatId) => Effect.Effect<TranscriptSnapshot, AgentError>;
   readonly send: (
     chatId: Chat.ChatId,
     prompt: AgentMessage.AgentPrompt,
@@ -430,7 +429,7 @@ const acquireEntry = Effect.fn("SessionPool.acquireEntry")(function* (
         if (item.kind === "barrier") return yield* Deferred.succeed(item.completed, undefined);
         const owner = item.owner;
         if (owner?.kind === "captured") {
-          if (item.event.type !== "title-changed") {
+          if (item.event.type !== "title-changed" && item.event.type !== "context-invalidated") {
             yield* owner.onEvent(item.event);
             return;
           }
@@ -546,19 +545,34 @@ export const makeSessionPool = Effect.fn("SessionPool.make")(function* (
     yield* Effect.yieldNow;
   });
 
-  const transcript = Effect.fn("AgentRuntime.transcript")(function* (chatId: Chat.ChatId) {
+  const transcript = Effect.fn("AgentRuntime.transcript")(function* (
+    chatId: Chat.ChatId,
+  ): Effect.fn.Return<TranscriptSnapshot, AgentError> {
     return yield* Effect.scoped(
       Effect.gen(function* () {
         const entry = yield* retainOption(sessions, chatId);
-        if (Option.isNone(entry)) return yield* options.loadTranscript(chatId);
+        if (Option.isNone(entry)) {
+          return {
+            messages: yield* options.loadTranscript(chatId),
+            contextUsage: { kind: "unavailable" },
+          } satisfies TranscriptSnapshot;
+        }
         return yield* entry.value.admission.withPermit(
           Effect.gen(function* () {
-            if (MutableRef.get(entry.value.lifecycle).type === "open") {
+            const open = MutableRef.get(entry.value.lifecycle).type === "open";
+            if (open) {
               yield* boundary("Failed to settle OMP transcript persistence", () =>
                 entry.value.session.settleInFlightMessagePersistence(),
               );
             }
-            return yield* options.loadTranscript(chatId);
+            const messages = yield* options.loadTranscript(chatId);
+            const contextUsage: ContextUsage = open
+              ? yield* Effect.try({
+                  try: entry.value.contextUsage,
+                  catch: (cause) => agentError("Failed to read OMP context", cause),
+                })
+              : { kind: "unavailable" };
+            return { messages, contextUsage };
           }),
         );
       }),
@@ -1059,8 +1073,15 @@ export const makeSessionPool = Effect.fn("SessionPool.make")(function* (
     return yield* Effect.scoped(
       Effect.gen(function* () {
         const entry = yield* retain(sessions, chatId);
-        return yield* runOperation(entry, "Failed to shake OMP session", (signal) =>
-          entry.shake(mode, signal),
+        return yield* runOperation(
+          entry,
+          "Failed to shake OMP session",
+          (signal) => entry.shake(mode, signal),
+          () =>
+            Queue.offer(output, {
+              kind: "event",
+              envelope: { chatId, event: { type: "context-invalidated" } },
+            }).pipe(Effect.asVoid),
         );
       }),
     );
