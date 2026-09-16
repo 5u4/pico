@@ -298,10 +298,10 @@ export function ChatScreen({
                       <span className="block truncate">{tab.title}</span>
                     </button>
                     <button
-                      aria-label={`Close ${tab.title}`}
+                      aria-label={`Close ${tab.title} in ${tab.contextLabel}`}
                       className="-my-1 flex size-6 shrink-0 items-center justify-center rounded-[5px] text-subtle transition-colors duration-100 hover:bg-surface-hover-strong hover:text-foreground"
                       onClick={() => closeTab(tab.id)}
-                      title={`Close ${tab.title}`}
+                      title={`Close ${tab.title} in ${tab.contextLabel}`}
                       type="button"
                     >
                       <XIcon aria-hidden="true" size={11} weight="bold" />
