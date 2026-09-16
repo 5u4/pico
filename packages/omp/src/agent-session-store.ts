@@ -1,3 +1,4 @@
+import { visitEntriesFromFileStream } from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { AgentSessionStore, type CreateAgentSession } from "@pico/contract/agent-session-store";
 import { AgentError } from "@pico/contract/errors";
@@ -8,6 +9,7 @@ import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as Schema from "effect/Schema";
 
 import { agentError } from "./agent-error.ts";
 
@@ -107,6 +109,26 @@ export const make = Effect.fn("AgentSessionStore.make")(function* (sessionsDir: 
     );
   });
 
+  const readTitle = Effect.fn("AgentSessionStore.readTitle")(function* (
+    chatId: CreateAgentSession["chatId"],
+  ) {
+    return yield* Effect.tryPromise({
+      try: async () => {
+        let title: string | null = null;
+        await visitEntriesFromFileStream(
+          path.join(sessionsDir, `${chatId}.jsonl`),
+          (entry: unknown) => {
+            if (isTitledSessionHeader(entry)) title = entry.title;
+            return false;
+          },
+          { maxRecords: 1 },
+        );
+        return title;
+      },
+      catch: (cause) => agentError("Failed to read OMP session title", cause),
+    });
+  });
+
   const remove = Effect.fn("AgentSessionStore.remove")(function* (
     chatId: CreateAgentSession["chatId"],
   ) {
@@ -115,8 +137,16 @@ export const make = Effect.fn("AgentSessionStore.make")(function* (sessionsDir: 
     );
   });
 
-  return AgentSessionStore.of({ create, remove });
+  return AgentSessionStore.of({ create, readTitle, remove });
 });
 
 export const layer = (sessionsDir: AbsolutePath) =>
   Layer.effect(AgentSessionStore, make(sessionsDir));
+
+const isTitledSessionHeader = Schema.is(
+  Schema.Struct({
+    type: Schema.Literal("session"),
+    id: Schema.String,
+    title: Schema.NonEmptyString,
+  }),
+);

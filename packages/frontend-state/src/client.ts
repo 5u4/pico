@@ -1,6 +1,6 @@
 import { AgentPrompt, type AgentTranscript } from "@pico/contract/agent-message";
 import type { CreateChat, CreateWorkspace, UpdateWorkspace } from "@pico/contract/application";
-import type { Chat, ChatId } from "@pico/contract/chat-model";
+import type { ChatId, ChatListEntry } from "@pico/contract/chat-model";
 import type { ApplicationError } from "@pico/contract/errors";
 import type { Workspace, WorkspaceId } from "@pico/contract/workspace-model";
 import * as RpcClient from "@pico/rpc/client";
@@ -180,7 +180,7 @@ export const make = ({ url }: { readonly url: string }) => {
 
   const workspaces = list<readonly Workspace[]>((client) => client.ListWorkspaces());
   const chats = Atom.family((workspaceId: WorkspaceId) =>
-    list<readonly Chat[]>((client) => client.ListChats({ workspaceId })),
+    list<readonly ChatListEntry[]>((client) => client.ListChats({ workspaceId })),
   );
   const createWorkspace = Atom.fn<CreateWorkspace>()((input, get) =>
     Effect.gen(function* () {

@@ -187,7 +187,15 @@ describe("RPC", () => {
             .pipe(Effect.orDie),
         listWorkspaces: () => ownership.workspaces.list().pipe(Effect.orDie),
         listChats: (workspaceId) =>
-          ownership.chats.listOpenByWorkspace(workspaceId).pipe(Effect.orDie),
+          ownership.chats.listOpenByWorkspace(workspaceId).pipe(
+            Effect.map((chats) =>
+              chats.map((chat) => ({
+                ...chat,
+                title: chat.id === firstChatId ? "Persisted inventory review" : null,
+              })),
+            ),
+            Effect.orDie,
+          ),
         createChat: ({ workspaceId, externalId }) =>
           ownership.chats
             .create({
@@ -275,7 +283,10 @@ describe("RPC", () => {
         assert.deepStrictEqual(yield* client.ListWorkspaces(), [newerWebWorkspace, webWorkspace]);
         assert.deepStrictEqual(
           yield* client.ListChats({ workspaceId: webWorkspace.id }),
-          yield* ownership.chats.listOpenByWorkspace(webWorkspace.id),
+          (yield* ownership.chats.listOpenByWorkspace(webWorkspace.id)).map((chat) => ({
+            ...chat,
+            title: chat.id === firstChatId ? "Persisted inventory review" : null,
+          })),
         );
         const updatedCwd = AbsolutePath.make("/tmp/pico-rpc-updated");
         for (const id of [discordWorkspace.id, workspaceId(10), workspaceId(99)]) {

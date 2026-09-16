@@ -17,6 +17,12 @@ export const Chat = Schema.Struct({
 });
 export type Chat = typeof Chat.Type;
 
+export const ChatListEntry = Schema.Struct({
+  ...Chat.fields,
+  title: Schema.NullOr(Schema.NonEmptyString),
+});
+export type ChatListEntry = typeof ChatListEntry.Type;
+
 export const NewChat = Schema.Struct({
   id: ChatId,
   workspaceId: WorkspaceId,

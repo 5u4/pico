@@ -174,21 +174,39 @@ export function WorkspaceChat({ state }: { readonly state: State | null }) {
       Atom.make((get) => {
         const result = state ? get(state.workspaces) : AsyncResult.initial<readonly Workspace[]>();
         const workspaces = Option.getOrElse(AsyncResult.value(result), () => []);
+        const retainedWorkspaces = new Set<WorkspaceId>();
+        for (const entry of navigation.entries.values()) {
+          if (entry.target.kind === "chat") retainedWorkspaces.add(entry.workspace.id);
+        }
         return {
           result,
           groups: workspaces.map((workspace) => ({
             workspace,
             chats:
-              state && (search.kind === "open" || navigation.expanded.has(workspace.id))
+              state &&
+              (search.kind === "open" ||
+                navigation.expanded.has(workspace.id) ||
+                retainedWorkspaces.has(workspace.id))
                 ? get(state.chats(workspace.id))
                 : null,
           })),
         };
       }),
-    [state, navigation.expanded, search.kind],
+    [state, navigation.expanded, navigation.entries, search.kind],
   );
   const { result: workspaces, groups } = useAtomValue(groupedAtom);
-  const titles = useAtomValue(state?.titles ?? emptyTitles);
+  const liveTitles = useAtomValue(state?.titles ?? emptyTitles);
+  const titles = useMemo(() => {
+    const merged = new Map<ChatId, string>();
+    for (const group of groups) {
+      if (!group.chats) continue;
+      for (const chat of Option.getOrElse(AsyncResult.value(group.chats), () => [])) {
+        if (chat.title !== null) merged.set(chat.id, chat.title);
+      }
+    }
+    for (const [id, title] of liveTitles) merged.set(id, title);
+    return merged;
+  }, [groups, liveTitles]);
   const selected =
     navigation.selectedKey === null ? undefined : navigation.entries.get(navigation.selectedKey);
   const chatId = selected?.target.kind === "chat" ? selected.target.chat.id : null;
@@ -596,7 +614,8 @@ export function WorkspaceChat({ state }: { readonly state: State | null }) {
         for (const entry of navigation.entries.values()) {
           if (entry.workspace.id !== workspace.id || entry.target.kind !== "chat") continue;
           const chat = entry.target.chat;
-          if (!records.some((record) => record.id === chat.id)) records.unshift(chat);
+          if (!records.some((record) => record.id === chat.id))
+            records.unshift({ ...chat, title: null });
         }
       }
       const summaries = records.map((chat) => ({

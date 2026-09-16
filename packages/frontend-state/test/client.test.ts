@@ -10,7 +10,7 @@ import {
   type AgentTranscript,
 } from "@pico/contract/agent-message";
 import { Application } from "@pico/contract/application";
-import { ChatId } from "@pico/contract/chat-model";
+import { ChatId, type ChatListEntry } from "@pico/contract/chat-model";
 import { ChatRepository } from "@pico/contract/chat-repository";
 import { ApplicationError, ChatClosed } from "@pico/contract/errors";
 import { EventRouter } from "@pico/contract/event-router";
@@ -544,6 +544,87 @@ describe("frontend state over WebSocket", () => {
         assert.strictEqual(registry.get(state.live(firstChat)).run.kind, "running");
         registry.dispose();
         yield* Deferred.await(route.closed);
+      }).pipe(Effect.scoped, Effect.provide(server.layer));
+    }),
+  );
+
+  it.live("keeps historical list titles separate from newer events during a delayed refresh", () =>
+    Effect.gen(function* () {
+      const historical: ChatListEntry = {
+        id: firstChat,
+        workspaceId: webWorkspace.id,
+        cwd: webWorkspace.defaultCwd,
+        externalId: null,
+        createdAt: 1,
+        archivedAt: null,
+        title: "Persisted inventory review",
+      };
+      const refreshing = yield* Deferred.make<void>();
+      const refreshed = yield* Deferred.make<readonly ChatListEntry[]>();
+      let listReads = 0;
+      let transcriptReads = 0;
+      const server = yield* fixture({
+        listChats: () =>
+          Effect.gen(function* () {
+            if (++listReads === 1) return [historical];
+            yield* Deferred.succeed(refreshing, undefined);
+            return yield* Deferred.await(refreshed);
+          }),
+        transcript: () =>
+          Effect.sync(() => {
+            transcriptReads++;
+            return [];
+          }),
+        sendMessage: () => Effect.succeed({ kind: "handled" }),
+        abort: () => Effect.void,
+      });
+      yield* Effect.gen(function* () {
+        const state = make({ url: yield* endpoint });
+        const registry = yield* registryInScope;
+        const chats = state.chats(webWorkspace.id);
+        registry.mount(chats);
+        registry.mount(state.titles);
+        const route = yield* Queue.take(server.opened);
+        const initial = yield* AtomRegistry.getResult(registry, chats);
+        assert.strictEqual(initial.find((chat) => chat.id === firstChat)?.title, historical.title);
+        assert.isFalse(registry.get(state.titles).has(firstChat));
+
+        registry.refresh(chats);
+        yield* Deferred.await(refreshing);
+        yield* Queue.offerAll(route.queue, [
+          {
+            chatId: firstChat,
+            event: {
+              type: "text-delta",
+              messageId: orphanMessageId,
+              contentIndex: 0,
+              text: "unopened background response",
+            },
+          },
+          {
+            chatId: firstChat,
+            event: {
+              type: "message-settled",
+              message: assistant(firstMessageId, "saved background response"),
+            },
+          },
+          { chatId: firstChat, event: { type: "title-changed", title: "Live inventory review" } },
+        ]);
+        yield* waitFor(
+          registry,
+          state.titles,
+          (titles) => titles.get(firstChat) === "Live inventory review",
+        );
+        yield* Deferred.succeed(refreshed, [{ ...historical, title: "Older inventory review" }]);
+        yield* waitFor(registry, chats, (value) => value._tag === "Success" && !value.waiting);
+        assert.strictEqual(
+          AsyncResult.getOrThrow(registry.get(chats)).find((chat) => chat.id === firstChat)?.title,
+          "Older inventory review",
+        );
+        assert.strictEqual(registry.get(state.titles).get(firstChat), "Live inventory review");
+        assert.strictEqual(transcriptReads, 0);
+        registry.mount(state.live(firstChat));
+        assert.deepStrictEqual([...registry.get(state.live(firstChat)).assistant], []);
       }).pipe(Effect.scoped, Effect.provide(server.layer));
     }),
   );
