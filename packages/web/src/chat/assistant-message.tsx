@@ -1,6 +1,7 @@
 import { CaretDownIcon, SparkleIcon } from "@phosphor-icons/react";
 import type { AssistantBlock, AssistantState, TranscriptItem } from "./chat-model.ts";
 import { LoadingDots } from "./loading-dots.tsx";
+import { Markdown } from "./markdown.tsx";
 
 export function AssistantMessage({
   item,
@@ -39,26 +40,16 @@ function AssistantBlockView({
   readonly onDisclosuresChange: (ids: readonly string[], open: boolean) => void;
 }) {
   switch (block.kind) {
-    case "text": {
-      let tailStart = live ? Math.max(0, block.text.length - 6) : block.text.length;
-      const code = block.text.charCodeAt(tailStart);
-      if (code >= 0xdc00 && code <= 0xdfff) tailStart -= 1;
+    case "text":
       return (
-        <p
-          className="max-w-[620px] whitespace-pre-wrap text-[13.5px] leading-[1.65] text-foreground [overflow-wrap:anywhere]"
-          data-transcript-end="prose"
-          data-transcript-start="prose"
-        >
-          {block.text.slice(0, tailStart)}
-          {tailStart < block.text.length && (
-            <span className="stream-tail" key={block.text.length}>
-              {block.text.slice(tailStart)}
-            </span>
-          )}
-          {live && <span aria-hidden="true" className="stream-caret" />}
-        </p>
+        <div data-transcript-end="prose" data-transcript-start="prose">
+          <Markdown
+            className="max-w-[620px] text-[13.5px] leading-[1.65] text-foreground"
+            streaming={live}
+            text={block.text}
+          />
+        </div>
       );
-    }
     case "thinking": {
       const contentId = `${block.id}-content`;
       const triggerId = `${block.id}-trigger`;
@@ -113,9 +104,10 @@ function AssistantBlockView({
                   aria-hidden="true"
                   className="absolute -top-2 bottom-1 left-[3px] w-px bg-border"
                 />
-                <p className="whitespace-pre-wrap py-1 text-[12.5px] leading-relaxed text-muted [overflow-wrap:anywhere]">
-                  {block.text}
-                </p>
+                <Markdown
+                  className="py-1 text-[12.5px] leading-relaxed text-muted"
+                  text={block.text}
+                />
               </div>
             </div>
           </div>

@@ -3,6 +3,7 @@ import { Button } from "../components/ui/button.tsx";
 import { AssistantMessage } from "./assistant-message.tsx";
 import type { TranscriptItem, TranscriptPresentation } from "./chat-model.ts";
 import { LoadingDots } from "./loading-dots.tsx";
+import { Markdown } from "./markdown.tsx";
 import { ToolGroup } from "./tool-group.tsx";
 
 export interface TranscriptProps {
@@ -120,7 +121,7 @@ function EmptyTranscript({
           <WrenchIcon aria-hidden="true" size={21} />
         </span>
         <h2 className="mt-5 text-display font-semibold">{title}</h2>
-        <p className="mt-2 text-copy text-muted">{description}</p>
+        <Markdown className="mt-2 text-copy text-muted" text={description} />
       </div>
     </section>
   );
@@ -144,7 +145,7 @@ function ErrorTranscript({
           <WarningCircleIcon aria-hidden="true" size={22} />
         </span>
         <h2 className="mt-5 text-display font-semibold">{title}</h2>
-        <p className="mt-2 text-copy text-muted">{description}</p>
+        <Markdown className="mt-2 text-copy text-muted" text={description} />
         <Button className="mt-5" onClick={onRetry} size="small">
           <ArrowClockwiseIcon aria-hidden="true" size={16} />
           {retryLabel}
@@ -166,9 +167,9 @@ function TranscriptItemView({
   switch (item.kind) {
     case "user":
       return (
-        <article className="transcript-user-enter flex justify-end pl-10 sm:pl-24">
-          <div className="min-w-0 rounded-xl bg-field px-3.5 py-2 text-[13px] leading-relaxed text-foreground shadow-hairline">
-            <p className="whitespace-pre-wrap [overflow-wrap:anywhere]">{item.text}</p>
+        <article className="transcript-user-enter flex min-w-0 justify-end pl-10 sm:pl-24">
+          <div className="min-w-0 max-w-full rounded-xl bg-field px-3.5 py-2 text-[13px] leading-relaxed text-foreground shadow-hairline">
+            <Markdown text={item.text} />
             <p className="sr-only">{item.timestampLabel}</p>
           </div>
         </article>
@@ -209,7 +210,7 @@ function Notice({ item }: { readonly item: Extract<TranscriptItem, { readonly ki
   return (
     <aside className={`rounded-control border-l-2 px-4 py-3 ${toneClasses[item.tone]}`}>
       <p className="text-label font-semibold">{item.title}</p>
-      <p className="mt-1 text-label">{item.text}</p>
+      <Markdown className="mt-1 text-label" text={item.text} />
     </aside>
   );
 }
