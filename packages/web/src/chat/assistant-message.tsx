@@ -1,5 +1,6 @@
 import { CaretDownIcon, SparkleIcon } from "@phosphor-icons/react";
 import type { AssistantBlock, AssistantState, TranscriptItem } from "./chat-model.ts";
+import { LoadingDots } from "./loading-dots.tsx";
 import { Markdown } from "./markdown.tsx";
 
 export function AssistantMessage({
@@ -14,7 +15,7 @@ export function AssistantMessage({
       <header className="sr-only">
         {item.modelLabel} · {item.timestampLabel}
       </header>
-      <div className="space-y-4">
+      <div className="transcript-flow">
         {item.blocks.map((block, index) => (
           <AssistantBlockView
             block={block}
@@ -24,7 +25,7 @@ export function AssistantMessage({
           />
         ))}
       </div>
-      <AssistantStateView hasContent={item.blocks.length > 0} state={item.state} />
+      <AssistantStateView state={item.state} />
     </article>
   );
 }
@@ -41,30 +42,41 @@ function AssistantBlockView({
   switch (block.kind) {
     case "text":
       return (
-        <Markdown
-          className="max-w-[620px] text-[13.5px] leading-[1.65] text-foreground"
-          text={block.text}
-        />
+        <div data-transcript-end="prose" data-transcript-start="prose">
+          <Markdown
+            className="max-w-[620px] text-[13.5px] leading-[1.65] text-foreground"
+            streaming={live}
+            text={block.text}
+          />
+        </div>
       );
     case "thinking": {
       const contentId = `${block.id}-content`;
       const triggerId = `${block.id}-trigger`;
       return (
-        <div className="w-full max-w-95">
+        <div
+          className="w-full max-w-95"
+          data-transcript-end="activity"
+          data-transcript-start="activity"
+        >
           <button
             aria-controls={contentId}
             aria-expanded={block.open}
-            className="-mx-1.5 flex min-h-7 max-w-full items-center gap-2 rounded-control px-1.5 py-1 text-start transition-colors duration-100 hover:bg-surface-hover"
+            className="-mx-1.5 flex min-h-7 max-w-full items-center gap-2.5 rounded-control px-1.5 py-1 text-start transition-colors duration-100 hover:bg-surface-hover"
             id={triggerId}
             onClick={() => onDisclosuresChange([block.id], !block.open)}
             type="button"
           >
-            <SparkleIcon
-              aria-hidden="true"
-              className={`shrink-0 ${live ? "text-muted" : "text-subtle"}`}
-              size={16}
-              weight="fill"
-            />
+            {live ? (
+              <LoadingDots />
+            ) : (
+              <SparkleIcon
+                aria-hidden="true"
+                className="shrink-0 text-subtle"
+                size={16}
+                weight="fill"
+              />
+            )}
             <span
               className={`min-w-0 break-words text-[13px] font-medium ${live ? "thinking-shimmer" : "text-muted"}`}
             >
@@ -109,22 +121,12 @@ function AssistantBlockView({
   }
 }
 
-function AssistantStateView({
-  hasContent,
-  state,
-}: {
-  readonly hasContent: boolean;
-  readonly state: AssistantState;
-}) {
+function AssistantStateView({ state }: { readonly state: AssistantState }) {
   switch (state.kind) {
     case "complete":
       return null;
     case "streaming":
-      return hasContent ? (
-        <p className="sr-only">{state.label}</p>
-      ) : (
-        <p className="thinking-shimmer min-h-6 text-[13px] font-medium">{state.label}</p>
-      );
+      return <p className="sr-only">{state.label}</p>;
     case "unknown":
       return <p className="mt-3 text-[12px] text-muted">{state.label}</p>;
     case "interrupted":

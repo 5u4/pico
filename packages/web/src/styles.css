@@ -595,6 +595,55 @@ textarea:disabled {
   background: var(--raw-surface-hover);
 }
 
+.transcript-flow {
+  display: flex;
+  flex-direction: column;
+}
+
+.transcript-flow > * + * {
+  margin-block-start: 16px;
+}
+
+.transcript-flow > [data-transcript-end="activity"] + [data-transcript-start="activity"] {
+  margin-block-start: 4px;
+}
+
+.transcript-flow > [data-transcript-end="conversation"] + *,
+.transcript-flow > * + [data-transcript-start="conversation"] {
+  margin-block-start: 32px;
+}
+
+/* Beautiful UI adaptations. Copyright (c) 2026 Shane Levine.
+   MIT license in ../licenses/beautiful-ui-MIT.txt. */
+.loading-dots {
+  display: grid;
+  flex-shrink: 0;
+  grid-template-columns: repeat(3, 4px);
+  gap: 1.5px;
+  color: var(--raw-foreground);
+}
+
+.loading-dots > span {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.15;
+}
+
+.chat-markdown[data-streaming="true"] > :last-child::after,
+.chat-markdown[data-streaming="true"]:empty::after {
+  content: "";
+  display: inline-block;
+  width: 2px;
+  height: 1.05em;
+  margin-inline-start: 1.5px;
+  transform: translateY(-0.5px);
+  border-radius: 1px;
+  background: currentColor;
+  vertical-align: text-bottom;
+}
+
 .thinking-expansion,
 .tool-expansion {
   display: grid;
@@ -751,6 +800,10 @@ textarea:disabled {
 
   .tool-preview-enter {
     animation: pop-in 160ms var(--raw-ease-out-strong) backwards;
+  }
+
+  .loading-dots > span {
+    animation: pixel-on 650ms ease-in-out infinite;
   }
 
   .thinking-shimmer {

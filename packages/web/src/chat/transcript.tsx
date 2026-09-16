@@ -2,6 +2,7 @@ import { ArrowClockwiseIcon, WarningCircleIcon, WrenchIcon } from "@phosphor-ico
 import { Button } from "../components/ui/button.tsx";
 import { AssistantMessage } from "./assistant-message.tsx";
 import type { TranscriptItem, TranscriptPresentation } from "./chat-model.ts";
+import { LoadingDots } from "./loading-dots.tsx";
 import { Markdown } from "./markdown.tsx";
 import { ToolGroup } from "./tool-group.tsx";
 
@@ -38,20 +39,46 @@ export function Transcript({
           <p aria-live="polite" className="sr-only">
             {presentation.liveLabel}
           </p>
-          <div className="mx-auto flex w-full max-w-[720px] flex-col gap-8">
+          <div className="transcript-flow mx-auto w-full max-w-[720px]">
             {presentation.items.map((item) => (
-              <TranscriptItemView
-                item={item}
+              <div
+                className="min-w-0"
+                data-transcript-end={transcriptBoundary(item, "end")}
+                data-transcript-start={transcriptBoundary(item, "start")}
                 key={item.id}
-                onDisclosuresChange={onDisclosuresChange}
-                onToolSelect={onToolSelect}
-              />
+              >
+                <TranscriptItemView
+                  item={item}
+                  onDisclosuresChange={onDisclosuresChange}
+                  onToolSelect={onToolSelect}
+                />
+              </div>
             ))}
           </div>
         </section>
       );
     default: {
       const exhaustive: never = presentation;
+      return exhaustive;
+    }
+  }
+}
+
+function transcriptBoundary(
+  item: TranscriptItem,
+  edge: "start" | "end",
+): "conversation" | "activity" | "prose" {
+  switch (item.kind) {
+    case "user":
+    case "notice":
+      return "conversation";
+    case "tool-group":
+    case "waiting":
+      return "activity";
+    case "assistant":
+      return item.blocks.at(edge === "start" ? 0 : -1)?.kind === "thinking" ? "activity" : "prose";
+    default: {
+      const exhaustive: never = item;
       return exhaustive;
     }
   }
@@ -156,6 +183,13 @@ function TranscriptItemView({
           onDisclosuresChange={onDisclosuresChange}
           onToolSelect={onToolSelect}
         />
+      );
+    case "waiting":
+      return (
+        <div className="flex min-h-7 w-fit items-center gap-2.5" role="status">
+          <LoadingDots />
+          <span className="thinking-shimmer text-[13px] font-medium">{item.label}</span>
+        </div>
       );
     case "notice":
       return <Notice item={item} />;

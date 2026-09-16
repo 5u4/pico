@@ -52,12 +52,17 @@ const components = {
 export const Markdown = memo(function Markdown({
   text,
   className,
+  streaming = false,
 }: {
   readonly text: string;
   readonly className?: string;
+  readonly streaming?: boolean;
 }) {
   return (
-    <div className={className ? `chat-markdown ${className}` : "chat-markdown"}>
+    <div
+      className={className ? `chat-markdown ${className}` : "chat-markdown"}
+      data-streaming={streaming || undefined}
+    >
       <ReactMarkdown components={components} remarkPlugins={remarkPlugins}>
         {text}
       </ReactMarkdown>
