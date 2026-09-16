@@ -16,6 +16,28 @@ export interface ChatTabPresentation {
   readonly contextLabel: string;
 }
 
+export type CloseChatPresentation =
+  | { readonly kind: "idle" }
+  | {
+      readonly kind: "closing";
+      readonly title: string;
+      readonly workspaceName: string;
+    }
+  | {
+      readonly kind: "confirmation";
+      readonly title: string;
+      readonly workspaceName: string;
+      readonly warning: string | null;
+      readonly canConfirm: boolean;
+    }
+  | {
+      readonly kind: "error";
+      readonly title: string;
+      readonly workspaceName: string;
+      readonly message: string;
+      readonly retry: { readonly enabled: boolean } | null;
+    };
+
 export interface PromptSuggestion {
   readonly label: string;
   readonly text: string;

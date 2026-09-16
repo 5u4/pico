@@ -1,6 +1,8 @@
 import {
+  ArchiveIcon,
   CaretDownIcon,
   CaretRightIcon,
+  DotsThreeIcon,
   FolderSimpleIcon,
   MagnifyingGlassIcon,
   PencilSimpleLineIcon,
@@ -9,7 +11,15 @@ import {
   SparkleIcon,
   XIcon,
 } from "@phosphor-icons/react";
-import { type PointerEvent, useCallback, useEffect, useId, useLayoutEffect, useRef } from "react";
+import {
+  type PointerEvent,
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import { Button } from "../components/ui/button.tsx";
 import {
   ContextMenu,
@@ -31,6 +41,8 @@ export interface WorkspaceSidebarProps {
   readonly onWorkspaceRetry: () => void;
   readonly onChatsRetry: (workspaceId: string) => void;
   readonly onChatSelect: (workspaceId: string, chatId: string) => void;
+  readonly onChatClose: (workspaceId: string, chatId: string, origin: HTMLElement) => void;
+  readonly chatCloseDisabled: boolean;
   readonly onNewChat: (workspaceId?: string) => void;
   readonly onAddWorkspace?: (() => void) | undefined;
   readonly onEditWorkspace?: ((workspaceId: string, origin: HTMLElement) => void) | undefined;
@@ -48,6 +60,8 @@ export function WorkspaceSidebar({
   onWorkspaceRetry,
   onChatsRetry,
   onChatSelect,
+  onChatClose,
+  chatCloseDisabled,
   onNewChat,
   onAddWorkspace,
   onEditWorkspace,
@@ -378,16 +392,15 @@ export function WorkspaceSidebar({
                         const selected = active && chat.id === navigation.activeChatId;
                         return (
                           <li key={chat.id}>
-                            <button
-                              aria-current={selected ? "page" : undefined}
-                              className={`sidebar-row flex w-full items-center py-1 pl-7 pr-2 text-left text-[14px] font-medium ${selected ? "bg-surface-hover-strong text-foreground" : "text-muted"}`}
-                              data-sidebar-row=""
-                              onClick={() => onChatSelect(workspace.id, chat.id)}
-                              title={chat.title}
-                              type="button"
-                            >
-                              <span className="truncate">{chat.title}</span>
-                            </button>
+                            <ChatRow
+                              chat={chat}
+                              chatCloseDisabled={chatCloseDisabled}
+                              contextMenuContainer={contextMenuContainer}
+                              onChatClose={onChatClose}
+                              onChatSelect={onChatSelect}
+                              selected={selected}
+                              workspaceId={workspace.id}
+                            />
                           </li>
                         );
                       })}
@@ -418,6 +431,119 @@ export function WorkspaceSidebar({
         )}
       </div>
     </aside>
+  );
+}
+
+function ChatRow({
+  chat,
+  workspaceId,
+  selected,
+  onChatSelect,
+  onChatClose,
+  chatCloseDisabled,
+  contextMenuContainer,
+}: Pick<
+  WorkspaceSidebarProps,
+  "onChatSelect" | "onChatClose" | "chatCloseDisabled" | "contextMenuContainer"
+> & {
+  readonly chat: NavigationPresentation["groups"][number]["chats"][number];
+  readonly workspaceId: string;
+  readonly selected: boolean;
+}) {
+  const trigger = useRef<HTMLButtonElement>(null);
+  const menuOrigin = useRef<HTMLElement | null>(null);
+  const pendingClose = useRef<HTMLElement | null>(null);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const openMenu = (origin: HTMLElement) => {
+    const bounds = origin.getBoundingClientRect();
+    trigger.current?.dispatchEvent(
+      new MouseEvent("contextmenu", {
+        bubbles: true,
+        cancelable: true,
+        clientX: bounds.left + bounds.width / 2,
+        clientY: bounds.bottom,
+        button: 2,
+      }),
+    );
+    menuOrigin.current = origin;
+  };
+
+  return (
+    <ContextMenu onOpenChange={setMenuOpen}>
+      <div
+        className={`sidebar-row flex items-center ${selected ? "bg-surface-hover-strong text-foreground" : "text-muted"}`}
+        data-sidebar-row=""
+      >
+        <ContextMenuTrigger asChild>
+          <button
+            aria-current={selected ? "page" : undefined}
+            className="sidebar-row flex min-w-0 flex-1 items-center py-1 pl-7 pr-1 text-left text-[14px] font-medium"
+            onClick={() => onChatSelect(workspaceId, chat.id)}
+            onContextMenu={(event) => {
+              menuOrigin.current = event.currentTarget;
+              event.currentTarget.focus({ preventScroll: true });
+            }}
+            onKeyDown={(event) => {
+              if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) return;
+              event.preventDefault();
+              openMenu(event.currentTarget);
+            }}
+            ref={trigger}
+            title={chat.title}
+            type="button"
+          >
+            <span className="truncate">{chat.title}</span>
+          </button>
+        </ContextMenuTrigger>
+        <button
+          aria-expanded={menuOpen}
+          aria-haspopup="menu"
+          aria-label={`Chat actions for ${chat.title}`}
+          className="sidebar-row sidebar-icon-button inline-flex shrink-0 items-center justify-center text-subtle hover:text-foreground"
+          onClick={(event) => openMenu(event.currentTarget)}
+          onContextMenu={(event) => {
+            event.preventDefault();
+            openMenu(event.currentTarget);
+          }}
+          onKeyDown={(event) => {
+            if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) return;
+            event.preventDefault();
+            openMenu(event.currentTarget);
+          }}
+          title={`Chat actions for ${chat.title}`}
+          type="button"
+        >
+          <DotsThreeIcon aria-hidden="true" size={18} weight="bold" />
+        </button>
+      </div>
+      <ContextMenuContent
+        container={contextMenuContainer}
+        onCloseAutoFocus={(event) => {
+          const origin = pendingClose.current;
+          pendingClose.current = null;
+          if (origin) {
+            event.preventDefault();
+            queueMicrotask(() => {
+              origin.focus({ preventScroll: true });
+              onChatClose(workspaceId, chat.id, origin);
+            });
+          } else if (document.activeElement === document.body && menuOrigin.current?.isConnected) {
+            event.preventDefault();
+            menuOrigin.current.focus({ preventScroll: true });
+          }
+        }}
+      >
+        <ContextMenuItem
+          disabled={chatCloseDisabled}
+          onSelect={() => {
+            pendingClose.current = menuOrigin.current ?? trigger.current;
+          }}
+        >
+          <ArchiveIcon aria-hidden="true" size={17} />
+          Close chat
+        </ContextMenuItem>
+      </ContextMenuContent>
+    </ContextMenu>
   );
 }
 

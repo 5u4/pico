@@ -34,6 +34,11 @@ export const PicoRpcs = RpcGroup.make(
     success: Chat.Chat,
     error: Errors.ApplicationError,
   }),
+  Rpc.make("CloseChat", {
+    payload: { chatId: Chat.ChatId, allowDirtyWorktree: Schema.Boolean },
+    success: Application.CloseChatResult,
+    error: Errors.ApplicationError,
+  }),
   Rpc.make("Transcript", {
     payload: { chatId: Chat.ChatId },
     success: AgentMessage.AgentTranscript,

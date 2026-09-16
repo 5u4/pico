@@ -83,7 +83,12 @@ const fixture = Effect.fnUntraced(function* (
     Partial<
       Pick<
         Application["Service"],
-        "listWorkspaces" | "listChats" | "createWorkspace" | "updateWorkspace" | "createChat"
+        | "listWorkspaces"
+        | "listChats"
+        | "createWorkspace"
+        | "updateWorkspace"
+        | "createChat"
+        | "closeChat"
       >
     >,
 ) {
@@ -312,6 +317,105 @@ describe("frontend state over WebSocket", () => {
           Option.getOrThrow(AsyncResult.value(registry.get(state.workspaces))),
           [saved],
         );
+      }).pipe(Effect.scoped, Effect.provide(server.layer));
+    }),
+  );
+
+  it.live("preserves close outcomes and confirmed removal when chat-list refresh fails", () =>
+    Effect.gen(function* () {
+      const chats: readonly ChatListEntry[] = [firstChat, secondChat].map((id) => ({
+        id,
+        workspaceId: webWorkspace.id,
+        cwd: webWorkspace.defaultCwd,
+        externalId: null,
+        title: null,
+        createdAt: 1,
+        archivedAt: null,
+      }));
+      let reads = 0;
+      const server = yield* fixture({
+        transcript: () => Effect.succeed([]),
+        sendMessage: () => Effect.succeed({ kind: "handled" }),
+        abort: () => Effect.void,
+        listChats: () =>
+          Effect.suspend(() =>
+            ++reads === 1
+              ? Effect.succeed(chats)
+              : Effect.fail(new ApplicationError({ reason: "operation", message: "Read failed" })),
+          ),
+        closeChat: (_, options) =>
+          options.allowDirtyWorktree
+            ? Effect.succeed({ kind: "closed" })
+            : Effect.succeed({ kind: "worktree-confirmation-required" }),
+      });
+      yield* Effect.gen(function* () {
+        const state = make({ url: yield* endpoint });
+        const registry = yield* registryInScope;
+        const list = state.chats(webWorkspace.id);
+        const close = state.closeChat(webWorkspace.id);
+        registry.mount(list);
+        yield* AtomRegistry.getResult(registry, list);
+        registry.set(close, { chatId: firstChat, allowDirtyWorktree: false });
+        const confirmation = yield* AtomRegistry.getResult(registry, close, {
+          suspendOnWaiting: true,
+        });
+        yield* waitFor(registry, list, (value) => value._tag === "Failure" && !value.waiting);
+        assert.strictEqual(confirmation.kind, "worktree-confirmation-required");
+        assert.deepStrictEqual(Option.getOrThrow(AsyncResult.value(registry.get(list))), chats);
+
+        registry.set(close, { chatId: firstChat, allowDirtyWorktree: true });
+        const closed = yield* AtomRegistry.getResult(registry, close, { suspendOnWaiting: true });
+        yield* waitFor(registry, list, (value) => value._tag === "Failure" && !value.waiting);
+        assert.strictEqual(closed.kind, "closed");
+        assert.deepStrictEqual(
+          Option.getOrThrow(AsyncResult.value(registry.get(list))).map((chat) => chat.id),
+          [secondChat],
+        );
+      }).pipe(Effect.scoped, Effect.provide(server.layer));
+    }),
+  );
+
+  it.live("refreshes archived membership without replacing a failed close outcome", () =>
+    Effect.gen(function* () {
+      const chat: ChatListEntry = {
+        id: firstChat,
+        workspaceId: webWorkspace.id,
+        cwd: webWorkspace.defaultCwd,
+        externalId: null,
+        title: null,
+        createdAt: 1,
+        archivedAt: null,
+      };
+      const cleanupFailure = new ApplicationError({
+        reason: "operation",
+        message: "Cleanup failed",
+      });
+      let archived = false;
+      const server = yield* fixture({
+        transcript: () => Effect.succeed([]),
+        sendMessage: () => Effect.succeed({ kind: "handled" }),
+        abort: () => Effect.void,
+        listChats: () => Effect.sync(() => (archived ? [] : [chat])),
+        closeChat: () =>
+          Effect.suspend(() => {
+            archived = true;
+            return Effect.fail(cleanupFailure);
+          }),
+      });
+      yield* Effect.gen(function* () {
+        const state = make({ url: yield* endpoint });
+        const registry = yield* registryInScope;
+        const list = state.chats(webWorkspace.id);
+        const close = state.closeChat(webWorkspace.id);
+        registry.mount(list);
+        yield* AtomRegistry.getResult(registry, list);
+        registry.set(close, { chatId: firstChat, allowDirtyWorktree: false });
+        const error = yield* AtomRegistry.getResult(registry, close, {
+          suspendOnWaiting: true,
+        }).pipe(Effect.flip);
+        const refreshed = yield* AtomRegistry.getResult(registry, list, { suspendOnWaiting: true });
+        assert.deepStrictEqual(error, cleanupFailure);
+        assert.deepStrictEqual(refreshed, []);
       }).pipe(Effect.scoped, Effect.provide(server.layer));
     }),
   );

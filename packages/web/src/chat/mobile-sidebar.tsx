@@ -4,18 +4,22 @@ import { WorkspaceSidebar, type WorkspaceSidebarProps } from "./workspace-sideba
 export function MobileSidebar({
   open,
   returnFocus,
+  onDialogOpenChange,
   ...sidebar
 }: WorkspaceSidebarProps & {
   readonly open: boolean;
   readonly returnFocus: RefObject<HTMLButtonElement | null>;
+  readonly onDialogOpenChange: (open: boolean) => void;
 }) {
   const [dialog, setDialog] = useState<HTMLDialogElement | null>(null);
 
   useEffect(() => {
     if (!dialog) return;
-    if (open && !dialog.open) dialog.showModal();
-    else if (!open && dialog.open) dialog.close();
-  }, [open, dialog]);
+    if (open && !dialog.open) {
+      dialog.showModal();
+      onDialogOpenChange(true);
+    } else if (!open && dialog.open) dialog.close();
+  }, [open, dialog, onDialogOpenChange]);
 
   useEffect(() => {
     const desktop = window.matchMedia("(min-width: 48rem)");
@@ -41,6 +45,7 @@ export function MobileSidebar({
         event.preventDefault();
         sidebar.onClose();
       }}
+      onClose={() => onDialogOpenChange(false)}
       onClick={(event) => {
         if (event.target !== event.currentTarget) return;
         const bounds = event.currentTarget.getBoundingClientRect();
@@ -62,6 +67,11 @@ export function MobileSidebar({
           onAddWorkspace={
             sidebar.onAddWorkspace ? () => afterClose(() => sidebar.onAddWorkspace?.()) : undefined
           }
+          onChatClose={(workspaceId, chatId, origin) => {
+            afterClose(() =>
+              sidebar.onChatClose(workspaceId, chatId, returnFocus.current ?? origin),
+            );
+          }}
           onEditWorkspace={
             sidebar.onEditWorkspace
               ? (workspaceId, origin) => {

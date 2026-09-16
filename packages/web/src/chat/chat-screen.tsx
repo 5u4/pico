@@ -14,11 +14,13 @@ import { Button } from "../components/ui/button.tsx";
 import type { Theme } from "../theme.ts";
 import type {
   ChatTabPresentation,
+  CloseChatPresentation,
   ComposerPresentation,
   PromptSuggestion,
   ToolCallPresentation,
   TranscriptPresentation,
 } from "./chat-model.ts";
+import { CloseChatDialog } from "./close-chat-dialog.tsx";
 import { Composer } from "./composer.tsx";
 import { MobileSidebar } from "./mobile-sidebar.tsx";
 import { ToolDetailPane } from "./tool-detail-pane.tsx";
@@ -51,6 +53,10 @@ export interface ChatScreenProps
   readonly theme: Theme;
   readonly workspaceForm: WorkspaceFormProps;
   readonly workspaceSettings?: WorkspaceSettingsProps | undefined;
+  readonly closeChat: CloseChatPresentation;
+  readonly onCloseChatConfirm: () => void;
+  readonly onCloseChatDismiss: () => void;
+  readonly onCloseChatRetry: () => void;
   readonly onSidebarOpenChange: (open: boolean) => void;
   readonly onTabSelect: (id: string) => void;
   readonly onTabClose: (id: string) => void;
@@ -83,6 +89,12 @@ export function ChatScreen({
   workspaceSettings,
   onEditWorkspace,
   workspaceEditPending,
+  closeChat,
+  chatCloseDisabled,
+  onChatClose,
+  onCloseChatConfirm,
+  onCloseChatDismiss,
+  onCloseChatRetry,
   onSidebarOpenChange,
   onWorkspaceToggle,
   onWorkspaceRetry,
@@ -113,6 +125,13 @@ export function ChatScreen({
   const [tabButtons] = useState(() => new Map<string, HTMLButtonElement>());
   const newTabButton = useRef<HTMLButtonElement>(null);
   const restoreTabFocus = useRef(false);
+  const closeOrigin = useRef<{
+    readonly element: HTMLElement;
+    readonly conversationKey: string | null;
+  } | null>(null);
+  const focusedElement = useRef<HTMLElement | null>(null);
+  const [closeDialogOpen, setCloseDialogOpen] = useState(false);
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const welcome = transcript.state === "empty";
   const showSuggestions =
     welcome && conversationKey !== null && composer.editable && suggestions.length > 0;
@@ -170,6 +189,33 @@ export function ChatScreen({
     (active ?? newTabButton.current)?.focus({ preventScroll: true });
   }, [conversationKey, tabs.length, tabButtons]);
 
+  useLayoutEffect(() => {
+    if (
+      focusedElement.current &&
+      !focusedElement.current.isConnected &&
+      document.activeElement === document.body
+    ) {
+      const active = conversationKey ? tabButtons.get(conversationKey) : undefined;
+      (active ?? newTabButton.current)?.focus({ preventScroll: true });
+    }
+    if (closeChat.kind === "idle") focusedElement.current = null;
+  });
+
+  useLayoutEffect(() => {
+    if (closeOrigin.current?.conversationKey !== conversationKey) closeOrigin.current = null;
+    if (closeChat.kind !== "confirmation") {
+      setCloseDialogOpen(false);
+      return;
+    }
+    if (document.activeElement === closeOrigin.current?.element) setCloseDialogOpen(true);
+  }, [closeChat.kind, conversationKey]);
+
+  useLayoutEffect(() => {
+    if (closeChat.kind === "confirmation" && closeDialogOpen && sidebarOpen) {
+      onSidebarOpenChange(false);
+    }
+  }, [closeChat.kind, closeDialogOpen, sidebarOpen, onSidebarOpenChange]);
+
   const closeTab = (id: string) => {
     restoreTabFocus.current = true;
     onTabClose(id);
@@ -217,6 +263,13 @@ export function ChatScreen({
     onChatsRetry,
     onEditWorkspace,
     workspaceEditPending,
+    chatCloseDisabled,
+    onChatClose: (workspaceId, chatId, origin) => {
+      if (chatCloseDisabled) return;
+      closeOrigin.current = { element: origin, conversationKey };
+      focusedElement.current = origin;
+      onChatClose(workspaceId, chatId, origin);
+    },
     onChatSelect: (workspaceId, chatId) => {
       onChatSelect(workspaceId, chatId);
       closeSidebar();
@@ -236,6 +289,11 @@ export function ChatScreen({
     <div
       className="chat-screen grid h-full min-h-0 grid-cols-1 bg-canvas p-2.5 text-foreground md:pl-0"
       data-sidebar-collapsed={desktopCollapse.collapsed}
+      onFocusCapture={(event) => {
+        if (closeChat.kind !== "idle" && event.target instanceof HTMLElement) {
+          focusedElement.current = event.target;
+        }
+      }}
     >
       <a
         className="sr-only focus:not-sr-only focus:fixed focus:start-4 focus:top-4 focus:z-50 focus:rounded-control focus:border focus:border-border focus:bg-panel focus:px-4 focus:py-2"
@@ -246,7 +304,12 @@ export function ChatScreen({
       <div className="hidden min-h-0 overflow-hidden md:block">
         <WorkspaceSidebar {...sidebar} desktopCollapse={desktopCollapse} />
       </div>
-      <MobileSidebar {...sidebar} open={sidebarOpen} returnFocus={sidebarOpener} />
+      <MobileSidebar
+        {...sidebar}
+        onDialogOpenChange={setMobileSidebarOpen}
+        open={sidebarOpen}
+        returnFocus={sidebarOpener}
+      />
 
       <main className="flex min-h-0 min-w-0 gap-2.5">
         <section
@@ -337,6 +400,52 @@ export function ChatScreen({
             </Button>
           </header>
 
+          <p
+            className={
+              closeChat.kind === "closing"
+                ? "shrink-0 break-words border-b border-border bg-panel px-4 py-3 text-label text-muted"
+                : "sr-only"
+            }
+            role="status"
+          >
+            {closeChat.kind === "closing"
+              ? `Closing ${closeChat.title} in ${closeChat.workspaceName}. You can keep working or use Stop if a response is running.`
+              : ""}
+          </p>
+          {closeChat.kind === "error" && (
+            <div className="flex shrink-0 flex-wrap items-center gap-3 border-b border-border bg-panel px-4 py-3 text-label">
+              <p className="min-w-0 flex-1 break-words text-danger" role="alert">
+                {closeChat.title} in {closeChat.workspaceName}. {closeChat.message}
+              </p>
+              {closeChat.retry && (
+                <Button
+                  disabled={!closeChat.retry.enabled}
+                  onClick={onCloseChatRetry}
+                  size="small"
+                  tone="secondary"
+                >
+                  Retry close
+                </Button>
+              )}
+              <Button onClick={onCloseChatDismiss} size="small" tone="ghost">
+                Dismiss
+              </Button>
+            </div>
+          )}
+          {closeChat.kind === "confirmation" && (
+            <div className="flex shrink-0 flex-wrap items-center gap-3 border-b border-border bg-panel px-4 py-3 text-label">
+              <p className="min-w-0 flex-1 break-words text-muted" role="status">
+                Worktree removal needs confirmation for {closeChat.title} in{" "}
+                {closeChat.workspaceName}. The chat may already be archived.
+              </p>
+              <Button onClick={() => setCloseDialogOpen(true)} size="small" tone="secondary">
+                Review close
+              </Button>
+              <Button onClick={onCloseChatDismiss} size="small" tone="ghost">
+                Not now
+              </Button>
+            </div>
+          )}
           <div className="relative min-h-0 flex-1">
             <div
               aria-label="Conversation history"
@@ -483,6 +592,20 @@ export function ChatScreen({
           />
         )}
       </main>
+      {closeChat.kind === "confirmation" &&
+        closeDialogOpen &&
+        !sidebarOpen &&
+        !mobileSidebarOpen && (
+          <CloseChatDialog
+            confirmation={closeChat}
+            onClose={onCloseChatDismiss}
+            onConfirm={onCloseChatConfirm}
+            onFocusFallback={() => {
+              const active = conversationKey ? tabButtons.get(conversationKey) : undefined;
+              (active ?? newTabButton.current)?.focus({ preventScroll: true });
+            }}
+          />
+        )}
       <WorkspaceDialog {...workspaceForm} />
       {workspaceSettings?.editor.kind === "open" && (
         <WorkspaceSettingsDialog
