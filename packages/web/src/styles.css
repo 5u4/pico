@@ -260,6 +260,171 @@ textarea:disabled {
   transform: scale(0.96);
 }
 
+.chat-markdown {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.chat-markdown :where(p, ul, ol, blockquote, pre) {
+  margin-block: 0.85em;
+}
+
+.chat-markdown :where(h1, h2, h3, h4, h5, h6) {
+  margin-block: 1.25em 0.5em;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.chat-markdown h1 {
+  font-size: 1.65em;
+}
+
+.chat-markdown h2 {
+  font-size: 1.4em;
+}
+
+.chat-markdown h3 {
+  font-size: 1.2em;
+}
+
+.chat-markdown h4 {
+  font-size: 1.1em;
+}
+
+.chat-markdown :where(h5, h6) {
+  font-size: 1em;
+}
+
+.chat-markdown > :first-child {
+  margin-block-start: 0;
+}
+
+.chat-markdown > :last-child {
+  margin-block-end: 0;
+}
+
+.chat-markdown :where(ul, ol) {
+  padding-inline-start: 1.5em;
+}
+
+.chat-markdown ul {
+  list-style-type: disc;
+}
+
+.chat-markdown ol {
+  list-style-type: decimal;
+}
+
+.chat-markdown ul ul {
+  list-style-type: circle;
+}
+
+.chat-markdown li {
+  margin-block: 0.25em;
+}
+
+.chat-markdown li > :where(p, ul, ol) {
+  margin-block: 0.35em;
+}
+
+.chat-markdown .task-list-item {
+  list-style-type: none;
+}
+
+.chat-markdown input[type="checkbox"] {
+  margin-inline-end: 0.4em;
+  accent-color: var(--raw-accent);
+}
+
+.chat-markdown blockquote {
+  border-inline-start: 2px solid var(--raw-border-strong);
+  padding-inline-start: 1em;
+  color: var(--raw-muted);
+}
+
+.chat-markdown a {
+  color: var(--raw-accent-ink);
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+}
+
+.chat-markdown code {
+  border-radius: var(--raw-radius-chip);
+  padding: 0.12em 0.32em;
+  background: var(--raw-surface);
+  font-family: var(--raw-font-mono);
+  font-size: 0.94em;
+  white-space: break-spaces;
+}
+
+.chat-markdown pre {
+  max-width: 100%;
+  overflow-x: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--raw-border-strong);
+  border-radius: var(--raw-radius-control);
+  padding: 0.85em 1em;
+  background: var(--raw-surface);
+  color: var(--raw-foreground);
+  white-space: pre;
+  tab-size: 2;
+}
+
+.chat-markdown pre code {
+  display: block;
+  min-width: max-content;
+  border-radius: 0;
+  padding: 0;
+  background: none;
+  white-space: inherit;
+  overflow-wrap: normal;
+}
+
+.chat-markdown hr {
+  margin-block: 1.5em;
+  border: 0;
+  border-block-start: 1px solid var(--raw-border-strong);
+}
+
+.chat-markdown-table {
+  max-width: 100%;
+  margin-block: 1em;
+  overflow-x: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--raw-border-strong);
+  border-radius: var(--raw-radius-control);
+}
+
+.chat-markdown table {
+  width: max-content;
+  min-width: 100%;
+  border-collapse: collapse;
+  font-size: 0.95em;
+}
+
+.chat-markdown :where(th, td) {
+  min-width: 6rem;
+  max-width: 26rem;
+  border-block-end: 1px solid var(--raw-border-strong);
+  padding: 0.5em 0.75em;
+  vertical-align: top;
+}
+
+.chat-markdown th {
+  background: var(--raw-surface);
+  font-weight: 600;
+}
+
+.chat-markdown tbody tr:last-child td {
+  border-block-end: 0;
+}
+
+.chat-markdown .footnotes {
+  margin-block-start: 1.5em;
+  color: var(--raw-muted);
+  font-size: 0.9em;
+}
+
 .composer {
   border: 1px solid var(--raw-border);
   border-radius: 22px;
@@ -550,19 +715,6 @@ textarea:disabled {
   }
 }
 
-@keyframes stream-resolve {
-  from {
-    filter: blur(1.6px);
-    -webkit-mask-image: linear-gradient(to right, oklch(0 0 0) 20%, oklch(0 0 0 / 0.2));
-    mask-image: linear-gradient(to right, oklch(0 0 0) 20%, oklch(0 0 0 / 0.2));
-  }
-  to {
-    filter: blur(0);
-    -webkit-mask-image: none;
-    mask-image: none;
-  }
-}
-
 @media (prefers-reduced-motion: no-preference) {
   .home-reveal {
     animation: home-reveal 800ms var(--raw-ease-sidebar) backwards;
@@ -613,10 +765,6 @@ textarea:disabled {
     -webkit-background-clip: text;
     color: transparent;
     animation: shimmer-text 1.4s linear infinite;
-  }
-
-  .stream-tail {
-    animation: stream-resolve 180ms ease-out;
   }
 
   .tool-pane {
@@ -683,12 +831,6 @@ textarea:disabled {
     opacity: 1;
     transform: none;
     filter: none;
-  }
-
-  .stream-tail {
-    filter: none;
-    -webkit-mask-image: none;
-    mask-image: none;
   }
 
   .press-feedback:enabled:active,

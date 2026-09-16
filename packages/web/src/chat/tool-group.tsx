@@ -8,6 +8,7 @@ import {
 import { type ReactNode, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { ToolCallPresentation, ToolState, TranscriptItem } from "./chat-model.ts";
+import { ToolPayload } from "./tool-payload.tsx";
 
 type PreviewPosition = {
   readonly left: number;
@@ -28,7 +29,7 @@ export function ToolGroup({
   const triggerId = `${item.id}-trigger`;
   const failed = item.calls.some((call) => call.state.kind === "failed");
   return (
-    <section className="w-full max-w-80 pb-1">
+    <section className="min-w-0 w-full max-w-80 pb-1">
       <button
         aria-controls={contentId}
         aria-expanded={item.open}
@@ -212,36 +213,8 @@ function ToolCall({
         <div className="min-h-0 overflow-hidden">
           <div className="mb-1 ml-2 mt-0.5 space-y-2 border-l border-border py-0.5 pl-3.5 text-[11.5px] leading-[1.6]">
             <p className={toolStateClass(call.state)}>{call.state.label}</p>
-            <dl className="space-y-2">
-              <div>
-                <dt className="mb-0.5 font-medium text-subtle">Arguments</dt>
-                <dd>
-                  {call.arguments === undefined ? (
-                    <p className="text-muted">Arguments unavailable</p>
-                  ) : call.arguments === "" ? (
-                    <p className="text-muted">Empty arguments</p>
-                  ) : (
-                    <pre className="max-h-64 overflow-y-auto whitespace-pre-wrap font-mono text-muted [overflow-wrap:anywhere]">
-                      {call.arguments}
-                    </pre>
-                  )}
-                </dd>
-              </div>
-              <div>
-                <dt className="mb-0.5 font-medium text-subtle">Output</dt>
-                <dd>
-                  {call.output === undefined ? (
-                    <p className="text-muted">Output unavailable</p>
-                  ) : call.output === "" ? (
-                    <p className="text-muted">Empty output</p>
-                  ) : (
-                    <pre className="max-h-64 overflow-y-auto whitespace-pre-wrap font-mono text-muted [overflow-wrap:anywhere]">
-                      {call.output}
-                    </pre>
-                  )}
-                </dd>
-              </div>
-            </dl>
+            <ToolPayload label="Arguments" value={call.arguments} variant="inline" />
+            <ToolPayload label="Output" value={call.output} variant="inline" />
           </div>
         </div>
       </div>

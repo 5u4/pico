@@ -1,10 +1,6 @@
-import { CheckIcon, CopyIcon, XIcon } from "@phosphor-icons/react";
-import { useState } from "react";
+import { XIcon } from "@phosphor-icons/react";
 import type { ToolCallPresentation, ToolState } from "./chat-model.ts";
-
-type CopyState =
-  | { readonly kind: "idle" }
-  | { readonly kind: "copying" | "copied" | "failed"; readonly text: string };
+import { ToolPayload } from "./tool-payload.tsx";
 
 export function ToolDetailPane({
   call,
@@ -53,72 +49,20 @@ export function ToolDetailPane({
           </p>
         </div>
         <div className="space-y-4">
-          <ToolPayload key={`${call.id}-arguments`} label="Arguments" value={call.arguments} />
-          <ToolPayload key={`${call.id}-output`} label="Output" value={call.output} />
+          <ToolPayload
+            key={`${call.id}-arguments`}
+            label="Arguments"
+            value={call.arguments}
+            variant="panel"
+          />
+          <ToolPayload
+            key={`${call.id}-output`}
+            label="Output"
+            value={call.output}
+            variant="panel"
+          />
         </div>
       </div>
-    </section>
-  );
-}
-
-function ToolPayload({
-  label,
-  value,
-}: {
-  readonly label: "Arguments" | "Output";
-  readonly value: string | undefined;
-}) {
-  const [copyState, setCopyState] = useState<CopyState>({ kind: "idle" });
-  const current = copyState.kind !== "idle" && copyState.text === value ? copyState.kind : "idle";
-  const copy = async () => {
-    if (value === undefined || value === "" || copyState.kind === "copying") return;
-    setCopyState({ kind: "copying", text: value });
-    try {
-      await navigator.clipboard.writeText(value);
-      setCopyState({ kind: "copied", text: value });
-    } catch {
-      setCopyState({ kind: "failed", text: value });
-    }
-  };
-
-  return (
-    <section className="min-w-0 overflow-hidden rounded-card bg-panel shadow-card">
-      <div className="flex min-h-11 items-center gap-2 border-b border-border px-3 text-[12.5px]">
-        <h3 className="font-medium text-foreground">{label}</h3>
-        {value !== undefined && value !== "" && (
-          <button
-            aria-label={`Copy ${label.toLowerCase()}`}
-            className={`-mr-1 ml-auto flex min-h-6 items-center gap-1 rounded-chip px-1.5 text-[12px] font-medium transition-colors duration-100 hover:bg-surface-hover disabled:cursor-wait ${current === "copied" ? "text-success" : "text-subtle hover:text-foreground"}`}
-            disabled={copyState.kind === "copying"}
-            onClick={copy}
-            type="button"
-          >
-            {current === "copied" ? (
-              <CheckIcon aria-hidden="true" size={12} />
-            ) : (
-              <CopyIcon aria-hidden="true" size={12} />
-            )}
-            {current === "copying" ? "Copying" : current === "copied" ? "Copied" : "Copy"}
-          </button>
-        )}
-      </div>
-      {value === undefined ? (
-        <p className="px-3 py-3 text-[12.5px] text-muted">{label} unavailable</p>
-      ) : value === "" ? (
-        <p className="px-3 py-3 text-[12.5px] text-muted">Empty {label.toLowerCase()}</p>
-      ) : (
-        <pre className="whitespace-pre-wrap px-3 py-3 font-mono text-[12.5px] leading-[1.65] text-muted [overflow-wrap:anywhere]">
-          <code>{value}</code>
-        </pre>
-      )}
-      <p aria-live="polite" className="sr-only">
-        {current === "copied" ? `${label} copied` : ""}
-      </p>
-      {current === "failed" && (
-        <p className="px-3 pb-3 text-[12px] text-danger" role="alert">
-          Could not copy {label.toLowerCase()}. Select the text and copy it manually.
-        </p>
-      )}
     </section>
   );
 }
