@@ -8,11 +8,11 @@ import * as HttpServer from "effect/unstable/http/HttpServer";
 import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
 import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
 
-export const open = Effect.fn("Daemon.Web.open")(function* () {
+export const open = Effect.fn("Daemon.Web.open")(function* (port: number) {
   const assets = yield* WebAssets.build();
   const server = yield* BunHttpServer.make({
     hostname: "127.0.0.1",
-    port: 0,
+    port,
     disablePreemptiveShutdown: true,
   });
   if (server.address._tag !== "TcpAddress") {

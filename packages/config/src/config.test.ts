@@ -124,6 +124,63 @@ describe("PicoConfig.load", () => {
       );
     }).pipe(Effect.provide(platformLayer)),
   );
+
+  it.effect("preserves port zero across Discord credential states", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = PicoRoot.make(
+        yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-web-port-" }),
+      );
+      const paths = yield* open(root);
+      const web = "[web]\nport = 0\n";
+      yield* fileSystem.writeFileString(paths.configFile, web);
+      const withoutDiscord = yield* load(paths);
+      assert.strictEqual(withoutDiscord.web.port, 0);
+      assert.isTrue(Option.isNone(withoutDiscord.discord));
+
+      yield* fileSystem.writeFileString(paths.configFile, `${config("[]", root)}\n${web}`);
+      yield* fileSystem.makeDirectory(paths.secretsDir, { recursive: true });
+      for (const token of [undefined, "\n", "token-value"]) {
+        if (token !== undefined) {
+          yield* fileSystem.writeFileString(
+            path.join(paths.secretsDir, "discord_bot_token"),
+            token,
+            { mode: 0o600 },
+          );
+        }
+        const loaded = yield* load(paths);
+        assert.strictEqual(loaded.web.port, 0);
+        assert.strictEqual(Option.isSome(loaded.discord), token === "token-value");
+      }
+    }).pipe(Effect.scoped, Effect.provide(platformLayer)),
+  );
+
+  it.effect("validates web port bounds without exposing config values", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const root = PicoRoot.make(
+        yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-web-port-validation-" }),
+      );
+      const paths = yield* open(root);
+      yield* fileSystem.writeFileString(paths.configFile, "[web]\nport = 65535\n");
+      assert.strictEqual((yield* load(paths)).web.port, 65535);
+
+      for (const invalid of ['"private-port-value"', "0.5", "-1", "65536"]) {
+        yield* fileSystem.writeFileString(paths.configFile, `[web]\nport = ${invalid}\n`);
+        const error = yield* load(paths).pipe(Effect.flip);
+        assert.instanceOf(error, ConfigError);
+        assert.include(error.message, "web.port");
+        assert.notInclude(error.message, invalid.replaceAll('"', ""));
+      }
+      yield* fileSystem.writeFileString(paths.configFile, 'web = "private-web-value"\n');
+      const error = yield* load(paths).pipe(Effect.flip);
+      assert.instanceOf(error, ConfigError);
+      assert.include(error.message, "web");
+      assert.notInclude(error.message, "private-web-value");
+    }).pipe(Effect.scoped, Effect.provide(platformLayer)),
+  );
+
   it.effect(
     "defaults the external browser off and validates explicit selection without Discord",
     () =>

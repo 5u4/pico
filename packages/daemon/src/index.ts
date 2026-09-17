@@ -116,7 +116,7 @@ const openComponents = Effect.fn("Daemon.openComponents")(function* (
   config: Config.PicoConfig,
 ) {
   const context = yield* Layer.build(daemonLayer(paths, config));
-  const web = yield* Web.open().pipe(Effect.provide(context));
+  const web = yield* Web.open(config.web.port).pipe(Effect.provide(context));
   yield* Effect.logInfo("pico.daemon.ready").pipe(
     Effect.annotateLogs({
       phase: "ready",
