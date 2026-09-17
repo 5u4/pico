@@ -139,10 +139,26 @@ export function normalizeMessage(message: SessionMessage): Agent.AgentMessage | 
         status: message.isError ? "failed" : "succeeded",
         timestamp: message.timestamp,
       };
+    case "custom":
+      if (
+        message.customType === "skill-prompt" &&
+        message.attribution === "user" &&
+        message.display === true &&
+        typeof message.details === "object" &&
+        message.details !== null &&
+        "prompt" in message.details &&
+        typeof message.details.prompt === "string"
+      ) {
+        return {
+          role: "user",
+          content: [{ type: "text", text: message.details.prompt }],
+          timestamp: message.timestamp,
+        };
+      }
+      return undefined;
     case "developer":
     case "bashExecution":
     case "pythonExecution":
-    case "custom":
     case "hookMessage":
     case "branchSummary":
     case "compactionSummary":

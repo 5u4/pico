@@ -27,6 +27,11 @@ import * as Stream from "effect/Stream";
 import { normalizeAgentEvent, normalizeTranscript } from "./agent-event.ts";
 import { makeSessionPool, type SessionFactory } from "./session-pool.ts";
 
+type CustomMessage = Extract<
+  Parameters<typeof normalizeTranscript>[0][number],
+  { readonly role: "custom" }
+>;
+
 const platformLayer = Layer.merge(BunFileSystem.layer, BunPath.layer);
 
 const chatId = Chat.ChatId.make("018f47a0-0000-7000-8000-000000000001");
@@ -204,6 +209,55 @@ describe("AgentRuntime", () => {
       }),
       { type: "context-invalidated" },
     );
+  });
+
+  it("preserves original skill prompts in events and transcripts", () => {
+    const prompt =
+      "Inspect this change with /skill:review and keep  both spaces.\n\n  Keep the indentation.";
+    const message: CustomMessage = {
+      role: "custom",
+      customType: "skill-prompt",
+      attribution: "user",
+      display: true,
+      content: "Expanded skill instructions that must stay internal.",
+      details: { prompt, __queueChipText: "/skill:review queued label" },
+      timestamp: 42,
+    };
+    const expected = {
+      role: "user",
+      content: [{ type: "text", text: prompt }],
+      timestamp: 42,
+    } satisfies Agent.AgentUserMessage;
+    assert.deepStrictEqual(normalizeAgentEvent({ type: "message_end", message }), {
+      type: "message-settled",
+      message: expected,
+    });
+    assert.deepStrictEqual(normalizeTranscript([{ ...message, details: { prompt } }]), [expected]);
+  });
+
+  it("does not expose other custom messages or skills without a visible user prompt", () => {
+    const message: CustomMessage = {
+      role: "custom",
+      customType: "skill-prompt",
+      attribution: "user",
+      display: true,
+      content: "Expanded skill instructions that must stay internal.",
+      details: { prompt: "/skill:review Inspect this change." },
+      timestamp: 42,
+    };
+    const excluded: CustomMessage[] = [
+      { ...message, customType: "extension-note" },
+      { ...message, attribution: "agent" },
+      { ...message, display: false },
+      { ...message, details: undefined },
+      { ...message, details: null },
+      { ...message, details: { name: "review", args: "Legacy request" } },
+      { ...message, details: { prompt: 42 } },
+    ];
+    assert.deepStrictEqual(normalizeTranscript(excluded), []);
+    for (const message of excluded) {
+      assert.isUndefined(normalizeAgentEvent({ type: "message_end", message }));
+    }
   });
 
   it.effect("keeps legacy assistant identity across read-only loads and writable migrations", () =>
