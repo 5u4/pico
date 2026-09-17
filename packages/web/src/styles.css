@@ -613,6 +613,16 @@ textarea:disabled {
   margin-block-start: 32px;
 }
 
+@media (hover: hover) {
+  .todo-disclosure:hover {
+    background: var(--raw-surface-hover);
+  }
+}
+
+.todo-tasks:focus-visible {
+  outline-offset: -2px;
+}
+
 /* Beautiful UI adaptations. Copyright (c) 2026 Shane Levine.
    MIT license in ../licenses/beautiful-ui-MIT.txt. */
 .loading-dots {

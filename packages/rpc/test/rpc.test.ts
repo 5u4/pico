@@ -108,6 +108,7 @@ const transcript: TranscriptSnapshot = {
     },
   ],
   contextUsage: { kind: "unavailable" },
+  todo: { kind: "ready", phases: [] },
 };
 const firstEvent: AgentEvent.AgentEventEnvelope = {
   chatId: firstChatId,

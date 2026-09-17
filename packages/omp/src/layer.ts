@@ -25,7 +25,7 @@ import * as Path from "effect/Path";
 import { makeAgentBrowserExtension } from "./agent-browser/extension.ts";
 import { type AgentBrowserManager, makeAgentBrowserManager } from "./agent-browser/manager.ts";
 import { agentError } from "./agent-error.ts";
-import { normalizeAgentEvent, normalizeTranscript } from "./agent-event.ts";
+import { normalizeAgentEvent, normalizeTodo, normalizeTranscript } from "./agent-event.ts";
 import { makeExchangeTitleFlow } from "./exchange-title.ts";
 import { makeOmpPromptSender } from "./omp-prompt-sender.ts";
 import { make as makeScheduleExtension } from "./schedule-extension.ts";
@@ -75,12 +75,13 @@ export const make = Effect.fn("AgentRuntime.make")(function* ({
 
   const loadTranscript = Effect.fn("OmpSession.loadTranscript")(function* (chatId: Chat.ChatId) {
     const sessionFile = path.join(sessionsDir, `${chatId}.jsonl`);
-    const messages = yield* promiseBoundary("Failed to read OMP transcript", () =>
-      OmpSessionLoader.loadSessionMessagesReadOnly(sessionFile),
+    const snapshot = yield* promiseBoundary("Failed to read OMP transcript", () =>
+      OmpSessionLoader.loadSessionSnapshotReadOnly(sessionFile),
     );
-    return yield* syncBoundary("Failed to normalize OMP transcript", () =>
-      normalizeTranscript(messages),
-    );
+    return yield* syncBoundary("Failed to normalize OMP transcript", () => ({
+      messages: normalizeTranscript(snapshot.messages),
+      todo: normalizeTodo(snapshot.todoPhases),
+    }));
   });
 
   const availableModels = (cwd: AbsolutePath) => loadAvailableModels(modelRegistry, cwd);

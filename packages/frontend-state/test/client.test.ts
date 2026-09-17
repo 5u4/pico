@@ -63,7 +63,7 @@ const prompt = (text: string) => AgentPrompt.make({ text, attachments: [] });
 const snapshot = (
   messages: AgentTranscript = [],
   contextUsage: ContextUsage = { kind: "unavailable" },
-): TranscriptSnapshot => ({ messages, contextUsage });
+): TranscriptSnapshot => ({ messages, contextUsage, todo: { kind: "ready", phases: [] } });
 const assistant = (id: AgentMessageId, text: string): AgentAssistantMessage => ({
   id,
   role: "assistant",

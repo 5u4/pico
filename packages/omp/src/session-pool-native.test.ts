@@ -372,7 +372,11 @@ const makePool = Effect.fn("NativePoolTest.make")(function* (
           };
         }),
     },
-    loadTranscript: () => Effect.succeed(native.normalizeTranscript(session.messages)),
+    loadTranscript: () =>
+      Effect.succeed({
+        messages: native.normalizeTranscript(session.messages),
+        todo: { kind: "ready", phases: [] },
+      }),
   });
 });
 

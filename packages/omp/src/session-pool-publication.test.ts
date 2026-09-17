@@ -13,7 +13,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Stream from "effect/Stream";
-import { normalizeMessage, normalizeTranscript } from "./agent-event.ts";
+import { normalizeMessage, normalizeTodo, normalizeTranscript } from "./agent-event.ts";
 import { makeSessionPool, type OpenedSession, type SessionFactory } from "./session-pool.ts";
 
 const platformLayer = Layer.merge(BunFileSystem.layer, BunPath.layer);
@@ -96,8 +96,11 @@ describe("session pool publication", () => {
           const pool = yield* makeSessionPool({
             factory,
             loadTranscript: () =>
-              Effect.promise(() => OmpSessionLoader.loadSessionMessagesReadOnly(sessionFile)).pipe(
-                Effect.map(normalizeTranscript),
+              Effect.promise(() => OmpSessionLoader.loadSessionSnapshotReadOnly(sessionFile)).pipe(
+                Effect.map((snapshot) => ({
+                  messages: normalizeTranscript(snapshot.messages),
+                  todo: normalizeTodo(snapshot.todoPhases),
+                })),
               ),
           });
           const delivered = yield* pool.events.pipe(
@@ -320,8 +323,11 @@ describe("session pool publication", () => {
               }),
           },
           loadTranscript: () =>
-            Effect.promise(() => OmpSessionLoader.loadSessionMessagesReadOnly(sessionFile)).pipe(
-              Effect.map(normalizeTranscript),
+            Effect.promise(() => OmpSessionLoader.loadSessionSnapshotReadOnly(sessionFile)).pipe(
+              Effect.map((snapshot) => ({
+                messages: normalizeTranscript(snapshot.messages),
+                todo: normalizeTodo(snapshot.todoPhases),
+              })),
             ),
         });
         const observed: Array<string> = [];

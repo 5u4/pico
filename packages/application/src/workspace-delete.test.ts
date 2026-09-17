@@ -26,7 +26,11 @@ import * as ScheduleLayer from "../../schedule/src/schedule.ts";
 import * as ApplicationLayer from "./application.ts";
 
 const platformLayer = Layer.mergeAll(BunCrypto.layer, BunFileSystem.layer, BunPath.layer);
-const emptyTranscript: TranscriptSnapshot = { messages: [], contextUsage: { kind: "unavailable" } };
+const emptyTranscript: TranscriptSnapshot = {
+  messages: [],
+  contextUsage: { kind: "unavailable" },
+  todo: { kind: "ready", phases: [] },
+};
 const populatedTranscript: TranscriptSnapshot = {
   ...emptyTranscript,
   messages: [

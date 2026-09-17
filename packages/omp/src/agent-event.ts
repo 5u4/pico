@@ -1,6 +1,8 @@
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session-events";
 import type { AgentEvent } from "@pico/contract/agent-event";
 import * as Agent from "@pico/contract/agent-message";
+import { TodoPhases, type TodoState } from "@pico/contract/agent-runtime";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 type SessionMessage = Extract<AgentSessionEvent, { readonly type: "message_end" }>["message"];
@@ -11,6 +13,23 @@ type ToolResultMessage = Extract<SessionMessage, { readonly role: "toolResult" }
 const stringifyArguments = (value: object): string => JSON.stringify(value) ?? "null";
 
 const decodeMessageId = Schema.decodeUnknownSync(Agent.AgentMessageId);
+const decodeTodoPhases = Schema.decodeUnknownOption(TodoPhases);
+const isTodoResult = Schema.is(
+  Schema.Struct({
+    op: Schema.optional(
+      Schema.Literals(["init", "start", "done", "rm", "drop", "block", "unblock", "append"]),
+    ),
+    phases: TodoPhases,
+    storage: Schema.Literals(["session", "memory"]),
+  }),
+);
+
+export const normalizeTodo = (phases: unknown): TodoState => {
+  const decoded = decodeTodoPhases(phases);
+  return Option.isSome(decoded)
+    ? { kind: "ready", phases: decoded.value }
+    : { kind: "unavailable" };
+};
 
 const assistantMessageId = (message: SessionMessage): Agent.AgentMessageId =>
   decodeMessageId("messageId" in message ? message.messageId : undefined);
@@ -138,6 +157,12 @@ export function normalizeMessage(message: SessionMessage): Agent.AgentMessage | 
         content: normalizeToolResultContent(message.content),
         status: message.isError ? "failed" : "succeeded",
         timestamp: message.timestamp,
+        ...(message.toolName === "todo" &&
+        !message.isError &&
+        message.content.every((block) => block.type === "text") &&
+        isTodoResult(message.details)
+          ? { todoSnapshot: true as const }
+          : {}),
       };
     case "developer":
     case "bashExecution":

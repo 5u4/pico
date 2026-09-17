@@ -144,6 +144,7 @@ export const AgentToolResultMessage = Schema.Struct({
   content: Schema.Array(AgentToolResultContent),
   status: Schema.Literals(["succeeded", "failed"]),
   timestamp: Schema.Natural,
+  todoSnapshot: Schema.optional(Schema.Literal(true)),
 });
 export type AgentToolResultMessage = typeof AgentToolResultMessage.Type;
 

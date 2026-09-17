@@ -24,7 +24,7 @@ import * as Logger from "effect/Logger";
 import * as Path from "effect/Path";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
-import { normalizeAgentEvent, normalizeTranscript } from "./agent-event.ts";
+import { normalizeAgentEvent, normalizeTodo, normalizeTranscript } from "./agent-event.ts";
 import { makeSessionPool, type SessionFactory } from "./session-pool.ts";
 
 const platformLayer = Layer.merge(BunFileSystem.layer, BunPath.layer);
@@ -81,7 +81,7 @@ describe("AgentRuntime", () => {
               unsubscribe: () => {},
             }),
         },
-        loadTranscript: () => Effect.succeed([]),
+        loadTranscript: () => Effect.succeed({ messages: [], todo: { kind: "ready", phases: [] } }),
       }).pipe(Scope.provide(owner));
       const delivery = yield* pool.send(chatId, prompt("queued"));
       if (delivery.kind !== "steered") return yield* Effect.die("Expected steering admission");
@@ -150,7 +150,8 @@ describe("AgentRuntime", () => {
                   unsubscribe: () => {},
                 }),
             },
-            loadTranscript: () => Effect.succeed([]),
+            loadTranscript: () =>
+              Effect.succeed({ messages: [], todo: { kind: "ready", phases: [] } }),
           });
           const first = yield* pool.send(chatId, prompt("same"));
           const second = yield* pool.send(chatId, prompt("same"));
@@ -283,6 +284,134 @@ describe("AgentRuntime", () => {
     ).pipe(Effect.provide(platformLayer)),
   );
 
+  it.effect(
+    "selects canonical todos on the persisted path before compaction and respects clear",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const directory = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-todos-" });
+          const file = path.join(directory, "session.jsonl");
+          yield* Effect.acquireUseRelease(
+            Effect.promise(() =>
+              OmpSessionManager.SessionManager.open(file, directory, undefined, {
+                initialCwd: directory,
+                suppressBreadcrumb: true,
+              }),
+            ),
+            (manager) =>
+              Effect.promise(async () => {
+                const initial = [
+                  { name: "Build", tasks: [{ content: "Ship", status: "in_progress" }] },
+                ];
+                const edited = [
+                  {
+                    name: "Build",
+                    tasks: [{ content: "Ship", status: "blocked" as const, blocker: "Review" }],
+                  },
+                ];
+                const root = manager.appendMessage({
+                  role: "user",
+                  content: "Start",
+                  timestamp: 1,
+                });
+                const appendTodo = (phases: unknown, op?: string, isError = false) =>
+                  manager.appendMessage({
+                    role: "toolResult",
+                    toolCallId: `todo-${manager.getLeafId()}`,
+                    toolName: "todo",
+                    content: [{ type: "text", text: "Todo result" }],
+                    details: { phases, op, storage: "session" },
+                    isError,
+                    timestamp: 2,
+                  });
+                const readSnapshot = async () => {
+                  await manager.ensureOnDisk();
+                  await manager.flush();
+                  return OmpSessionLoader.loadSessionSnapshotReadOnly(file);
+                };
+                appendTodo(initial, "init");
+                assert.deepStrictEqual((await readSnapshot()).todoPhases, initial);
+                manager.appendCustomEntry("user_todo_edit", { phases: edited });
+                appendTodo([], "view");
+                appendTodo([], "done", true);
+                assert.deepStrictEqual((await readSnapshot()).todoPhases, edited);
+
+                const kept = manager.appendMessage({
+                  role: "user",
+                  content: "Continue",
+                  timestamp: 3,
+                });
+                manager.appendCompaction("Earlier work", undefined, kept, 100);
+                const compacted = await readSnapshot();
+                assert.deepStrictEqual(compacted.todoPhases, edited);
+                assert.deepStrictEqual(normalizeTranscript(compacted.messages), [
+                  { role: "user", content: [{ type: "text", text: "Continue" }], timestamp: 3 },
+                ]);
+
+                manager.appendCustomEntry("user_todo_edit", { phases: [] });
+                assert.deepStrictEqual(normalizeTodo((await readSnapshot()).todoPhases), {
+                  kind: "ready",
+                  phases: [],
+                });
+                manager.branch(root);
+                manager.appendMessage({ role: "user", content: "Other branch", timestamp: 4 });
+                assert.deepStrictEqual((await readSnapshot()).todoPhases, []);
+                appendTodo(initial);
+                assert.deepStrictEqual((await readSnapshot()).todoPhases, initial);
+                appendTodo([], "init");
+                assert.deepStrictEqual((await readSnapshot()).todoPhases, []);
+              }),
+            (manager) => Effect.promise(() => manager.close()),
+          );
+        }),
+      ).pipe(Effect.provide(platformLayer)),
+  );
+
+  it.effect("keeps ordinary messages when the latest canonical todo snapshot is malformed", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const directory = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "pico-invalid-todos-",
+        });
+        const file = path.join(directory, "session.jsonl");
+        yield* Effect.acquireUseRelease(
+          Effect.promise(() =>
+            OmpSessionManager.SessionManager.open(file, directory, undefined, {
+              initialCwd: directory,
+              suppressBreadcrumb: true,
+            }),
+          ),
+          (manager) =>
+            Effect.promise(async () => {
+              manager.appendMessage({ role: "user", content: "Keep this", timestamp: 1 });
+              manager.appendCustomEntry("user_todo_edit", {
+                phases: [{ name: "Old", tasks: [{ content: "Old task", status: "completed" }] }],
+              });
+              for (const phases of [
+                [{ name: "Bad", tasks: null }],
+                [{ name: "Bad", tasks: [{ content: "Task", status: "future-status" }] }],
+                [{ name: "Bad", tasks: [{ content: "Task", status: "blocked", blocker: 42 }] }],
+              ]) {
+                manager.appendCustomEntry("user_todo_edit", { phases });
+                await manager.ensureOnDisk();
+                await manager.flush();
+                const snapshot = await OmpSessionLoader.loadSessionSnapshotReadOnly(file);
+                assert.deepStrictEqual(normalizeTodo(snapshot.todoPhases), { kind: "unavailable" });
+                assert.deepStrictEqual(normalizeTranscript(snapshot.messages), [
+                  { role: "user", content: [{ type: "text", text: "Keep this" }], timestamp: 1 },
+                ]);
+              }
+            }),
+          (manager) => Effect.promise(() => manager.close()),
+        );
+      }),
+    ).pipe(Effect.provide(platformLayer)),
+  );
+
   it.effect("owns normalized events and one ordered session lifecycle", () =>
     Effect.gen(function* () {
       const toolArguments = { path: "before.ts" };
@@ -348,7 +477,8 @@ describe("AgentRuntime", () => {
         Effect.gen(function* () {
           const pool = yield* makeSessionPool({
             factory,
-            loadTranscript: () => Effect.succeed([]),
+            loadTranscript: () =>
+              Effect.succeed({ messages: [], todo: { kind: "ready", phases: [] } }),
           });
           const firstAcquisitions = yield* Effect.all(
             [pool.send(chatId, prompt("acquire")), pool.send(chatId, prompt("acquire"))],
@@ -483,12 +613,13 @@ describe("AgentRuntime", () => {
           factory,
           loadTranscript: () =>
             transcriptFailure === undefined
-              ? Effect.succeed(messages)
+              ? Effect.succeed({ messages, todo: { kind: "ready", phases: [] } })
               : Effect.fail(transcriptFailure),
         });
 
         assert.deepStrictEqual(yield* pool.transcript(chatId), {
           messages,
+          todo: { kind: "ready", phases: [] },
           contextUsage: { kind: "unavailable" },
         });
         assert.strictEqual(acquisitions, 0);
@@ -541,6 +672,7 @@ describe("AgentRuntime", () => {
         assert.strictEqual(contextReads, 4);
         assert.deepStrictEqual(yield* pool.transcript(chatId), {
           messages,
+          todo: { kind: "ready", phases: [] },
           contextUsage: { kind: "error" },
         });
 
@@ -603,7 +735,8 @@ describe("AgentRuntime", () => {
         };
         const pool = yield* makeSessionPool({
           factory,
-          loadTranscript: () => Effect.succeed([]),
+          loadTranscript: () =>
+            Effect.succeed({ messages: [], todo: { kind: "ready", phases: [] } }),
         });
 
         yield* pool.close(chatId);
@@ -618,6 +751,7 @@ describe("AgentRuntime", () => {
         assert.deepStrictEqual(yield* pool.transcript(chatId), {
           messages: [],
           contextUsage: { kind: "unavailable" },
+          todo: { kind: "ready", phases: [] },
         });
         assert.strictEqual(acquisitions, 1);
       }),
@@ -668,7 +802,8 @@ describe("AgentRuntime", () => {
                     },
                   }),
               },
-              loadTranscript: () => Effect.succeed([]),
+              loadTranscript: () =>
+                Effect.succeed({ messages: [], todo: { kind: "ready", phases: [] } }),
             });
             yield* pool.send(chatId, prompt("private prompt"));
             const first = yield* pool.close(chatId).pipe(Effect.flip);
@@ -702,7 +837,7 @@ describe("AgentRuntime", () => {
         factory: {
           open: () => Effect.die("unexpected session open"),
         },
-        loadTranscript: () => Effect.succeed([]),
+        loadTranscript: () => Effect.succeed({ messages: [], todo: { kind: "ready", phases: [] } }),
       }).pipe(Scope.provide(scope));
 
       yield* Scope.close(scope, Exit.void);
@@ -741,7 +876,8 @@ describe("AgentRuntime", () => {
                 unsubscribe: () => {},
               }),
           },
-          loadTranscript: () => Effect.succeed([]),
+          loadTranscript: () =>
+            Effect.succeed({ messages: [], todo: { kind: "ready", phases: [] } }),
         });
         yield* pool.events.pipe(
           Stream.runForEach(() =>
@@ -795,7 +931,8 @@ describe("AgentRuntime", () => {
                 unsubscribe: () => {},
               }),
           },
-          loadTranscript: () => Effect.succeed([]),
+          loadTranscript: () =>
+            Effect.succeed({ messages: [], todo: { kind: "ready", phases: [] } }),
         });
         const capture = yield* pool
           .sendCaptured(
