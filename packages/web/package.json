@@ -17,6 +17,7 @@
     "@pico/frontend-state": "workspace:*",
     "@radix-ui/react-context-menu": "catalog:",
     "@tailwindcss/vite": "catalog:",
+    "@tanstack/react-router": "catalog:",
     "@vitejs/plugin-react": "catalog:",
     "effect": "catalog:",
     "react": "catalog:",

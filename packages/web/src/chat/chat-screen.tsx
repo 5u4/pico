@@ -56,8 +56,9 @@ export interface ChatScreenProps
   readonly onContextDetailsOpenChange: (open: boolean) => void;
   readonly sidebarOpen: boolean;
   readonly theme: Theme;
-  readonly workspaceForm: WorkspaceFormProps;
-  readonly workspaceSettings?: WorkspaceSettingsProps | undefined;
+  readonly workspaceForm: WorkspaceFormProps | null;
+  readonly workspaceSettings: WorkspaceSettingsProps | null;
+  readonly onAddWorkspace: () => void;
   readonly closeChat: CloseChatPresentation;
   readonly onCloseChatConfirm: () => void;
   readonly onCloseChatDismiss: () => void;
@@ -95,6 +96,7 @@ export function ChatScreen({
   theme,
   workspaceForm,
   workspaceSettings,
+  onAddWorkspace,
   onEditWorkspace,
   workspaceEditPending,
   closeChat,
@@ -288,7 +290,7 @@ export function ChatScreen({
     },
     onAddWorkspace: () => {
       closeSidebar();
-      workspaceForm.onOpenChange(true);
+      onAddWorkspace();
     },
     onClose: closeSidebar,
   } satisfies WorkspaceSidebarProps;
@@ -581,11 +583,7 @@ export function ChatScreen({
                       </>
                     )}
                     {onboarding && (
-                      <Button
-                        className="mt-4"
-                        onClick={() => workspaceForm.onOpenChange(true)}
-                        tone="primary"
-                      >
+                      <Button className="mt-4" onClick={onAddWorkspace} tone="primary">
                         <PlusIcon aria-hidden="true" size={17} />
                         Add workspace
                       </Button>
@@ -619,13 +617,9 @@ export function ChatScreen({
             }}
           />
         )}
-      <WorkspaceDialog {...workspaceForm} />
-      {workspaceSettings?.editor.kind === "open" && (
-        <WorkspaceSettingsDialog
-          {...workspaceSettings}
-          editor={workspaceSettings.editor}
-          key={workspaceSettings.editor.session}
-        />
+      {workspaceForm && <WorkspaceDialog {...workspaceForm} key={workspaceForm.session} />}
+      {workspaceSettings && (
+        <WorkspaceSettingsDialog {...workspaceSettings} key={workspaceSettings.editor.session} />
       )}
     </div>
   );

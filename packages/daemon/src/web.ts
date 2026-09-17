@@ -22,7 +22,7 @@ export const open = Effect.fn("Daemon.Web.open")(function* () {
   const webUrl = `http://${host}`;
   yield* Layer.build(
     HttpRouter.serve(
-      Layer.mergeAll(RpcServer.routes, assetRoutes(assets), boundary(host, webUrl, assets.files)),
+      Layer.mergeAll(RpcServer.routes, assetRoutes(assets), boundary(host, webUrl, assets)),
       { disableLogger: true, disableListenLog: true },
     ).pipe(Layer.provide(Layer.succeed(HttpServer.HttpServer)(server))),
   );
@@ -37,11 +37,11 @@ const headers = {
   "content-security-policy": "frame-ancestors 'none'; base-uri 'none'; object-src 'none'",
 };
 
+const documentPath = /^\/(?:workspaces\/[A-Za-z0-9_-]+(?:\/(?:settings|chats\/[A-Za-z0-9_-]+))?)?$/;
+
 const assetRoutes = (assets: WebAssets.Assets) =>
   HttpRouter.use((router) =>
     Effect.gen(function* () {
-      const index = response(assets.index);
-      yield* router.add("*", "/", index);
       for (const [path, asset] of assets.files) {
         yield* router.add("*", path, response(asset));
       }
@@ -51,8 +51,10 @@ const assetRoutes = (assets: WebAssets.Assets) =>
 const response = (asset: WebAssets.Asset) =>
   HttpServerResponse.uint8Array(asset.body, { contentType: asset.contentType });
 
-const boundary = (host: string, webUrl: string, files: ReadonlyMap<string, WebAssets.Asset>) =>
-  HttpRouter.middleware(
+const boundary = (host: string, webUrl: string, assets: WebAssets.Assets) => {
+  const index = response(assets.index);
+  const files: ReadonlyMap<string, WebAssets.Asset> = assets.files;
+  return HttpRouter.middleware(
     (httpEffect) =>
       Effect.gen(function* () {
         const request = yield* HttpServerRequest.HttpServerRequest;
@@ -62,7 +64,8 @@ const boundary = (host: string, webUrl: string, files: ReadonlyMap<string, WebAs
         }
         const query = request.url.indexOf("?");
         const path = query === -1 ? request.url : request.url.slice(0, query);
-        if (path !== "/rpc" && path !== "/" && !files.has(path)) {
+        const document = documentPath.test(path);
+        if (path !== "/rpc" && !document && !files.has(path)) {
           return HttpServerResponse.empty({ status: 404, headers });
         }
         if (path === "/rpc") {
@@ -85,7 +88,8 @@ const boundary = (host: string, webUrl: string, files: ReadonlyMap<string, WebAs
             headers: { ...headers, allow: "GET, HEAD" },
           });
         }
-        return HttpServerResponse.setHeaders(yield* httpEffect, headers);
+        return HttpServerResponse.setHeaders(document ? index : yield* httpEffect, headers);
       }),
     { global: true },
   );
+};

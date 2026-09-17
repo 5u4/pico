@@ -3,26 +3,28 @@ import { useEffect, useRef, useState } from "react";
 import { Button } from "../components/ui/button.tsx";
 
 export interface WorkspaceFormProps {
-  readonly open: boolean;
+  readonly session: number;
+  readonly origin: HTMLElement | null;
   readonly available: boolean;
   readonly submission:
     | { readonly kind: "ready" }
     | { readonly kind: "pending" }
     | { readonly kind: "error"; readonly message: string };
-  readonly onOpenChange: (open: boolean) => void;
+  readonly onClose: () => void;
   readonly onSubmit: (input: { readonly name: string; readonly directory: string }) => void;
 }
 
 export function WorkspaceDialog({
-  open,
   available,
   submission,
-  onOpenChange,
+  origin,
+  onClose,
   onSubmit,
 }: WorkspaceFormProps) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const nameRef = useRef<HTMLInputElement>(null);
   const directoryRef = useRef<HTMLInputElement>(null);
+  const returnFocus = useRef(origin);
   const [name, setName] = useState("");
   const [directory, setDirectory] = useState("");
   const pending = submission.kind === "pending";
@@ -31,17 +33,22 @@ export function WorkspaceDialog({
   useEffect(() => {
     const dialog = dialogRef.current;
     if (!dialog) return;
-    if (open && !dialog.open) {
-      setName("");
-      setDirectory("");
-      dialog.showModal();
-      nameRef.current?.focus();
-    } else if (!open && dialog.open) dialog.close();
-  }, [open]);
+    dialog.showModal();
+    nameRef.current?.focus();
+    return () => {
+      dialog.close();
+      const target = returnFocus.current;
+      if (target?.isConnected && target.getClientRects().length > 0) {
+        target.focus({ preventScroll: true });
+      } else {
+        document.getElementById("conversation-history")?.focus({ preventScroll: true });
+      }
+    };
+  }, []);
 
   useEffect(() => {
-    if (open && error) directoryRef.current?.focus();
-  }, [open, error]);
+    if (error) directoryRef.current?.focus();
+  }, [error]);
 
   return (
     <dialog
@@ -49,7 +56,7 @@ export function WorkspaceDialog({
       className="fixed inset-0 m-auto max-h-[calc(100dvh_-_2rem)] w-[calc(100%_-_2rem)] max-w-md overflow-y-auto overscroll-contain rounded-surface border border-border bg-panel p-6 text-foreground shadow-composer backdrop:bg-overlay"
       onCancel={(event) => {
         event.preventDefault();
-        onOpenChange(false);
+        onClose();
       }}
       ref={dialogRef}
     >
@@ -57,12 +64,7 @@ export function WorkspaceDialog({
         <h2 className="text-title font-semibold" id="workspace-dialog-title">
           Add workspace
         </h2>
-        <Button
-          aria-label="Close add workspace"
-          onClick={() => onOpenChange(false)}
-          size="icon"
-          tone="ghost"
-        >
+        <Button aria-label="Close add workspace" onClick={onClose} size="icon" tone="ghost">
           <XIcon aria-hidden="true" size={18} />
         </Button>
       </div>
@@ -124,7 +126,7 @@ export function WorkspaceDialog({
           </p>
         )}
         <div className="mt-6 flex justify-end gap-2">
-          <Button onClick={() => onOpenChange(false)} tone="ghost">
+          <Button onClick={onClose} tone="ghost">
             Cancel
           </Button>
           <Button disabled={pending || !available} tone="primary" type="submit">
