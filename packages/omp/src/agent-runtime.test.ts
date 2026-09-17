@@ -1061,7 +1061,7 @@ describe("AgentRuntime", () => {
   });
 
   it.effect(
-    "captures a public runtime cut across token streaming, synthetic delivery, and session replacement",
+    "captures a public runtime cut across streaming, late tool completion, and session replacement",
     () =>
       Effect.scoped(
         Effect.gen(function* () {
@@ -1116,10 +1116,16 @@ describe("AgentRuntime", () => {
             toolCallId: "read",
             toolName: "read",
             argumentsJson: '{"path":"a.ts"}',
-          } as const;
+          } satisfies AgentEvent;
+          const lateStart = {
+            ...start,
+            toolCallId: "late-read",
+            argumentsJson: '{"path":"b.ts"}',
+          } satisfies AgentEvent;
           emit({ type: "run-started" });
           emit({ type: "text-delta", messageId: id, contentIndex: 0, text: "prefix" });
           emit(start);
+          emit(lateStart);
           const delivery = {
             role: "assistant",
             id: Agent.AgentMessageId.make("delivery"),
@@ -1149,18 +1155,35 @@ describe("AgentRuntime", () => {
             },
             { kind: "settled", message: delivery },
           ]);
-          assert.deepStrictEqual(active.runtime.tools, [{ kind: "running", start }]);
-          emit({
+          assert.deepStrictEqual(active.runtime.tools, [
+            { kind: "running", start },
+            { kind: "running", start: lateStart },
+          ]);
+          const end = {
             type: "tool-finished",
-            toolCallId: "read",
-            toolName: "read",
+            toolCallId: start.toolCallId,
+            toolName: start.toolName,
             status: "succeeded",
-          });
+          } satisfies AgentEvent;
+          emit(end);
           emit({ type: "run-finished", outcome: "completed" });
           const finished = yield* pool.transcript(chatId);
           assert.deepStrictEqual(finished.runtime.run, { kind: "finished", outcome: "completed" });
-          assert.strictEqual(finished.runtime.tools[0]?.kind, "finished");
+          assert.deepStrictEqual(finished.runtime.tools, [{ kind: "finished", start, end }]);
+          assert.deepStrictEqual(finished.runtime.assistant, active.runtime.assistant);
           assert.isAbove(finished.runtime.publication, active.runtime.publication);
+          const lateEnd = {
+            ...end,
+            toolCallId: lateStart.toolCallId,
+          } satisfies AgentEvent;
+          emit(lateEnd);
+          const late = yield* pool.transcript(chatId);
+          assert.deepStrictEqual(late.runtime.run, { kind: "finished", outcome: "completed" });
+          assert.deepStrictEqual(late.runtime.tools, [
+            { kind: "finished", start, end },
+            { kind: "finished", start: null, end: lateEnd },
+          ]);
+          assert.deepStrictEqual(late.runtime.assistant, active.runtime.assistant);
           yield* pool.close(chatId);
           const absent = yield* pool.transcript(chatId);
           assert.deepStrictEqual(absent.runtime.run, { kind: "idle" });

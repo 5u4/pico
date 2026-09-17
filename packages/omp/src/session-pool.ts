@@ -257,7 +257,6 @@ const projectEvent = (
       runtime.tools.set(event.toolCallId, { kind: "running", start: event });
       break;
     case "tool-finished":
-      beginPublicRun(runtime);
       runtime.tools.set(event.toolCallId, {
         kind: "finished",
         start: runtime.tools.get(event.toolCallId)?.start ?? null,
