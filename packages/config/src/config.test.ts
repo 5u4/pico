@@ -163,6 +163,7 @@ describe("PicoConfig.load", () => {
         yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-web-port-validation-" }),
       );
       const paths = yield* open(root);
+      assert.strictEqual((yield* load(paths)).web.port, 7426);
       yield* fileSystem.writeFileString(paths.configFile, "[web]\nport = 65535\n");
       assert.strictEqual((yield* load(paths)).web.port, 65535);
 
