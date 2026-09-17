@@ -72,6 +72,9 @@ export function MobileSidebar({
               sidebar.onChatClose(workspaceId, chatId, returnFocus.current ?? origin),
             );
           }}
+          onChatSelect={(workspaceId, chatId) =>
+            afterClose(() => sidebar.onChatSelect(workspaceId, chatId))
+          }
           onEditWorkspace={
             sidebar.onEditWorkspace
               ? (workspaceId, origin) => {
@@ -82,6 +85,9 @@ export function MobileSidebar({
               : undefined
           }
           onNewChat={(workspaceId) => afterClose(() => sidebar.onNewChat(workspaceId))}
+          onOpenSchedules={(origin) =>
+            afterClose(() => sidebar.onOpenSchedules(returnFocus.current ?? origin))
+          }
         />
       )}
     </dialog>

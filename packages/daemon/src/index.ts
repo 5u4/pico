@@ -19,6 +19,7 @@ import {
   SchedulePlatformService,
   type ScheduleRunHost,
   ScheduleRunHostFactory,
+  Schedules,
 } from "@pico/contract/schedule";
 import * as DiscordLayer from "@pico/discord/layer";
 import * as EventRouterLayer from "@pico/event-router/layer";
@@ -229,6 +230,6 @@ const daemonLayer = (paths: PicoPaths, config: Config.PicoConfig) =>
         }),
       ).pipe(Layer.provide(surfaces));
 
-      return Layer.merge(surfaces, scheduler);
+      return Layer.mergeAll(surfaces, scheduler, Layer.succeed(Schedules, schedules));
     }),
   );

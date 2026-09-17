@@ -67,6 +67,38 @@ export interface NavigationPresentation {
   readonly activeChatId: string | null;
 }
 
+export interface ScheduleRow {
+  readonly id: string;
+  readonly name: string;
+  readonly owner: string;
+  readonly platform: string;
+  readonly definitionState: "enabled" | "disabled" | "invalid";
+  readonly trigger: string;
+  readonly timeZone: string;
+  readonly nextTrigger: string;
+  readonly lastRun: {
+    readonly label: string;
+    readonly timestamp: string | null;
+    readonly revision: string | null;
+    readonly tone: "neutral" | "danger";
+  };
+  readonly details: readonly { readonly label: string; readonly value: string }[];
+}
+
+export type ScheduleListPresentation =
+  | { readonly kind: "loading"; readonly message: string }
+  | { readonly kind: "disconnected" }
+  | { readonly kind: "error"; readonly message: string }
+  | {
+      readonly kind: "loaded";
+      readonly rows: readonly ScheduleRow[];
+      readonly observedAt: string;
+      readonly freshness:
+        | { readonly kind: "current" }
+        | { readonly kind: "refreshing" }
+        | { readonly kind: "stale"; readonly message: string };
+    };
+
 export type AssistantBlock =
   | {
       readonly kind: "text";

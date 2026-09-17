@@ -37,7 +37,8 @@ const headers = {
   "content-security-policy": "frame-ancestors 'none'; base-uri 'none'; object-src 'none'",
 };
 
-const documentPath = /^\/(?:workspaces\/[A-Za-z0-9_-]+(?:\/(?:settings|chats\/[A-Za-z0-9_-]+))?)?$/;
+const documentPath =
+  /^\/(?:schedules|workspaces\/[A-Za-z0-9_-]+(?:\/(?:settings|chats\/[A-Za-z0-9_-]+))?)?$/;
 
 const assetRoutes = (assets: WebAssets.Assets) =>
   HttpRouter.use((router) =>

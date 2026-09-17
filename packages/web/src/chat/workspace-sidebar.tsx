@@ -1,5 +1,6 @@
 import {
   ArchiveIcon,
+  CalendarBlankIcon,
   CaretDownIcon,
   CaretRightIcon,
   DotsThreeIcon,
@@ -31,6 +32,7 @@ import type { NavigationPresentation, SidebarSearchPresentation } from "./chat-m
 
 export interface WorkspaceSidebarProps {
   readonly navigation: NavigationPresentation;
+  readonly currentPage: "chat" | "schedules";
   readonly search: SidebarSearchPresentation;
   readonly onSearchChange: (search: SidebarSearchPresentation) => void;
   readonly desktopCollapse?: {
@@ -44,6 +46,8 @@ export interface WorkspaceSidebarProps {
   readonly onChatClose: (workspaceId: string, chatId: string, origin: HTMLElement) => void;
   readonly chatCloseDisabled: boolean;
   readonly onNewChat: (workspaceId?: string) => void;
+  readonly schedulesHref: string;
+  readonly onOpenSchedules: (origin: HTMLElement) => void;
   readonly onAddWorkspace?: (() => void) | undefined;
   readonly onEditWorkspace?: ((workspaceId: string, origin: HTMLElement) => void) | undefined;
   readonly workspaceEditPending?: boolean | undefined;
@@ -53,6 +57,7 @@ export interface WorkspaceSidebarProps {
 
 export function WorkspaceSidebar({
   navigation,
+  currentPage,
   search,
   onSearchChange,
   desktopCollapse,
@@ -63,6 +68,8 @@ export function WorkspaceSidebar({
   onChatClose,
   chatCloseDisabled,
   onNewChat,
+  schedulesHref,
+  onOpenSchedules,
   onAddWorkspace,
   onEditWorkspace,
   workspaceEditPending,
@@ -241,6 +248,34 @@ export function WorkspaceSidebar({
             New chat
           </span>
         </button>
+        <a
+          aria-label="Schedules"
+          aria-current={currentPage === "schedules" ? "page" : undefined}
+          className={`sidebar-control sidebar-rail-row relative mx-2 flex shrink-0 items-center rounded-control px-2 text-left transition-colors hover:bg-surface-hover-strong hover:text-foreground ${currentPage === "schedules" ? "bg-surface-hover-strong text-foreground" : "text-muted"}`}
+          href={schedulesHref}
+          onClick={(event) => {
+            if (
+              event.defaultPrevented ||
+              event.button !== 0 ||
+              event.metaKey ||
+              event.ctrlKey ||
+              event.altKey ||
+              event.shiftKey ||
+              (event.currentTarget.target && event.currentTarget.target !== "_self")
+            )
+              return;
+            event.preventDefault();
+            onOpenSchedules(event.currentTarget);
+          }}
+          title="Schedules"
+        >
+          <span className="flex size-5 shrink-0 items-center justify-center">
+            <CalendarBlankIcon aria-hidden="true" size={18} />
+          </span>
+          <span className="sidebar-copy ml-1.5 min-w-0 flex-1 truncate text-[14px] font-medium">
+            Schedules
+          </span>
+        </a>
 
         <nav
           aria-label={searchOpen ? "Chat search results" : "Workspaces"}

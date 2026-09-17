@@ -38,7 +38,7 @@
   --raw-success-soft: oklch(0.705 0.154 153.814 / 0.14);
   --raw-warning: oklch(0.746 0.156 55.642);
   --raw-warning-soft: oklch(0.746 0.156 55.642 / 0.14);
-  --raw-danger: oklch(0.666 0.18 21.433);
+  --raw-danger: oklch(0.72 0.18 21.433);
   --raw-danger-soft: oklch(0.666 0.18 21.433 / 0.14);
   --raw-overlay: rgb(0 0 0 / 55%);
   --raw-shadow-btn: 0 0 0 1px oklch(1 0 0 / 0.1), 0 1px 2px oklch(0 0 0 / 0.3);
@@ -99,7 +99,7 @@
   --raw-success-soft: oklch(0.958 0.017 159.118);
   --raw-warning: oklch(0.689 0.179 49.902);
   --raw-warning-soft: oklch(0.964 0.021 67.581);
-  --raw-danger: oklch(0.621 0.192 23.042);
+  --raw-danger: oklch(0.54 0.192 23.042);
   --raw-danger-soft: oklch(0.956 0.017 17.462);
   --raw-overlay: rgb(0 0 0 / 30%);
   --raw-shadow-btn: 0 0 0 1px var(--raw-border-strong), 0 0 4px 0 rgb(0 0 0 / 4%);

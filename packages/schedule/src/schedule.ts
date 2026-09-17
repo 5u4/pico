@@ -2,6 +2,7 @@ import * as AgentMessage from "@pico/contract/agent-message";
 import * as Chat from "@pico/contract/chat-model";
 import type { AbsolutePath } from "@pico/contract/path";
 import * as Schedule from "@pico/contract/schedule";
+import { WorkspaceId } from "@pico/contract/workspace-model";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Cron from "effect/Cron";
@@ -11,9 +12,11 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
 import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
 import type * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
 import {
@@ -42,6 +45,7 @@ import type { Storage } from "./storage.ts";
 const RESCAN_INTERVAL = Duration.seconds(30);
 const MISSED_GRACE_MILLIS = 2 * 60 * 60 * 1_000;
 
+const decodeOwnerWorkspaceId = Schema.decodeUnknownOption(WorkspaceId);
 const scheduleError = (kind: Schedule.ScheduleError["kind"], message: string) =>
   new Schedule.ScheduleError({ kind, message });
 
@@ -66,6 +70,58 @@ const invalidExternalView = (loaded: LoadedSchedule): Schedule.ScheduleView => {
         sourceDirectory: loaded.view.sourceDirectory,
         error,
       };
+};
+
+const nextTrigger = (
+  view: Schedule.ScheduleView,
+  observedAt: number,
+): Schedule.ScheduleNextTrigger => {
+  if (view.kind === "invalid") return { kind: "none", reason: "invalid" };
+  if (view.state === "disabled") return { kind: "none", reason: "disabled" };
+  const { trigger, createdAt } = view.definition;
+  if (trigger.kind === "once") {
+    return trigger.at > observedAt
+      ? { kind: "scheduled", at: trigger.at }
+      : { kind: "none", reason: "past-once" };
+  }
+  const parsed = Cron.parse(trigger.expression, trigger.timeZone);
+  if (Result.isFailure(parsed)) return { kind: "unavailable" };
+  try {
+    const at = Cron.next(parsed.success, Math.max(observedAt, createdAt)).getTime();
+    return Number.isFinite(at) ? { kind: "scheduled", at } : { kind: "unavailable" };
+  } catch {
+    return { kind: "unavailable" };
+  }
+};
+
+const summarizeRun = (run: Schedule.ScheduleRunLifecycle): Schedule.ScheduleRunSummary => {
+  const base = {
+    id: run.id,
+    definitionRevision: run.definitionRevision,
+    scheduledFor: run.source.scheduledFor,
+    claimedAt: run.claimedAt,
+  };
+  const state = run.state;
+  switch (state.kind) {
+    case "claimed":
+    case "target-resolved":
+      return { ...base, state: { kind: state.kind } };
+    case "running-script":
+    case "running-omp":
+      return { ...base, state: { kind: state.kind, startedAt: state.startedAt } };
+    case "finished":
+      return {
+        ...base,
+        state: {
+          kind: "finished",
+          finishedAt: state.finishedAt,
+          outcome:
+            state.outcome.kind === "failed" || state.outcome.kind === "interrupted"
+              ? state.outcome
+              : { kind: state.outcome.kind },
+        },
+      };
+  }
 };
 
 const authorize = (
@@ -203,6 +259,36 @@ const capture = Effect.fn("Schedules.capture")(function* (
         return loaded
           .filter((schedule) => schedule.ownerWorkspaceId === caller.workspaceId)
           .map(invalidExternalView);
+      }),
+    );
+  });
+
+  const overview = Effect.fn("Schedules.overview")(function* () {
+    return yield* mutation.withPermit(
+      Effect.gen(function* () {
+        const observedAt = yield* Clock.currentTimeMillis;
+        const loaded = yield* scanSchedules(storage);
+        const entries: Array<Schedule.ScheduleOverviewEntry> = [];
+        for (const schedule of loaded) {
+          const view = invalidExternalView(schedule);
+          let lastRun: Schedule.ScheduleRunLifecycle | undefined;
+          for (const run of yield* readRuns(storage, view.id)) {
+            if (
+              lastRun === undefined ||
+              run.claimedAt > lastRun.claimedAt ||
+              (run.claimedAt === lastRun.claimedAt && run.id > lastRun.id)
+            ) {
+              lastRun = run;
+            }
+          }
+          entries.push({
+            view,
+            ownerWorkspaceId: Option.getOrNull(decodeOwnerWorkspaceId(schedule.ownerWorkspaceId)),
+            nextTrigger: nextTrigger(view, observedAt),
+            lastRun: lastRun === undefined ? null : summarizeRun(lastRun),
+          });
+        }
+        return { observedAt, entries };
       }),
     );
   });
@@ -916,7 +1002,7 @@ const capture = Effect.fn("Schedules.capture")(function* (
   });
 
   return {
-    service: Schedule.Schedules.of({ create, list, get, update, remove, start }),
+    service: Schedule.Schedules.of({ create, list, overview, get, update, remove, start }),
     initialize,
   };
 });

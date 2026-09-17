@@ -46,6 +46,7 @@ const smoke = Effect.fn("AgentRuntime.smoke")(function* () {
   const schedules = Schedules.of({
     create: () => Effect.die("unexpected schedule create"),
     list: () => Effect.die("unexpected schedule list"),
+    overview: () => Effect.die("unexpected schedule overview"),
     get: () => Effect.die("unexpected schedule get"),
     update: () => Effect.die("unexpected schedule update"),
     remove: () => Effect.die("unexpected schedule delete"),

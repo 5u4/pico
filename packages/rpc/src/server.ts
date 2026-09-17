@@ -4,6 +4,7 @@ import { ChatRepository } from "@pico/contract/chat-repository";
 import { ApplicationError, ChatClosed, WorkspaceBindingInvalid } from "@pico/contract/errors";
 import { EventRouter } from "@pico/contract/event-router";
 import { PicoRpcs } from "@pico/contract/rpc";
+import { ScheduleError, Schedules } from "@pico/contract/schedule";
 import type { WorkspaceId, WorkspacePlatform } from "@pico/contract/workspace-model";
 import { WorkspaceRepository } from "@pico/contract/workspace-repository";
 import * as Cause from "effect/Cause";
@@ -20,6 +21,7 @@ const handlers = PicoRpcs.toLayer(
     const eventRouter = yield* EventRouter;
     const workspaces = yield* WorkspaceRepository;
     const chats = yield* ChatRepository;
+    const schedules = yield* Schedules;
 
     return PicoRpcs.of({
       ListWorkspaces: (_, { requestId }) =>
@@ -40,6 +42,37 @@ const handlers = PicoRpcs.toLayer(
             component: "rpc",
             procedure: "ListChats",
             workspaceId,
+            requestId: String(requestId),
+          }),
+        ),
+      ListSchedules: (_, { requestId }) =>
+        Effect.gen(function* () {
+          const snapshot = yield* schedules.overview();
+          const owners = yield* workspaces.list().pipe(
+            Effect.mapError(
+              () =>
+                new ApplicationError({
+                  reason: "operation",
+                  message: "Failed to read schedule owners",
+                }),
+            ),
+          );
+          const byId = new Map(
+            owners.map(({ id, name, platform }) => [id, { id, name, platform }]),
+          );
+          return {
+            observedAt: snapshot.observedAt,
+            entries: snapshot.entries.map((entry) => ({
+              ...entry,
+              owner:
+                entry.ownerWorkspaceId === null ? null : (byId.get(entry.ownerWorkspaceId) ?? null),
+            })),
+          };
+        }).pipe(
+          Effect.tapCause(reportFailure),
+          Effect.annotateLogs({
+            component: "rpc",
+            procedure: "ListSchedules",
             requestId: String(requestId),
           }),
         ),
@@ -145,7 +178,7 @@ const handlers = PicoRpcs.toLayer(
   }),
 );
 
-/** Daemon composition installs these Web-only routes on its shared HTTP listener. */
+/** Daemon composition installs web chat routes and the root-local read-only schedule overview. */
 export const routes = RpcServer.layerHttp({ group: PicoRpcs, path: "/rpc" }).pipe(
   Layer.provide(handlers),
   Layer.provide(RpcSerialization.layerJson),
@@ -228,6 +261,7 @@ const reportFailure = (cause: Cause.Cause<unknown>) => {
     if (reason._tag === "Die") return true;
     const error = reason.error;
     if (error instanceof ApplicationError) return error.reason === "operation";
+    if (error instanceof ScheduleError) return error.kind === "io" || error.kind === "corrupt";
     return !(error instanceof ChatClosed || error instanceof WorkspaceBindingInvalid);
   });
   if (!operational) return Effect.void;

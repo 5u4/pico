@@ -1,5 +1,6 @@
 import {
   ArrowClockwiseIcon,
+  ArrowLeftIcon,
   BookOpenIcon,
   BugIcon,
   MagnifyingGlassIcon,
@@ -25,6 +26,7 @@ import { CloseChatDialog } from "./close-chat-dialog.tsx";
 import { Composer } from "./composer.tsx";
 import { ContextUsage } from "./context-usage.tsx";
 import { MobileSidebar } from "./mobile-sidebar.tsx";
+import { SchedulePage, type SchedulePageProps } from "./schedule-page.tsx";
 import { ToolDetailPane } from "./tool-detail-pane.tsx";
 import { Transcript } from "./transcript.tsx";
 import { WorkspaceDialog, type WorkspaceFormProps } from "./workspace-dialog.tsx";
@@ -41,7 +43,10 @@ const suggestionIcons = {
 } satisfies Record<PromptSuggestion["kind"], typeof BookOpenIcon>;
 
 export interface ChatScreenProps
-  extends Omit<WorkspaceSidebarProps, "onClose" | "onAddWorkspace" | "contextMenuContainer"> {
+  extends Omit<
+    WorkspaceSidebarProps,
+    "onClose" | "onAddWorkspace" | "contextMenuContainer" | "currentPage"
+  > {
   readonly desktopCollapse: NonNullable<WorkspaceSidebarProps["desktopCollapse"]>;
   readonly conversationKey: string | null;
   readonly title: string;
@@ -59,6 +64,11 @@ export interface ChatScreenProps
   readonly workspaceForm: WorkspaceFormProps | null;
   readonly workspaceSettings: WorkspaceSettingsProps | null;
   readonly onAddWorkspace: () => void;
+  readonly view:
+    | { readonly kind: "chat" }
+    | { readonly kind: "schedules"; readonly page: SchedulePageProps };
+  readonly onReturnToChat: () => void;
+  readonly returnToChatHref: string;
   readonly closeChat: CloseChatPresentation;
   readonly onCloseChatConfirm: () => void;
   readonly onCloseChatDismiss: () => void;
@@ -97,6 +107,9 @@ export function ChatScreen({
   workspaceForm,
   workspaceSettings,
   onAddWorkspace,
+  view,
+  onReturnToChat,
+  returnToChatHref,
   onEditWorkspace,
   workspaceEditPending,
   closeChat,
@@ -111,6 +124,8 @@ export function ChatScreen({
   onChatsRetry,
   onChatSelect,
   onNewChat,
+  schedulesHref,
+  onOpenSchedules,
   onTabSelect,
   onTabClose,
   onSearchChange,
@@ -142,6 +157,30 @@ export function ChatScreen({
   const focusedElement = useRef<HTMLElement | null>(null);
   const [closeDialogOpen, setCloseDialogOpen] = useState(false);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  const chatVisible = view.kind === "chat";
+  const scheduleContent = useRef<HTMLDivElement>(null);
+  const scheduleOrigin = useRef<HTMLElement | null>(null);
+  const restoreScheduleFocus = useRef(false);
+  const previousChatVisible = useRef<boolean | null>(null);
+
+  useLayoutEffect(() => {
+    if (previousChatVisible.current === chatVisible) return;
+    previousChatVisible.current = chatVisible;
+    if (!chatVisible) {
+      scheduleContent.current?.querySelector<HTMLElement>("h1")?.focus({ preventScroll: true });
+      return;
+    }
+    if (!restoreScheduleFocus.current) return;
+    restoreScheduleFocus.current = false;
+    const active = conversationKey ? tabButtons.get(conversationKey) : undefined;
+    const target = [
+      scheduleOrigin.current,
+      sidebarOpener.current,
+      active,
+      newTabButton.current,
+    ].find((element) => element?.isConnected && element.getClientRects().length > 0);
+    target?.focus({ preventScroll: true });
+  }, [chatVisible, conversationKey, tabButtons]);
   const welcome = transcript.state === "empty";
   const showSuggestions =
     welcome && conversationKey !== null && composer.editable && suggestions.length > 0;
@@ -151,6 +190,7 @@ export function ChatScreen({
     navigation.status?.kind === "empty";
 
   useLayoutEffect(() => {
+    if (!chatVisible) return;
     const element = transcriptRef.current;
     if (!element) return;
     if (scroll.current.key !== conversationKey) {
@@ -158,9 +198,10 @@ export function ChatScreen({
       setShowJump(false);
     }
     if (scroll.current.following) element.scrollTop = element.scrollHeight;
-  }, [conversationKey, transcript, composerHeight]);
+  }, [chatVisible, conversationKey, transcript, composerHeight]);
 
   useLayoutEffect(() => {
+    if (!chatVisible) return;
     const element = composerRef.current;
     if (!element || welcome) return;
     const measure = () => setComposerHeight(element.offsetHeight);
@@ -168,9 +209,10 @@ export function ChatScreen({
     const observer = new ResizeObserver(measure);
     observer.observe(element);
     return () => observer.disconnect();
-  }, [welcome]);
+  }, [chatVisible, welcome]);
 
   useLayoutEffect(() => {
+    if (!chatVisible) return;
     const element = transcriptRef.current;
     const content = contentRef.current;
     if (!element || !content || welcome) return;
@@ -189,17 +231,19 @@ export function ChatScreen({
       observer.disconnect();
       cancelAnimationFrame(frame);
     };
-  }, [welcome]);
+  }, [chatVisible, welcome]);
 
   useLayoutEffect(() => {
+    if (!chatVisible) return;
     const active = conversationKey ? tabButtons.get(conversationKey) : undefined;
     active?.scrollIntoView({ block: "nearest", inline: "nearest" });
     if (!restoreTabFocus.current) return;
     restoreTabFocus.current = false;
     (active ?? newTabButton.current)?.focus({ preventScroll: true });
-  }, [conversationKey, tabs.length, tabButtons]);
+  }, [chatVisible, conversationKey, tabs.length, tabButtons]);
 
   useLayoutEffect(() => {
+    if (!chatVisible) return;
     if (
       focusedElement.current &&
       !focusedElement.current.isConnected &&
@@ -212,19 +256,23 @@ export function ChatScreen({
   });
 
   useLayoutEffect(() => {
+    if (!chatVisible) {
+      setCloseDialogOpen(false);
+      return;
+    }
     if (closeOrigin.current?.conversationKey !== conversationKey) closeOrigin.current = null;
     if (closeChat.kind !== "confirmation") {
       setCloseDialogOpen(false);
       return;
     }
     if (document.activeElement === closeOrigin.current?.element) setCloseDialogOpen(true);
-  }, [closeChat.kind, conversationKey]);
+  }, [chatVisible, closeChat.kind, conversationKey]);
 
   useLayoutEffect(() => {
-    if (closeChat.kind === "confirmation" && closeDialogOpen && sidebarOpen) {
+    if (chatVisible && closeChat.kind === "confirmation" && closeDialogOpen && sidebarOpen) {
       onSidebarOpenChange(false);
     }
-  }, [closeChat.kind, closeDialogOpen, sidebarOpen, onSidebarOpenChange]);
+  }, [chatVisible, closeChat.kind, closeDialogOpen, sidebarOpen, onSidebarOpenChange]);
 
   const closeTab = (id: string) => {
     restoreTabFocus.current = true;
@@ -265,9 +313,19 @@ export function ChatScreen({
   };
   const closeSidebar = () => onSidebarOpenChange(false);
   const sidebar = {
-    navigation,
+    navigation: chatVisible
+      ? navigation
+      : { ...navigation, activeWorkspaceId: null, activeChatId: null },
+    currentPage: view.kind,
     search,
     onSearchChange,
+    schedulesHref,
+    onOpenSchedules: (origin) => {
+      if (chatVisible) scheduleOrigin.current = origin;
+      onOpenSchedules(origin);
+      if (!chatVisible)
+        scheduleContent.current?.querySelector<HTMLElement>("h1")?.focus({ preventScroll: true });
+    },
     onWorkspaceToggle,
     onWorkspaceRetry,
     onChatsRetry,
@@ -300,16 +358,16 @@ export function ChatScreen({
       className="chat-screen grid h-full min-h-0 grid-cols-1 bg-canvas p-2.5 text-foreground md:pl-0"
       data-sidebar-collapsed={desktopCollapse.collapsed}
       onFocusCapture={(event) => {
-        if (closeChat.kind !== "idle" && event.target instanceof HTMLElement) {
+        if (chatVisible && closeChat.kind !== "idle" && event.target instanceof HTMLElement) {
           focusedElement.current = event.target;
         }
       }}
     >
       <a
         className="sr-only focus:not-sr-only focus:fixed focus:start-4 focus:top-4 focus:z-50 focus:rounded-control focus:border focus:border-border focus:bg-panel focus:px-4 focus:py-2"
-        href="#conversation-history"
+        href={chatVisible ? "#conversation-history" : "#schedules-heading"}
       >
-        Skip to conversation
+        {chatVisible ? "Skip to conversation" : "Skip to schedules"}
       </a>
       <div className="hidden min-h-0 overflow-hidden md:block">
         <WorkspaceSidebar {...sidebar} desktopCollapse={desktopCollapse} />
@@ -323,7 +381,7 @@ export function ChatScreen({
 
       <main className="flex min-h-0 min-w-0 gap-2.5">
         <section
-          aria-label={title}
+          aria-label={chatVisible ? title : "Schedules"}
           className="flex min-h-0 min-w-0 flex-1 flex-col overflow-clip rounded-window border border-border bg-page"
         >
           <header className="flex h-11 shrink-0 items-center gap-1 border-b border-border px-2">
@@ -342,7 +400,13 @@ export function ChatScreen({
             </Button>
             <div
               aria-label="Open chats"
-              className="flex h-full min-w-0 flex-1 items-center gap-1 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+              className={
+                chatVisible
+                  ? "flex h-full min-w-0 flex-1 items-center gap-1 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+                  : "hidden"
+              }
+              hidden={!chatVisible}
+              inert={!chatVisible}
               role="tablist"
             >
               {tabs.map((tab, index) => {
@@ -393,6 +457,32 @@ export function ChatScreen({
                 <PlusIcon aria-hidden="true" size={15} />
               </button>
             </div>
+            {!chatVisible && (
+              <div className="min-w-0 flex-1">
+                <a
+                  className="press-feedback inline-flex h-8 shrink-0 items-center justify-center gap-2 rounded-control px-3 text-label font-medium text-muted transition-[transform,background-color,color,opacity] duration-feedback ease-feedback hover:bg-surface-hover hover:text-foreground"
+                  href={returnToChatHref}
+                  onClick={(event) => {
+                    if (
+                      event.defaultPrevented ||
+                      event.button !== 0 ||
+                      event.metaKey ||
+                      event.ctrlKey ||
+                      event.altKey ||
+                      event.shiftKey ||
+                      (event.currentTarget.target && event.currentTarget.target !== "_self")
+                    )
+                      return;
+                    event.preventDefault();
+                    restoreScheduleFocus.current = true;
+                    onReturnToChat();
+                  }}
+                >
+                  <ArrowLeftIcon aria-hidden="true" size={16} />
+                  Back to chats
+                </a>
+              </div>
+            )}
             <Button
               aria-label="Dark theme"
               aria-pressed={theme === "dark"}
@@ -410,191 +500,209 @@ export function ChatScreen({
             </Button>
           </header>
 
-          <p
-            className={
-              closeChat.kind === "closing"
-                ? "shrink-0 break-words border-b border-border bg-panel px-4 py-3 text-label text-muted"
-                : "sr-only"
-            }
-            role="status"
+          <div
+            className={`${chatVisible ? "flex" : "hidden"} min-h-0 flex-1 flex-col`}
+            hidden={!chatVisible}
+            inert={!chatVisible}
           >
-            {closeChat.kind === "closing"
-              ? `Closing ${closeChat.title} in ${closeChat.workspaceName}. You can keep working or use Stop if a response is running.`
-              : ""}
-          </p>
-          {closeChat.kind === "error" && (
-            <div className="flex shrink-0 flex-wrap items-center gap-3 border-b border-border bg-panel px-4 py-3 text-label">
-              <p className="min-w-0 flex-1 break-words text-danger" role="alert">
-                {closeChat.title} in {closeChat.workspaceName}. {closeChat.message}
-              </p>
-              {closeChat.retry && (
-                <Button
-                  disabled={!closeChat.retry.enabled}
-                  onClick={onCloseChatRetry}
-                  size="small"
-                  tone="secondary"
-                >
-                  Retry close
-                </Button>
-              )}
-              <Button onClick={onCloseChatDismiss} size="small" tone="ghost">
-                Dismiss
-              </Button>
-            </div>
-          )}
-          {closeChat.kind === "confirmation" && (
-            <div className="flex shrink-0 flex-wrap items-center gap-3 border-b border-border bg-panel px-4 py-3 text-label">
-              <p className="min-w-0 flex-1 break-words text-muted" role="status">
-                Worktree removal needs confirmation for {closeChat.title} in{" "}
-                {closeChat.workspaceName}. The chat may already be archived.
-              </p>
-              <Button onClick={() => setCloseDialogOpen(true)} size="small" tone="secondary">
-                Review close
-              </Button>
-              <Button onClick={onCloseChatDismiss} size="small" tone="ghost">
-                Not now
-              </Button>
-            </div>
-          )}
-          <div className="relative min-h-0 flex-1">
-            <div
-              aria-label="Conversation history"
-              className="transcript-scroll h-full overflow-y-auto overscroll-contain"
-              hidden={welcome}
-              id={welcome ? undefined : "conversation-history"}
-              onScroll={(event) => {
-                const element = event.currentTarget;
-                const following =
-                  element.scrollHeight - element.clientHeight - element.scrollTop < 120;
-                scroll.current.following = following;
-                setShowJump(!following);
-              }}
-              ref={transcriptRef}
-              role="tabpanel"
-              tabIndex={0}
-            >
-              <div ref={contentRef} style={{ paddingBottom: composerHeight + 16 }}>
-                {!welcome && (
-                  <Transcript
-                    onDisclosuresChange={onDisclosuresChange}
-                    onRetry={onTranscriptRetry}
-                    onToolSelect={selectTool}
-                    presentation={transcript}
-                  />
-                )}
-              </div>
-            </div>
-            {!welcome && (
-              <div
-                aria-hidden="true"
-                className="composer-fade pointer-events-none absolute inset-x-0 bottom-0"
-                style={{ height: composerHeight + 32 }}
-              />
-            )}
-            {showJump && !welcome && (
-              <div
-                className="pointer-events-none absolute inset-x-0 z-10 flex justify-center"
-                style={{ bottom: composerHeight + 8 }}
-              >
-                <Button
-                  className="pointer-events-auto shadow-card"
-                  onClick={jumpToLatest}
-                  size="small"
-                  tone="secondary"
-                >
-                  Jump to latest
-                </Button>
-              </div>
-            )}
-            <div
-              aria-label={welcome ? "Conversation" : undefined}
+            <p
               className={
-                welcome
-                  ? "absolute inset-0 overflow-y-auto overscroll-contain"
-                  : "absolute inset-x-0 bottom-0 px-4 pb-6 sm:px-8 lg:px-12"
+                closeChat.kind === "closing"
+                  ? "shrink-0 break-words border-b border-border bg-panel px-4 py-3 text-label text-muted"
+                  : "sr-only"
               }
-              id={welcome ? "conversation-history" : undefined}
-              ref={composerRef}
-              role={welcome ? "tabpanel" : undefined}
-              tabIndex={welcome ? 0 : undefined}
+              role="status"
             >
+              {closeChat.kind === "closing"
+                ? `Closing ${closeChat.title} in ${closeChat.workspaceName}. You can keep working or use Stop if a response is running.`
+                : ""}
+            </p>
+            {closeChat.kind === "error" && (
+              <div className="flex shrink-0 flex-wrap items-center gap-3 border-b border-border bg-panel px-4 py-3 text-label">
+                <p className="min-w-0 flex-1 break-words text-danger" role="alert">
+                  {closeChat.title} in {closeChat.workspaceName}. {closeChat.message}
+                </p>
+                {closeChat.retry && (
+                  <Button
+                    disabled={!closeChat.retry.enabled}
+                    onClick={onCloseChatRetry}
+                    size="small"
+                    tone="secondary"
+                  >
+                    Retry close
+                  </Button>
+                )}
+                <Button onClick={onCloseChatDismiss} size="small" tone="ghost">
+                  Dismiss
+                </Button>
+              </div>
+            )}
+            {closeChat.kind === "confirmation" && (
+              <div className="flex shrink-0 flex-wrap items-center gap-3 border-b border-border bg-panel px-4 py-3 text-label">
+                <p className="min-w-0 flex-1 break-words text-muted" role="status">
+                  Worktree removal needs confirmation for {closeChat.title} in{" "}
+                  {closeChat.workspaceName}. The chat may already be archived.
+                </p>
+                <Button onClick={() => setCloseDialogOpen(true)} size="small" tone="secondary">
+                  Review close
+                </Button>
+                <Button onClick={onCloseChatDismiss} size="small" tone="ghost">
+                  Not now
+                </Button>
+              </div>
+            )}
+            <div className="relative min-h-0 flex-1">
               <div
+                aria-label="Conversation history"
+                className="transcript-scroll h-full overflow-y-auto overscroll-contain"
+                hidden={welcome}
+                id={welcome ? undefined : "conversation-history"}
+                onScroll={(event) => {
+                  if (!chatVisible) return;
+                  const element = event.currentTarget;
+                  const following =
+                    element.scrollHeight - element.clientHeight - element.scrollTop < 120;
+                  scroll.current.following = following;
+                  setShowJump(!following);
+                }}
+                ref={transcriptRef}
+                role="tabpanel"
+                tabIndex={0}
+              >
+                <div ref={contentRef} style={{ paddingBottom: composerHeight + 16 }}>
+                  {!welcome && (
+                    <Transcript
+                      onDisclosuresChange={onDisclosuresChange}
+                      onRetry={onTranscriptRetry}
+                      onToolSelect={selectTool}
+                      presentation={transcript}
+                    />
+                  )}
+                </div>
+              </div>
+              {!welcome && (
+                <div
+                  aria-hidden="true"
+                  className="composer-fade pointer-events-none absolute inset-x-0 bottom-0"
+                  style={{ height: composerHeight + 32 }}
+                />
+              )}
+              {showJump && !welcome && (
+                <div
+                  className="pointer-events-none absolute inset-x-0 z-10 flex justify-center"
+                  style={{ bottom: composerHeight + 8 }}
+                >
+                  <Button
+                    className="pointer-events-auto shadow-card"
+                    onClick={jumpToLatest}
+                    size="small"
+                    tone="secondary"
+                  >
+                    Jump to latest
+                  </Button>
+                </div>
+              )}
+              <div
+                aria-label={welcome ? "Conversation" : undefined}
                 className={
                   welcome
-                    ? "mx-auto flex min-h-full max-w-[720px] flex-col justify-center px-4 py-10 sm:px-8"
-                    : "mx-auto max-w-[720px]"
+                    ? "absolute inset-0 overflow-y-auto overscroll-contain"
+                    : "absolute inset-x-0 bottom-0 px-4 pb-6 sm:px-8 lg:px-12"
                 }
+                id={welcome ? "conversation-history" : undefined}
+                ref={composerRef}
+                role={welcome ? "tabpanel" : undefined}
+                tabIndex={welcome ? 0 : undefined}
               >
-                {transcript.state === "empty" && (
-                  <h1 className="text-[26px] font-normal tracking-[-0.02em]">
-                    <span className="home-reveal home-reveal-hello block text-subtle">Hello</span>
-                    <span className="home-reveal home-reveal-question block">
-                      {transcript.title}
-                    </span>
-                  </h1>
-                )}
                 <div
-                  className={welcome ? "home-reveal home-reveal-prompt relative mt-7" : "relative"}
+                  className={
+                    welcome
+                      ? "mx-auto flex min-h-full max-w-[720px] flex-col justify-center px-4 py-10 sm:px-8"
+                      : "mx-auto max-w-[720px]"
+                  }
                 >
-                  <Composer
-                    contextLabel={contextLabel}
-                    onStop={onStop}
-                    onSubmit={onComposerSubmit}
-                    onValueChange={onComposerValueChange}
-                    presentation={composer}
-                  />
-                  <ContextUsage
-                    onOpenChange={onContextDetailsOpenChange}
-                    open={contextDetailsOpen}
-                    presentation={contextUsage}
-                  />
-                </div>
-                {transcript.state === "empty" && (
-                  <div className="home-reveal home-reveal-recommendations mt-6 flex flex-col text-subtle">
-                    <p className={showSuggestions ? "sr-only" : "text-[13px]"}>
-                      {transcript.description}
-                    </p>
-                    {showSuggestions && (
-                      <>
-                        {suggestions.map((suggestion) => {
-                          const Icon = suggestionIcons[suggestion.kind];
-                          return (
+                  {transcript.state === "empty" && (
+                    <h1 className="text-[26px] font-normal tracking-[-0.02em]">
+                      <span className="home-reveal home-reveal-hello block text-subtle">Hello</span>
+                      <span className="home-reveal home-reveal-question block">
+                        {transcript.title}
+                      </span>
+                    </h1>
+                  )}
+                  <div
+                    className={
+                      welcome ? "home-reveal home-reveal-prompt relative mt-7" : "relative"
+                    }
+                  >
+                    <Composer
+                      contextLabel={contextLabel}
+                      onStop={onStop}
+                      onSubmit={onComposerSubmit}
+                      onValueChange={onComposerValueChange}
+                      presentation={composer}
+                    />
+                    <ContextUsage
+                      onOpenChange={onContextDetailsOpenChange}
+                      open={chatVisible && contextDetailsOpen}
+                      presentation={contextUsage}
+                    />
+                  </div>
+                  {transcript.state === "empty" && (
+                    <div className="home-reveal home-reveal-recommendations mt-6 flex flex-col text-subtle">
+                      <p className={showSuggestions ? "sr-only" : "text-[13px]"}>
+                        {transcript.description}
+                      </p>
+                      {showSuggestions && (
+                        <>
+                          {suggestions.map((suggestion) => {
+                            const Icon = suggestionIcons[suggestion.kind];
+                            return (
+                              <button
+                                className="-mx-2 flex h-[41px] items-center gap-3 rounded-control px-2 py-2.5 text-left text-[14px] text-foreground transition-colors duration-150 hover:bg-surface-hover active:bg-surface-hover-strong"
+                                key={suggestion.text}
+                                onClick={() => onSuggestionSelect(suggestion.text)}
+                                type="button"
+                              >
+                                <Icon
+                                  aria-hidden="true"
+                                  className="shrink-0 text-subtle"
+                                  size={15}
+                                />
+                                <span className="min-w-0 truncate">{suggestion.label}</span>
+                              </button>
+                            );
+                          })}
+                          <div className="mt-1 flex items-center gap-5 pl-0.5 text-[13px] text-subtle">
                             <button
-                              className="-mx-2 flex h-[41px] items-center gap-3 rounded-control px-2 py-2.5 text-left text-[14px] text-foreground transition-colors duration-150 hover:bg-surface-hover active:bg-surface-hover-strong"
-                              key={suggestion.text}
-                              onClick={() => onSuggestionSelect(suggestion.text)}
+                              className="flex items-center gap-2 py-1 transition-colors duration-150 hover:text-foreground active:text-foreground"
+                              onClick={onSuggestionsShuffle}
                               type="button"
                             >
-                              <Icon aria-hidden="true" className="shrink-0 text-subtle" size={15} />
-                              <span className="min-w-0 truncate">{suggestion.label}</span>
+                              <ArrowClockwiseIcon aria-hidden="true" size={14} />
+                              Shuffle suggestions
                             </button>
-                          );
-                        })}
-                        <div className="mt-1 flex items-center gap-5 pl-0.5 text-[13px] text-subtle">
-                          <button
-                            className="flex items-center gap-2 py-1 transition-colors duration-150 hover:text-foreground active:text-foreground"
-                            onClick={onSuggestionsShuffle}
-                            type="button"
-                          >
-                            <ArrowClockwiseIcon aria-hidden="true" size={14} />
-                            Shuffle suggestions
-                          </button>
-                        </div>
-                      </>
-                    )}
-                    {onboarding && (
-                      <Button className="mt-4" onClick={onAddWorkspace} tone="primary">
-                        <PlusIcon aria-hidden="true" size={17} />
-                        Add workspace
-                      </Button>
-                    )}
-                  </div>
-                )}
+                          </div>
+                        </>
+                      )}
+                      {onboarding && (
+                        <Button className="mt-4" onClick={onAddWorkspace} tone="primary">
+                          <PlusIcon aria-hidden="true" size={17} />
+                          Add workspace
+                        </Button>
+                      )}
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
           </div>
+          {view.kind === "schedules" && (
+            <div className="flex min-h-0 flex-1 flex-col" ref={scheduleContent}>
+              <SchedulePage {...view.page} />
+            </div>
+          )}
         </section>
-        {toolPane && (
+        {chatVisible && toolPane && (
           <ToolPaneShell
             call={toolPane}
             fallbackFocus={transcriptRef}
@@ -603,7 +711,8 @@ export function ChatScreen({
           />
         )}
       </main>
-      {closeChat.kind === "confirmation" &&
+      {chatVisible &&
+        closeChat.kind === "confirmation" &&
         closeDialogOpen &&
         !sidebarOpen &&
         !mobileSidebarOpen && (
@@ -658,7 +767,13 @@ function ToolPaneShell({
         queueMicrotask(() => {
           if (dialog.isConnected && dialog.open) return;
           const origin = returnFocus.current;
-          (origin?.isConnected ? origin : fallbackFocus.current)?.focus({ preventScroll: true });
+          const target = [origin, fallbackFocus.current].find(
+            (element) =>
+              element?.isConnected &&
+              element.getClientRects().length > 0 &&
+              !element.closest("[inert]"),
+          );
+          target?.focus({ preventScroll: true });
         });
       }
     };

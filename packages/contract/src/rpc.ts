@@ -7,7 +7,25 @@ import { TranscriptSnapshot } from "./agent-runtime.ts";
 import * as Application from "./application.ts";
 import * as Chat from "./chat-model.ts";
 import * as Errors from "./errors.ts";
+import * as Schedule from "./schedule.ts";
 import * as Workspace from "./workspace-model.ts";
+
+export const ScheduleOverviewResponse = Schema.Struct({
+  observedAt: Schema.Natural,
+  entries: Schema.Array(
+    Schema.Struct({
+      ...Schedule.ScheduleOverviewEntry.fields,
+      owner: Schema.NullOr(
+        Schema.Struct({
+          id: Workspace.WorkspaceId,
+          name: Workspace.Workspace.members[0].fields.name,
+          platform: Workspace.WorkspacePlatform,
+        }),
+      ),
+    }),
+  ),
+});
+export type ScheduleOverviewResponse = typeof ScheduleOverviewResponse.Type;
 
 export const PicoRpcs = RpcGroup.make(
   Rpc.make("ListWorkspaces", {
@@ -19,6 +37,11 @@ export const PicoRpcs = RpcGroup.make(
     payload: { workspaceId: Workspace.WorkspaceId },
     success: Schema.Array(Chat.ChatListEntry),
     error: Errors.ApplicationError,
+  }),
+  Rpc.make("ListSchedules", {
+    payload: Schema.Void,
+    success: ScheduleOverviewResponse,
+    error: Schema.Union([Errors.ApplicationError, Schedule.ScheduleError]),
   }),
   Rpc.make("CreateWorkspace", {
     payload: Application.CreateWorkspace,

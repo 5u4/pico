@@ -146,6 +146,16 @@ export const ResolvedScheduleRunTarget = Schema.Struct({
 });
 export type ResolvedScheduleRunTarget = typeof ResolvedScheduleRunTarget.Type;
 
+const FailedScheduleOutcome = Schema.Struct({
+  kind: Schema.Literal("failed"),
+  stage: Schema.Literals(["target", "script", "protocol", "omp", "publish"]),
+  message: Schema.String,
+});
+const InterruptedScheduleOutcome = Schema.Struct({
+  kind: Schema.Literal("interrupted"),
+  phase: Schema.String,
+});
+
 export const TerminalOutcome = Schema.Union([
   Schema.Struct({ kind: Schema.Literal("skipped") }),
   Schema.Struct({ kind: Schema.Literal("published"), content: Schema.String }),
@@ -155,12 +165,8 @@ export const TerminalOutcome = Schema.Union([
     scheduledFor: Schema.Natural,
     observedAt: Schema.Natural,
   }),
-  Schema.Struct({
-    kind: Schema.Literal("failed"),
-    stage: Schema.Literals(["target", "script", "protocol", "omp", "publish"]),
-    message: Schema.String,
-  }),
-  Schema.Struct({ kind: Schema.Literal("interrupted"), phase: Schema.String }),
+  FailedScheduleOutcome,
+  InterruptedScheduleOutcome,
 ]);
 export type TerminalOutcome = typeof TerminalOutcome.Type;
 
@@ -201,6 +207,54 @@ export const ScheduleRunLifecycle = Schema.Union([
   }),
 ]);
 export type ScheduleRunLifecycle = typeof ScheduleRunLifecycle.Type;
+
+export const ScheduleRunSummary = Schema.Struct({
+  id: ScheduleRunId,
+  definitionRevision: ScheduleRevision,
+  scheduledFor: Schema.Natural,
+  claimedAt: Schema.Natural,
+  state: Schema.Union([
+    Schema.Struct({ kind: Schema.Literals(["claimed", "target-resolved"]) }),
+    Schema.Struct({
+      kind: Schema.Literals(["running-script", "running-omp"]),
+      startedAt: Schema.Natural,
+    }),
+    Schema.Struct({
+      kind: Schema.Literal("finished"),
+      finishedAt: Schema.Natural,
+      outcome: Schema.Union([
+        Schema.Struct({ kind: Schema.Literals(["skipped", "published", "completed", "missed"]) }),
+        FailedScheduleOutcome,
+        InterruptedScheduleOutcome,
+      ]),
+    }),
+  ]),
+});
+export type ScheduleRunSummary = typeof ScheduleRunSummary.Type;
+
+export const ScheduleNextTrigger = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("scheduled"), at: Schema.Natural }),
+  Schema.Struct({
+    kind: Schema.Literal("none"),
+    reason: Schema.Literals(["disabled", "invalid", "past-once"]),
+  }),
+  Schema.Struct({ kind: Schema.Literal("unavailable") }),
+]);
+export type ScheduleNextTrigger = typeof ScheduleNextTrigger.Type;
+
+export const ScheduleOverviewEntry = Schema.Struct({
+  view: ScheduleView,
+  ownerWorkspaceId: Schema.NullOr(WorkspaceId),
+  nextTrigger: ScheduleNextTrigger,
+  lastRun: Schema.NullOr(ScheduleRunSummary),
+});
+export type ScheduleOverviewEntry = typeof ScheduleOverviewEntry.Type;
+
+export const ScheduleOverview = Schema.Struct({
+  observedAt: Schema.Natural,
+  entries: Schema.Array(ScheduleOverviewEntry),
+});
+export type ScheduleOverview = typeof ScheduleOverview.Type;
 
 export const CreateSchedule = Schema.Struct({
   name: Schema.NonEmptyString,
@@ -309,20 +363,24 @@ export class Schedules extends Context.Service<
       caller: ScheduleCaller,
       input: CreateSchedule,
     ) => Effect.Effect<ScheduleView, ScheduleError>;
+    /** OMP lists schedules owned by the calling chat's workspace. */
     readonly list: (
       caller: ScheduleCaller,
     ) => Effect.Effect<ReadonlyArray<ScheduleView>, ScheduleError>;
+    /** The root-local web overview reads all current definitions and recorded status. */
+    readonly overview: () => Effect.Effect<ScheduleOverview, ScheduleError>;
     /** OMP calls this before reading or editing the current managed directory. */
     readonly get: (
       caller: ScheduleCaller,
       id: ScheduleId,
     ) => Effect.Effect<ScheduleView, ScheduleError>;
-    /** OMP calls this when changing schedule metadata or enabled state. */
+    /** OMP calls this when changing metadata or enabled state. */
     readonly update: (
       caller: ScheduleCaller,
       id: ScheduleId,
       input: UpdateSchedule,
     ) => Effect.Effect<ScheduleView, ScheduleError>;
+    /** OMP removes the live definition, retaining run history. */
     readonly remove: (caller: ScheduleCaller, id: ScheduleId) => Effect.Effect<void, ScheduleError>;
     readonly start: (host: ScheduleRunHost) => Effect.Effect<void, ScheduleError, Scope.Scope>;
   }
