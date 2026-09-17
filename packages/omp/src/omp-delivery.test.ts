@@ -34,6 +34,8 @@ const importNative = async () => {
     loaders,
     events,
     sender,
+    normalization,
+    sessionLoader,
   ] = await Promise.all([
     import("@oh-my-pi/pi-agent-core"),
     import("@oh-my-pi/pi-ai"),
@@ -47,6 +49,8 @@ const importNative = async () => {
     import("@oh-my-pi/pi-coding-agent/extensibility/extensions/loader"),
     import("@oh-my-pi/pi-coding-agent/utils/event-bus"),
     import("./omp-prompt-sender.ts"),
+    import("./agent-event.ts"),
+    import("@oh-my-pi/pi-coding-agent/session/session-loader"),
   ]);
   return {
     ...core,
@@ -61,6 +65,8 @@ const importNative = async () => {
     ...loaders,
     ...events,
     ...sender,
+    ...normalization,
+    ...sessionLoader,
   };
 };
 
@@ -673,9 +679,18 @@ describe("native OMP prompt delivery", () => {
   it("expands a known skill through the sender before reaching the provider", async () => {
     const turn = providerTurn();
     await withSession([turn], async (session) => {
+      const live: Array<ReturnType<typeof native.normalizeTranscript>[number]> = [];
+      const unsubscribe = session.subscribe((event) => {
+        if (event.type !== "message_end") return;
+        const normalized = native.normalizeAgentEvent(event);
+        if (normalized?.type === "message-settled" && normalized.message.role === "user") {
+          live.push(normalized.message);
+        }
+      });
       const send = await makeSender(session);
       const request = "Review the queued delivery change.";
-      const delivery = await send({ text: `/skill:delivery ${request}`, attachments: [] });
+      const input = `/skill:delivery ${request}`;
+      const delivery = await send({ text: input, attachments: [] });
       if (delivery.kind !== "started")
         throw new Error("Expected the skill to start a provider turn");
       try {
@@ -693,7 +708,16 @@ describe("native OMP prompt delivery", () => {
       } finally {
         turn.release.resolve();
         await Effect.runPromise(delivery.completed);
+        unsubscribe();
       }
+      await session.settleInFlightMessagePersistence();
+      await session.sessionManager.ensureOnDisk();
+      await session.sessionManager.flush();
+      const file = session.sessionManager.getSessionFile();
+      if (file === undefined) throw new Error("Expected skill journal");
+      const persisted = native.normalizeTranscript(await native.loadSessionMessagesReadOnly(file));
+      expect(live.map((message) => message.content)).toEqual([[{ type: "text", text: input }]]);
+      expect(persisted.filter((message) => message.role === "user")).toEqual(live);
     });
   }, 30_000);
 
