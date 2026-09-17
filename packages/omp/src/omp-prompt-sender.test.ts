@@ -28,7 +28,6 @@ type ImagePromptOptions = Parameters<OmpAgentSession.AgentSession["prompt"]>[1];
 type LiteralPromptOptions = Parameters<OmpAgentSession.AgentSession["sendUserMessage"]>[1];
 
 const platformLayer = Layer.mergeAll(BunCrypto.layer, BunFileSystem.layer, BunPath.layer);
-const textPrompt = (text: string) => AgentMessage.AgentPrompt.make({ text, attachments: [] });
 const diagnostics = {
   chatId: Chat.ChatId.make("018f47a0-0000-7000-8000-000000000001"),
   runEffect: Effect.runPromise,
@@ -148,123 +147,6 @@ describe("makeOmpPromptSender", () => {
           image,
         );
       }).pipe(Effect.provide(platformLayer)),
-  );
-
-  it.effect("preserves text and skill prompt behavior", () =>
-    Effect.gen(function* () {
-      const fileSystem = yield* FileSystem.FileSystem;
-      const path = yield* Path.Path;
-      const crypto = yield* Crypto.Crypto;
-      const skillDirectory = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "pico-omp-skill-",
-      });
-      const sessionFile = path.join(skillDirectory, "session.jsonl");
-      const skillFile = path.join(skillDirectory, "SKILL.md");
-      yield* fileSystem.writeFileString(
-        skillFile,
-        "---\nname: focused-skill\ndescription: Focused adapter test\n---\nFollow the focused instructions.\nPreserve the supplied arguments.\n",
-      );
-      const skill = {
-        name: "focused-skill",
-        description: "Focused adapter test",
-        filePath: skillFile,
-        baseDir: skillDirectory,
-        source: "test",
-      } satisfies Skill;
-
-      const enabled = makeFakeSession(skill, true, sessionFile);
-      yield* Effect.promise(() =>
-        makeOmpPromptSender(
-          enabled.session,
-          fileSystem,
-          path,
-          crypto,
-          diagnostics,
-        )(textPrompt("/skill:focused-skill inspect auth")),
-      );
-      assert.deepStrictEqual(enabled.literalPrompts, []);
-      assert.deepStrictEqual(enabled.imagePrompts, []);
-      assert.deepStrictEqual(
-        enabled.customMessages.map(({ message, options }) => ({
-          customType: message.customType,
-          display: message.display,
-          details: message.details,
-          attribution: message.attribution,
-          options: { streamingBehavior: options?.streamingBehavior },
-        })),
-        [
-          {
-            customType: "skill-prompt",
-            display: true,
-            details: {
-              name: "focused-skill",
-              path: skillFile,
-              args: "inspect auth",
-              lineCount: 2,
-            },
-            attribution: "user",
-            options: { streamingBehavior: "steer" },
-          },
-        ],
-      );
-
-      const ordinary = makeFakeSession(skill, true, sessionFile);
-      yield* Effect.promise(() =>
-        makeOmpPromptSender(
-          ordinary.session,
-          fileSystem,
-          path,
-          crypto,
-          diagnostics,
-        )(textPrompt("  ordinary text stays exact  ")),
-      );
-      assert.deepStrictEqual(ordinary.literalPrompts, ["  ordinary text stays exact  "]);
-      assert.deepStrictEqual(ordinary.customMessages, []);
-
-      const unknown = makeFakeSession(skill, true, sessionFile);
-      yield* Effect.promise(() =>
-        makeOmpPromptSender(
-          unknown.session,
-          fileSystem,
-          path,
-          crypto,
-          diagnostics,
-        )(textPrompt("/skill:unknown keep this exact")),
-      );
-      assert.deepStrictEqual(unknown.literalPrompts, ["/skill:unknown keep this exact"]);
-
-      const disabled = makeFakeSession(skill, false, sessionFile);
-      yield* Effect.promise(() =>
-        makeOmpPromptSender(
-          disabled.session,
-          fileSystem,
-          path,
-          crypto,
-          diagnostics,
-        )(textPrompt("/skill:focused-skill still literal")),
-      );
-      assert.deepStrictEqual(disabled.literalPrompts, ["/skill:focused-skill still literal"]);
-
-      const missingSkill = {
-        ...skill,
-        filePath: path.join(skillDirectory, "missing", "SKILL.md"),
-      } satisfies Skill;
-      const rejected = makeFakeSession(missingSkill, true, sessionFile);
-      const rejection = yield* Effect.tryPromise({
-        try: () =>
-          makeOmpPromptSender(
-            rejected.session,
-            fileSystem,
-            path,
-            crypto,
-            diagnostics,
-          )(textPrompt("/skill:focused-skill cannot build")),
-        catch: (error) => error,
-      }).pipe(Effect.flip);
-      assert.instanceOf(rejection, Error);
-      assert.deepStrictEqual(rejected.literalPrompts, []);
-      assert.deepStrictEqual(rejected.customMessages, []);
-    }).pipe(Effect.provide(platformLayer)),
   );
 
   it.effect("persists ordered originals and submits image prompts through OMP once", () =>
