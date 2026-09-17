@@ -204,6 +204,24 @@ const coldCases = [
     },
     expected: { provider: "pico-fixture", id: "switched", name: "switched" },
   },
+  {
+    chatId: Chat.ChatId.make("018f47a0-0000-7000-8000-000000000010"),
+    prepare: (manager: SessionManager) => {
+      manager.appendModelChange("pico-fixture/workspace", "temporary");
+      manager.appendModelChange("pico-fixture/switched", "default");
+      manager.appendModelChange("pico-fixture/default", "temporary", true);
+    },
+    expected: { provider: "pico-fixture", id: "switched", name: "switched" },
+  },
+  {
+    chatId: Chat.ChatId.make("018f47a0-0000-7000-8000-000000000011"),
+    prepare: (manager: SessionManager) => {
+      manager.appendModelChange("pico-fixture/workspace", "temporary");
+      manager.appendModelChange("pico-fixture/switched", "slow");
+      manager.appendModelChange("pico-fixture/default", "temporary", true);
+    },
+    expected: { provider: "pico-fixture", id: "switched", name: "switched" },
+  },
 ];
 
 await Effect.runPromise(

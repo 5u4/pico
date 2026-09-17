@@ -67,6 +67,6 @@ Context details use a controlled native popover above the footer, outside the co
 
 The native model select at the lower left changes only the current chat through the same application operation as Discord `/switch`. It does not update the workspace default. Opening the picker on a new draft creates the chat and its configured worktree without sending the draft. This gives selection a durable chat identity before the first message.
 
-Cold reads and session opening respect the latest model-change role. Recover an earlier temporary selection only when the latest temporary entry records a retry fallback, never over a later default or other role selection.
+Cold reads and session opening respect the latest intentional model change. A trailing temporary retry fallback does not become durable; Pico restores the latest non-fallback role selection.
 
 The picker stays available during an active response, including tool execution. The native model switch takes effect at the next provider call, which may occur in the same run. Pico does not abort or restart the run to switch models. Provider-specific connection resets and recovery remain OMP's responsibility. Another switch blocks selection until it finishes. A successful switch supplies the displayed model even if no history snapshot has loaded. An unconfirmed journal save shows the active selection with a warning instead of reporting the switch as failed.

@@ -41,6 +41,7 @@ import {
   type SessionHandle,
 } from "./session-pool.ts";
 import {
+  findRestorableModelChange,
   loadAvailableModels,
   loadCurrentModel,
   prepareSessionSettings,
@@ -440,19 +441,15 @@ const makeFactory = (
     );
     yield* promiseBoundary("Failed to restore OMP model selection", async () => {
       const branch = manager.getBranch();
-      const selected = branch.findLast(
-        (entry) =>
-          entry.type === "model_change" &&
-          entry.role === "temporary" &&
-          !entry.resolvedModelIsFallback,
-      );
       const latest = branch.findLast((entry) => entry.type === "model_change");
+      const selected = findRestorableModelChange(branch);
       if (
-        selected?.type === "model_change" &&
-        latest?.role === "temporary" &&
-        latest.resolvedModelIsFallback
+        latest?.type === "model_change" &&
+        latest.role === "temporary" &&
+        latest.resolvedModelIsFallback &&
+        selected
       ) {
-        manager.appendModelChange(selected.model, "temporary");
+        manager.appendModelChange(selected.model, selected.role);
         await manager.ensureOnDisk();
         await manager.flush();
       }

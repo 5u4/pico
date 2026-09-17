@@ -163,6 +163,16 @@ const handlers = PicoRpcs.toLayer(
       SwitchModel: ({ chatId, model }, { requestId }) =>
         requireWebChat(workspaces, chats, chatId).pipe(
           Effect.andThen(() => application.switchModel(chatId, model)),
+          Effect.tap((result) =>
+            result.kind === "persistence-unconfirmed"
+              ? Effect.logWarning("pico.rpc.model-selection-persistence-unconfirmed").pipe(
+                  Effect.annotateLogs({
+                    operation: "persist-model-selection",
+                    outcome: "failure",
+                  }),
+                )
+              : Effect.void,
+          ),
           Effect.tapCause(reportFailure),
           Effect.annotateLogs({
             component: "rpc",

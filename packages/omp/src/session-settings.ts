@@ -12,7 +12,10 @@ import {
   buildSessionContext,
   getRestorableSessionModels,
 } from "@oh-my-pi/pi-coding-agent/session/session-context";
-import type { SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
+import type {
+  ModelChangeEntry,
+  SessionEntry,
+} from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { loadEntriesFromFile } from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import { migrateToCurrentVersion } from "@oh-my-pi/pi-coding-agent/session/session-migrations";
 import type { ModelInfo } from "@pico/contract/agent-runtime";
@@ -26,6 +29,19 @@ const bundledSkillsDirectory = Bun.fileURLToPath(new URL("./skills", import.meta
 const agentBrowserSkillsDirectory = Bun.fileURLToPath(
   new URL("./agent-browser/skills", import.meta.url),
 );
+
+export const findRestorableModelChange = (
+  entries: readonly SessionEntry[],
+): ModelChangeEntry | undefined => {
+  const latest = entries.findLast(
+    (entry): entry is ModelChangeEntry => entry.type === "model_change",
+  );
+  if (!latest?.resolvedModelIsFallback || latest.role !== "temporary") return latest;
+  return entries.findLast(
+    (entry): entry is ModelChangeEntry =>
+      entry.type === "model_change" && !entry.resolvedModelIsFallback,
+  );
+};
 
 export const loadAvailableModels = Effect.fn("OmpSession.loadAvailableModels")(function* (
   registry: ModelRegistry,
@@ -72,16 +88,9 @@ export const loadCurrentModel = Effect.fn("OmpSession.loadCurrentModel")(functio
       }
       branch.reverse();
       const { models } = buildSessionContext(branch, undefined, byId);
-      let role: string | undefined;
-      let temporary: string | undefined;
-      for (const entry of branch) {
-        if (entry.type !== "model_change") continue;
-        role = entry.role ?? "default";
-        if (role === "temporary" && !entry.resolvedModelIsFallback) temporary = entry.model;
-      }
-      if (role === "temporary" && temporary !== undefined) {
-        models.temporary = temporary;
-      }
+      const selected = findRestorableModelChange(branch);
+      const role = selected ? (selected.role ?? "default") : undefined;
+      if (selected && role === "temporary") models.temporary = selected.model;
       // Extensions may restore the preferred model when the session opens.
       const [selection] = getRestorableSessionModels(models, role);
       if (selection !== undefined) {
