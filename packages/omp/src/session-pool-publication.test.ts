@@ -3,10 +3,12 @@ import * as BunPath from "@effect/platform-bun/BunPath";
 import { assert, describe, it } from "@effect/vitest";
 import * as OmpSessionLoader from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import * as OmpSessionManager from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import type * as AgentEvent from "@pico/contract/agent-event";
 import * as Agent from "@pico/contract/agent-message";
 import type { MessageDelivery, ShakeMode, ShakeResult } from "@pico/contract/agent-runtime";
 import * as Chat from "@pico/contract/chat-model";
 import * as Schedule from "@pico/contract/schedule";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
@@ -40,6 +42,123 @@ const shakeResult = (mode: ShakeMode): ShakeResult => {
 };
 
 describe("session pool publication", () => {
+  it.effect(
+    "includes delivery settlements received during a snapshot without resetting a live run",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const observing = yield* Deferred.make<void>();
+          const finishRead = yield* Deferred.make<void>();
+          const opened = yield* Deferred.make<Parameters<SessionFactory["open"]>[1]>();
+          let messages: ReadonlyArray<Agent.AgentMessage> = [];
+          let reads = 0;
+          const pool = yield* makeSessionPool({
+            factory: {
+              open: (_id, emit) =>
+                Effect.sync(() => {
+                  Deferred.doneUnsafe(opened, Effect.succeed(emit));
+                  return {
+                    session: {
+                      isStreaming: false,
+                      waitForIdle: async () => {},
+                      settleInFlightMessagePersistence: async () => {},
+                      abort: async () => {},
+                      beginDispose: () => {},
+                      dispose: async () => {},
+                    },
+                    sendPrompt: () => Promise.reject(new Error("Unexpected prompt")),
+                    askBtw: () => Promise.reject(new Error("Unexpected side question")),
+                    shake: () => Promise.reject(new Error("Unexpected shake")),
+                    switchModel: () => Promise.reject(new Error("Unexpected model switch")),
+                    appendAssistantMessage: () =>
+                      Promise.reject(new Error("Delivery must not append")),
+                    flush: async () => {},
+                    historyBoundary: () => JSON.stringify(messages),
+                    settleHistory: async () => {},
+                    contextUsage: () => ({ kind: "unavailable" }),
+                    unsubscribe: () => {},
+                  } satisfies OpenedSession;
+                }),
+            },
+            loadTranscript: () =>
+              Effect.gen(function* () {
+                const current = messages;
+                if (reads++ === 0) {
+                  yield* Deferred.succeed(observing, undefined);
+                  yield* Deferred.await(finishRead);
+                }
+                return { messages: current, todo: { kind: "ready", phases: [] } };
+              }),
+          });
+          const envelopes: AgentEvent.AgentEventEnvelope[] = [];
+          yield* pool.events.pipe(
+            Stream.runForEach((event) => Effect.sync(() => envelopes.push(event))),
+            Effect.forkChild,
+          );
+          yield* pool.contextUsage(chatId);
+          const emit = yield* Deferred.await(opened);
+          const prefix = {
+            type: "text-delta",
+            messageId: Agent.AgentMessageId.make("active-assistant"),
+            contentIndex: 0,
+            text: "Already streaming",
+          } satisfies AgentEvent.AgentEvent;
+          const tool = {
+            type: "tool-started",
+            toolCallId: "active-tool",
+            toolName: "read",
+            argumentsJson: '{"path":"source.ts"}',
+          } satisfies AgentEvent.AgentEvent;
+          emit(prefix);
+          emit(tool);
+          emit({ type: "run-started" });
+          const reading = yield* pool.transcript(chatId).pipe(Effect.forkChild);
+          yield* Deferred.await(observing);
+          const delivery = {
+            role: "assistant",
+            id: Agent.AgentMessageId.make("delivered-assistant"),
+            status: "completed",
+            stopReason: "stop",
+            content: [{ type: "text", text: "Delivered beside the main answer" }],
+            model: "test",
+            timestamp: 1,
+          } satisfies Agent.AgentAssistantMessage;
+          yield* pool.deliver(chatId, delivery);
+          yield* pool.drain();
+          yield* Deferred.succeed(finishRead, undefined);
+          const snapshot = yield* Fiber.join(reading);
+          const draft = {
+            kind: "draft",
+            messageId: prefix.messageId,
+            blocks: [prefix],
+          } satisfies (typeof snapshot.runtime.assistant)[number];
+          assert.deepStrictEqual(snapshot.messages, []);
+          assert.deepStrictEqual(snapshot.runtime.run, { kind: "running" });
+          assert.deepStrictEqual(snapshot.runtime.assistant, [
+            draft,
+            { kind: "settled", message: delivery },
+          ]);
+          assert.deepStrictEqual(snapshot.runtime.tools, [{ kind: "running", start: tool }]);
+          assert.strictEqual(snapshot.runtime.publication, envelopes.at(-1)?.publication);
+
+          messages = [delivery];
+          const acknowledged = yield* pool.transcript(chatId);
+          assert.deepStrictEqual(acknowledged.messages, [delivery]);
+          assert.deepStrictEqual(acknowledged.runtime.assistant, [draft]);
+          yield* pool.deliver(chatId, {
+            ...delivery,
+            id: Agent.AgentMessageId.make("unpersisted-delivery"),
+          });
+          yield* pool.close(chatId);
+          const evicted = yield* pool.transcript(chatId);
+          assert.deepStrictEqual(evicted.messages, [delivery]);
+          assert.deepStrictEqual(evicted.runtime.run, { kind: "idle" });
+          assert.deepStrictEqual(evicted.runtime.assistant, []);
+          assert.deepStrictEqual(evicted.runtime.tools, []);
+        }),
+      ),
+  );
+
   it.effect(
     "persists local-only scheduled publications and still notifies transcript subscribers",
     () =>
@@ -80,6 +199,8 @@ describe("session pool publication", () => {
                     await manager.ensureOnDisk();
                     await manager.flush();
                   },
+                  historyBoundary: () => JSON.stringify(manager.getEntries()),
+                  settleHistory: () => manager.flush(),
                   sendPrompt: () => Promise.resolve(admitted),
                   shake: async (mode) => shakeResult(mode),
                   appendAssistantMessage: async (message) => {
@@ -304,6 +425,8 @@ describe("session pool publication", () => {
                     await manager.ensureOnDisk();
                     await manager.flush();
                   },
+                  historyBoundary: () => JSON.stringify(manager.getEntries()),
+                  settleHistory: () => manager.flush(),
                   sendPrompt: (_value, onStarted) => {
                     onStarted?.();
                     manager.appendMessage(assistantMessage);

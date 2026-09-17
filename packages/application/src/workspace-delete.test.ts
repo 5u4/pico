@@ -2,8 +2,10 @@ import * as BunCrypto from "@effect/platform-bun/BunCrypto";
 import * as BunFileSystem from "@effect/platform-bun/BunFileSystem";
 import * as BunPath from "@effect/platform-bun/BunPath";
 import { assert, describe, it } from "@effect/vitest";
-import { AgentRuntime, type TranscriptSnapshot } from "@pico/contract/agent-runtime";
+import { Publication } from "@pico/contract/agent-event";
+import { AgentRuntime } from "@pico/contract/agent-runtime";
 import { AgentSessionStore } from "@pico/contract/agent-session-store";
+import type { TranscriptSnapshot } from "@pico/contract/agent-snapshot";
 import { Application } from "@pico/contract/application";
 import { ChatId } from "@pico/contract/chat-model";
 import { ChatRepository } from "@pico/contract/chat-repository";
@@ -32,6 +34,7 @@ const emptyTranscript: TranscriptSnapshot = {
   messages: [],
   contextUsage: { kind: "unavailable" },
   todo: { kind: "ready", phases: [] },
+  runtime: { publication: Publication.make(0), run: { kind: "idle" }, assistant: [], tools: [] },
 };
 const populatedTranscript: TranscriptSnapshot = {
   ...emptyTranscript,

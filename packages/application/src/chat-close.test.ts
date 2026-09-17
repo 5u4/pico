@@ -2,13 +2,11 @@ import * as BunCrypto from "@effect/platform-bun/BunCrypto";
 import * as BunFileSystem from "@effect/platform-bun/BunFileSystem";
 import * as BunPath from "@effect/platform-bun/BunPath";
 import { assert, describe, it } from "@effect/vitest";
+import { Publication } from "@pico/contract/agent-event";
 import * as AgentMessage from "@pico/contract/agent-message";
-import {
-  AgentRuntime,
-  type ShakeResult,
-  type TranscriptSnapshot,
-} from "@pico/contract/agent-runtime";
+import { AgentRuntime, type ShakeResult } from "@pico/contract/agent-runtime";
 import { AgentSessionStore } from "@pico/contract/agent-session-store";
+import type { TranscriptSnapshot } from "@pico/contract/agent-snapshot";
 import { Application } from "@pico/contract/application";
 import * as Chat from "@pico/contract/chat-model";
 import { ChatRepository } from "@pico/contract/chat-repository";
@@ -59,6 +57,7 @@ const runtimeTranscript: TranscriptSnapshot = {
   ],
   contextUsage: { kind: "unavailable" },
   todo: { kind: "ready", phases: [] },
+  runtime: { publication: Publication.make(0), run: { kind: "idle" }, assistant: [], tools: [] },
 };
 
 const assertApplicationError = (
@@ -714,6 +713,12 @@ describe("Chat close", () => {
               messages: [],
               contextUsage: { kind: "unavailable" },
               todo: { kind: "ready", phases: [] },
+              runtime: {
+                publication: Publication.make(0),
+                run: { kind: "idle" },
+                assistant: [],
+                tools: [],
+              },
             }),
           send: () => Effect.die("unexpected ordinary send"),
           sendCaptured: (_chatId, runId) =>
@@ -856,6 +861,12 @@ describe("Chat close", () => {
                 messages: [],
                 contextUsage: { kind: "unavailable" },
                 todo: { kind: "ready", phases: [] },
+                runtime: {
+                  publication: Publication.make(0),
+                  run: { kind: "idle" },
+                  assistant: [],
+                  tools: [],
+                },
               }),
             send: () => Effect.die("unexpected send"),
             sendCaptured: () => Effect.die("unexpected captured runtime send"),

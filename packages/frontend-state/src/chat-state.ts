@@ -4,13 +4,11 @@ import type {
   AgentMessageId,
   AgentTranscript,
 } from "@pico/contract/agent-message";
+import type { RuntimeSnapshot, TranscriptSnapshot } from "@pico/contract/agent-snapshot";
 
 type Event<Type extends AgentEvent["type"]> = Extract<AgentEvent, { readonly type: Type }>;
 
-export type LiveRun =
-  | { readonly kind: "unknown" }
-  | { readonly kind: "running" }
-  | { readonly kind: "finished"; readonly outcome: Event<"run-finished">["outcome"] };
+export type LiveRun = { readonly kind: "unknown" } | RuntimeSnapshot["run"];
 
 export type LiveBlock = Event<"text-delta" | "thinking-delta">;
 
@@ -56,6 +54,13 @@ const retainDrafts = (messages: LiveChat["assistant"]): LiveChat["assistant"] =>
   return retained ?? messages;
 };
 
+export const unconfirmChat = (state: LiveChat): LiveChat => ({
+  ...state,
+  run: { kind: "unknown" },
+  assistant: retainDrafts(state.assistant),
+  tools: new Map(),
+});
+
 export const acknowledgeTranscript = (state: LiveChat, transcript: AgentTranscript): LiveChat => {
   let assistant: Map<AgentMessageId, LiveAssistant> | undefined;
   let snapshotIds: Set<AgentMessageId> | undefined;
@@ -77,6 +82,36 @@ export const acknowledgeTranscript = (state: LiveChat, transcript: AgentTranscri
         snapshotIds: snapshotIds ?? state.snapshotIds,
       }
     : state;
+};
+
+export const rehydrateChat = (state: LiveChat, snapshot: TranscriptSnapshot): LiveChat => {
+  const acknowledged = acknowledgeTranscript(state, snapshot.messages);
+  const assistant = new Map(retainDrafts(acknowledged.assistant));
+  for (const observed of snapshot.runtime.assistant) {
+    const id = observed.kind === "draft" ? observed.messageId : observed.message.id;
+    if (acknowledged.snapshotIds.has(id)) continue;
+    assistant.set(
+      id,
+      observed.kind === "settled"
+        ? observed
+        : {
+            kind: "draft",
+            blocks: new Map(observed.blocks.map((block) => [block.contentIndex, block])),
+            phase: snapshot.runtime.run.kind === "running" ? "streaming" : "retained",
+          },
+    );
+  }
+  return {
+    ...acknowledged,
+    run: snapshot.runtime.run,
+    assistant,
+    tools: new Map(
+      snapshot.runtime.tools.map((tool) => [
+        tool.kind === "running" ? tool.start.toolCallId : tool.end.toolCallId,
+        tool,
+      ]),
+    ),
+  };
 };
 
 export const reduceLiveChat = (
@@ -129,13 +164,14 @@ export const reduceLiveChat = (
         start: state.tools.get(event.toolCallId)?.start ?? null,
         end: event,
       });
-      return { ...state, run: { kind: "running" }, tools };
+      return { ...state, tools };
     }
     case "run-finished":
       return {
         ...state,
         run: { kind: "finished", outcome: event.outcome },
         assistant: retainDrafts(state.assistant),
+        tools: new Map([...state.tools].filter(([, tool]) => tool.kind === "finished")),
       };
     default: {
       const exhaustive: never = event;

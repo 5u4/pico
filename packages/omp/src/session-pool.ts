@@ -1,5 +1,5 @@
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session-events";
-import type * as AgentEvent from "@pico/contract/agent-event";
+import * as AgentEvent from "@pico/contract/agent-event";
 import type * as AgentMessage from "@pico/contract/agent-message";
 import type {
   CapturedAgentRun,
@@ -10,8 +10,8 @@ import type {
   ModelSwitchResult,
   ShakeMode,
   ShakeResult,
-  TranscriptSnapshot,
 } from "@pico/contract/agent-runtime";
+import type { RuntimeSnapshot, TranscriptSnapshot } from "@pico/contract/agent-snapshot";
 import type * as Chat from "@pico/contract/chat-model";
 import { AgentError } from "@pico/contract/errors";
 import type { ScheduleRunId } from "@pico/contract/schedule";
@@ -59,6 +59,8 @@ export interface OpenedSession {
   readonly switchModel: (model: ModelRef) => Promise<ModelInfo>;
   readonly flush: () => Promise<void>;
   readonly contextUsage: () => ContextUsage;
+  readonly historyBoundary: () => string;
+  readonly settleHistory: () => Promise<void>;
   readonly appendAssistantMessage: (message: OmpAssistantMessage) => Promise<void>;
   readonly unsubscribe: () => void;
 }
@@ -148,6 +150,7 @@ type SessionItem =
 
 interface SessionKey {
   readonly chatId: Chat.ChatId;
+  readonly runtime: PublicRuntime;
 }
 
 interface SessionEntries {
@@ -165,6 +168,8 @@ interface LiveEntry {
   readonly switchModel: OpenedSession["switchModel"];
   readonly flush: OpenedSession["flush"];
   readonly contextUsage: () => ContextUsage;
+  readonly historyBoundary: OpenedSession["historyBoundary"];
+  readonly settleHistory: OpenedSession["settleHistory"];
   readonly appendAssistantMessage: (message: OmpAssistantMessage) => Promise<void>;
   readonly events: Queue.Queue<SessionItem, Cause.Done>;
   readonly forwarder: Fiber.Fiber<void>;
@@ -175,6 +180,116 @@ interface LiveEntry {
   readonly operations: Set<Deferred.Deferred<void>>;
   readonly closed: Deferred.Deferred<void>;
 }
+
+type PublicAssistant =
+  | {
+      readonly kind: "draft";
+      readonly messageId: AgentMessage.AgentMessageId;
+      readonly blocks: Map<
+        number,
+        Extract<AgentEvent.AgentEvent, { type: "text-delta" | "thinking-delta" }>
+      >;
+    }
+  | Extract<RuntimeSnapshot["assistant"][number], { kind: "settled" }>;
+
+interface PublicRuntime {
+  run: RuntimeSnapshot["run"];
+  readonly assistant: Map<AgentMessage.AgentMessageId, PublicAssistant>;
+  readonly tools: Map<string, RuntimeSnapshot["tools"][number]>;
+  structural: number;
+  mutations: number;
+  healthy: boolean;
+}
+
+const makePublicRuntime = (): PublicRuntime => ({
+  run: { kind: "idle" },
+  assistant: new Map(),
+  tools: new Map(),
+  structural: 0,
+  mutations: 0,
+  healthy: true,
+});
+
+const beginPublicRun = (runtime: PublicRuntime) => {
+  if (runtime.run.kind === "running") return;
+  runtime.run = { kind: "running" };
+  for (const [id, assistant] of runtime.assistant) {
+    if (assistant.kind === "draft") runtime.assistant.delete(id);
+  }
+  runtime.tools.clear();
+};
+
+const projectEvent = (
+  runtime: PublicRuntime,
+  event: AgentEvent.AgentEvent,
+  origin: AgentEvent.AgentEventEnvelope["origin"],
+) => {
+  if (origin === "delivery" && (event.type === "run-started" || event.type === "run-finished"))
+    return;
+  switch (event.type) {
+    case "run-started":
+      beginPublicRun(runtime);
+      break;
+    case "text-delta":
+    case "thinking-delta": {
+      const previous = runtime.assistant.get(event.messageId);
+      if (previous?.kind === "settled") break;
+      beginPublicRun(runtime);
+      const draft: Extract<PublicAssistant, { kind: "draft" }> = previous ?? {
+        kind: "draft",
+        messageId: event.messageId,
+        blocks: new Map(),
+      };
+      const block = draft.blocks.get(event.contentIndex);
+      draft.blocks.set(event.contentIndex, {
+        ...event,
+        text: block?.type === event.type ? block.text + event.text : event.text,
+      });
+      runtime.assistant.set(event.messageId, draft);
+      break;
+    }
+    case "message-settled":
+      if (event.message.role === "assistant")
+        runtime.assistant.set(event.message.id, { kind: "settled", message: event.message });
+      break;
+    case "tool-started":
+      beginPublicRun(runtime);
+      runtime.tools.set(event.toolCallId, { kind: "running", start: event });
+      break;
+    case "tool-finished":
+      runtime.tools.set(event.toolCallId, {
+        kind: "finished",
+        start: runtime.tools.get(event.toolCallId)?.start ?? null,
+        end: event,
+      });
+      break;
+    case "run-finished":
+      runtime.run = { kind: "finished", outcome: event.outcome };
+      for (const [id, tool] of runtime.tools) if (tool.kind === "running") runtime.tools.delete(id);
+      break;
+    case "title-changed":
+    case "context-invalidated":
+    case "notice":
+      break;
+  }
+};
+
+const runtimeSnapshot = (
+  runtime: PublicRuntime,
+  publication: AgentEvent.Publication,
+): RuntimeSnapshot => ({
+  publication,
+  run: runtime.run,
+  assistant: Array.from(runtime.assistant.values(), (value) =>
+    value.kind === "settled" ? value : { ...value, blocks: Array.from(value.blocks.values()) },
+  ),
+  tools: Array.from(runtime.tools.values()),
+});
+
+type PublishEvent = (
+  key: SessionKey | undefined,
+  envelope: Omit<AgentEvent.AgentEventEnvelope, "publication">,
+) => void;
 
 interface MakeOptions {
   readonly factory: SessionFactory;
@@ -261,11 +376,21 @@ const drainSessionEvents = Effect.fn("SessionPool.drainSessionEvents")(function*
 const runOperation = Effect.fn("SessionPool.runOperation")(function* <A>(
   entry: LiveEntry,
   message: string,
+  history: "unchanged" | "mutating",
   evaluate: (signal: AbortSignal) => Promise<A>,
   complete?: (value: A) => Effect.Effect<void>,
 ) {
   const controller = new AbortController();
   const finished = yield* Deferred.make<void>();
+  let mutating = false;
+  const endMutation = () => {
+    if (!mutating) return;
+    mutating = false;
+    entry.key.runtime.mutations--;
+    entry.key.runtime.structural++;
+  };
+  const publishCompletion = (value: A) =>
+    Effect.sync(endMutation).pipe(Effect.andThen(complete?.(value) ?? Effect.void));
   return yield* Effect.uninterruptibleMask((restore) =>
     Effect.acquireUseRelease(
       Effect.acquireUseRelease(
@@ -276,9 +401,19 @@ const runOperation = Effect.fn("SessionPool.runOperation")(function* <A>(
               if (MutableRef.get(entry.lifecycle).type !== "open") {
                 throw new AgentError({ message: "OMP session is closing" });
               }
-              const pending = evaluate(controller.signal);
-              entry.operations.add(finished);
-              return pending;
+              if (history === "mutating") {
+                entry.key.runtime.structural++;
+                entry.key.runtime.mutations++;
+                mutating = true;
+              }
+              try {
+                const pending = evaluate(controller.signal);
+                entry.operations.add(finished);
+                return pending;
+              } catch (cause) {
+                endMutation();
+                throw cause;
+              }
             },
             catch: (cause) => agentError(message, cause),
           }),
@@ -291,12 +426,12 @@ const runOperation = Effect.fn("SessionPool.runOperation")(function* <A>(
           ),
         ).pipe(
           Effect.onExit((exit) => {
-            if (Exit.isSuccess(exit)) return complete?.(exit.value) ?? Effect.void;
+            if (Exit.isSuccess(exit)) return publishCompletion(exit.value);
             if (!Cause.hasInterrupts(exit.cause)) return Effect.void;
             return Effect.sync(() => controller.abort()).pipe(
               Effect.andThen(
                 boundary(message, () => pending).pipe(
-                  Effect.flatMap((value) => complete?.(value) ?? Effect.void),
+                  Effect.flatMap(publishCompletion),
                   Effect.catchCause((cause) =>
                     Cause.hasInterruptsOnly(cause) ? Effect.void : Effect.failCause(cause),
                   ),
@@ -306,9 +441,10 @@ const runOperation = Effect.fn("SessionPool.runOperation")(function* <A>(
           }),
         ),
       () =>
-        Effect.sync(() => entry.operations.delete(finished)).pipe(
-          Effect.andThen(Deferred.succeed(finished, undefined)),
-        ),
+        Effect.sync(() => {
+          entry.operations.delete(finished);
+          endMutation();
+        }).pipe(Effect.andThen(Deferred.succeed(finished, undefined))),
     ),
   );
 });
@@ -387,7 +523,7 @@ const releaseEntry = (entry: LiveEntry) =>
 
 const acquireEntry = Effect.fn("SessionPool.acquireEntry")(function* (
   factory: SessionFactory,
-  output: Queue.Queue<OutputItem, Cause.Done>,
+  publishEvent: PublishEvent,
   key: SessionKey,
 ) {
   const { chatId } = key;
@@ -421,6 +557,14 @@ const acquireEntry = Effect.fn("SessionPool.acquireEntry")(function* (
             : { kind: "settled", terminal: event };
       }
     }
+    if (event.type === "message-settled" || event.type === "context-invalidated")
+      key.runtime.structural++;
+    if (
+      owner?.kind !== "captured" ||
+      event.type === "title-changed" ||
+      event.type === "context-invalidated"
+    )
+      publishEvent(key, { chatId, event, origin: "session" });
     Queue.offerUnsafe(events, { kind: "event", event, owner });
   });
   const forwarder = yield* Stream.fromQueue(events).pipe(
@@ -437,7 +581,6 @@ const acquireEntry = Effect.fn("SessionPool.acquireEntry")(function* (
         if (owner?.kind === "ordinary" && item.event.type === "run-finished") {
           yield* settleOrdinaryRun(chatId, run, owner);
         }
-        yield* Queue.offer(output, { kind: "event", envelope: { chatId, event: item.event } });
       }),
     ),
     Effect.asVoid,
@@ -453,6 +596,11 @@ const acquireEntry = Effect.fn("SessionPool.acquireEntry")(function* (
               failureKind: "defect",
             }),
           ),
+    ),
+    Effect.ensuring(
+      Effect.sync(() => {
+        key.runtime.healthy = false;
+      }),
     ),
     Effect.ensuring(Queue.end(events)),
     Effect.forkDetach,
@@ -472,6 +620,8 @@ const acquireEntry = Effect.fn("SessionPool.acquireEntry")(function* (
     flush: opened.flush,
     appendAssistantMessage: opened.appendAssistantMessage,
     contextUsage: opened.contextUsage,
+    historyBoundary: opened.historyBoundary,
+    settleHistory: opened.settleHistory,
     events,
     forwarder,
     lifecycle: MutableRef.make<LiveLifecycle>({
@@ -498,7 +648,7 @@ const retain = (sessions: SessionEntries, chatId: Chat.ChatId) =>
   Effect.suspend(() => {
     let key = sessions.keys.get(chatId);
     if (key === undefined) {
-      key = Equal.byReferenceUnsafe({ chatId });
+      key = Equal.byReferenceUnsafe({ chatId, runtime: makePublicRuntime() });
       sessions.keys.set(chatId, key);
     }
     const selected = key;
@@ -529,9 +679,15 @@ export const makeSessionPool = Effect.fn("SessionPool.make")(function* (
     Queue.end(queue).pipe(Effect.asVoid),
   );
   const keys: SessionEntries["keys"] = new Map();
+  let publication = AgentEvent.Publication.make(0);
+  const publishEvent: PublishEvent = (key, envelope) => {
+    publication = AgentEvent.Publication.make(publication + 1);
+    if (key !== undefined) projectEvent(key.runtime, envelope.event, envelope.origin);
+    Queue.offerUnsafe(output, { kind: "event", envelope: { ...envelope, publication } });
+  };
   const cache = yield* RcMap.make({
     lookup: (key: SessionKey) =>
-      Effect.acquireRelease(acquireEntry(options.factory, output, key), (entry) =>
+      Effect.acquireRelease(acquireEntry(options.factory, publishEvent, key), (entry) =>
         releaseEntry(entry).pipe(Effect.ensuring(forgetKey(keys, key))),
       ),
     idleTimeToLive: "10 minutes",
@@ -550,37 +706,74 @@ export const makeSessionPool = Effect.fn("SessionPool.make")(function* (
   ): Effect.fn.Return<TranscriptSnapshot, AgentError> {
     return yield* Effect.scoped(
       Effect.gen(function* () {
-        const entry = yield* retainOption(sessions, chatId);
-        if (Option.isNone(entry)) {
-          return {
-            ...(yield* options.loadTranscript(chatId)),
-            contextUsage: { kind: "unavailable" },
-          } satisfies TranscriptSnapshot;
-        }
-        return yield* entry.value.admission.withPermit(
-          Effect.gen(function* () {
-            const open = MutableRef.get(entry.value.lifecycle).type === "open";
-            if (open) {
-              yield* boundary("Failed to settle OMP transcript persistence", () =>
-                entry.value.session.settleInFlightMessagePersistence(),
-              );
-            }
+        while (true) {
+          const selected = keys.get(chatId);
+          const retained = yield* retainOption(sessions, chatId);
+          if (Option.isNone(retained)) {
             const snapshot = yield* options.loadTranscript(chatId);
+            if (keys.get(chatId) !== selected) continue;
             return {
               ...snapshot,
-              contextUsage: open
-                ? yield* Effect.sync((): TranscriptSnapshot["contextUsage"] => {
-                    try {
-                      return entry.value.contextUsage();
-                    } catch {
-                      return { kind: "error" };
-                    }
-                  })
-                : { kind: "unavailable" },
+              contextUsage: { kind: "unavailable" },
+              runtime: runtimeSnapshot(makePublicRuntime(), publication),
             } satisfies TranscriptSnapshot;
-          }),
-        );
+          }
+          const entry = retained.value;
+          const value = yield* entry.admission.withPermit(
+            Effect.gen(function* () {
+              const runtime = entry.key.runtime;
+              if (!runtime.healthy || MutableRef.get(entry.lifecycle).type !== "open")
+                return yield* new AgentError({ message: "OMP runtime observation is unavailable" });
+              if (runtime.mutations !== 0)
+                return yield* new AgentError({ message: "OMP history is changing" });
+              const structural = runtime.structural;
+              const before = yield* Effect.try({
+                try: entry.historyBoundary,
+                catch: (cause) => agentError("Failed to observe OMP history", cause),
+              });
+              yield* boundary("Failed to settle OMP transcript persistence", entry.settleHistory);
+              const snapshot = yield* options.loadTranscript(chatId);
+              return yield* Effect.try({
+                try: (): TranscriptSnapshot | undefined => {
+                  if (!runtime.healthy) throw new Error("OMP event forwarder stopped");
+                  if (
+                    runtime.structural !== structural ||
+                    runtime.mutations !== 0 ||
+                    keys.get(chatId) !== entry.key ||
+                    entry.historyBoundary() !== before
+                  )
+                    return undefined;
+                  for (const message of snapshot.messages) {
+                    if (
+                      message.role === "assistant" &&
+                      runtime.assistant.get(message.id)?.kind === "settled"
+                    )
+                      runtime.assistant.delete(message.id);
+                  }
+                  let contextUsage: TranscriptSnapshot["contextUsage"];
+                  try {
+                    contextUsage = entry.contextUsage();
+                  } catch {
+                    contextUsage = { kind: "error" };
+                  }
+                  return {
+                    ...snapshot,
+                    contextUsage,
+                    runtime: runtimeSnapshot(runtime, publication),
+                  };
+                },
+                catch: (cause) => agentError("Failed to observe OMP runtime", cause),
+              });
+            }),
+          );
+          if (value !== undefined) return value;
+        }
       }),
+    ).pipe(
+      Effect.timeout("5 seconds"),
+      Effect.catchTag("TimeoutError", () =>
+        Effect.fail(new AgentError({ message: "OMP history did not reach a stable observation" })),
+      ),
     );
   });
 
@@ -591,8 +784,11 @@ export const makeSessionPool = Effect.fn("SessionPool.make")(function* (
     return yield* Effect.scoped(
       Effect.gen(function* () {
         const entry = yield* retain(sessions, chatId);
-        return yield* runOperation(entry, "Failed to ask OMP side question", (signal) =>
-          entry.askBtw(question, signal),
+        return yield* runOperation(
+          entry,
+          "Failed to ask OMP side question",
+          "unchanged",
+          (signal) => entry.askBtw(question, signal),
         );
       }),
     );
@@ -944,12 +1140,16 @@ export const makeSessionPool = Effect.fn("SessionPool.make")(function* (
               : "failed",
       },
     ];
-    for (const event of events) {
-      yield* Queue.offer(output, {
-        kind: "event",
-        envelope: { chatId, event, ...(localOnly === undefined ? {} : { localOnly }) },
-      }).pipe(Effect.asVoid);
-    }
+    yield* Effect.sync(() => {
+      for (const event of events) {
+        publishEvent(keys.get(chatId), {
+          chatId,
+          event,
+          origin: "delivery",
+          ...(localOnly === undefined ? {} : { localOnly }),
+        });
+      }
+    });
   });
 
   const deliver = Effect.fn("AgentRuntime.deliver")(function* (
@@ -990,6 +1190,7 @@ export const makeSessionPool = Effect.fn("SessionPool.make")(function* (
         yield* runOperation(
           entry,
           "Failed to persist scheduled publication",
+          "mutating",
           () => entry.appendAssistantMessage(message),
           () => deliverEvents(chatId, normalizeMessage(message), localOnly),
         );
@@ -1081,12 +1282,16 @@ export const makeSessionPool = Effect.fn("SessionPool.make")(function* (
         return yield* runOperation(
           entry,
           "Failed to shake OMP session",
+          "mutating",
           (signal) => entry.shake(mode, signal),
           () =>
-            Queue.offer(output, {
-              kind: "event",
-              envelope: { chatId, event: { type: "context-invalidated" } },
-            }).pipe(Effect.asVoid),
+            Effect.sync(() =>
+              publishEvent(entry.key, {
+                chatId,
+                event: { type: "context-invalidated" },
+                origin: "session",
+              }),
+            ),
         );
       }),
     );

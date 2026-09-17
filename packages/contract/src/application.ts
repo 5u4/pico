@@ -12,8 +12,8 @@ import type {
   ModelSwitchResult,
   ShakeMode,
   ShakeResult,
-  TranscriptSnapshot,
 } from "./agent-runtime.ts";
+import type { TranscriptSnapshot } from "./agent-snapshot.ts";
 import type { Chat, ChatId, ChatListEntry } from "./chat-model.ts";
 import type { ApplicationError, ChatClosed, GitError, WorkspaceBindingInvalid } from "./errors.ts";
 import type { AbsolutePath } from "./path.ts";

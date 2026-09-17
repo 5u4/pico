@@ -4,9 +4,14 @@ import * as OmpRuntimeInit from "@oh-my-pi/pi-coding-agent/modes/runtime-init";
 import * as OmpAgentRegistry from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import * as OmpSdk from "@oh-my-pi/pi-coding-agent/sdk";
 import type * as OmpAgentSession from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session-events";
 import * as OmpSessionLoader from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import * as OmpSessionManager from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type * as OmpShake from "@oh-my-pi/pi-coding-agent/session/shake-types";
+import {
+  sameMessageContent,
+  sessionMessagePersistenceKey,
+} from "@oh-my-pi/pi-coding-agent/session/turn-persistence";
 import { AgentRuntime, type ContextUsage, type ShakeResult } from "@pico/contract/agent-runtime";
 import { BranchNaming, type BranchNamingHandler } from "@pico/contract/branch-naming";
 import type * as Chat from "@pico/contract/chat-model";
@@ -293,6 +298,106 @@ const normalizeContextUsage = (
   };
 };
 
+export const makeSessionObservation = (
+  session: Pick<
+    OmpAgentSession.AgentSession,
+    "sessionManager" | "settleInFlightMessagePersistence" | "subscribe"
+  >,
+  emit: Parameters<SessionFactory["open"]>[1],
+  onError: (cause: unknown, event: AgentSessionEvent) => void,
+): Pick<OpenedSession, "historyBoundary" | "settleHistory" | "unsubscribe"> => {
+  const manager = session.sessionManager;
+  const pendingPersistence = new Set<OmpAgentSession.AgentSession["messages"][number]>();
+  let observationFailure: unknown;
+  const previousAppendObserver = manager.onEntryAppended;
+  const observeAppend: NonNullable<OmpSessionManager.SessionManager["onEntryAppended"]> = (
+    entry,
+  ) => {
+    if (entry.type === "message") {
+      const key = sessionMessagePersistenceKey(entry.message);
+      for (const message of pendingPersistence) {
+        if (
+          key !== undefined &&
+          key === sessionMessagePersistenceKey(message) &&
+          ((message.role === "assistant" &&
+            "messageId" in message &&
+            typeof message.messageId === "string" &&
+            message.messageId.length > 0) ||
+            sameMessageContent(entry.message, message))
+        ) {
+          pendingPersistence.delete(message);
+        }
+      }
+    }
+    previousAppendObserver?.(entry);
+  };
+  manager.onEntryAppended = observeAppend;
+  const settleHistory = async () => {
+    if (observationFailure !== undefined) throw observationFailure;
+    const pending = Array.from(pendingPersistence);
+    await session.settleInFlightMessagePersistence();
+    await manager.ensureOnDisk();
+    await manager.flush();
+    if (pending.length === 0 || pendingPersistence.size === 0) return;
+    const entries = manager.getEntries();
+    for (const message of pending) {
+      if (!pendingPersistence.has(message)) continue;
+      const key = sessionMessagePersistenceKey(message);
+      if (
+        key === undefined ||
+        !entries.some(
+          (entry) =>
+            entry.type === "message" &&
+            sessionMessagePersistenceKey(entry.message) === key &&
+            ((message.role === "assistant" &&
+              "messageId" in message &&
+              typeof message.messageId === "string" &&
+              message.messageId.length > 0) ||
+              sameMessageContent(entry.message, message)),
+        )
+      ) {
+        throw new Error("Published OMP message persistence is not confirmed");
+      }
+      pendingPersistence.delete(message);
+    }
+  };
+  const unsubscribe = session.subscribe((event) => {
+    try {
+      const normalized = normalizeAgentEvent(event);
+      if (normalized === undefined) return;
+      if (event.type === "message_end" && observationFailure === undefined)
+        pendingPersistence.add(event.message);
+      emit(normalized);
+      if (normalized.type === "run-finished")
+        void settleHistory().catch((cause) => {
+          observationFailure = cause;
+          pendingPersistence.clear();
+        });
+    } catch (cause) {
+      observationFailure = cause;
+      onError(cause, event);
+    }
+  });
+  return {
+    historyBoundary: () => {
+      if (observationFailure !== undefined) throw observationFailure;
+      return JSON.stringify(manager.getEntries());
+    },
+    settleHistory,
+    unsubscribe: () => {
+      try {
+        unsubscribe();
+      } finally {
+        pendingPersistence.clear();
+        if (manager.onEntryAppended === observeAppend) {
+          if (previousAppendObserver === undefined) delete manager.onEntryAppended;
+          else manager.onEntryAppended = previousAppendObserver;
+        }
+      }
+    },
+  };
+};
+
 const makeFactory = (
   sessionsDir: AbsolutePath,
   path: Path.Path,
@@ -399,14 +504,14 @@ const makeFactory = (
       emitTitleChanged: (title) => emit({ type: "title-changed", title }),
     });
 
-    const unsubscribe = yield* syncBoundary("Failed to subscribe to OMP session events", () =>
-      created.session.subscribe((event) => {
-        try {
-          const normalized = normalizeAgentEvent(event);
-          if (normalized === undefined) return;
-          emit(normalized);
-          titleFlow.observe(normalized);
-        } catch (cause) {
+    const observation = yield* syncBoundary("Failed to subscribe to OMP session events", () =>
+      makeSessionObservation(
+        created.session,
+        (event) => {
+          emit(event);
+          titleFlow.observe(event);
+        },
+        (cause, event) => {
           void runEffect(
             Effect.logWarning(
               "OMP event callback failed",
@@ -421,8 +526,8 @@ const makeFactory = (
               }),
             ),
           );
-        }
-      }),
+        },
+      ),
     ).pipe(
       Effect.catch((error) => disposeSessionAfterFailure(created.session, error)),
       Effect.annotateLogs({
@@ -469,7 +574,7 @@ const makeFactory = (
       Effect.catch((error) =>
         ignoreCleanupFailure(
           "Failed to unsubscribe after OMP startup failure",
-          syncBoundary("Failed to unsubscribe from OMP session events", unsubscribe),
+          syncBoundary("Failed to unsubscribe from OMP session events", observation.unsubscribe),
         ).pipe(Effect.andThen(disposeSessionAfterFailure(created.session, error))),
       ),
     );
@@ -485,12 +590,12 @@ const makeFactory = (
         await manager.flush();
       },
       contextUsage: () => normalizeContextUsage(created.session.getContextBreakdown()),
+      ...observation,
       appendAssistantMessage: async (message) => {
         created.session.sessionManager.appendMessage(message);
         created.session.agent.appendMessage(message);
         await created.session.sessionManager.flush();
       },
-      unsubscribe,
     };
     yield* Effect.logDebug("OMP session ready").pipe(
       Effect.annotateLogs({

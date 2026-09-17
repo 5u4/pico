@@ -73,9 +73,20 @@ export const AgentEvent = Schema.Union([
 ]);
 export type AgentEvent = typeof AgentEvent.Type;
 
+export const Publication = Schema.Natural.pipe(Schema.brand("Publication"));
+export type Publication = typeof Publication.Type;
+
 export const AgentEventEnvelope = Schema.Struct({
   chatId: ChatId,
   event: AgentEvent,
+  publication: Publication,
+  origin: Schema.Literals(["session", "delivery"]),
   localOnly: Schema.optional(Schema.Literal(true)),
 });
 export type AgentEventEnvelope = typeof AgentEventEnvelope.Type;
+
+export const EventsFrame = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("ready") }),
+  Schema.Struct({ kind: Schema.Literal("event"), envelope: AgentEventEnvelope }),
+]);
+export type EventsFrame = typeof EventsFrame.Type;

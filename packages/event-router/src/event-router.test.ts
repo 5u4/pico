@@ -1,12 +1,15 @@
 import { assert, describe, it } from "@effect/vitest";
 import type { AgentEventEnvelope } from "@pico/contract/agent-event";
+import { Publication } from "@pico/contract/agent-event";
 import { AgentRuntime } from "@pico/contract/agent-runtime";
 import * as Chat from "@pico/contract/chat-model";
 import { EventRouter } from "@pico/contract/event-router";
+import type * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Logger from "effect/Logger";
 import * as Queue from "effect/Queue";
@@ -21,6 +24,8 @@ const thirdChatId = Chat.ChatId.make("018f47a0-0000-7000-8000-000000000003");
 const envelope = (chatId: Chat.ChatId, message: string): AgentEventEnvelope => ({
   chatId,
   event: { type: "notice", level: "info", message },
+  publication: Publication.make(1),
+  origin: "session",
 });
 
 describe("EventRouter", () => {
@@ -156,7 +161,7 @@ describe("EventRouter", () => {
   );
   it.effect("reports a failed pump once and keeps scope shutdown quiet", () =>
     Effect.gen(function* () {
-      for (const failureAt of ["filter", "upstream", "shutdown"] as const) {
+      for (const failureAt of ["filter", "upstream", "end", "shutdown"] as const) {
         const records: Array<ReturnType<typeof Logger.formatStructured.log>> = [];
         const reported = Promise.withResolvers<void>();
         const logger = Logger.layer([
@@ -166,7 +171,7 @@ describe("EventRouter", () => {
             if (record.level === "ERROR") reported.resolve();
           }),
         ]);
-        const source = yield* Queue.unbounded<AgentEventEnvelope>();
+        const source = yield* Queue.unbounded<AgentEventEnvelope, Cause.Done>();
         const runtimeLayer = Layer.succeed(
           AgentRuntime,
           AgentRuntime.of({
@@ -199,15 +204,23 @@ describe("EventRouter", () => {
             Scope.provide(routerScope),
           );
           const router = Context.get(context, EventRouter);
-          yield* router
+          const route = yield* router
             .open(() => {
               if (failureAt === "filter") throw new Error("private filter payload");
               return true;
             })
             .pipe(Scope.provide(routeScope));
+          const completed = yield* route.events.pipe(Stream.runDrain, Effect.forkChild);
           if (failureAt !== "shutdown") {
-            yield* Queue.offer(source, envelope(firstChatId, "private event payload"));
+            if (failureAt === "end") yield* Queue.end(source);
+            else yield* Queue.offer(source, envelope(firstChatId, "private event payload"));
             yield* Effect.promise(() => reported.promise);
+            yield* Fiber.join(completed);
+            const reopened = yield* router
+              .open(() => true)
+              .pipe(Scope.provide(routeScope), Effect.exit);
+            assert.isTrue(Exit.isFailure(reopened));
+            assert.isTrue(Exit.isFailure(yield* router.drain().pipe(Effect.exit)));
           }
           yield* Scope.close(routeScope, Exit.void);
           yield* Scope.close(routerScope, Exit.void);

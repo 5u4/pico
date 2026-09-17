@@ -3,6 +3,7 @@ import * as BunFileSystem from "@effect/platform-bun/BunFileSystem";
 import * as BunPath from "@effect/platform-bun/BunPath";
 import { assert, describe, it } from "@effect/vitest";
 import type { AgentEventEnvelope } from "@pico/contract/agent-event";
+import { Publication } from "@pico/contract/agent-event";
 import * as AgentMessage from "@pico/contract/agent-message";
 import type { ContextUsage } from "@pico/contract/agent-runtime";
 import { Application } from "@pico/contract/application";
@@ -521,11 +522,20 @@ describe("discord input", () => {
           const envelopes: ReadonlyArray<AgentEventEnvelope> = [
             {
               chatId: failingChatId,
+              publication: Publication.make(1),
+              origin: "session",
               event: { type: "notice", level: "error", message: "invalid persisted binding" },
             },
-            { chatId, event: { type: "run-started" } },
             {
               chatId,
+              event: { type: "run-started" },
+              publication: Publication.make(2),
+              origin: "delivery",
+            },
+            {
+              chatId,
+              publication: Publication.make(3),
+              origin: "delivery",
               event: {
                 type: "message-settled",
                 message: {
@@ -539,7 +549,12 @@ describe("discord input", () => {
                 },
               },
             },
-            { chatId, event: { type: "run-finished", outcome: "completed" } },
+            {
+              chatId,
+              event: { type: "run-finished", outcome: "completed" },
+              publication: Publication.make(4),
+              origin: "delivery",
+            },
           ];
           const eventRouter = EventRouter.of({
             open: (filter) =>

@@ -1,5 +1,7 @@
+import type { AgentEventEnvelope } from "@pico/contract/agent-event";
 import { AgentPrompt } from "@pico/contract/agent-message";
-import type { ShakeMode, TranscriptSnapshot } from "@pico/contract/agent-runtime";
+import type { ShakeMode } from "@pico/contract/agent-runtime";
+import type { TranscriptSnapshot } from "@pico/contract/agent-snapshot";
 import type {
   CloseChatOptions,
   CreateChat,
@@ -9,50 +11,81 @@ import type {
 import type { ChatId, ChatListEntry } from "@pico/contract/chat-model";
 import { ApplicationError } from "@pico/contract/errors";
 import type { ScheduleOverviewResponse } from "@pico/contract/rpc";
-import { ScheduleError } from "@pico/contract/schedule";
+import type { ScheduleError } from "@pico/contract/schedule";
 import type { Workspace, WorkspaceId } from "@pico/contract/workspace-model";
 import * as RpcClient from "@pico/rpc/client";
-import type * as Cause from "effect/Cause";
+import * as Cause from "effect/Cause";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
+import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as AsyncResult from "effect/unstable/reactivity/AsyncResult";
 import * as Atom from "effect/unstable/reactivity/Atom";
 import * as AtomRegistry from "effect/unstable/reactivity/AtomRegistry";
-import type { RpcClientError } from "effect/unstable/rpc/RpcClientError";
+import { RpcClientError } from "effect/unstable/rpc/RpcClientError";
 import {
-  acknowledgeTranscript,
   emptyLiveChat,
   type LiveChat,
   reduceLiveChat,
+  rehydrateChat,
+  unconfirmChat,
 } from "./chat-state.ts";
 
 export type { LiveAssistant, LiveBlock, LiveChat, LiveRun, LiveTool } from "./chat-state.ts";
-
 export type Connection =
   | { readonly kind: "opening" }
   | { readonly kind: "active" }
-  | {
-      readonly kind: "unavailable";
-      readonly cause: Cause.Cause<ApplicationError | RpcClientError>;
-    };
+  | { readonly kind: "unavailable"; readonly cause: Cause.Cause<unknown> };
 
 type Client = Effect.Success<ReturnType<typeof RpcClient.make>>;
+type ReadError = ApplicationError | RpcClientError;
+interface Generation {
+  readonly scope: Scope.Closeable;
+  readonly client: Client;
+  readonly ready: Deferred.Deferred<void, ApplicationError>;
+  readonly retired: Deferred.Deferred<never, ApplicationError>;
+  phase: "subscribing" | "rehydrating" | "active" | "retired";
+}
+interface ReadFlight {
+  readonly generation: Generation;
+  readonly done: Deferred.Deferred<void>;
+  dirty: boolean;
+}
+interface ReadRecord {
+  readonly kind: "list" | "chats" | "transcript";
+  readonly run: (flight: ReadFlight) => Effect.Effect<void>;
+  generation: Generation | undefined;
+  flight: ReadFlight | undefined;
+}
 interface ChatRecord {
   readonly live: LiveChat;
-  readonly transcriptResult: AsyncResult.AsyncResult<
-    TranscriptSnapshot,
-    ApplicationError | RpcClientError
-  >;
+  readonly transcriptResult: AsyncResult.AsyncResult<TranscriptSnapshot, ReadError>;
+}
+interface ChatRead extends ReadRecord {
+  readonly chatId: ChatId;
+  readonly accept: (envelope: AgentEventEnvelope, generation: Generation) => void;
+  readonly buffer: (generation: Generation) => void;
 }
 const decodePrompt = Schema.decodeUnknownEffect(AgentPrompt);
+const unavailableError = () =>
+  new ApplicationError({
+    reason: "operation",
+    message: "Connection changed before confirmation. Check the conversation before sending again.",
+  });
+const domainFailure = (cause: Cause.Cause<unknown>) =>
+  cause.reasons.every(
+    (reason) =>
+      reason._tag === "Fail" &&
+      !(reason.error instanceof RpcClientError) &&
+      !(reason.error instanceof Cause.TimeoutError),
+  );
 
 /** Construct once per page and dispose its registry at page shutdown. */
 export const make = ({ url }: { readonly url: string }) => {
   const status = Atom.make<Connection>({ kind: "opening" }).pipe(Atom.keepAlive);
-  const titleCell = Atom.make<ReadonlyMap<ChatId, string>>(new Map()).pipe(Atom.keepAlive);
   const chatCell = Atom.family((_chatId: ChatId) =>
     Atom.make<ChatRecord>({
       live: emptyLiveChat(),
@@ -60,263 +93,431 @@ export const make = ({ url }: { readonly url: string }) => {
     }).pipe(Atom.keepAlive),
   );
 
-  const lifetime = Atom.make((get) => {
-    const registry = get.registry;
-    let disposed = false;
-    get.addFinalizer(() => {
-      disposed = true;
-    });
-
-    const update = <A>(atom: Atom.Writable<A>, f: (value: A) => A) => {
-      if (!disposed) registry.update(atom, f);
-    };
-    const recordResponse = () => {
-      update(
-        status,
-        (current): Connection => (current.kind === "opening" ? { kind: "active" } : current),
-      );
-    };
-    const refresh = (chatId: ChatId): void => {
-      if (!disposed && registry.getNodes().has(transcriptRead(chatId))) {
-        registry.refresh(transcriptRead(chatId));
-      }
-    };
-    const available = Effect.suspend(() => {
-      const current = registry.get(status);
-      return current.kind === "unavailable" ? Effect.failCause(current.cause) : Effect.void;
-    });
-
-    return { update, recordResponse, refresh, available };
-  }).pipe(Atom.keepAlive);
-
   const owner = Atom.make((get) =>
     Effect.gen(function* () {
-      const lifecycle = get(lifetime);
-      const client = yield* RpcClient.make(url);
-      yield* client.Events().pipe(
-        Stream.runForEach(({ chatId, event }) =>
-          Effect.sync(() => {
-            lifecycle.recordResponse();
-            if (event.type === "title-changed") {
-              lifecycle.update(titleCell, (titles) => new Map(titles).set(chatId, event.title));
-              return;
-            }
-            const cell = chatCell(chatId);
-            if (get.registry.getNodes().has(cell)) {
-              lifecycle.update(cell, (state) => ({
-                ...state,
-                live: reduceLiveChat(state.live, event),
-              }));
-            }
-            if (
-              event.type === "message-settled" ||
-              event.type === "run-finished" ||
-              event.type === "context-invalidated"
-            ) {
-              lifecycle.refresh(chatId);
-            }
-          }),
-        ),
-        Effect.andThen(Effect.die(new Error("RPC Events stream ended"))),
-        Effect.catchCause((cause) =>
-          Effect.sync(() => {
-            lifecycle.update(status, (): Connection => ({ kind: "unavailable", cause }));
-          }),
-        ),
-        Effect.forkScoped,
-      );
-      return {
-        client,
-        available: lifecycle.available,
-        recordResponse: lifecycle.recordResponse,
+      const registry = get.registry;
+      const pageScope = yield* Effect.scope;
+      const reads = new Set<ReadRecord>();
+      const chatReads = new Map<ChatId, ChatRead>();
+      let current: Generation | undefined;
+      let closing: Generation | undefined;
+      let attempt: Deferred.Deferred<void, ApplicationError> | undefined;
+      let disposed = false;
+      get.addFinalizer(() => {
+        disposed = true;
+        if (current !== undefined) current.phase = "retired";
+        current = undefined;
+      });
+      const isCurrent = (generation: Generation) =>
+        !disposed && current === generation && generation.phase !== "retired";
+      const update = <A>(atom: Atom.Writable<A>, change: (value: A) => A) => {
+        if (!disposed) registry.update(atom, change);
       };
+      const retire = (generation: Generation, cause: Cause.Cause<unknown>) => {
+        if (!isCurrent(generation)) return;
+        generation.phase = "retired";
+        current = undefined;
+        closing = generation;
+        Deferred.doneUnsafe(generation.ready, Effect.fail(unavailableError()));
+        Deferred.doneUnsafe(generation.retired, Effect.fail(unavailableError()));
+        registry.set(status, { kind: "unavailable", cause });
+      };
+      const close = (generation: Generation) =>
+        Scope.close(generation.scope, Exit.void).pipe(
+          Effect.ensuring(
+            Effect.sync(() => {
+              if (closing === generation) closing = undefined;
+            }),
+          ),
+        );
+      const fail = (generation: Generation, cause: Cause.Cause<unknown>) =>
+        Effect.gen(function* () {
+          if (!isCurrent(generation)) return;
+          retire(generation, cause);
+          yield* close(generation).pipe(Effect.forkIn(pageScope));
+        });
+      const refresh = (
+        record: ReadRecord,
+        generation: Generation,
+        invalidate = true,
+      ): Effect.Effect<void> =>
+        Effect.suspend(() => {
+          if (!isCurrent(generation)) return Effect.void;
+          const pending = record.flight;
+          if (pending?.generation === generation) {
+            if (invalidate) pending.dirty = true;
+            return Deferred.await(pending.done);
+          }
+          const flight = { generation, done: Deferred.makeUnsafe<void>(), dirty: false };
+          record.flight = flight;
+          return Effect.gen(function* () {
+            do {
+              flight.dirty = false;
+              yield* record.run(flight);
+              if (isCurrent(generation)) record.generation = generation;
+            } while (flight.dirty && isCurrent(generation));
+          }).pipe(
+            Effect.ensuring(
+              Effect.sync(() => {
+                if (record.flight === flight) record.flight = undefined;
+                Deferred.doneUnsafe(flight.done, Effect.void);
+              }),
+            ),
+            Effect.forkIn(generation.scope),
+            Effect.andThen(Deferred.await(flight.done)),
+          );
+        });
+      const invalidate = (record: ReadRecord, generation: Generation) =>
+        refresh(record, generation).pipe(Effect.forkIn(generation.scope), Effect.asVoid);
+      const onEvent = (envelope: AgentEventEnvelope, generation: Generation) =>
+        Effect.gen(function* () {
+          if (!isCurrent(generation)) return;
+          if (envelope.event.type === "title-changed") {
+            yield* Effect.forEach(
+              reads,
+              (record) => (record.kind === "chats" ? invalidate(record, generation) : Effect.void),
+              { discard: true },
+            );
+            return;
+          }
+          const record = chatReads.get(envelope.chatId);
+          if (record === undefined) return;
+          record.accept(envelope, generation);
+          if (
+            envelope.event.type === "message-settled" ||
+            envelope.event.type === "run-finished" ||
+            envelope.event.type === "context-invalidated"
+          )
+            yield* invalidate(record, generation);
+        });
+      const establish = Effect.fn("FrontendState.establish")(function* () {
+        const scope = yield* Scope.fork(pageScope);
+        const opened = yield* RpcClient.make(url).pipe(Scope.provide(scope), Effect.exit);
+        if (Exit.isFailure(opened)) {
+          yield* Scope.close(scope, Exit.void);
+          return yield* Effect.failCause(opened.cause);
+        }
+        const generation: Generation = {
+          scope,
+          client: opened.value,
+          ready: Deferred.makeUnsafe<void, ApplicationError>(),
+          retired: Deferred.makeUnsafe<never, ApplicationError>(),
+          phase: "subscribing",
+        };
+        if (disposed) {
+          yield* close(generation);
+          return yield* Effect.interrupt;
+        }
+        current = generation;
+        for (const record of chatReads.values()) record.buffer(generation);
+        yield* generation.client.Events().pipe(
+          Stream.runForEach((frame) =>
+            frame.kind === "ready"
+              ? Effect.sync(() => {
+                  if (isCurrent(generation) && generation.phase === "subscribing") {
+                    generation.phase = "rehydrating";
+                    Deferred.doneUnsafe(generation.ready, Effect.void);
+                  }
+                })
+              : onEvent(frame.envelope, generation),
+          ),
+          Effect.andThen(Effect.die(new Error("RPC Events stream ended"))),
+          Effect.catchCause((cause) => fail(generation, cause)),
+          Effect.forkIn(scope),
+        );
+        yield* Deferred.await(generation.ready);
+        while (isCurrent(generation)) {
+          const pending = [...reads].filter((record) => record.generation !== generation);
+          if (pending.length === 0) break;
+          yield* Effect.forEach(pending, (record) => refresh(record, generation, false), {
+            concurrency: "unbounded",
+            discard: true,
+          });
+        }
+        if (!isCurrent(generation)) return yield* unavailableError();
+        generation.phase = "active";
+        registry.set(status, { kind: "active" });
+      });
+      const ensure = (): Effect.Effect<void, ApplicationError> =>
+        Effect.suspend(() => {
+          if (disposed) return Effect.interrupt;
+          if (attempt !== undefined) return Deferred.await(attempt);
+          const joined = Deferred.makeUnsafe<void, ApplicationError>();
+          attempt = joined;
+          return Effect.gen(function* () {
+            const previous = current;
+            if (previous?.phase === "active") {
+              const probe = yield* previous.client
+                .ListWorkspaces()
+                .pipe(Effect.timeout("3 seconds"), Effect.exit);
+              if (isCurrent(previous) && (Exit.isSuccess(probe) || domainFailure(probe.cause)))
+                return;
+              retire(
+                previous,
+                Exit.isFailure(probe)
+                  ? probe.cause
+                  : Cause.die(new Error("Events subscription ended")),
+              );
+              yield* close(previous);
+            }
+            if (closing !== undefined) yield* close(closing);
+            yield* establish();
+          }).pipe(
+            Effect.timeout("12 seconds"),
+            Effect.catchCause((cause) =>
+              Effect.gen(function* () {
+                const generation = current;
+                if (generation !== undefined) {
+                  retire(generation, cause);
+                  yield* close(generation);
+                }
+                if (!disposed) registry.set(status, { kind: "unavailable", cause });
+                return yield* unavailableError();
+              }),
+            ),
+            Effect.onExit((exit) =>
+              Effect.sync(() => {
+                if (attempt === joined) attempt = undefined;
+                Deferred.doneUnsafe(joined, exit);
+              }),
+            ),
+            Effect.forkIn(pageScope),
+            Effect.andThen(Deferred.await(joined)),
+          );
+        });
+      const read = (record: ReadRecord) =>
+        Effect.gen(function* () {
+          reads.add(record);
+          const previous = current;
+          if (previous?.phase !== "active") {
+            yield* ensure().pipe(Effect.ignore);
+            if (record.generation === current) return;
+          }
+          const generation = current;
+          if (generation === undefined) return;
+          yield* refresh(record, generation);
+        });
+      const registerChat = (record: ChatRead) => {
+        reads.add(record);
+        chatReads.set(record.chatId, record);
+        if (current !== undefined && record.generation !== current) record.buffer(current);
+      };
+      const write = <A, E>(
+        execute: (client: Client) => Effect.Effect<A, E>,
+        commit?: (value: A) => void,
+        settled?: () => void,
+      ) =>
+        Effect.gen(function* () {
+          if (registry.get(status).kind === "opening") yield* ensure();
+          const generation = current;
+          if (generation?.phase !== "active" || !isCurrent(generation))
+            return yield* unavailableError();
+          const exit = yield* Effect.raceFirst(
+            execute(generation.client),
+            Deferred.await(generation.retired),
+          ).pipe(Effect.exit);
+          if (!isCurrent(generation)) return yield* unavailableError();
+          if (Exit.isFailure(exit)) {
+            if (!Cause.hasInterruptsOnly(exit.cause) && !domainFailure(exit.cause))
+              yield* fail(generation, exit.cause);
+            else settled?.();
+            return yield* exit;
+          }
+          commit?.(exit.value);
+          settled?.();
+          return exit.value;
+        });
+      yield* ensure().pipe(Effect.ignore, Effect.forkIn(pageScope));
+      return { ensure, read, registerChat, isCurrent, fail, update, write };
     }),
   ).pipe(Atom.keepAlive);
 
   const connection = Atom.readable((get): Connection => {
-    const session = get(owner);
-    return session._tag === "Failure" ? { kind: "unavailable", cause: session.cause } : get(status);
+    const value = get(owner);
+    return value._tag === "Failure" ? { kind: "unavailable", cause: value.cause } : get(status);
   }).pipe(Atom.keepAlive);
-
-  const titles = Atom.readable((get): ReadonlyMap<ChatId, string> => {
-    get(owner);
-    return get(titleCell);
-  }).pipe(Atom.keepAlive);
+  const ensure = Atom.fn<void>()(
+    (_input, get) =>
+      Effect.gen(function* () {
+        const manager = yield* get.result(owner);
+        yield* manager.ensure();
+      }),
+    { concurrent: true },
+  ).pipe(Atom.keepAlive, Atom.setLazy(false));
 
   const list = <A, E = never>(
-    execute: (client: Client) => Effect.Effect<A, E | ApplicationError | RpcClientError>,
+    execute: (client: Client) => Effect.Effect<A, E | ReadError>,
+    kind: ReadRecord["kind"] = "list",
   ) => {
-    const result = Atom.make<AsyncResult.AsyncResult<A, E | ApplicationError | RpcClientError>>(
-      AsyncResult.initial(),
-    ).pipe(Atom.keepAlive);
-    const read = Atom.make((get) => {
-      let active = true;
-      get.addFinalizer(() => {
-        active = false;
-      });
-      get.set(result, AsyncResult.waiting(get.once(result)));
-      return Effect.gen(function* () {
-        const session = yield* get.resultOnce(owner);
-        yield* session.available;
-        const value = yield* execute(session.client).pipe(
-          Effect.tapError((error) =>
-            Effect.sync(() => {
-              if (error instanceof ApplicationError || error instanceof ScheduleError)
-                session.recordResponse();
-            }),
-          ),
-        );
-        session.recordResponse();
-        return value;
-      }).pipe(
-        Effect.onExit((exit) =>
-          Effect.sync(() => {
-            if (!active) return;
-            get.set(
-              result,
-              Exit.isSuccess(exit)
-                ? AsyncResult.success(exit.value)
-                : AsyncResult.failureWithPrevious(exit.cause, {
-                    previous: Option.some(get.once(result)),
-                  }),
+    const result = Atom.make<AsyncResult.AsyncResult<A, E | ReadError>>(AsyncResult.initial()).pipe(
+      Atom.keepAlive,
+    );
+    const record = Atom.make(
+      (get): ReadRecord => ({
+        kind,
+        generation: undefined,
+        flight: undefined,
+        run: (flight) =>
+          Effect.gen(function* () {
+            const { generation } = flight;
+            const manager = yield* get.resultOnce(owner);
+            if (!manager.isCurrent(generation)) return;
+            get.registry.update(result, AsyncResult.waiting);
+            const outcome = yield* execute(generation.client).pipe(
+              Effect.exit,
+              Effect.timeoutOption("5 seconds"),
             );
+            if (!manager.isCurrent(generation)) return;
+            const exit = Option.isSome(outcome) ? outcome.value : Exit.fail(unavailableError());
+            if (!flight.dirty || Exit.isFailure(exit))
+              get.registry.update(result, (previous) =>
+                Exit.isSuccess(exit)
+                  ? AsyncResult.success(exit.value)
+                  : AsyncResult.failureWithPrevious(exit.cause, {
+                      previous: Option.some(previous),
+                    }),
+              );
+            if (Exit.isFailure(exit) && (Option.isNone(outcome) || !domainFailure(exit.cause)))
+              yield* manager.fail(
+                generation,
+                Option.isNone(outcome) ? Cause.fail(new Cause.TimeoutError()) : exit.cause,
+              );
           }),
-        ),
-        Effect.asVoid,
-      );
-    }).pipe(Atom.keepAlive, Atom.setLazy(false));
+      }),
+    ).pipe(Atom.keepAlive);
+    const read = Atom.make((get) =>
+      Effect.gen(function* () {
+        const manager = yield* get.resultOnce(owner);
+        yield* manager.read(get.once(record));
+      }),
+    ).pipe(Atom.keepAlive, Atom.setLazy(false));
     return Atom.writable(
       (get) => {
         if (!get.registry.getNodes().has(read)) get.once(read);
         return get(result);
       },
-      (context, update: (value: A) => A) =>
-        context.set(result, AsyncResult.map(context.get(result), update)),
+      (get, change: (value: A) => A) => {
+        const pending = get.get(record).flight;
+        if (pending !== undefined) pending.dirty = true;
+        get.set(result, AsyncResult.map(get.get(result), change));
+      },
       (refresh) => refresh(read),
     ).pipe(Atom.keepAlive);
   };
-
   const workspaces = list<readonly Workspace[]>((client) => client.ListWorkspaces());
   const chats = Atom.family((workspaceId: WorkspaceId) =>
-    list<readonly ChatListEntry[]>((client) => client.ListChats({ workspaceId })),
+    list<readonly ChatListEntry[]>((client) => client.ListChats({ workspaceId }), "chats"),
   );
   const schedules = list<ScheduleOverviewResponse, ScheduleError>((client) =>
     client.ListSchedules(),
   );
-  const createWorkspace = Atom.fn<CreateWorkspace>()((input, get) =>
-    Effect.gen(function* () {
-      const session = yield* get.result(owner);
-      yield* session.available;
-      const workspace = yield* session.client.CreateWorkspace(input);
-      session.recordResponse();
-      get.registry.refresh(workspaces);
-      return workspace;
-    }),
-  ).pipe(Atom.keepAlive, Atom.setLazy(false));
-  /** Web clients call this when saving workspace settings. */
-  const updateWorkspace = Atom.fn<UpdateWorkspace>()((input, get) =>
-    Effect.gen(function* () {
-      const session = yield* get.result(owner);
-      yield* session.available;
-      const workspace = yield* session.client.UpdateWorkspace(input);
-      session.recordResponse();
-      get.set(workspaces, (current) =>
-        current.map((existing) => (existing.id === workspace.id ? workspace : existing)),
-      );
-      get.registry.refresh(workspaces);
-      return workspace;
-    }),
-  ).pipe(Atom.keepAlive, Atom.setLazy(false));
-  const deleteWorkspace = Atom.fn<{ readonly workspaceId: WorkspaceId }>()((input, get) =>
-    Effect.gen(function* () {
-      const session = yield* get.result(owner);
-      yield* session.available;
-      yield* session.client
-        .DeleteWorkspace(input)
-        .pipe(Effect.tapErrorTag("ApplicationError", () => Effect.sync(session.recordResponse)));
-      session.recordResponse();
-      get.set(workspaces, (current) =>
-        current.filter((workspace) => workspace.id !== input.workspaceId),
-      );
-    }).pipe(Effect.onExit(() => Effect.sync(() => get.registry.refresh(workspaces)))),
-  ).pipe(Atom.keepAlive, Atom.setLazy(false));
-  const createChat = Atom.family((workspaceId: WorkspaceId) =>
-    Atom.fn<Omit<CreateChat, "workspaceId">>()((input, get) =>
+
+  const outsideSnapshot = (envelope: AgentEventEnvelope) =>
+    envelope.event.type === "notice" ||
+    (envelope.origin === "delivery" && envelope.event.type === "message-settled");
+  const transcriptRecord = Atom.family((chatId: ChatId) =>
+    Atom.make((get): ChatRead => {
+      const cell = chatCell(chatId);
+      let buffered:
+        | {
+            readonly generation: Generation;
+            readonly baseline: LiveChat;
+            readonly events: AgentEventEnvelope[];
+          }
+        | undefined;
+      let cut: { readonly generation: Generation; readonly publication: number } | undefined;
+      const reduce = (live: LiveChat, envelope: AgentEventEnvelope) => {
+        if (envelope.event.type === "title-changed") return live;
+        if (
+          envelope.origin === "delivery" &&
+          (envelope.event.type === "run-started" || envelope.event.type === "run-finished")
+        )
+          return live;
+        return reduceLiveChat(live, envelope.event);
+      };
+      return {
+        kind: "transcript",
+        chatId,
+        generation: undefined,
+        flight: undefined,
+        buffer: (generation) => {
+          if (buffered?.generation !== generation)
+            buffered = { generation, baseline: get.registry.get(cell).live, events: [] };
+        },
+        accept: (envelope, generation) => {
+          if (
+            !outsideSnapshot(envelope) &&
+            cut?.generation === generation &&
+            envelope.publication <= cut.publication
+          )
+            return;
+          if (envelope.event.type !== "notice" && buffered?.generation === generation)
+            buffered.events.push(envelope);
+          get.registry.update(cell, (state) => {
+            const live = reduce(state.live, envelope);
+            return { ...state, live: cut?.generation === generation ? live : unconfirmChat(live) };
+          });
+        },
+        run: ({ generation }) =>
+          Effect.gen(function* () {
+            const manager = yield* get.resultOnce(owner);
+            if (!manager.isCurrent(generation)) return;
+            if (buffered?.generation !== generation)
+              buffered = { generation, baseline: get.registry.get(cell).live, events: [] };
+            const pending = buffered;
+            const baseline = pending.baseline;
+            get.registry.update(cell, (state) => ({
+              ...state,
+              transcriptResult: AsyncResult.waiting(state.transcriptResult),
+            }));
+            const exit = yield* generation.client
+              .Transcript({ chatId })
+              .pipe(Effect.timeout("5 seconds"), Effect.exit);
+            if (!manager.isCurrent(generation) || buffered !== pending) return;
+            if (Exit.isFailure(exit)) {
+              get.registry.update(cell, (state) => ({
+                ...state,
+                live: unconfirmChat(state.live),
+                transcriptResult: AsyncResult.failureWithPrevious(
+                  Cause.map(exit.cause, (error) =>
+                    error._tag === "TimeoutError" ? unavailableError() : error,
+                  ),
+                  { previous: Option.some(state.transcriptResult) },
+                ),
+              }));
+              buffered = undefined;
+              cut = undefined;
+              if (!domainFailure(exit.cause)) yield* manager.fail(generation, exit.cause);
+              return;
+            }
+            Atom.batch(() =>
+              get.registry.update(cell, (state) => {
+                let live = rehydrateChat({ ...baseline, notices: state.live.notices }, exit.value);
+                for (const envelope of pending.events)
+                  if (
+                    outsideSnapshot(envelope) ||
+                    envelope.publication > exit.value.runtime.publication
+                  )
+                    live = reduce(live, envelope);
+                cut = { generation, publication: exit.value.runtime.publication };
+                buffered = undefined;
+                return { live, transcriptResult: AsyncResult.success(exit.value) };
+              }),
+            );
+          }),
+      };
+    }).pipe(Atom.keepAlive),
+  );
+  const transcriptRead = Atom.family((chatId: ChatId) =>
+    Atom.make((get) =>
       Effect.gen(function* () {
-        const session = yield* get.result(owner);
-        yield* session.available;
-        const chat = yield* session.client.CreateChat({ ...input, workspaceId });
-        session.recordResponse();
-        get.registry.refresh(chats(workspaceId));
-        return chat;
+        const manager = yield* get.resultOnce(owner);
+        const record = get.once(transcriptRecord(chatId));
+        manager.registerChat(record);
+        yield* manager.read(record);
       }),
     ).pipe(Atom.keepAlive, Atom.setLazy(false)),
   );
-  const closeChat = Atom.family((workspaceId: WorkspaceId) =>
-    Atom.fn<CloseChatOptions & { readonly chatId: ChatId }>()((input, get) =>
-      Effect.gen(function* () {
-        const session = yield* get.result(owner);
-        yield* session.available;
-        const result = yield* session.client
-          .CloseChat(input)
-          .pipe(Effect.tapErrorTag("ApplicationError", () => Effect.sync(session.recordResponse)));
-        session.recordResponse();
-        if (result.kind === "closed") {
-          get.set(chats(workspaceId), (current) =>
-            current.filter((chat) => chat.id !== input.chatId),
-          );
-        }
-        return result;
-      }).pipe(Effect.onExit(() => Effect.sync(() => get.registry.refresh(chats(workspaceId))))),
-    ).pipe(Atom.keepAlive, Atom.setLazy(false)),
-  );
-
-  const transcriptRead = Atom.family((chatId: ChatId) =>
-    Atom.make((get) => {
-      const cell = chatCell(chatId);
-      let active = true;
-      get.addFinalizer(() => {
-        active = false;
-      });
-      const current = get.once(cell);
-      get.set(cell, {
-        ...current,
-        transcriptResult: AsyncResult.waiting(current.transcriptResult),
-      });
-      return Effect.gen(function* () {
-        const session = yield* get.resultOnce(owner);
-        yield* session.available;
-        const snapshot = yield* session.client.Transcript({ chatId });
-        session.recordResponse();
-        return snapshot;
-      }).pipe(
-        Effect.onExit((exit) =>
-          Effect.sync(() => {
-            if (!active) return;
-            const current = get.once(cell);
-            Atom.batch(() =>
-              get.set(
-                cell,
-                Exit.isSuccess(exit)
-                  ? {
-                      live: acknowledgeTranscript(current.live, exit.value.messages),
-                      transcriptResult: AsyncResult.success(exit.value),
-                    }
-                  : {
-                      ...current,
-                      transcriptResult: AsyncResult.failureWithPrevious(exit.cause, {
-                        previous: Option.some(current.transcriptResult),
-                      }),
-                    },
-              ),
-            );
-          }),
-        ),
-        Effect.asVoid,
-      );
-    }).pipe(Atom.keepAlive, Atom.setLazy(false)),
-  );
-
   const snapshot = Atom.family((chatId: ChatId) =>
     Atom.readable(
       (get) => {
@@ -327,7 +528,6 @@ export const make = ({ url }: { readonly url: string }) => {
       (refresh) => refresh(transcriptRead(chatId)),
     ).pipe(Atom.keepAlive),
   );
-
   const transcript = Atom.family((chatId: ChatId) =>
     Atom.readable(
       (get) => AsyncResult.map(get(snapshot(chatId)), (value) => value.messages),
@@ -346,14 +546,76 @@ export const make = ({ url }: { readonly url: string }) => {
       (refresh) => refresh(snapshot(chatId)),
     ).pipe(Atom.keepAlive),
   );
-
   const live = Atom.family((chatId: ChatId) =>
     Atom.readable((get): LiveChat => {
-      const state = get(chatCell(chatId)).live;
-      return get(connection).kind === "unavailable" && state.run.kind === "running"
-        ? { ...state, run: { kind: "unknown" } }
-        : state;
+      get(snapshot(chatId));
+      const value = get(chatCell(chatId)).live;
+      return get(connection).kind !== "active" ? unconfirmChat(value) : value;
     }).pipe(Atom.keepAlive),
+  );
+
+  const createWorkspace = Atom.fn<CreateWorkspace>()((input, get) =>
+    Effect.gen(function* () {
+      const manager = yield* get.result(owner);
+      return yield* manager.write(
+        (client) => client.CreateWorkspace(input),
+        () => get.registry.refresh(workspaces),
+      );
+    }),
+  ).pipe(Atom.keepAlive, Atom.setLazy(false));
+  const updateWorkspace = Atom.fn<UpdateWorkspace>()((input, get) =>
+    Effect.gen(function* () {
+      const manager = yield* get.result(owner);
+      return yield* manager.write(
+        (client) => client.UpdateWorkspace(input),
+        (workspace) =>
+          get.set(workspaces, (current) =>
+            current.map((existing) => (existing.id === workspace.id ? workspace : existing)),
+          ),
+        () => get.registry.refresh(workspaces),
+      );
+    }),
+  ).pipe(Atom.keepAlive, Atom.setLazy(false));
+  const deleteWorkspace = Atom.fn<{ readonly workspaceId: WorkspaceId }>()((input, get) =>
+    Effect.gen(function* () {
+      const manager = yield* get.result(owner);
+      return yield* manager.write(
+        (client) => client.DeleteWorkspace(input),
+        () =>
+          get.set(workspaces, (current) =>
+            current.filter((workspace) => workspace.id !== input.workspaceId),
+          ),
+        () => get.registry.refresh(workspaces),
+      );
+    }),
+  ).pipe(Atom.keepAlive, Atom.setLazy(false));
+  const createChat = Atom.family((workspaceId: WorkspaceId) =>
+    Atom.fn<Omit<CreateChat, "workspaceId">>()((input, get) =>
+      Effect.gen(function* () {
+        const manager = yield* get.result(owner);
+        return yield* manager.write(
+          (client) => client.CreateChat({ ...input, workspaceId }),
+          () => get.registry.refresh(chats(workspaceId)),
+        );
+      }),
+    ).pipe(Atom.keepAlive, Atom.setLazy(false)),
+  );
+  const closeChat = Atom.family((workspaceId: WorkspaceId) =>
+    Atom.fn<CloseChatOptions & { readonly chatId: ChatId }>()((input, get) =>
+      Effect.gen(function* () {
+        const manager = yield* get.result(owner);
+        return yield* manager.write(
+          (client) => client.CloseChat(input),
+          (result) => {
+            if (result.kind === "closed")
+              get.set(chats(workspaceId), (current) =>
+                current.filter((chat) => chat.id !== input.chatId),
+              );
+          },
+          () => get.registry.refresh(chats(workspaceId)),
+        );
+      }),
+    ).pipe(Atom.keepAlive, Atom.setLazy(false)),
   );
 
   const command = <Input, Error>(
@@ -362,62 +624,54 @@ export const make = ({ url }: { readonly url: string }) => {
   ) => {
     const lane = Atom.make<{
       readonly pending: number;
-      readonly result: AsyncResult.AsyncResult<void, Error | ApplicationError | RpcClientError>;
+      readonly result: AsyncResult.AsyncResult<void, Error | ReadError>;
     }>({ pending: 0, result: AsyncResult.initial() }).pipe(Atom.keepAlive);
     const trigger = Atom.fn<Input>()(
-      (input, get) => {
-        const lifecycle = get.registry.get(lifetime);
-        return Effect.gen(function* () {
-          get.registry.get(chatCell(chatId));
-          const session = yield* get.result(owner);
-          yield* session.available;
-          yield* execute(session.client, input);
-          session.recordResponse();
-        }).pipe(
-          Effect.onExit((exit) =>
-            Effect.sync(() => {
-              lifecycle.update(lane, (current) => {
-                const pending = current.pending - 1;
-                const waiting = pending > 0;
-                const result = AsyncResult.isFailure(current.result)
-                  ? AsyncResult.failure(current.result.cause, {
-                      previousSuccess: current.result.previousSuccess,
-                      waiting,
-                    })
-                  : Exit.isFailure(exit)
-                    ? AsyncResult.failure<void, Error | ApplicationError | RpcClientError>(
-                        exit.cause,
-                        { waiting },
-                      )
-                    : AsyncResult.success<void, Error | ApplicationError | RpcClientError>(
-                        undefined,
-                        { waiting },
-                      );
-                return { pending, result };
-              });
-              lifecycle.refresh(chatId);
-            }),
-          ),
-        );
-      },
+      (input, get) =>
+        Effect.gen(function* () {
+          const manager = yield* get.result(owner);
+          yield* manager
+            .write(
+              (client) => execute(client, input),
+              undefined,
+              () => get.registry.refresh(transcriptRead(chatId)),
+            )
+            .pipe(
+              Effect.onExit((exit) =>
+                Effect.sync(() =>
+                  manager.update(lane, (current) => {
+                    const pending = current.pending - 1;
+                    const waiting = pending > 0;
+                    const result = AsyncResult.isFailure(current.result)
+                      ? AsyncResult.failure(current.result.cause, {
+                          previousSuccess: current.result.previousSuccess,
+                          waiting,
+                        })
+                      : Exit.isFailure(exit)
+                        ? AsyncResult.failure<void, Error | ReadError>(exit.cause, { waiting })
+                        : AsyncResult.success<void, Error | ReadError>(undefined, { waiting });
+                    return { pending, result };
+                  }),
+                ),
+              ),
+            );
+        }),
       { concurrent: true },
     ).pipe(Atom.keepAlive, Atom.setLazy(false));
-
-    // The concurrent Atom.fn join can omit synchronous exits and fail before siblings finish.
     return Atom.writable(
       (get) => get(lane).result,
       (get, input: Input) => {
-        const lifecycle = get.get(lifetime);
-        lifecycle.update(lane, (current) => ({
-          pending: current.pending + 1,
+        get.set(lane, {
+          pending: get.get(lane).pending + 1,
           result:
-            current.pending === 0 ? AsyncResult.initial(true) : AsyncResult.waiting(current.result),
-        }));
+            get.get(lane).pending === 0
+              ? AsyncResult.initial(true)
+              : AsyncResult.waiting(get.get(lane).result),
+        });
         get.set(trigger, input);
       },
     ).pipe(Atom.keepAlive);
   };
-
   const send = Atom.family((chatId: ChatId) =>
     command(
       chatId,
@@ -428,34 +682,27 @@ export const make = ({ url }: { readonly url: string }) => {
     ),
   );
   const abort = Atom.family((chatId: ChatId) =>
-    command(
-      chatId,
-      Effect.fn("FrontendState.abort")(function* (client: Client, _input: undefined) {
-        yield* client.Abort({ chatId });
-      }),
-    ),
+    command(chatId, (client: Client, _input: undefined) => client.Abort({ chatId })),
   );
   const shake = Effect.fn("FrontendState.shake")(function* (
     registry: AtomRegistry.AtomRegistry,
     chatId: ChatId,
     mode: ShakeMode,
   ) {
-    const lifecycle = registry.get(lifetime);
-    return yield* Effect.gen(function* () {
-      const session = yield* AtomRegistry.getResult(registry, owner, { suspendOnWaiting: true });
-      yield* session.available;
-      const result = yield* session.client.Shake({ chatId, mode });
-      session.recordResponse();
-      return result;
-    }).pipe(Effect.onExit(() => Effect.sync(() => lifecycle.refresh(chatId))));
+    const manager = yield* AtomRegistry.getResult(registry, owner, { suspendOnWaiting: true });
+    return yield* manager.write(
+      (client) => client.Shake({ chatId, mode }),
+      undefined,
+      () => registry.refresh(transcriptRead(chatId)),
+    );
   });
 
   return {
     connection,
+    ensure,
     workspaces,
     chats,
     schedules,
-    titles,
     createWorkspace,
     updateWorkspace,
     deleteWorkspace,
@@ -468,5 +715,5 @@ export const make = ({ url }: { readonly url: string }) => {
     send,
     abort,
     shake,
-  } as const;
+  };
 };
