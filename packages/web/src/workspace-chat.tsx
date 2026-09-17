@@ -1,6 +1,7 @@
 import { useAtomValue } from "@effect/atom-react/Hooks";
 import { RegistryContext } from "@effect/atom-react/RegistryContext";
-import type { ShakeMode, ShakeResult, TranscriptSnapshot } from "@pico/contract/agent-runtime";
+import type { ShakeMode, ShakeResult } from "@pico/contract/agent-runtime";
+import type { TranscriptSnapshot } from "@pico/contract/agent-snapshot";
 import { CreateWorkspace } from "@pico/contract/application";
 import type { Chat, ChatId } from "@pico/contract/chat-model";
 import { GitError, WorkspaceBindingInvalid } from "@pico/contract/errors";
@@ -109,7 +110,6 @@ const emptySchedules = Atom.make(AsyncResult.initial<ScheduleOverviewResponse>()
 const emptyDraft: DraftValue = { text: "" };
 const workspaceStorageKey = "pico-last-workspace";
 const openingConnection = Atom.make<FrontendState.Connection>({ kind: "opening" });
-const emptyTitles = Atom.make<ReadonlyMap<ChatId, string>>(new Map());
 const decodeWorkspace = Schema.decodeUnknownOption(CreateWorkspace);
 const tokenFormat = new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 });
 const percentageFormat = new Intl.NumberFormat("en-US", { maximumFractionDigits: 1 });
@@ -410,7 +410,6 @@ export function WorkspaceChat({
     readonly conversationKey: string;
     readonly callId: string;
   } | null>(null);
-  const [recoveryOpen, setRecoveryOpen] = useState(false);
   const [contextDetailsKey, setContextDetailsKey] = useState<string | null>();
   const [shakeFeedback, setShakeFeedback] = useState<{
     readonly visit: number;
@@ -464,7 +463,6 @@ export function WorkspaceChat({
     ],
   );
   const { result: workspaces, groups } = useAtomValue(groupedAtom);
-  const liveTitles = useAtomValue(state?.titles ?? emptyTitles);
   const titles = useMemo(() => {
     const merged = new Map<ChatId, string>();
     for (const group of groups) {
@@ -473,9 +471,8 @@ export function WorkspaceChat({
         if (chat.title !== null) merged.set(chat.id, chat.title);
       }
     }
-    for (const [id, title] of liveTitles) merged.set(id, title);
     return merged;
-  }, [groups, liveTitles]);
+  }, [groups]);
   const content = ((): PageContent => {
     if (page.kind === "home" || page.kind === "new-workspace") return { kind: "home" };
     if (page.kind === "schedules") return { kind: "schedules" };
@@ -599,13 +596,6 @@ export function WorkspaceChat({
     setToolSelection(null);
     setShakeFeedback(null);
   }, [visit, selected?.key]);
-
-  useEffect(() => {
-    if (!state || !chatId || !available) return;
-    const snapshot = state.transcript(chatId);
-    const current = registry.get(snapshot);
-    if (current._tag !== "Initial" && !current.waiting) registry.refresh(snapshot);
-  }, [state, registry, chatId, available]);
 
   const updateNavigation = (change: (current: TabState) => TabState) => {
     const current = navigationRef.current;
@@ -798,14 +788,6 @@ export function WorkspaceChat({
   useEffect(() => {
     if (workspaces._tag !== "Success" || workspaces.waiting) return;
     if (state && registry.get(state.workspaces) !== workspaces) return;
-    const existingIds = new Set(workspaces.value.map((workspace) => workspace.id));
-    const retainedIds = new Set([
-      ...navigationRef.current.expanded,
-      ...[...navigationRef.current.entries.values()].map((entry) => entry.workspace.id),
-    ]);
-    for (const id of retainedIds) {
-      if (!existingIds.has(id)) pruneWorkspace(id);
-    }
     updateNavigation((current) => reconcileWorkspaceSnapshots(current, workspaces.value));
   }, [state, registry, workspaces]);
 
@@ -1289,6 +1271,7 @@ export function WorkspaceChat({
   const submitDraft = async () => {
     if (
       !state ||
+      content.kind !== "ready" ||
       !ownsVisit() ||
       (page.kind !== "draft" && page.kind !== "chat") ||
       registry.get(state.connection).kind !== "active"
@@ -1318,7 +1301,7 @@ export function WorkspaceChat({
           ...value,
           submission: {
             kind: "error",
-            message: `${errorMessage(exit.cause)} Your draft is kept. Try sending again.`,
+            message: `${errorMessage(exit.cause)} Your draft is kept. Check the chat list before creating another chat.`,
           },
         }));
         return;
@@ -1355,7 +1338,7 @@ export function WorkspaceChat({
         ? { kind: "idle" }
         : {
             kind: "error",
-            message: `${errorMessage(exit.cause)} Your draft is kept. Edit or send it again.`,
+            message: `${errorMessage(exit.cause)} Your draft is kept. Check the conversation before sending again.`,
           },
     }));
   };
@@ -1407,8 +1390,11 @@ export function WorkspaceChat({
     });
   };
 
-  const draftValues = [...navigation.entries.values()].filter(
-    (entry) => entry.value.text.length > 0,
+  const orphanDrafts = [...navigation.entries.values()].filter(
+    (entry) =>
+      entry.value.text.length > 0 &&
+      workspaces._tag === "Success" &&
+      !workspaces.value.some((workspace) => workspace.id === entry.workspace.id),
   );
   const unavailable = connection.kind === "unavailable";
   const closePresentation: CloseChatPresentation =
@@ -1435,15 +1421,14 @@ export function WorkspaceChat({
               message: closeFlow.message,
               retry: closeFlow.outcome === "unconfirmed" ? { enabled: available } : null,
             };
-  const onReload = () => {
-    if (draftValues.length > 0) setRecoveryOpen(true);
-    else window.location.reload();
+  const retryConnection = () => {
+    if (state) registry.set(state.ensure, undefined);
   };
   const retryTranscript = () => {
     if (content.kind === "error" && content.recovery === "home") navigatePage({ kind: "home" });
     else if (content.kind === "error" && content.recovery === "workspace" && routeWorkspaceId)
       navigatePage({ kind: "draft", workspaceId: routeWorkspaceId, tabKey: null });
-    else if (unavailable) onReload();
+    else if (unavailable) retryConnection();
     else if (content.kind === "error" && content.recovery === "chats" && state && routeWorkspaceId)
       registry.refresh(state.chats(routeWorkspaceId));
     else if (state && chatId) registry.refresh(state.transcript(chatId));
@@ -1596,7 +1581,7 @@ export function WorkspaceChat({
               : content.recovery === "workspace"
                 ? "New chat in this workspace"
                 : unavailable
-                  ? "Reload"
+                  ? "Retry connection"
                   : content.recovery === "chats"
                     ? "Retry chats"
                     : "Retry workspaces",
@@ -1624,7 +1609,7 @@ export function WorkspaceChat({
                     state: "error",
                     title: "Workspaces unavailable",
                     description: errorMessage(workspaces.cause),
-                    retryLabel: unavailable ? "Reload" : "Retry workspaces",
+                    retryLabel: unavailable ? "Retry connection" : "Retry workspaces",
                   }
                 : workspaces._tag === "Initial" || workspaces.waiting
                   ? { state: "loading", label: "Loading workspaces..." }
@@ -1658,18 +1643,12 @@ export function WorkspaceChat({
     <div className="flex h-dvh min-h-0 flex-col bg-canvas text-foreground">
       <ConnectionRecovery
         connection={connection.kind}
-        recovery={
-          recoveryOpen
-            ? draftValues.map((entry) => ({
-                key: entry.key,
-                label: `${entry.target.kind === "chat" ? `Chat ${entry.target.chat.id.slice(-8)}` : "New chat"} in ${entry.workspace.name}`,
-                text: entry.value.text,
-              }))
-            : null
-        }
-        onReload={onReload}
-        onKeepEditing={() => setRecoveryOpen(false)}
-        onDiscardAndReload={() => window.location.reload()}
+        orphanDrafts={orphanDrafts.map((entry) => ({
+          key: entry.key,
+          label: `${entry.target.kind === "chat" ? `Chat ${entry.target.chat.id.slice(-8)}` : "New chat"} in ${entry.workspace.name}`,
+          text: entry.value.text,
+        }))}
+        onRetry={retryConnection}
       />
       {page.kind !== "schedules" &&
         conversation?.snapshot._tag === "Failure" &&
@@ -1679,7 +1658,7 @@ export function WorkspaceChat({
               {errorMessage(conversation.snapshot.cause)} Displayed history may be incomplete.
             </p>
             <Button onClick={retryTranscript} size="small" tone="secondary">
-              {unavailable ? "Reload" : "Retry history"}
+              {unavailable ? "Retry connection" : "Retry history"}
             </Button>
           </div>
         )}
@@ -1696,8 +1675,8 @@ export function WorkspaceChat({
           className="shrink-0 border-b border-border bg-panel p-3 text-label text-danger"
           role="alert"
         >
-          {errorMessage(conversation.stopping.cause)} Stop was not confirmed. Try Stop again or
-          reload to reconnect.
+          {errorMessage(conversation.stopping.cause)} Stop was not confirmed. Reconnect and check
+          the run status before requesting Stop again.
         </p>
       )}
       {page.kind !== "schedules" &&

@@ -16,10 +16,29 @@ export function App() {
   const [session, setSession] = useState<Session | null>(null);
   useEffect(() => {
     const url = new URL("/rpc", window.location.href);
-    url.protocol = "ws:";
+    url.protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const registry = AtomRegistry.make({ scheduleTask });
-    setSession({ registry, state: FrontendState.make({ url: url.href }) });
-    return () => registry.dispose();
+    const state = FrontendState.make({ url: url.href });
+    const ensure = () => registry.set(state.ensure, undefined);
+    const visible = () => {
+      if (document.visibilityState === "visible") ensure();
+    };
+    const restored = (event: PageTransitionEvent) => {
+      if (event.persisted) ensure();
+    };
+    window.addEventListener("focus", ensure);
+    window.addEventListener("online", ensure);
+    document.addEventListener("visibilitychange", visible);
+    window.addEventListener("pageshow", restored);
+    setSession({ registry, state });
+    ensure();
+    return () => {
+      window.removeEventListener("focus", ensure);
+      window.removeEventListener("online", ensure);
+      document.removeEventListener("visibilitychange", visible);
+      window.removeEventListener("pageshow", restored);
+      registry.dispose();
+    };
   }, []);
   return (
     <RegistryContext.Provider value={session?.registry ?? bootRegistry}>

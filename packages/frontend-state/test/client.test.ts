@@ -4,19 +4,15 @@ import * as BunFileSystem from "@effect/platform-bun/BunFileSystem";
 import * as BunPath from "@effect/platform-bun/BunPath";
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import { assert, describe, it } from "@effect/vitest";
-import type { AgentEventEnvelope } from "@pico/contract/agent-event";
+import { type AgentEventEnvelope, Publication } from "@pico/contract/agent-event";
 import {
   type AgentAssistantMessage,
   AgentMessageId,
   AgentPrompt,
   type AgentTranscript,
 } from "@pico/contract/agent-message";
-import type {
-  ContextUsage,
-  ShakeMode,
-  ShakeResult,
-  TranscriptSnapshot,
-} from "@pico/contract/agent-runtime";
+import type { ContextUsage, ShakeMode, ShakeResult } from "@pico/contract/agent-runtime";
+import type { RuntimeSnapshot, TranscriptSnapshot } from "@pico/contract/agent-snapshot";
 import { Application } from "@pico/contract/application";
 import { ChatId, type ChatListEntry } from "@pico/contract/chat-model";
 import { ChatRepository } from "@pico/contract/chat-repository";
@@ -66,10 +62,22 @@ const webWorkspace: Workspace = {
 };
 const message = { role: "user", content: [{ type: "text", text: "same" }], timestamp: 1 } as const;
 const prompt = (text: string) => AgentPrompt.make({ text, attachments: [] });
+let publication = 0;
 const snapshot = (
   messages: AgentTranscript = [],
   contextUsage: ContextUsage = { kind: "unavailable" },
-): TranscriptSnapshot => ({ messages, contextUsage, todo: { kind: "ready", phases: [] } });
+  runtime: RuntimeSnapshot = {
+    publication: Publication.make(0),
+    run: { kind: "idle" },
+    assistant: [],
+    tools: [],
+  },
+): TranscriptSnapshot => ({
+  messages,
+  contextUsage,
+  todo: { kind: "ready", phases: [] },
+  runtime,
+});
 const assistant = (id: AgentMessageId, text: string): AgentAssistantMessage => ({
   id,
   role: "assistant",
@@ -88,8 +96,11 @@ const draftBlock = (live: LiveChat, id: AgentMessageId, index: number) => {
   return entry?.kind === "draft" ? entry.blocks.get(index) : undefined;
 };
 
+type RoutedEvent = Omit<AgentEventEnvelope, "publication" | "origin"> &
+  Partial<Pick<AgentEventEnvelope, "publication" | "origin">>;
+
 interface Route {
-  readonly queue: Queue.Queue<AgentEventEnvelope, Cause.Done>;
+  readonly queue: Queue.Queue<RoutedEvent, Cause.Done>;
   readonly closed: Deferred.Deferred<void>;
 }
 
@@ -108,8 +119,10 @@ const fixture = Effect.fnUntraced(function* (
         | "shake"
       >
     >,
+  beforeReady: Effect.Effect<void> = Effect.void,
 ) {
   const opened = yield* Queue.unbounded<Route>();
+  let openCount = 0;
   const storeFile = yield* Deferred.make<AbsolutePath>();
   const scheduleDirectory = yield* Deferred.make<AbsolutePath>();
   const persistence = Layer.unwrap(
@@ -139,7 +152,7 @@ const fixture = Effect.fnUntraced(function* (
   ).pipe(Layer.provideMerge(persistence));
   const application = Application.of({
     deleteWorkspace: () => Effect.die("unexpected workspace deletion"),
-    listWorkspaces: () => Effect.die("unexpected workspace list"),
+    listWorkspaces: () => Effect.succeed([webWorkspace]),
     listChats: () => Effect.die("unexpected chat list"),
     askBtw: () => Effect.die("unexpected side question"),
     createWorkspace: () => Effect.die("unexpected workspace creation"),
@@ -164,7 +177,8 @@ const fixture = Effect.fnUntraced(function* (
     open: () =>
       Effect.acquireRelease(
         Effect.gen(function* () {
-          const queue = yield* Queue.unbounded<AgentEventEnvelope, Cause.Done>();
+          openCount++;
+          const queue = yield* Queue.unbounded<RoutedEvent, Cause.Done>();
           const closed = yield* Deferred.make<void>();
           const route = { queue, closed };
           yield* Queue.offer(opened, route);
@@ -172,8 +186,17 @@ const fixture = Effect.fnUntraced(function* (
         }),
         (route) => Deferred.succeed(route.closed, undefined),
       ).pipe(
+        Effect.tap(() => beforeReady),
         Effect.map((route) => ({
-          events: Stream.fromQueue(route.queue),
+          events: Stream.fromQueue(route.queue).pipe(
+            Stream.map(
+              (envelope): AgentEventEnvelope => ({
+                ...envelope,
+                publication: envelope.publication ?? Publication.make(++publication),
+                origin: envelope.origin ?? "session",
+              }),
+            ),
+          ),
           setFilter: () => Effect.die("unexpected filter change"),
         })),
       ),
@@ -205,6 +228,7 @@ const fixture = Effect.fnUntraced(function* (
   );
   return {
     opened,
+    openCount: () => openCount,
     layer,
     storeFile: Deferred.await(storeFile),
     scheduleDirectory: Deferred.await(scheduleDirectory),
@@ -236,19 +260,18 @@ const registryInScope = Effect.acquireRelease(
 
 const snapshotFixture = Effect.fnUntraced(function* () {
   const requests = yield* Queue.unbounded<{
-    readonly reply: Deferred.Deferred<AgentTranscript, ApplicationError>;
+    readonly reply: Deferred.Deferred<TranscriptSnapshot, ApplicationError>;
     readonly returned: Deferred.Deferred<void>;
   }>();
-  const pending: Array<Deferred.Deferred<AgentTranscript, ApplicationError>> = [];
+  const pending: Array<Deferred.Deferred<TranscriptSnapshot, ApplicationError>> = [];
   const server = yield* fixture({
     transcript: () =>
       Effect.gen(function* () {
-        const reply = yield* Deferred.make<AgentTranscript, ApplicationError>();
+        const reply = yield* Deferred.make<TranscriptSnapshot, ApplicationError>();
         const returned = yield* Deferred.make<void>();
         pending.push(reply);
         yield* Queue.offer(requests, { reply, returned });
         return yield* Deferred.await(reply).pipe(
-          Effect.map((messages) => snapshot(messages)),
           Effect.ensuring(Deferred.succeed(returned, undefined)),
           Effect.uninterruptible,
         );
@@ -259,7 +282,7 @@ const snapshotFixture = Effect.fnUntraced(function* () {
   return {
     ...server,
     requests,
-    release: Effect.forEach(pending, (reply) => Deferred.succeed(reply, []), { discard: true }),
+    release: Effect.forEach(pending, Deferred.interrupt, { discard: true }),
   };
 });
 
@@ -270,16 +293,27 @@ describe("frontend state over WebSocket", () => {
       Effect.gen(function* () {
         let rejectDeletion = true;
         let refreshFails = false;
+        const staleStarted = yield* Deferred.make<void>();
+        const staleReply = yield* Deferred.make<readonly Workspace[]>();
+        let holdRead = false;
         const server = yield* fixture({
           transcript: () => Effect.succeed(snapshot()),
           sendMessage: () => Effect.succeed({ kind: "handled" }),
           abort: () => Effect.void,
           listWorkspaces: () =>
-            refreshFails
-              ? Effect.fail(
-                  new ApplicationError({ reason: "operation", message: "Refresh unavailable" }),
-                )
-              : Effect.succeed([webWorkspace]),
+            Effect.gen(function* () {
+              if (holdRead) {
+                holdRead = false;
+                yield* Deferred.succeed(staleStarted, undefined);
+                return yield* Deferred.await(staleReply);
+              }
+              if (refreshFails)
+                return yield* new ApplicationError({
+                  reason: "operation",
+                  message: "Refresh unavailable",
+                });
+              return [webWorkspace];
+            }),
           deleteWorkspace: () =>
             rejectDeletion
               ? Effect.fail(
@@ -313,10 +347,18 @@ describe("frontend state over WebSocket", () => {
           );
           assert.strictEqual(registry.get(state.connection).kind, "active");
           rejectDeletion = false;
+          holdRead = true;
+          registry.refresh(state.workspaces);
+          yield* Deferred.await(staleStarted);
           registry.set(state.deleteWorkspace, { workspaceId: webWorkspace.id });
           yield* AtomRegistry.getResult(registry, state.deleteWorkspace, {
             suspendOnWaiting: true,
           });
+          assert.deepStrictEqual(
+            Option.getOrThrow(AsyncResult.value(registry.get(state.workspaces))),
+            [],
+          );
+          yield* Deferred.succeed(staleReply, [webWorkspace]);
           yield* waitFor(
             registry,
             state.workspaces,
@@ -462,7 +504,7 @@ describe("frontend state over WebSocket", () => {
           draftBlock(registry.get(state.live(firstChat)), firstMessageId, 0)?.text,
           "keep this draft",
         );
-        assert.strictEqual(registry.get(state.live(firstChat)).run.kind, "running");
+        assert.strictEqual(registry.get(state.live(firstChat)).run.kind, "idle");
       }).pipe(Effect.scoped, Effect.provide(server.layer));
     }),
   );
@@ -497,6 +539,7 @@ describe("frontend state over WebSocket", () => {
           if (result._tag !== "Failure")
             return yield* Effect.die("Expected initial list rejection");
           assert.deepStrictEqual(Option.getOrNull(Cause.findErrorOption(result.cause)), rejection);
+          yield* waitFor(registry, state.connection, (value) => value.kind === "active");
           assert.strictEqual(registry.get(state.connection).kind, "active");
           assert.strictEqual(reads, 1);
           registry.refresh(state.workspaces);
@@ -517,6 +560,9 @@ describe("frontend state over WebSocket", () => {
   it.live("keeps saved workspace settings visible while the list refresh waits or fails", () =>
     Effect.gen(function* () {
       const refreshed = yield* Deferred.make<readonly Workspace[], ApplicationError>();
+      const staleStarted = yield* Deferred.make<void>();
+      const staleReply = yield* Deferred.make<readonly Workspace[]>();
+      const refreshStarted = yield* Deferred.make<void>();
       const saved = { ...webWorkspace, worktree: { branch: "main", prefix: "pico/" } };
       let reads = 0;
       const server = yield* fixture({
@@ -524,9 +570,16 @@ describe("frontend state over WebSocket", () => {
         sendMessage: () => Effect.succeed({ kind: "handled" }),
         abort: () => Effect.void,
         listWorkspaces: () =>
-          Effect.suspend(() =>
-            ++reads === 1 ? Effect.succeed([webWorkspace]) : Deferred.await(refreshed),
-          ),
+          Effect.gen(function* () {
+            reads++;
+            if (reads === 1) return [webWorkspace];
+            if (reads === 2) {
+              yield* Deferred.succeed(staleStarted, undefined);
+              return yield* Deferred.await(staleReply);
+            }
+            yield* Deferred.succeed(refreshStarted, undefined);
+            return yield* Deferred.await(refreshed);
+          }),
         updateWorkspace: () => Effect.succeed(saved),
       });
       yield* Effect.gen(function* () {
@@ -534,6 +587,9 @@ describe("frontend state over WebSocket", () => {
         const registry = yield* registryInScope;
         registry.mount(state.workspaces);
         yield* AtomRegistry.getResult(registry, state.workspaces);
+        yield* waitFor(registry, state.connection, (value) => value.kind === "active");
+        registry.refresh(state.workspaces);
+        yield* Deferred.await(staleStarted);
         registry.set(state.updateWorkspace, {
           workspaceId: webWorkspace.id,
           configuration: {
@@ -543,6 +599,13 @@ describe("frontend state over WebSocket", () => {
           },
         });
         yield* AtomRegistry.getResult(registry, state.updateWorkspace, { suspendOnWaiting: true });
+        assert.deepStrictEqual(
+          Option.getOrThrow(AsyncResult.value(registry.get(state.workspaces))),
+          [saved],
+        );
+        assert.isTrue(registry.get(state.workspaces).waiting);
+        yield* Deferred.succeed(staleReply, [webWorkspace]);
+        yield* Deferred.await(refreshStarted);
         assert.deepStrictEqual(
           Option.getOrThrow(AsyncResult.value(registry.get(state.workspaces))),
           [saved],
@@ -576,16 +639,22 @@ describe("frontend state over WebSocket", () => {
         archivedAt: null,
       }));
       let reads = 0;
+      const staleStarted = yield* Deferred.make<void>();
+      const staleReply = yield* Deferred.make<readonly ChatListEntry[]>();
       const server = yield* fixture({
         transcript: () => Effect.succeed(snapshot()),
         sendMessage: () => Effect.succeed({ kind: "handled" }),
         abort: () => Effect.void,
         listChats: () =>
-          Effect.suspend(() =>
-            ++reads === 1
-              ? Effect.succeed(chats)
-              : Effect.fail(new ApplicationError({ reason: "operation", message: "Read failed" })),
-          ),
+          Effect.gen(function* () {
+            reads++;
+            if (reads === 1) return chats;
+            if (reads === 3) {
+              yield* Deferred.succeed(staleStarted, undefined);
+              return yield* Deferred.await(staleReply);
+            }
+            return yield* new ApplicationError({ reason: "operation", message: "Read failed" });
+          }),
         closeChat: (_, options) =>
           options.allowDirtyWorktree
             ? Effect.succeed({ kind: "closed" })
@@ -606,8 +675,15 @@ describe("frontend state over WebSocket", () => {
         assert.strictEqual(confirmation.kind, "worktree-confirmation-required");
         assert.deepStrictEqual(Option.getOrThrow(AsyncResult.value(registry.get(list))), chats);
 
+        registry.refresh(list);
+        yield* Deferred.await(staleStarted);
         registry.set(close, { chatId: firstChat, allowDirtyWorktree: true });
         const closed = yield* AtomRegistry.getResult(registry, close, { suspendOnWaiting: true });
+        assert.deepStrictEqual(
+          Option.getOrThrow(AsyncResult.value(registry.get(list))).map((chat) => chat.id),
+          [secondChat],
+        );
+        yield* Deferred.succeed(staleReply, chats);
         yield* waitFor(registry, list, (value) => value._tag === "Failure" && !value.waiting);
         assert.strictEqual(closed.kind, "closed");
         assert.deepStrictEqual(
@@ -704,6 +780,8 @@ describe("frontend state over WebSocket", () => {
         const stale = yield* Queue.take(requests);
         assert.deepStrictEqual(AsyncResult.getOrThrow(registry.get(state.workspaces)), [workspace]);
         registry.refresh(state.workspaces);
+        yield* Deferred.succeed(stale.reply, []);
+        yield* Deferred.await(stale.returned);
         yield* Deferred.succeed((yield* Queue.take(requests)).reply, [latest]);
         yield* waitFor(
           registry,
@@ -711,8 +789,6 @@ describe("frontend state over WebSocket", () => {
           (value) =>
             value._tag === "Success" && !value.waiting && value.value[0]?.name === latest.name,
         );
-        yield* Deferred.succeed(stale.reply, []);
-        yield* Deferred.await(stale.returned);
         assert.deepStrictEqual(AsyncResult.getOrThrow(registry.get(state.workspaces)), [latest]);
         registry.refresh(state.workspaces);
         yield* Deferred.fail(
@@ -755,7 +831,16 @@ describe("frontend state over WebSocket", () => {
                 Effect.uninterruptible,
               );
             }
-            return snapshot(stored);
+            return snapshot(
+              stored,
+              { kind: "unavailable" },
+              {
+                publication: Publication.make(0),
+                run: { kind: "running" },
+                assistant: [],
+                tools: [],
+              },
+            );
           }),
         sendMessage: (chatId, input) =>
           Effect.gen(function* () {
@@ -778,14 +863,6 @@ describe("frontend state over WebSocket", () => {
         registry.mount(state.live(firstChat));
         registry.mount(state.live(secondChat));
         const route = yield* Queue.take(server.opened);
-        const observed: Array<AgentTranscript> = [];
-        registry.subscribe(
-          state.transcript(firstChat),
-          (value) => {
-            if (AsyncResult.isSuccess(value)) observed.push(value.value);
-          },
-          { immediate: true },
-        );
         yield* Deferred.await(firstRead);
         yield* Queue.offerAll(route.queue, [
           { chatId: firstChat, event: { type: "run-started" } },
@@ -818,18 +895,18 @@ describe("frontend state over WebSocket", () => {
           },
           { chatId: firstChat, event: { type: "message-settled", message } },
         ]);
+        yield* Deferred.succeed(releaseStale, undefined);
+        yield* Deferred.await(staleReturned);
         yield* waitFor(
           registry,
           state.transcript(firstChat),
-          (value) => AsyncResult.isSuccess(value) && !value.waiting,
+          (value) =>
+            AsyncResult.isSuccess(value) && !value.waiting && value.value.length === stored.length,
         );
         assert.deepStrictEqual(
           AsyncResult.getOrThrow(registry.get(state.transcript(firstChat))),
           stored,
         );
-        yield* Deferred.succeed(releaseStale, undefined);
-        yield* Deferred.await(staleReturned);
-        assert.deepStrictEqual(observed, [[message, message]]);
         assert.strictEqual(
           draftBlock(registry.get(state.live(firstChat)), firstMessageId, 2)?.text,
           "plan",
@@ -842,7 +919,6 @@ describe("frontend state over WebSocket", () => {
           draftBlock(registry.get(state.live(secondChat)), secondMessageId, 7)?.text,
           "other",
         );
-        assert.strictEqual(reads, 2);
 
         const releaseSendView = registry.mount(state.send(firstChat));
         registry.set(state.send(firstChat), prompt("first"));
@@ -895,151 +971,79 @@ describe("frontend state over WebSocket", () => {
     }),
   );
 
-  it.live("keeps historical list titles separate from newer events during a delayed refresh", () =>
-    Effect.gen(function* () {
-      const historical: ChatListEntry = {
-        id: firstChat,
-        workspaceId: webWorkspace.id,
-        cwd: webWorkspace.defaultCwd,
-        externalId: null,
-        createdAt: 1,
-        archivedAt: null,
-        title: "Persisted inventory review",
-      };
-      const refreshing = yield* Deferred.make<void>();
-      const refreshed = yield* Deferred.make<readonly ChatListEntry[]>();
-      let listReads = 0;
-      let transcriptReads = 0;
-      const server = yield* fixture({
-        listChats: () =>
-          Effect.gen(function* () {
-            if (++listReads === 1) return [historical];
-            yield* Deferred.succeed(refreshing, undefined);
-            return yield* Deferred.await(refreshed);
-          }),
-        transcript: () =>
-          Effect.sync(() => {
-            transcriptReads++;
-            return snapshot();
-          }),
-        sendMessage: () => Effect.succeed({ kind: "handled" }),
-        abort: () => Effect.void,
-      });
-      yield* Effect.gen(function* () {
-        const state = make({ url: yield* endpoint });
-        const registry = yield* registryInScope;
-        const chats = state.chats(webWorkspace.id);
-        registry.mount(chats);
-        registry.mount(state.titles);
-        const route = yield* Queue.take(server.opened);
-        const initial = yield* AtomRegistry.getResult(registry, chats);
-        assert.strictEqual(initial.find((chat) => chat.id === firstChat)?.title, historical.title);
-        assert.isFalse(registry.get(state.titles).has(firstChat));
-
-        registry.refresh(chats);
-        yield* Deferred.await(refreshing);
-        yield* Queue.offerAll(route.queue, [
-          {
-            chatId: firstChat,
-            event: {
-              type: "text-delta",
-              messageId: orphanMessageId,
-              contentIndex: 0,
-              text: "unopened background response",
-            },
-          },
-          {
-            chatId: firstChat,
-            event: {
-              type: "message-settled",
-              message: assistant(firstMessageId, "saved background response"),
-            },
-          },
-          { chatId: firstChat, event: { type: "title-changed", title: "Live inventory review" } },
-        ]);
-        yield* waitFor(
-          registry,
-          state.titles,
-          (titles) => titles.get(firstChat) === "Live inventory review",
-        );
-        yield* Deferred.succeed(refreshed, [{ ...historical, title: "Older inventory review" }]);
-        yield* waitFor(registry, chats, (value) => value._tag === "Success" && !value.waiting);
-        assert.strictEqual(
-          AsyncResult.getOrThrow(registry.get(chats)).find((chat) => chat.id === firstChat)?.title,
-          "Older inventory review",
-        );
-        assert.strictEqual(registry.get(state.titles).get(firstChat), "Live inventory review");
-        assert.strictEqual(transcriptReads, 0);
-        registry.mount(state.live(firstChat));
-        assert.deepStrictEqual([...registry.get(state.live(firstChat)).assistant], []);
-      }).pipe(Effect.scoped, Effect.provide(server.layer));
-    }),
-  );
-
-  it.live("observes unopened chat titles without retaining background assistant events", () =>
-    Effect.gen(function* () {
-      const server = yield* snapshotFixture();
-      yield* Effect.gen(function* () {
-        yield* Effect.addFinalizer(() => server.release);
-        const state = make({ url: yield* endpoint });
-        const registry = yield* registryInScope;
-        const stored = assistant(firstMessageId, "saved background response");
-        const releaseTitles = registry.mount(state.titles);
-        const route = yield* Queue.take(server.opened);
-        yield* Queue.offerAll(route.queue, [
-          { chatId: firstChat, event: { type: "title-changed", title: "Background chat" } },
-          {
-            chatId: firstChat,
-            event: {
-              type: "text-delta",
-              messageId: orphanMessageId,
-              contentIndex: 0,
-              text: "unseen partial response",
-            },
-          },
-          { chatId: firstChat, event: { type: "message-settled", message: stored } },
-          { chatId: firstChat, event: { type: "title-changed", title: "Renamed background chat" } },
-        ]);
-        yield* waitFor(
-          registry,
-          state.titles,
-          (titles) => titles.get(firstChat) === "Renamed background chat",
-        );
-        releaseTitles();
-        yield* Effect.yieldNow;
-        registry.mount(state.titles);
-        assert.strictEqual(registry.get(state.titles).get(firstChat), "Renamed background chat");
-
-        registry.mount(state.live(firstChat));
-        assert.deepStrictEqual([...registry.get(state.live(firstChat)).assistant], []);
-        registry.mount(state.transcript(firstChat));
-        yield* Deferred.succeed((yield* Queue.take(server.requests)).reply, [stored]);
-        yield* waitFor(
-          registry,
-          state.transcript(firstChat),
-          (value) => AsyncResult.isSuccess(value) && !value.waiting,
-        );
-        assert.deepStrictEqual(AsyncResult.getOrThrow(registry.get(state.transcript(firstChat))), [
-          stored,
-        ]);
-        yield* Queue.offer(route.queue, {
-          chatId: firstChat,
-          event: {
-            type: "text-delta",
-            messageId: nextMessageId,
-            contentIndex: 0,
-            text: "visible response",
-          },
+  it.live(
+    "refreshes authoritative titles after invalidation without retaining unopened chat deltas",
+    () =>
+      Effect.gen(function* () {
+        const historical: ChatListEntry = {
+          id: firstChat,
+          workspaceId: webWorkspace.id,
+          cwd: webWorkspace.defaultCwd,
+          externalId: null,
+          createdAt: 1,
+          archivedAt: null,
+          title: "Original",
+        };
+        const reading = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<readonly ChatListEntry[]>();
+        let reads = 0;
+        const server = yield* fixture({
+          listChats: () =>
+            Effect.gen(function* () {
+              reads++;
+              if (reads === 1) return [historical];
+              if (reads === 2) {
+                yield* Deferred.succeed(reading, undefined);
+                return yield* Deferred.await(release);
+              }
+              return [{ ...historical, title: "Authoritative title" }];
+            }),
+          transcript: () => Effect.succeed(snapshot()),
+          sendMessage: () => Effect.succeed({ kind: "handled" }),
+          abort: () => Effect.void,
         });
-        yield* waitFor(
-          registry,
-          state.live(firstChat),
-          (live) => draftBlock(live, nextMessageId, 0)?.text === "visible response",
-        );
-        assert.isUndefined(draftBlock(registry.get(state.live(firstChat)), orphanMessageId, 0));
-        assert.strictEqual(registry.get(state.titles).get(firstChat), "Renamed background chat");
-      }).pipe(Effect.scoped, Effect.provide(server.layer));
-    }),
+        yield* Effect.gen(function* () {
+          const state = make({ url: yield* endpoint });
+          const registry = yield* registryInScope;
+          const chats = state.chats(webWorkspace.id);
+          registry.mount(chats);
+          registry.mount(state.live(secondChat));
+          const route = yield* Queue.take(server.opened);
+          yield* waitFor(registry, state.connection, (value) => value.kind === "active");
+          registry.refresh(chats);
+          yield* Deferred.await(reading);
+          yield* Queue.offerAll(route.queue, [
+            {
+              chatId: firstChat,
+              event: {
+                type: "text-delta",
+                messageId: orphanMessageId,
+                contentIndex: 0,
+                text: "unopened",
+              },
+            },
+            { chatId: firstChat, event: { type: "title-changed", title: "Event title" } },
+            {
+              chatId: secondChat,
+              event: { type: "notice", level: "info", message: "after title" },
+            },
+          ]);
+          yield* waitFor(registry, state.live(secondChat), (value) =>
+            value.notices.some((notice) => notice.message === "after title"),
+          );
+          yield* Deferred.succeed(release, [{ ...historical, title: "Stale read" }]);
+          yield* waitFor(
+            registry,
+            chats,
+            (value) =>
+              value._tag === "Success" &&
+              value.value[0]?.title === "Authoritative title" &&
+              !value.waiting,
+          );
+          yield* AtomRegistry.getResult(registry, state.transcript(firstChat));
+          assert.isUndefined(draftBlock(registry.get(state.live(firstChat)), orphanMessageId, 0));
+        }).pipe(Effect.scoped, Effect.provide(server.layer));
+      }),
   );
 
   it.live(
@@ -1093,20 +1097,9 @@ describe("frontend state over WebSocket", () => {
           ]);
           yield* waitFor(
             first,
-            state.titles,
-            (titles) => titles.get(firstChat) === "First registry",
+            state.live(firstChat),
+            (live) => draftBlock(live, firstMessageId, 3)?.text === "keep me",
           );
-          assert.isFalse(second.get(state.titles).has(firstChat));
-          yield* Queue.offer(secondRoute.queue, {
-            chatId: firstChat,
-            event: { type: "title-changed", title: "Second registry" },
-          });
-          yield* waitFor(
-            second,
-            state.titles,
-            (titles) => titles.get(firstChat) === "Second registry",
-          );
-          assert.strictEqual(first.get(state.titles).get(firstChat), "First registry");
           assert.isUndefined(draftBlock(second.get(state.live(firstChat)), firstMessageId, 3));
           yield* Queue.end(firstRoute.queue);
           yield* waitFor(first, state.connection, (value) => value.kind === "unavailable");
@@ -1121,7 +1114,7 @@ describe("frontend state over WebSocket", () => {
           const failed = first.get(state.send(firstChat));
           if (!AsyncResult.isFailure(failed))
             return yield* Effect.die("Expected unavailable action");
-          assert.isTrue(Cause.hasDies(failed.cause));
+          assert.instanceOf(Cause.squash(failed.cause), ApplicationError);
           assert.isFalse(failed.waiting);
           first.dispose();
           yield* Deferred.await(firstRoute.closed);
@@ -1190,6 +1183,8 @@ describe("frontend state over WebSocket", () => {
           return yield* Effect.die("Expected unavailable connection");
         const error = Option.getOrThrow(Cause.findErrorOption(connection.cause));
         assert.instanceOf(error, ApplicationError);
+        if (!(error instanceof ApplicationError))
+          return yield* Effect.die("Expected application error");
         assert.strictEqual(error.reason, "operation");
         assert.strictEqual(
           draftBlock(registry.get(state.live(firstChat)), firstMessageId, 0)?.text,
@@ -1225,7 +1220,10 @@ describe("frontend state over WebSocket", () => {
         registry.set(state.send(firstChat), prompt("second"));
         assert.isTrue(registry.get(state.send(firstChat)).waiting);
         const route = yield* Queue.take(server.opened);
-        assert.deepStrictEqual((yield* Queue.takeN(sent, 2)).sort(), ["first", "second"]);
+        assert.deepStrictEqual([yield* Queue.take(sent), yield* Queue.take(sent)].sort(), [
+          "first",
+          "second",
+        ]);
         yield* Deferred.succeed(release, undefined);
         yield* waitFor(
           registry,
@@ -1247,6 +1245,16 @@ describe("frontend state over WebSocket", () => {
       const releaseElide = yield* Deferred.make<ShakeResult>();
       const releaseImages = yield* Deferred.make<ShakeResult>();
       const releaseThinking = yield* Deferred.make<ShakeResult>();
+      let usage = {
+        kind: "available",
+        contextWindow: 100_000,
+        usedTokens: 1000,
+        messagesTokens: 800,
+        systemPromptTokens: 100,
+        systemToolsTokens: 100,
+        systemContextTokens: 0,
+        skillsTokens: 0,
+      } satisfies ContextUsage;
       const images: ShakeResult = { mode: "images", imagesDropped: 2, tokensFreed: 0 };
       const elide: ShakeResult = {
         mode: "elide",
@@ -1260,7 +1268,7 @@ describe("frontend state over WebSocket", () => {
         tokensFreed: 0,
       };
       const server = yield* fixture({
-        transcript: () => Effect.succeed(snapshot()),
+        transcript: () => Effect.sync(() => snapshot([], usage)),
         sendMessage: () =>
           Effect.gen(function* () {
             yield* Deferred.succeed(sent, undefined);
@@ -1279,6 +1287,8 @@ describe("frontend state over WebSocket", () => {
       yield* Effect.gen(function* () {
         const state = make({ url: yield* endpoint });
         const registry = yield* registryInScope;
+        registry.mount(state.contextUsage(firstChat));
+        yield* waitFor(registry, state.connection, (value) => value.kind === "active");
         registry.set(state.send(firstChat), prompt("keep working"));
         yield* Deferred.await(sent);
         const elideInvocation = yield* Effect.forkScoped(state.shake(registry, firstChat, "elide"));
@@ -1296,8 +1306,18 @@ describe("frontend state over WebSocket", () => {
         yield* Queue.take(shaking);
         yield* Deferred.succeed(releaseThinking, thinking);
         assert.deepStrictEqual(yield* Fiber.join(thinkingInvocation), thinking);
+        usage = { ...usage, usedTokens: 600, messagesTokens: 400 };
         yield* Deferred.succeed(releaseElide, elide);
         assert.deepStrictEqual(yield* Fiber.join(elideInvocation), elide);
+        yield* waitFor(
+          registry,
+          state.contextUsage(firstChat),
+          (value) =>
+            value._tag === "Success" &&
+            !value.waiting &&
+            value.value.kind === "available" &&
+            value.value.usedTokens === 600,
+        );
         assert.isTrue(registry.get(state.send(firstChat)).waiting);
         yield* Deferred.succeed(releaseSend, undefined);
         yield* waitFor(
@@ -1314,6 +1334,8 @@ describe("frontend state over WebSocket", () => {
       const shaking = yield* Queue.unbounded<ShakeMode>();
       const releaseElide = yield* Deferred.make<ShakeResult, ApplicationError>();
       const releaseThinking = yield* Deferred.make<ShakeResult>();
+      const ready = yield* Deferred.make<void>();
+      let current = snapshot();
       const rejection = new ApplicationError({
         reason: "operation",
         message: "Elide failed",
@@ -1323,30 +1345,47 @@ describe("frontend state over WebSocket", () => {
         thinkingBlocksDropped: 4,
         tokensFreed: 90,
       };
-      const server = yield* fixture({
-        transcript: () => Effect.succeed(snapshot()),
-        sendMessage: () => Effect.succeed({ kind: "handled" }),
-        abort: () => Effect.void,
-        shake: (_chatId, mode) =>
-          Effect.gen(function* () {
-            yield* Queue.offer(shaking, mode);
-            if (mode === "elide") return yield* Deferred.await(releaseElide);
-            return yield* Deferred.await(releaseThinking);
-          }),
-      });
+      const server = yield* fixture(
+        {
+          transcript: () => Effect.sync(() => current),
+          sendMessage: () => Effect.succeed({ kind: "handled" }),
+          abort: () => Effect.void,
+          shake: (_chatId, mode) =>
+            Effect.gen(function* () {
+              yield* Queue.offer(shaking, mode);
+              if (mode === "elide") return yield* Deferred.await(releaseElide);
+              return yield* Deferred.await(releaseThinking);
+            }),
+        },
+        Deferred.await(ready),
+      );
       yield* Effect.gen(function* () {
         const state = make({ url: yield* endpoint });
         const registry = yield* registryInScope;
         const elideInvocation = yield* Effect.forkScoped(state.shake(registry, firstChat, "elide"));
+        yield* Queue.take(server.opened);
+        assert.strictEqual(registry.get(state.connection).kind, "opening");
+        assert.strictEqual(yield* Queue.size(shaking), 0);
+        yield* Deferred.succeed(ready, undefined);
         yield* Queue.take(shaking);
         const thinkingInvocation = yield* Effect.forkScoped(
           state.shake(registry, firstChat, "thinking"),
         );
         yield* Queue.take(shaking);
+        registry.mount(state.contextUsage(firstChat));
+        yield* AtomRegistry.getResult(registry, state.contextUsage(firstChat), {
+          suspendOnWaiting: true,
+        });
+        current = { ...snapshot(), contextUsage: { kind: "error" } };
         yield* Deferred.fail(releaseElide, rejection);
         const failed = yield* Fiber.await(elideInvocation);
         if (failed._tag !== "Failure") return yield* Effect.die("Expected Shake rejection");
         assert.deepStrictEqual(Option.getOrNull(Cause.findErrorOption(failed.cause)), rejection);
+        yield* waitFor(
+          registry,
+          state.contextUsage(firstChat),
+          (value) => value._tag === "Success" && !value.waiting && value.value.kind === "error",
+        );
         yield* Deferred.succeed(releaseThinking, thinking);
         assert.deepStrictEqual(yield* Fiber.join(thinkingInvocation), thinking);
       }).pipe(Effect.scoped, Effect.provide(server.layer));
@@ -1365,7 +1404,7 @@ describe("frontend state over WebSocket", () => {
         registry.mount(state.live(firstChat));
         const route = yield* Queue.take(server.opened);
         registry.mount(state.transcript(firstChat));
-        yield* Deferred.succeed((yield* Queue.take(server.requests)).reply, []);
+        yield* Deferred.succeed((yield* Queue.take(server.requests)).reply, snapshot());
         yield* waitFor(
           registry,
           state.transcript(firstChat),
@@ -1407,7 +1446,27 @@ describe("frontend state over WebSocket", () => {
         assert.deepStrictEqual(pendingMessages(registry.get(state.live(firstChat))), [first]);
 
         registry.refresh(state.transcript(firstChat));
-        yield* Deferred.succeed((yield* Queue.take(server.requests)).reply, []);
+        const missing = snapshot([], undefined, {
+          publication: Publication.make(publication),
+          run: { kind: "running" },
+          assistant: [
+            { kind: "settled", message: first },
+            {
+              kind: "draft",
+              messageId: second.id,
+              blocks: [
+                {
+                  type: "text-delta",
+                  messageId: second.id,
+                  contentIndex: 0,
+                  text: "second answer",
+                },
+              ],
+            },
+          ],
+          tools: [],
+        });
+        yield* Deferred.succeed((yield* Queue.take(server.requests)).reply, missing);
         yield* waitFor(
           registry,
           state.transcript(firstChat),
@@ -1420,16 +1479,29 @@ describe("frontend state over WebSocket", () => {
           chatId: firstChat,
           event: { type: "message-settled", message: second },
         });
+        yield* waitFor(
+          registry,
+          state.live(firstChat),
+          (value) => value.assistant.get(second.id)?.kind === "settled",
+        );
+        yield* Deferred.succeed(stale.reply, missing);
+        yield* Deferred.await(stale.returned);
         const newer = yield* Queue.take(server.requests);
-        yield* Deferred.succeed(newer.reply, [first]);
+        yield* Deferred.succeed(
+          newer.reply,
+          snapshot([first], undefined, {
+            publication: Publication.make(publication),
+            run: { kind: "running" },
+            assistant: [{ kind: "settled", message: second }],
+            tools: [],
+          }),
+        );
         yield* waitFor(
           registry,
           state.transcript(firstChat),
           (value) => AsyncResult.isSuccess(value) && !value.waiting,
         );
         assert.deepStrictEqual(pendingMessages(registry.get(state.live(firstChat))), [second]);
-        yield* Deferred.succeed(stale.reply, [first, second]);
-        yield* Deferred.await(stale.returned);
         assert.deepStrictEqual(AsyncResult.getOrThrow(registry.get(state.transcript(firstChat))), [
           first,
         ]);
@@ -1448,7 +1520,15 @@ describe("frontend state over WebSocket", () => {
         registry.subscribe(state.live(firstChat), observe, { immediate: true });
         registry.subscribe(state.transcript(firstChat), observe, { immediate: true });
         registry.refresh(state.transcript(firstChat));
-        yield* Deferred.succeed((yield* Queue.take(server.requests)).reply, [first, second]);
+        yield* Deferred.succeed(
+          (yield* Queue.take(server.requests)).reply,
+          snapshot([first, second], undefined, {
+            publication: Publication.make(publication),
+            run: { kind: "running" },
+            assistant: [],
+            tools: [],
+          }),
+        );
         yield* waitFor(
           registry,
           state.transcript(firstChat),
@@ -1471,7 +1551,7 @@ describe("frontend state over WebSocket", () => {
         registry.mount(state.live(firstChat));
         const route = yield* Queue.take(server.opened);
         registry.mount(state.transcript(firstChat));
-        yield* Deferred.succeed((yield* Queue.take(server.requests)).reply, []);
+        yield* Deferred.succeed((yield* Queue.take(server.requests)).reply, snapshot());
         yield* waitFor(
           registry,
           state.transcript(firstChat),
@@ -1491,7 +1571,28 @@ describe("frontend state over WebSocket", () => {
           state.live(firstChat),
           (value) => draftBlock(value, reply.id, 0)?.text === "PICO_WEB_OK",
         );
-        yield* Deferred.succeed(early.reply, [message, reply]);
+        yield* Deferred.succeed(
+          early.reply,
+          snapshot([message, reply], undefined, {
+            publication: Publication.make(publication),
+            run: { kind: "running" },
+            assistant: [
+              {
+                kind: "draft",
+                messageId: reply.id,
+                blocks: [
+                  {
+                    type: "text-delta",
+                    messageId: reply.id,
+                    contentIndex: 0,
+                    text: "PICO_WEB_OK",
+                  },
+                ],
+              },
+            ],
+            tools: [],
+          }),
+        );
         yield* waitFor(
           registry,
           state.transcript(firstChat),
@@ -1509,7 +1610,15 @@ describe("frontend state over WebSocket", () => {
         });
         const settled = yield* Queue.take(server.requests);
         assert.deepStrictEqual(pendingMessages(registry.get(state.live(firstChat))), []);
-        yield* Deferred.succeed(settled.reply, [message, reply]);
+        yield* Deferred.succeed(
+          settled.reply,
+          snapshot([message, reply], undefined, {
+            publication: Publication.make(publication),
+            run: { kind: "running" },
+            assistant: [],
+            tools: [],
+          }),
+        );
         yield* waitFor(
           registry,
           state.transcript(firstChat),
@@ -1520,7 +1629,15 @@ describe("frontend state over WebSocket", () => {
           chatId: firstChat,
           event: { type: "run-finished", outcome: "completed" },
         });
-        yield* Deferred.succeed((yield* Queue.take(server.requests)).reply, [message, reply]);
+        yield* Deferred.succeed(
+          (yield* Queue.take(server.requests)).reply,
+          snapshot([message, reply], undefined, {
+            publication: Publication.make(publication),
+            run: { kind: "finished", outcome: "completed" },
+            assistant: [],
+            tools: [],
+          }),
+        );
         yield* waitFor(
           registry,
           state.transcript(firstChat),
@@ -1533,7 +1650,6 @@ describe("frontend state over WebSocket", () => {
         const live = registry.get(state.live(firstChat));
         assert.deepStrictEqual(pendingMessages(live), []);
         assert.isUndefined(draftBlock(live, reply.id, 0));
-        assert.deepStrictEqual(live.run, { kind: "finished", outcome: "completed" });
       }).pipe(Effect.scoped, Effect.provide(server.layer));
     }),
   );
@@ -1551,7 +1667,7 @@ describe("frontend state over WebSocket", () => {
         registry.mount(state.live(firstChat));
         const route = yield* Queue.take(server.opened);
         registry.mount(state.transcript(firstChat));
-        yield* Deferred.succeed((yield* Queue.take(server.requests)).reply, [history]);
+        yield* Deferred.succeed((yield* Queue.take(server.requests)).reply, snapshot([history]));
         yield* waitFor(
           registry,
           state.transcript(firstChat),
@@ -1562,11 +1678,44 @@ describe("frontend state over WebSocket", () => {
           event: { type: "message-settled", message: first },
         });
         const stale = yield* Queue.take(server.requests);
+        const staleSnapshot = snapshot([history], undefined, {
+          publication: Publication.make(publication),
+          run: { kind: "idle" },
+          assistant: [{ kind: "settled", message: first }],
+          tools: [],
+        });
         yield* Queue.offer(route.queue, {
           chatId: firstChat,
           event: { type: "message-settled", message: second },
         });
-        yield* Deferred.succeed((yield* Queue.take(server.requests)).reply, [history]);
+        yield* waitFor(
+          registry,
+          state.live(firstChat),
+          (value) => value.assistant.get(second.id)?.kind === "settled",
+        );
+        assert.deepStrictEqual(pendingMessages(registry.get(state.live(firstChat))), [
+          first,
+          second,
+        ]);
+        yield* Deferred.succeed(stale.reply, staleSnapshot);
+        yield* Deferred.await(stale.returned);
+        const newer = yield* Queue.take(server.requests);
+        assert.deepStrictEqual(pendingMessages(registry.get(state.live(firstChat))), [
+          first,
+          second,
+        ]);
+        yield* Deferred.succeed(
+          newer.reply,
+          snapshot([history], undefined, {
+            publication: Publication.make(publication),
+            run: { kind: "idle" },
+            assistant: [
+              { kind: "settled", message: first },
+              { kind: "settled", message: second },
+            ],
+            tools: [],
+          }),
+        );
         yield* waitFor(
           registry,
           state.transcript(firstChat),
@@ -1576,17 +1725,16 @@ describe("frontend state over WebSocket", () => {
           first,
           second,
         ]);
-        yield* Deferred.succeed(stale.reply, [history, first, second]);
-        yield* Deferred.await(stale.returned);
-        assert.deepStrictEqual(pendingMessages(registry.get(state.live(firstChat))), [
-          first,
-          second,
-        ]);
         registry.refresh(state.transcript(firstChat));
-        yield* Deferred.succeed((yield* Queue.take(server.requests)).reply, [
-          history,
-          { ...first, model: "normalized-model" },
-        ]);
+        yield* Deferred.succeed(
+          (yield* Queue.take(server.requests)).reply,
+          snapshot([history, { ...first, model: "normalized-model" }], undefined, {
+            publication: Publication.make(publication),
+            run: { kind: "idle" },
+            assistant: [{ kind: "settled", message: second }],
+            tools: [],
+          }),
+        );
         yield* waitFor(
           registry,
           state.transcript(firstChat),
@@ -1606,6 +1754,25 @@ describe("frontend state over WebSocket", () => {
           { chatId: firstChat, event: { type: "run-finished", outcome: "aborted" } },
         ]);
         const finish = yield* Queue.take(server.requests);
+        const finishedSnapshot = snapshot([history, first, second], undefined, {
+          publication: Publication.make(publication),
+          run: { kind: "finished", outcome: "aborted" },
+          assistant: [
+            {
+              kind: "draft",
+              messageId: orphanMessageId,
+              blocks: [
+                {
+                  type: "text-delta",
+                  messageId: orphanMessageId,
+                  contentIndex: 0,
+                  text: "orphan",
+                },
+              ],
+            },
+          ],
+          tools: [],
+        });
         yield* Queue.offerAll(route.queue, [
           { chatId: firstChat, event: { type: "run-started" } },
           {
@@ -1623,7 +1790,7 @@ describe("frontend state over WebSocket", () => {
           state.live(firstChat),
           (value) => draftBlock(value, nextMessageId, 0)?.text === "new run",
         );
-        yield* Deferred.succeed(finish.reply, [history, first, second]);
+        yield* Deferred.succeed(finish.reply, finishedSnapshot);
         yield* waitFor(
           registry,
           state.transcript(firstChat),
@@ -1634,12 +1801,28 @@ describe("frontend state over WebSocket", () => {
         assert.strictEqual(draftBlock(retained, orphanMessageId, 0)?.text, "orphan");
         assert.strictEqual(draftBlock(retained, nextMessageId, 0)?.text, "new run");
         registry.refresh(state.transcript(firstChat));
-        yield* Deferred.succeed((yield* Queue.take(server.requests)).reply, [
-          history,
-          first,
-          second,
-          assistant(orphanMessageId, "orphan"),
-        ]);
+        yield* Deferred.succeed(
+          (yield* Queue.take(server.requests)).reply,
+          snapshot([history, first, second, assistant(orphanMessageId, "orphan")], undefined, {
+            publication: Publication.make(publication),
+            run: { kind: "running" },
+            assistant: [
+              {
+                kind: "draft",
+                messageId: nextMessageId,
+                blocks: [
+                  {
+                    type: "text-delta",
+                    messageId: nextMessageId,
+                    contentIndex: 0,
+                    text: "new run",
+                  },
+                ],
+              },
+            ],
+            tools: [],
+          }),
+        );
         yield* waitFor(
           registry,
           state.transcript(firstChat),
@@ -1662,26 +1845,37 @@ describe("frontend state over WebSocket", () => {
         const repeated = assistant(firstMessageId, "same as history");
         registry.mount(state.live(firstChat));
         const route = yield* Queue.take(server.opened);
-        yield* Queue.offerAll(route.queue, [
-          { chatId: firstChat, event: { type: "message-settled", message: repeated } },
-          { chatId: firstChat, event: { type: "title-changed", title: "settlement received" } },
-        ]);
+        const initial = yield* Queue.take(server.requests);
+        yield* Queue.offer(route.queue, {
+          chatId: firstChat,
+          event: { type: "message-settled", message: repeated },
+        });
+        registry.mount(state.transcript(firstChat));
         yield* waitFor(
           registry,
-          state.titles,
-          (titles) => titles.get(firstChat) === "settlement received",
+          state.live(firstChat),
+          (value) => value.assistant.get(repeated.id)?.kind === "settled",
         );
-        registry.mount(state.transcript(firstChat));
-        yield* Deferred.succeed((yield* Queue.take(server.requests)).reply, [repeated]);
+        assert.isTrue(Option.isNone(AsyncResult.value(registry.get(state.transcript(firstChat)))));
+        const persisted = snapshot([repeated], undefined, {
+          publication: Publication.make(publication),
+          run: { kind: "idle" },
+          assistant: [],
+          tools: [],
+        });
+        yield* Deferred.succeed(initial.reply, persisted);
+        yield* Deferred.await(initial.returned);
+        const followup = yield* Queue.take(server.requests);
+        assert.deepStrictEqual(AsyncResult.getOrThrow(registry.get(state.transcript(firstChat))), [
+          repeated,
+        ]);
+        assert.deepStrictEqual(pendingMessages(registry.get(state.live(firstChat))), []);
+        yield* Deferred.succeed(followup.reply, persisted);
         yield* waitFor(
           registry,
           state.transcript(firstChat),
           (value) => AsyncResult.isSuccess(value) && !value.waiting,
         );
-        assert.deepStrictEqual(AsyncResult.getOrThrow(registry.get(state.transcript(firstChat))), [
-          repeated,
-        ]);
-        assert.deepStrictEqual(pendingMessages(registry.get(state.live(firstChat))), []);
         yield* Queue.offerAll(route.queue, [
           {
             chatId: firstChat,
@@ -1692,7 +1886,15 @@ describe("frontend state over WebSocket", () => {
         const late = yield* Queue.take(server.requests);
         assert.deepStrictEqual(pendingMessages(registry.get(state.live(firstChat))), []);
         assert.isUndefined(draftBlock(registry.get(state.live(firstChat)), repeated.id, 0));
-        yield* Deferred.succeed(late.reply, [repeated]);
+        yield* Deferred.succeed(
+          late.reply,
+          snapshot([repeated], undefined, {
+            publication: Publication.make(publication),
+            run: { kind: "running" },
+            assistant: [],
+            tools: [],
+          }),
+        );
         yield* waitFor(
           registry,
           state.transcript(firstChat),
@@ -1700,5 +1902,646 @@ describe("frontend state over WebSocket", () => {
         );
       }).pipe(Effect.scoped, Effect.provide(server.layer));
     }),
+  );
+
+  it.live(
+    "merges an ordinary snapshot cut with later deltas and tool completion exactly once",
+    () =>
+      Effect.gen(function* () {
+        const reading = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<TranscriptSnapshot>();
+        let hold = false;
+        const server = yield* fixture({
+          transcript: () =>
+            hold
+              ? Deferred.succeed(reading, undefined).pipe(Effect.andThen(Deferred.await(release)))
+              : Effect.succeed(snapshot()),
+          sendMessage: () => Effect.succeed({ kind: "handled" }),
+          abort: () => Effect.void,
+        });
+        yield* Effect.gen(function* () {
+          const state = make({ url: yield* endpoint });
+          const registry = yield* registryInScope;
+          registry.mount(state.live(firstChat));
+          const route = yield* Queue.take(server.opened);
+          yield* waitFor(registry, state.connection, (value) => value.kind === "active");
+          const start = {
+            type: "tool-started",
+            toolCallId: "read-file",
+            toolName: "read",
+            argumentsJson: '{"path":"file.ts"}',
+          } as const;
+          yield* Queue.offerAll(route.queue, [
+            { chatId: firstChat, event: { type: "run-started" } },
+            {
+              chatId: firstChat,
+              event: {
+                type: "text-delta",
+                messageId: firstMessageId,
+                contentIndex: 0,
+                text: "prefix",
+              },
+            },
+            { chatId: firstChat, event: start },
+          ]);
+          yield* waitFor(
+            registry,
+            state.live(firstChat),
+            (value) => value.tools.get(start.toolCallId)?.kind === "running",
+          );
+          const cut = snapshot(
+            [],
+            { kind: "unavailable" },
+            {
+              publication: Publication.make(publication),
+              run: { kind: "running" },
+              assistant: [
+                {
+                  kind: "draft",
+                  messageId: firstMessageId,
+                  blocks: [
+                    {
+                      type: "text-delta",
+                      messageId: firstMessageId,
+                      contentIndex: 0,
+                      text: "prefix",
+                    },
+                  ],
+                },
+              ],
+              tools: [{ kind: "running", start }],
+            },
+          );
+          hold = true;
+          registry.refresh(state.transcript(firstChat));
+          yield* Deferred.await(reading);
+          yield* Queue.offerAll(route.queue, [
+            {
+              chatId: firstChat,
+              event: {
+                type: "text-delta",
+                messageId: firstMessageId,
+                contentIndex: 0,
+                text: " suffix",
+              },
+            },
+            {
+              chatId: firstChat,
+              event: {
+                type: "tool-finished",
+                toolCallId: start.toolCallId,
+                toolName: "read",
+                status: "succeeded",
+              },
+            },
+          ]);
+          yield* waitFor(
+            registry,
+            state.live(firstChat),
+            (value) => value.tools.get(start.toolCallId)?.kind === "finished",
+          );
+          yield* Deferred.succeed(release, cut);
+          yield* waitFor(
+            registry,
+            state.transcript(firstChat),
+            (value) => value._tag === "Success" && !value.waiting,
+          );
+          const live = registry.get(state.live(firstChat));
+          assert.strictEqual(draftBlock(live, firstMessageId, 0)?.text, "prefix suffix");
+          assert.strictEqual(live.tools.get(start.toolCallId)?.kind, "finished");
+          assert.strictEqual(live.run.kind, "running");
+        }).pipe(Effect.scoped, Effect.provide(server.layer));
+      }),
+  );
+
+  it.live("preserves notices once across snapshot cuts and delayed Events frames", () =>
+    Effect.gen(function* () {
+      const reading = yield* Deferred.make<void>();
+      const reply = yield* Deferred.make<TranscriptSnapshot>();
+      let current = snapshot();
+      let hold = false;
+      const server = yield* fixture({
+        transcript: () =>
+          hold
+            ? Deferred.succeed(reading, undefined).pipe(Effect.andThen(Deferred.await(reply)))
+            : Effect.succeed(current),
+        sendMessage: () => Effect.succeed({ kind: "handled" }),
+        abort: () => Effect.void,
+      });
+      yield* Effect.gen(function* () {
+        const state = make({ url: yield* endpoint });
+        const registry = yield* registryInScope;
+        registry.mount(state.live(firstChat));
+        const route = yield* Queue.take(server.opened);
+        yield* waitFor(registry, state.connection, (value) => value.kind === "active");
+        const baseline = {
+          type: "notice",
+          level: "info",
+          message: "Before refresh",
+        } satisfies AgentEventEnvelope["event"];
+        const buffered = {
+          type: "notice",
+          level: "warning",
+          message: "Before snapshot cut",
+        } satisfies AgentEventEnvelope["event"];
+        const afterCut = {
+          type: "notice",
+          level: "error",
+          message: "After snapshot cut",
+        } satisfies AgentEventEnvelope["event"];
+        yield* Queue.offer(route.queue, { chatId: firstChat, event: baseline });
+        yield* waitFor(registry, state.live(firstChat), (value) => value.notices.length === 1);
+        hold = true;
+        registry.refresh(state.transcript(firstChat));
+        yield* Deferred.await(reading);
+        yield* Queue.offer(route.queue, { chatId: firstChat, event: buffered });
+        yield* waitFor(registry, state.live(firstChat), (value) => value.notices.length === 2);
+        const delayed = {
+          chatId: firstChat,
+          event: { type: "notice", level: "warning", message: "Delayed frame" },
+          publication: Publication.make(++publication),
+          origin: "session",
+        } satisfies AgentEventEnvelope;
+        current = snapshot(
+          [],
+          { kind: "unavailable" },
+          {
+            publication: delayed.publication,
+            run: { kind: "idle" },
+            assistant: [],
+            tools: [],
+          },
+        );
+        yield* Queue.offer(route.queue, { chatId: firstChat, event: afterCut });
+        yield* waitFor(registry, state.live(firstChat), (value) => value.notices.length === 3);
+        hold = false;
+        yield* Deferred.succeed(reply, current);
+        yield* waitFor(
+          registry,
+          state.transcript(firstChat),
+          (value) => value._tag === "Success" && !value.waiting,
+        );
+        assert.deepStrictEqual(registry.get(state.live(firstChat)).notices, [
+          baseline,
+          buffered,
+          afterCut,
+        ]);
+        yield* Queue.offerAll(route.queue, [
+          delayed,
+          {
+            chatId: firstChat,
+            event: {
+              type: "text-delta",
+              messageId: firstMessageId,
+              contentIndex: 0,
+              text: "after delayed frame",
+            },
+          },
+        ]);
+        yield* waitFor(
+          registry,
+          state.live(firstChat),
+          (value) => draftBlock(value, firstMessageId, 0)?.text === "after delayed frame",
+        );
+        assert.deepStrictEqual(registry.get(state.live(firstChat)).notices, [
+          baseline,
+          buffered,
+          afterCut,
+          delayed.event,
+        ]);
+        registry.refresh(state.transcript(firstChat));
+        yield* AtomRegistry.getResult(registry, state.transcript(firstChat), {
+          suspendOnWaiting: true,
+        });
+        assert.deepStrictEqual(registry.get(state.live(firstChat)).notices, [
+          baseline,
+          buffered,
+          afterCut,
+          delayed.event,
+        ]);
+      }).pipe(Effect.scoped, Effect.provide(server.layer));
+    }),
+  );
+
+  it.live(
+    "retains delivery settlements outside an absent-session snapshot cut without duplicating IDs",
+    () =>
+      Effect.gen(function* () {
+        const reading = yield* Deferred.make<void>();
+        const reply = yield* Deferred.make<TranscriptSnapshot>();
+        let current = snapshot();
+        let hold = false;
+        const server = yield* fixture({
+          transcript: () =>
+            hold
+              ? Deferred.succeed(reading, undefined).pipe(Effect.andThen(Deferred.await(reply)))
+              : Effect.succeed(current),
+          sendMessage: () => Effect.succeed({ kind: "handled" }),
+          abort: () => Effect.void,
+        });
+        yield* Effect.gen(function* () {
+          const state = make({ url: yield* endpoint });
+          const registry = yield* registryInScope;
+          registry.mount(state.live(firstChat));
+          const route = yield* Queue.take(server.opened);
+          yield* waitFor(registry, state.connection, (value) => value.kind === "active");
+          hold = true;
+          registry.refresh(state.transcript(firstChat));
+          yield* Deferred.await(reading);
+          const delivered = {
+            chatId: firstChat,
+            publication: Publication.make(++publication),
+            origin: "delivery",
+            event: {
+              type: "message-settled",
+              message: assistant(firstMessageId, "Delivery failed"),
+            },
+          } satisfies AgentEventEnvelope;
+          const delayed = {
+            chatId: firstChat,
+            publication: Publication.make(++publication),
+            origin: "delivery",
+            event: {
+              type: "message-settled",
+              message: assistant(secondMessageId, "Delayed delivery failure"),
+            },
+          } satisfies AgentEventEnvelope;
+          yield* Queue.offer(route.queue, delivered);
+          yield* waitFor(
+            registry,
+            state.live(firstChat),
+            (value) => value.assistant.get(firstMessageId)?.kind === "settled",
+          );
+          current = snapshot(
+            [],
+            { kind: "unavailable" },
+            {
+              publication: delayed.publication,
+              run: { kind: "idle" },
+              assistant: [],
+              tools: [],
+            },
+          );
+          hold = false;
+          yield* Deferred.succeed(reply, current);
+          yield* waitFor(
+            registry,
+            state.transcript(firstChat),
+            (value) => value._tag === "Success" && !value.waiting,
+          );
+          assert.deepStrictEqual(pendingMessages(registry.get(state.live(firstChat))), [
+            delivered.event.message,
+          ]);
+          yield* Queue.offerAll(route.queue, [
+            delivered,
+            delayed,
+            {
+              chatId: firstChat,
+              event: { type: "notice", level: "info", message: "After duplicate delivery" },
+            },
+          ]);
+          yield* waitFor(registry, state.live(firstChat), (value) =>
+            value.notices.some((notice) => notice.message === "After duplicate delivery"),
+          );
+          yield* AtomRegistry.getResult(registry, state.transcript(firstChat), {
+            suspendOnWaiting: true,
+          });
+          assert.deepStrictEqual(pendingMessages(registry.get(state.live(firstChat))), [
+            delivered.event.message,
+            delayed.event.message,
+          ]);
+          assert.deepStrictEqual(registry.get(state.live(firstChat)).run, { kind: "idle" });
+        }).pipe(Effect.scoped, Effect.provide(server.layer));
+      }),
+  );
+
+  it.live(
+    "keeps shared recovery alive when its initiating query is refreshed before Events is ready",
+    () =>
+      Effect.gen(function* () {
+        const ready = yield* Deferred.make<void>();
+        let holdReady = false;
+        let rejectList = true;
+        const recovered = { ...webWorkspace, name: "Recovered workspace" };
+        const server = yield* fixture(
+          {
+            transcript: () => Effect.succeed(snapshot()),
+            sendMessage: () => Effect.succeed({ kind: "handled" }),
+            abort: () => Effect.void,
+            listWorkspaces: () =>
+              rejectList
+                ? Effect.fail(
+                    new ApplicationError({ reason: "operation", message: "List unavailable" }),
+                  )
+                : Effect.succeed([recovered]),
+          },
+          Effect.suspend(() => (holdReady ? Deferred.await(ready) : Effect.void)),
+        );
+        yield* Effect.gen(function* () {
+          const state = make({ url: yield* endpoint });
+          const registry = yield* registryInScope;
+          registry.mount(state.workspaces);
+          const first = yield* Queue.take(server.opened);
+          yield* waitFor(registry, state.connection, (value) => value.kind === "active");
+          yield* waitFor(
+            registry,
+            state.workspaces,
+            (value) => value._tag === "Failure" && !value.waiting,
+          );
+          yield* Queue.end(first.queue);
+          yield* waitFor(registry, state.connection, (value) => value.kind === "unavailable");
+          yield* Deferred.await(first.closed);
+          holdReady = true;
+          rejectList = false;
+          registry.refresh(state.workspaces);
+          const replacement = yield* Queue.take(server.opened);
+          registry.set(state.ensure, undefined);
+          yield* waitFor(registry, state.ensure, (value) => value.waiting);
+          yield* Effect.yieldNow;
+          registry.refresh(state.workspaces);
+          yield* Effect.yieldNow;
+          yield* Deferred.succeed(ready, undefined);
+          yield* AtomRegistry.getResult(registry, state.ensure, { suspendOnWaiting: true });
+          yield* waitFor(registry, state.connection, (value) => value.kind === "active");
+          assert.deepStrictEqual(
+            yield* AtomRegistry.getResult(registry, state.workspaces, { suspendOnWaiting: true }),
+            [recovered],
+          );
+          assert.strictEqual(server.openCount(), 2);
+          assert.isFalse(yield* Deferred.isDone(replacement.closed));
+        }).pipe(Effect.scoped, Effect.provide(server.layer));
+      }),
+  );
+
+  it.live(
+    "joins recovery, rehydrates active and finished runs, and fences old reads and writes without replay",
+    () =>
+      Effect.gen(function* () {
+        const oldRead = {
+          started: yield* Deferred.make<void>(),
+          reply: yield* Deferred.make<TranscriptSnapshot>(),
+          returned: yield* Deferred.make<void>(),
+        };
+        const recoveryRead = {
+          started: yield* Deferred.make<void>(),
+          reply: yield* Deferred.make<TranscriptSnapshot>(),
+          returned: yield* Deferred.make<void>(),
+        };
+        let nextRead: typeof oldRead | undefined;
+        const sent = yield* Deferred.make<void>();
+        const shaken = yield* Deferred.make<void>();
+        const releaseWrite = yield* Deferred.make<void>();
+        const writeReturned = yield* Deferred.make<void>();
+        const shakeReturned = yield* Deferred.make<void>();
+        let sends = 0;
+        let shakes = 0;
+        let current = snapshot([message]);
+        let workspace = webWorkspace;
+        let title = "Before disconnect";
+        const server = yield* fixture({
+          listWorkspaces: () => Effect.sync(() => [workspace]),
+          listChats: () =>
+            Effect.sync(() => [
+              {
+                id: firstChat,
+                workspaceId: webWorkspace.id,
+                cwd: webWorkspace.defaultCwd,
+                externalId: null,
+                createdAt: 1,
+                archivedAt: null,
+                title,
+              },
+            ]),
+          transcript: () =>
+            Effect.gen(function* () {
+              const pending = nextRead;
+              nextRead = undefined;
+              if (pending === undefined) return current;
+              yield* Deferred.succeed(pending.started, undefined);
+              return yield* Deferred.await(pending.reply).pipe(
+                Effect.ensuring(Deferred.succeed(pending.returned, undefined)),
+                Effect.uninterruptible,
+              );
+            }),
+          sendMessage: () =>
+            Effect.gen(function* () {
+              sends++;
+              yield* Deferred.succeed(sent, undefined);
+              yield* Deferred.await(releaseWrite);
+              yield* Deferred.succeed(writeReturned, undefined);
+              return { kind: "handled" } as const;
+            }).pipe(Effect.uninterruptible),
+          abort: () => Effect.void,
+          shake: () =>
+            Effect.gen(function* () {
+              shakes++;
+              yield* Deferred.succeed(shaken, undefined);
+              yield* Deferred.await(releaseWrite);
+              yield* Deferred.succeed(shakeReturned, undefined);
+              return { mode: "images", imagesDropped: 2, tokensFreed: 0 } as const;
+            }).pipe(Effect.uninterruptible),
+        });
+        yield* Effect.gen(function* () {
+          yield* Effect.addFinalizer(() =>
+            Effect.all([
+              Deferred.succeed(oldRead.reply, snapshot()),
+              Deferred.succeed(recoveryRead.reply, snapshot()),
+              Deferred.succeed(releaseWrite, undefined),
+            ]),
+          );
+          const state = make({ url: yield* endpoint });
+          const registry = yield* registryInScope;
+          registry.mount(state.workspaces);
+          registry.mount(state.chats(webWorkspace.id));
+          registry.mount(state.live(firstChat));
+          const first = yield* Queue.take(server.opened);
+          yield* waitFor(registry, state.connection, (value) => value.kind === "active");
+          yield* Queue.offer(first.queue, {
+            chatId: firstChat,
+            event: {
+              type: "text-delta",
+              messageId: orphanMessageId,
+              contentIndex: 0,
+              text: "local fragment",
+            },
+          });
+          yield* waitFor(
+            registry,
+            state.live(firstChat),
+            (value) => draftBlock(value, orphanMessageId, 0)?.text === "local fragment",
+          );
+          nextRead = oldRead;
+          registry.refresh(state.transcript(firstChat));
+          yield* Deferred.await(oldRead.started);
+          registry.set(state.send(firstChat), prompt("execute once"));
+          yield* Deferred.await(sent);
+          const shakeInvocation = yield* Effect.forkScoped(
+            state.shake(registry, firstChat, "images"),
+          );
+          yield* Deferred.await(shaken);
+          yield* Queue.end(first.queue);
+          yield* waitFor(registry, state.connection, (value) => value.kind === "unavailable");
+          yield* waitFor(
+            registry,
+            state.send(firstChat),
+            (value) => value._tag === "Failure" && !value.waiting,
+          );
+          const shakeExit = yield* Fiber.await(shakeInvocation);
+          if (shakeExit._tag !== "Failure") return yield* Effect.die("Expected unconfirmed Shake");
+          assert.instanceOf(Cause.squash(shakeExit.cause), ApplicationError);
+          const start = {
+            type: "tool-started",
+            toolCallId: "active-tool",
+            toolName: "read",
+            argumentsJson: '{"path":"active.ts"}',
+          } as const;
+          current = snapshot(
+            [message],
+            {
+              kind: "available",
+              contextWindow: 100_000,
+              usedTokens: 1234,
+              messagesTokens: 1000,
+              systemPromptTokens: 100,
+              systemToolsTokens: 100,
+              systemContextTokens: 34,
+              skillsTokens: 0,
+            },
+            {
+              publication: Publication.make(publication),
+              run: { kind: "running" },
+              assistant: [
+                {
+                  kind: "draft",
+                  messageId: firstMessageId,
+                  blocks: [
+                    {
+                      type: "text-delta",
+                      messageId: firstMessageId,
+                      contentIndex: 0,
+                      text: "server prefix",
+                    },
+                  ],
+                },
+              ],
+              tools: [{ kind: "running", start }],
+            },
+          );
+          workspace = { ...webWorkspace, name: "Changed while disconnected" };
+          title = "Recovered title";
+          nextRead = recoveryRead;
+          registry.set(state.ensure, undefined);
+          registry.set(state.ensure, undefined);
+          registry.set(state.ensure, undefined);
+          const second = yield* Queue.take(server.opened);
+          yield* Deferred.await(recoveryRead.started);
+          assert.strictEqual(registry.get(state.connection).kind, "unavailable");
+          yield* Deferred.succeed(recoveryRead.reply, current);
+          yield* waitFor(registry, state.connection, (value) => value.kind === "active");
+          yield* Deferred.await(first.closed);
+          assert.strictEqual(server.openCount(), 2);
+          assert.strictEqual(
+            draftBlock(registry.get(state.live(firstChat)), firstMessageId, 0)?.text,
+            "server prefix",
+          );
+          assert.deepStrictEqual(registry.get(state.live(firstChat)).tools.get(start.toolCallId), {
+            kind: "running",
+            start,
+          });
+          assert.strictEqual(
+            AsyncResult.getOrThrow(registry.get(state.workspaces))[0]?.name,
+            workspace.name,
+          );
+          assert.strictEqual(
+            AsyncResult.getOrThrow(registry.get(state.chats(webWorkspace.id)))[0]?.title,
+            title,
+          );
+          assert.deepStrictEqual(
+            AsyncResult.getOrThrow(registry.get(state.contextUsage(firstChat))),
+            current.contextUsage,
+          );
+          const fragment = registry.get(state.live(firstChat)).assistant.get(orphanMessageId);
+          assert.strictEqual(fragment?.kind === "draft" ? fragment.phase : undefined, "retained");
+          yield* Deferred.succeed(oldRead.reply, snapshot());
+          yield* Deferred.succeed(releaseWrite, undefined);
+          yield* Deferred.await(oldRead.returned);
+          yield* Deferred.await(writeReturned);
+          yield* Deferred.await(shakeReturned);
+          assert.strictEqual(
+            draftBlock(registry.get(state.live(firstChat)), firstMessageId, 0)?.text,
+            "server prefix",
+          );
+          assert.strictEqual(sends, 1);
+          assert.strictEqual(shakes, 1);
+          assert.isFalse(registry.get(state.send(firstChat)).waiting);
+          registry.set(state.ensure, undefined);
+          registry.set(state.ensure, undefined);
+          yield* AtomRegistry.getResult(registry, state.ensure, { suspendOnWaiting: true });
+          assert.strictEqual(server.openCount(), 2);
+          yield* Queue.end(second.queue);
+          yield* waitFor(registry, state.connection, (value) => value.kind === "unavailable");
+          const completed = assistant(firstMessageId, "server completed");
+          current = snapshot(
+            [message, completed],
+            { kind: "unavailable" },
+            {
+              publication: Publication.make(publication),
+              run: { kind: "finished", outcome: "completed" },
+              assistant: [],
+              tools: [],
+            },
+          );
+          registry.set(state.ensure, undefined);
+          const third = yield* Queue.take(server.opened);
+          yield* waitFor(registry, state.connection, (value) => value.kind === "active");
+          const live = registry.get(state.live(firstChat));
+          assert.deepStrictEqual(live.run, { kind: "finished", outcome: "completed" });
+          assert.deepStrictEqual([...live.tools], []);
+          assert.isUndefined(live.assistant.get(firstMessageId));
+          assert.strictEqual(draftBlock(live, orphanMessageId, 0)?.text, "local fragment");
+          assert.deepStrictEqual(
+            AsyncResult.getOrThrow(registry.get(state.transcript(firstChat))),
+            [message, completed],
+          );
+          assert.strictEqual(sends, 1);
+          assert.strictEqual(shakes, 1);
+          registry.dispose();
+          yield* Deferred.await(third.closed);
+        }).pipe(Effect.scoped, Effect.provide(server.layer));
+      }),
+  );
+
+  it.live(
+    "disposes a generation while rehydration is waiting without restoring registry state",
+    () =>
+      Effect.gen(function* () {
+        const reading = yield* Deferred.make<void>();
+        const reply = yield* Deferred.make<TranscriptSnapshot>();
+        const returned = yield* Deferred.make<void>();
+        const server = yield* fixture({
+          transcript: () =>
+            Deferred.succeed(reading, undefined).pipe(
+              Effect.andThen(Deferred.await(reply)),
+              Effect.ensuring(Deferred.succeed(returned, undefined)),
+              Effect.uninterruptible,
+            ),
+          sendMessage: () => Effect.succeed({ kind: "handled" }),
+          abort: () => Effect.void,
+        });
+        yield* Effect.gen(function* () {
+          yield* Effect.addFinalizer(() => Deferred.succeed(reply, snapshot()));
+          const registry = yield* registryInScope;
+          const state = make({ url: yield* endpoint });
+          registry.mount(state.live(firstChat));
+          const route = yield* Queue.take(server.opened);
+          yield* Deferred.await(reading);
+          registry.dispose();
+          yield* Deferred.await(route.closed);
+          yield* Deferred.succeed(reply, snapshot([message]));
+          yield* Deferred.await(returned);
+          assert.strictEqual(registry.getNodes().size, 0);
+          assert.strictEqual(server.openCount(), 1);
+        }).pipe(Effect.scoped, Effect.provide(server.layer));
+      }),
   );
 });

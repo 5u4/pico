@@ -3,6 +3,7 @@ import * as BunPath from "@effect/platform-bun/BunPath";
 import { assert, describe, it } from "@effect/vitest";
 import * as OmpSessionLoader from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import * as OmpSessionManager from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { type AgentEvent, Publication } from "@pico/contract/agent-event";
 import * as Agent from "@pico/contract/agent-message";
 import type {
   ContextUsage,
@@ -75,6 +76,8 @@ describe("AgentRuntime", () => {
               askBtw: () => Promise.reject(new Error("unexpected side question")),
               switchModel: () => Promise.reject(new Error("unexpected model switch")),
               flush: () => Promise.resolve(),
+              historyBoundary: () => "stable",
+              settleHistory: () => Promise.resolve(),
               sendPrompt: async (): Promise<MessageDelivery> => ({
                 kind: "steered",
                 consumed: Deferred.await(nativeConsumption),
@@ -127,6 +130,8 @@ describe("AgentRuntime", () => {
                   askBtw: () => Promise.reject(new Error("unexpected side question")),
                   switchModel: () => Promise.reject(new Error("unexpected model switch")),
                   flush: () => Promise.resolve(),
+                  historyBoundary: () => "stable",
+                  settleHistory: () => Promise.resolve(),
                   sendPrompt: async (value, onStarted): Promise<MessageDelivery> => {
                     submitted.push(value.text);
                     if (submitted.length === 1) {
@@ -511,6 +516,8 @@ describe("AgentRuntime", () => {
               askBtw: () => Promise.reject(new Error("unexpected side question")),
               switchModel: () => Promise.reject(new Error("unexpected model switch")),
               flush: () => Promise.resolve(),
+              historyBoundary: () => "stable",
+              settleHistory: () => Promise.resolve(),
               sendPrompt: (value) => {
                 if (value.text !== "acquire") {
                   emit({ type: "notice", level: "info", message: value.text });
@@ -641,6 +648,11 @@ describe("AgentRuntime", () => {
               askBtw: () => Promise.reject(new Error("unexpected side question")),
               switchModel: () => Promise.reject(new Error("unexpected model switch")),
               flush: () => Promise.resolve(),
+              historyBoundary: () => "stable",
+              settleHistory: () =>
+                persistenceFailure === undefined
+                  ? Promise.resolve()
+                  : Promise.reject(persistenceFailure),
               sendPrompt: () => {
                 sends += 1;
                 return Promise.reject(
@@ -675,6 +687,12 @@ describe("AgentRuntime", () => {
           messages,
           todo: { kind: "ready", phases: [] },
           contextUsage: { kind: "unavailable" },
+          runtime: {
+            publication: Publication.make(0),
+            run: { kind: "idle" },
+            assistant: [],
+            tools: [],
+          },
         });
         assert.strictEqual(acquisitions, 0);
         assert.strictEqual(contextReads, 0);
@@ -705,9 +723,10 @@ describe("AgentRuntime", () => {
           imagesDropped: 3,
           tokensFreed: 0,
         });
-        assert.deepStrictEqual(yield* Fiber.join(contextChanged), [
-          { chatId, event: { type: "context-invalidated" } },
-        ]);
+        assert.deepStrictEqual(
+          (yield* Fiber.join(contextChanged)).map(({ event }) => event),
+          [{ type: "context-invalidated" }],
+        );
         assert.strictEqual(acquisitions, 1);
         assert.strictEqual(sends, 0);
         assert.deepStrictEqual(shakenModes, ["images"]);
@@ -728,6 +747,12 @@ describe("AgentRuntime", () => {
           messages,
           todo: { kind: "ready", phases: [] },
           contextUsage: { kind: "error" },
+          runtime: {
+            publication: Publication.make(1),
+            run: { kind: "idle" },
+            assistant: [],
+            tools: [],
+          },
         });
 
         transcriptFailure = new AgentError({ message: "History read failed" });
@@ -777,6 +802,8 @@ describe("AgentRuntime", () => {
               askBtw: () => Promise.reject(new Error("unexpected side question")),
               switchModel: () => Promise.reject(new Error("unexpected model switch")),
               flush: () => Promise.resolve(),
+              historyBoundary: () => "stable",
+              settleHistory: () => Promise.resolve(),
               sendPrompt: () => Promise.resolve(admitted),
               shake: async (mode) => shakeResult(mode),
               appendAssistantMessage: () => Promise.resolve(),
@@ -806,6 +833,12 @@ describe("AgentRuntime", () => {
           messages: [],
           contextUsage: { kind: "unavailable" },
           todo: { kind: "ready", phases: [] },
+          runtime: {
+            publication: Publication.make(0),
+            run: { kind: "idle" },
+            assistant: [],
+            tools: [],
+          },
         });
         assert.strictEqual(acquisitions, 1);
       }),
@@ -846,6 +879,8 @@ describe("AgentRuntime", () => {
                     askBtw: () => Promise.reject(new Error("unexpected side question")),
                     switchModel: () => Promise.reject(new Error("unexpected model switch")),
                     flush: () => Promise.resolve(),
+                    historyBoundary: () => "stable",
+                    settleHistory: () => Promise.resolve(),
                     sendPrompt: () => Promise.resolve(admitted),
                     shake: async (mode) => shakeResult(mode),
                     appendAssistantMessage: () => Promise.resolve(),
@@ -920,6 +955,8 @@ describe("AgentRuntime", () => {
                 askBtw: () => Promise.reject(new Error("unexpected side question")),
                 switchModel: () => Promise.reject(new Error("unexpected model switch")),
                 flush: () => Promise.resolve(),
+                historyBoundary: () => "stable",
+                settleHistory: () => Promise.resolve(),
                 sendPrompt: () => {
                   emit({ type: "notice", level: "info", message: "last" });
                   return Promise.resolve(admitted);
@@ -974,6 +1011,8 @@ describe("AgentRuntime", () => {
                 askBtw: () => Promise.reject(new Error("unexpected side question")),
                 switchModel: () => Promise.reject(new Error("unexpected model switch")),
                 flush: () => Promise.resolve(),
+                historyBoundary: () => "stable",
+                settleHistory: () => Promise.resolve(),
                 sendPrompt: async (_value, onStarted) => {
                   onStarted?.();
                   emit({ type: "run-started" });
@@ -999,6 +1038,7 @@ describe("AgentRuntime", () => {
         yield* Effect.promise(() => reported.promise);
         const failed = yield* Fiber.await(capture);
         assert.isTrue(Exit.isFailure(failed) && Cause.hasDies(failed.cause));
+        assert.instanceOf(yield* pool.transcript(chatId).pipe(Effect.flip), AgentError);
         yield* pool.close(chatId);
         const forwarderErrors = records.filter(
           (record) => record.annotations.operation === "event-forwarder",
@@ -1019,4 +1059,119 @@ describe("AgentRuntime", () => {
       ),
     );
   });
+
+  it.effect(
+    "captures a public runtime cut across token streaming, synthetic delivery, and session replacement",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          let emit: (event: AgentEvent) => void = () => {
+            throw new Error("Session not opened");
+          };
+          const reading = yield* Deferred.make<void>();
+          const release = yield* Deferred.make<void>();
+          let hold = false;
+          let historyReads = 0;
+          const pool = yield* makeSessionPool({
+            factory: {
+              open: (_id, callback) =>
+                Effect.sync(() => {
+                  emit = callback;
+                  return {
+                    session: {
+                      isStreaming: false,
+                      waitForIdle: async () => {},
+                      settleInFlightMessagePersistence: async () => {},
+                      abort: async () => {},
+                      beginDispose: () => {},
+                      dispose: async () => {},
+                    },
+                    sendPrompt: async () => admitted,
+                    askBtw: () => Promise.reject(new Error("Unexpected side question")),
+                    shake: async (mode) => shakeResult(mode),
+                    switchModel: () => Promise.reject(new Error("Unexpected model switch")),
+                    flush: async () => {},
+                    historyBoundary: () => "stable",
+                    settleHistory: async () => {},
+                    contextUsage: () => ({ kind: "unavailable" }),
+                    appendAssistantMessage: async () => {},
+                    unsubscribe: () => {},
+                  };
+                }),
+            },
+            loadTranscript: () =>
+              Effect.gen(function* () {
+                historyReads++;
+                if (hold) {
+                  yield* Deferred.succeed(reading, undefined);
+                  yield* Deferred.await(release);
+                }
+                return [];
+              }),
+          });
+          yield* pool.contextUsage(chatId);
+          const id = Agent.AgentMessageId.make("recoverable");
+          const start = {
+            type: "tool-started",
+            toolCallId: "read",
+            toolName: "read",
+            argumentsJson: '{"path":"a.ts"}',
+          } as const;
+          emit({ type: "run-started" });
+          emit({ type: "text-delta", messageId: id, contentIndex: 0, text: "prefix" });
+          emit(start);
+          const delivery = {
+            role: "assistant",
+            id: Agent.AgentMessageId.make("delivery"),
+            status: "completed",
+            stopReason: "stop",
+            model: "schedule",
+            timestamp: 1,
+            content: [{ type: "text", text: "notice" }],
+          } satisfies Agent.AgentAssistantMessage;
+          yield* pool.deliver(chatId, delivery);
+          hold = true;
+          const pending = yield* pool.transcript(chatId).pipe(Effect.forkChild);
+          yield* Deferred.await(reading);
+          emit({ type: "text-delta", messageId: id, contentIndex: 0, text: " suffix" });
+          hold = false;
+          yield* Deferred.succeed(release, undefined);
+          const active = yield* Fiber.join(pending);
+          assert.strictEqual(historyReads, 1);
+          assert.deepStrictEqual(active.runtime.run, { kind: "running" });
+          assert.deepStrictEqual(active.runtime.assistant, [
+            {
+              kind: "draft",
+              messageId: id,
+              blocks: [
+                { type: "text-delta", messageId: id, contentIndex: 0, text: "prefix suffix" },
+              ],
+            },
+            { kind: "settled", message: delivery },
+          ]);
+          assert.deepStrictEqual(active.runtime.tools, [{ kind: "running", start }]);
+          emit({
+            type: "tool-finished",
+            toolCallId: "read",
+            toolName: "read",
+            status: "succeeded",
+          });
+          emit({ type: "run-finished", outcome: "completed" });
+          const finished = yield* pool.transcript(chatId);
+          assert.deepStrictEqual(finished.runtime.run, { kind: "finished", outcome: "completed" });
+          assert.strictEqual(finished.runtime.tools[0]?.kind, "finished");
+          assert.isAbove(finished.runtime.publication, active.runtime.publication);
+          yield* pool.close(chatId);
+          const absent = yield* pool.transcript(chatId);
+          assert.deepStrictEqual(absent.runtime.run, { kind: "idle" });
+          assert.deepStrictEqual(absent.runtime.assistant, []);
+          yield* pool.contextUsage(chatId);
+          emit({ type: "run-started" });
+          assert.isAbove(
+            (yield* pool.transcript(chatId)).runtime.publication,
+            finished.runtime.publication,
+          );
+        }),
+      ),
+  );
 });

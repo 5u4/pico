@@ -27,7 +27,9 @@ interface RouteState {
 const make = Effect.fn("EventRouter.make")(function* () {
   const runtime = yield* AgentRuntime;
   const routes = yield* Ref.make<ReadonlyArray<RouteState>>([]);
+  const ended = yield* Deferred.make<void>();
   let dispatching: AgentEventEnvelope | undefined;
+  let alive = true;
 
   const dispatch = Effect.fn("EventRouter.dispatch")(function* (envelope: AgentEventEnvelope) {
     const activeRoutes = yield* Ref.get(routes);
@@ -43,19 +45,37 @@ const make = Effect.fn("EventRouter.make")(function* () {
 
   yield* runtime.events.pipe(
     Stream.runForEach(dispatch),
-    Effect.onExit((exit) => {
-      if (Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause)) return Effect.void;
-      return Effect.logError("Event router pump stopped unexpectedly").pipe(
-        Effect.annotateLogs({
-          component: "event-router",
-          operation: "pump",
-          phase: dispatching === undefined ? "upstream" : "dispatch",
-          chatId: dispatching?.chatId,
-          eventType: dispatching?.event.type,
-          failureKind: Exit.isSuccess(exit) ? "unexpected-end" : "defect",
-        }),
-      );
-    }),
+    Effect.onExit((exit) =>
+      Effect.gen(function* () {
+        alive = false;
+        yield* Deferred.succeed(ended, undefined);
+        const active = yield* Ref.get(routes);
+        yield* Effect.forEach(
+          active,
+          (route) =>
+            Effect.gen(function* () {
+              route.closed = true;
+              yield* Queue.end(route.output);
+              yield* Effect.forEach(route.drains, (drain) => Deferred.succeed(drain, undefined), {
+                discard: true,
+              });
+              route.drains.clear();
+            }),
+          { discard: true },
+        );
+        if (Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause)) return;
+        yield* Effect.logError("Event router pump stopped unexpectedly").pipe(
+          Effect.annotateLogs({
+            component: "event-router",
+            operation: "pump",
+            phase: dispatching === undefined ? "upstream" : "dispatch",
+            chatId: dispatching?.chatId,
+            eventType: dispatching?.event.type,
+            failureKind: Exit.isSuccess(exit) ? "unexpected-end" : "defect",
+          }),
+        );
+      }),
+    ),
     Effect.forkScoped({ startImmediately: true }),
   );
 
@@ -67,7 +87,10 @@ const make = Effect.fn("EventRouter.make")(function* () {
     const state: RouteState = { filter, output, drains: new Set(), closed: false };
 
     yield* Effect.acquireRelease(
-      Ref.update(routes, (activeRoutes) => [...activeRoutes, state]),
+      Ref.update(routes, (activeRoutes) => {
+        if (!alive) throw new Error("Event router producer is unavailable");
+        return [...activeRoutes, state];
+      }),
       () =>
         Ref.update(routes, (activeRoutes) => activeRoutes.filter((route) => route !== state)).pipe(
           Effect.andThen(
@@ -105,7 +128,13 @@ const make = Effect.fn("EventRouter.make")(function* () {
   });
 
   const drain = Effect.fn("EventRouter.drain")(function* () {
-    yield* runtime.drain();
+    if (!alive) return yield* Effect.die(new Error("Event router producer is unavailable"));
+    yield* Effect.raceFirst(
+      runtime.drain(),
+      Deferred.await(ended).pipe(
+        Effect.andThen(Effect.die(new Error("Event router producer ended during drain"))),
+      ),
+    );
     const activeRoutes = yield* Ref.get(routes);
     const completed = yield* Effect.forEach(activeRoutes, (route) =>
       Effect.gen(function* () {

@@ -1,5 +1,6 @@
 import { assert, describe, it } from "@effect/vitest";
 import type { AgentEvent, AgentEventEnvelope } from "@pico/contract/agent-event";
+import { Publication } from "@pico/contract/agent-event";
 import { type AgentAssistantMessage, AgentMessageId } from "@pico/contract/agent-message";
 import * as Chat from "@pico/contract/chat-model";
 import { ScheduleHostError } from "@pico/contract/schedule";
@@ -31,6 +32,8 @@ const visiblePolicy: DiscordOutputPolicy = {
 const envelope = (chatId: Chat.ChatId, event: AgentEvent): AgentEventEnvelope => ({
   chatId,
   event,
+  publication: Publication.make(1),
+  origin: "session",
 });
 
 const completed = (

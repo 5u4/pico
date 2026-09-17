@@ -272,8 +272,8 @@ export function presentTranscript(
     return {
       state: "error",
       title: "History unavailable",
-      description: `${errorMessage(snapshot.cause)} ${connection.kind === "unavailable" ? "Reload to reconnect." : "Retry loading the conversation."}`,
-      retryLabel: connection.kind === "unavailable" ? "Reload" : "Retry history",
+      description: `${errorMessage(snapshot.cause)} ${connection.kind === "unavailable" ? "Retry the connection to refresh this conversation." : "Retry loading the conversation."}`,
+      retryLabel: connection.kind === "unavailable" ? "Retry connection" : "Retry history",
     };
   if (snapshot.waiting || snapshot._tag === "Initial")
     return { state: "loading", label: "Loading conversation..." };

@@ -218,7 +218,7 @@ describe("live chat transitions", () => {
   }
 
   for (const previous of ["unknown", "finished"] as const) {
-    it(`marks running when tool completion arrives after ${previous}`, () => {
+    it(`does not revive a run when tool completion arrives after ${previous}`, () => {
       const initial =
         previous === "unknown"
           ? emptyLiveChat()
@@ -229,7 +229,7 @@ describe("live chat transitions", () => {
         toolName: "read",
         status: "succeeded",
       });
-      assert.strictEqual(completed.run.kind, "running");
+      assert.strictEqual(completed.run.kind, previous);
     });
   }
 });

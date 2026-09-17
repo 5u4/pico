@@ -16,6 +16,7 @@ const chatId = ChatId.make("018f47a0-0000-7000-8000-000000000001");
 
 const fixture = Effect.fn("SessionPoolOperationsTest.fixture")(function* (
   options: {
+    readonly askBtw?: OpenedSession["askBtw"];
     readonly shake?: OpenedSession["shake"];
     readonly appendAssistantMessage?: OpenedSession["appendAssistantMessage"];
     readonly dispose?: () => Promise<void>;
@@ -41,11 +42,13 @@ const fixture = Effect.fn("SessionPoolOperationsTest.fixture")(function* (
               },
             },
             sendPrompt: () => Promise.reject(new Error("unexpected prompt")),
-            askBtw: () => Promise.reject(new Error("unexpected side question")),
+            askBtw: options.askBtw ?? (() => Promise.reject(new Error("unexpected side question"))),
             shake:
               options.shake ?? (async () => ({ mode: "images", imagesDropped: 1, tokensFreed: 0 })),
             switchModel: () => Promise.reject(new Error("unexpected model switch")),
             flush: async () => {},
+            historyBoundary: () => "stable",
+            settleHistory: async () => {},
             contextUsage: () => ({ kind: "unavailable" }),
             appendAssistantMessage: options.appendAssistantMessage ?? (async () => {}),
             unsubscribe: () => {},
@@ -58,6 +61,34 @@ const fixture = Effect.fn("SessionPoolOperationsTest.fixture")(function* (
 });
 
 describe("session pool operations", () => {
+  it.effect("reads the transcript while an ephemeral side answer is still pending", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const entered = yield* Deferred.make<void>();
+        const answer = yield* Deferred.make<string>();
+        const { pool } = yield* fixture({
+          askBtw: () =>
+            Effect.runPromise(
+              Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(answer))),
+            ),
+        });
+        const pending = yield* pool
+          .askBtw(chatId, "Explain without changing the conversation")
+          .pipe(Effect.forkChild);
+        yield* Deferred.await(entered);
+        const snapshot = yield* pool
+          .transcript(chatId)
+          .pipe(Effect.ensuring(Deferred.succeed(answer, "Ephemeral explanation")));
+        assert.deepStrictEqual(snapshot.messages, []);
+        assert.deepStrictEqual(snapshot.runtime.assistant, []);
+        assert.strictEqual(yield* Fiber.join(pending), "Ephemeral explanation");
+        const after = yield* pool.transcript(chatId);
+        assert.deepStrictEqual(after.messages, snapshot.messages);
+        assert.deepStrictEqual(after.runtime, snapshot.runtime);
+      }),
+    ),
+  );
+
   for (const stop of ["interrupt", "close", "shutdown"] as const) {
     it.live(`cancels an admitted shake before disposal on ${stop}`, () =>
       Effect.scoped(
@@ -92,6 +123,8 @@ describe("session pool operations", () => {
           }).pipe(Effect.provideService(Scope.Scope, poolScope));
           const pending = yield* pool.shake(chatId, "images").pipe(Effect.forkChild);
           yield* Deferred.await(entered);
+          const observation = yield* pool.transcript(chatId).pipe(Effect.exit);
+          assert.isTrue(Exit.isFailure(observation));
           yield* (
             stop === "interrupt"
               ? Fiber.interrupt(pending).pipe(Effect.andThen(pool.close(chatId)))

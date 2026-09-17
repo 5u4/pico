@@ -70,6 +70,8 @@ describe("session pool capture", () => {
                   askBtw: () => Promise.reject(new Error("unexpected side question")),
                   switchModel: () => Promise.reject(new Error("unexpected model switch")),
                   flush: () => Promise.resolve(),
+                  historyBoundary: () => "stable",
+                  settleHistory: () => Promise.resolve(),
                   sendPrompt: async (value, onStarted): Promise<MessageDelivery> => {
                     if (value.text === "reject")
                       throw new AgentError({ message: "Rejected before admission" });
@@ -158,6 +160,8 @@ describe("session pool capture", () => {
                 askBtw: () => Promise.reject(new Error("unexpected side question")),
                 switchModel: () => Promise.reject(new Error("unexpected model switch")),
                 flush: () => Promise.resolve(),
+                historyBoundary: () => "stable",
+                settleHistory: () => Promise.resolve(),
                 sendPrompt: async (value, onStarted): Promise<MessageDelivery> => {
                   if (value.text === "following") {
                     emit({ type: "run-finished", outcome: "completed" });
@@ -237,6 +241,8 @@ describe("session pool capture", () => {
                 askBtw: () => Promise.reject(new Error("unexpected side question")),
                 switchModel: () => Promise.reject(new Error("unexpected model switch")),
                 flush: () => Promise.resolve(),
+                historyBoundary: () => "stable",
+                settleHistory: () => Promise.resolve(),
                 sendPrompt: (_value, onStarted) => {
                   onStarted?.();
                   emit({ type: "run-started" });
@@ -319,6 +325,8 @@ describe("session pool capture", () => {
                 askBtw: () => Promise.reject(new Error("unexpected side question")),
                 switchModel: () => Promise.reject(new Error("unexpected model switch")),
                 flush: () => Promise.resolve(),
+                historyBoundary: () => "stable",
+                settleHistory: () => Promise.resolve(),
                 sendPrompt: (_value, onStarted) => {
                   onStarted?.();
                   emit({ type: "run-started" });
@@ -362,6 +370,7 @@ describe("session pool capture", () => {
           )
           .pipe(Effect.forkChild);
         yield* Deferred.await(captureStarted);
+        assert.deepStrictEqual((yield* pool.transcript(chatId)).runtime.run, { kind: "idle" });
         if (emitEvent === undefined || completeCapture === undefined) {
           return yield* Effect.die("Session controls were not initialized");
         }
@@ -409,6 +418,8 @@ describe("session pool capture", () => {
                 askBtw: () => Promise.reject(new Error("unexpected side question")),
                 switchModel: () => Promise.reject(new Error("unexpected model switch")),
                 flush: () => Promise.resolve(),
+                historyBoundary: () => "stable",
+                settleHistory: () => Promise.resolve(),
                 sendPrompt: (_value, onStarted) => {
                   sends += 1;
                   if (sends === 1) {
@@ -522,6 +533,8 @@ describe("session pool capture", () => {
                 askBtw: () => Promise.reject(new Error("unexpected side question")),
                 switchModel: () => Promise.reject(new Error("unexpected model switch")),
                 flush: () => Promise.resolve(),
+                historyBoundary: () => "stable",
+                settleHistory: () => Promise.resolve(),
                 sendPrompt: (_value, onStarted) => {
                   sends += 1;
                   if (sends === 1) {
@@ -604,6 +617,8 @@ describe("session pool capture", () => {
                   askBtw: () => Promise.reject(new Error("unexpected side question")),
                   switchModel: () => Promise.reject(new Error("unexpected model switch")),
                   flush: () => Promise.resolve(),
+                  historyBoundary: () => "stable",
+                  settleHistory: () => Promise.resolve(),
                   sendPrompt: (value, onStarted) => {
                     if (value.text === "reject") return Promise.reject(rejected);
                     if (value.text === "abort-reject")

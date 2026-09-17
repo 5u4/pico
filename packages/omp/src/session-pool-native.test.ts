@@ -46,6 +46,7 @@ const importNative = async () => {
     import("./session-settings.ts"),
     import("@oh-my-pi/pi-coding-agent/session/session-loader"),
     import("@oh-my-pi/pi-coding-agent/session/session-context"),
+    import("@oh-my-pi/pi-coding-agent/secrets/obfuscator"),
   ]);
   const [
     core,
@@ -66,6 +67,7 @@ const importNative = async () => {
     sessionSettings,
     sessionLoader,
     sessionContext,
+    secrets,
   ] = modules;
   return {
     ...core,
@@ -85,6 +87,8 @@ const importNative = async () => {
     ...sessionSettings,
     ...sessionLoader,
     ...sessionContext,
+    ...secrets,
+    makeSessionObservation: adapter.makeSessionObservation,
     makeSessionHandle: adapter.makeSessionHandle,
     makeBtw: adapter.makeBtw,
     makeShake: adapter.makeShake,
@@ -142,6 +146,7 @@ const withSession = async (
   turns: ReturnType<typeof providerTurn>[],
   run: (session: AgentSession, reopen: () => Promise<AgentSession>) => Promise<void>,
   extensionFactory?: ExtensionFactory,
+  obfuscator?: AgentSession["obfuscator"],
 ) => {
   const directory = await NodeFileSystem.mkdtemp(join(root, "session-"));
   const auth = new native.AuthStorage(
@@ -285,6 +290,7 @@ const withSession = async (
       modelRegistry: registry,
       sessionManager,
       sideStreamFn: streamFn,
+      ...(obfuscator === undefined ? {} : { obfuscator }),
       ...(extensionRunner === undefined ? {} : { extensionRunner }),
       skills: [],
       skillsSettings: { enableSkillCommands: true },
@@ -362,13 +368,12 @@ const makePool = Effect.fn("NativePoolTest.make")(function* (
               await currentSession.sessionManager.ensureOnDisk();
               await currentSession.sessionManager.flush();
             },
+            ...native.makeSessionObservation(currentSession, emit, (cause) => {
+              throw cause;
+            }),
             contextUsage: () => ({ kind: "unavailable" }),
             appendAssistantMessage: () =>
               Promise.reject(new Error("Publication is not part of ownership tests")),
-            unsubscribe: currentSession.subscribe((event) => {
-              const normalized = native.normalizeAgentEvent(event);
-              if (normalized !== undefined) emit(normalized);
-            }),
           };
         }),
     },
@@ -410,6 +415,66 @@ const seedShake = async (session: AgentSession) => {
 };
 
 describe("native SessionPool ownership", () => {
+  it("confirms obfuscated assistant persistence by lifecycle ID before and after its append", async () => {
+    const secret = "native-observation-secret-value";
+    const obfuscator = new native.SecretObfuscator(
+      [{ type: "plain", content: secret }],
+      "native-observation-placeholder-key",
+    );
+    const providerText = obfuscator.obfuscate(`Stored ${secret}`);
+    const turn = providerTurn(providerText, "aborted", { messageId: "secret-assistant" });
+    await withSession(
+      [turn],
+      async (session) => {
+        const displayed: AgentMessage.AgentAssistantMessage[] = [];
+        let settled = Promise.withResolvers<void>();
+        const observation = native.makeSessionObservation(
+          session,
+          (event) => {
+            if (event.type !== "message-settled" || event.message.role !== "assistant") return;
+            displayed.push(event.message);
+            settled.resolve();
+          },
+          (cause) => {
+            throw cause;
+          },
+        );
+        try {
+          const running = session.prompt("Echo the stored value", { expandPromptTemplates: false });
+          await turn.entered.promise;
+          turn.release.resolve();
+          await running;
+          await observation.settleHistory();
+          const file = session.sessionManager.getSessionFile();
+          if (file === undefined) throw new Error("Expected obfuscated session journal");
+          const persisted = await native.loadSessionMessagesReadOnly(file);
+          const assistant = persisted.find((message) => message.role === "assistant");
+          if (assistant === undefined) throw new Error("Expected persisted assistant");
+          expect(displayed).toMatchObject([
+            {
+              id: "secret-assistant",
+              content: [{ type: "text", text: `Stored ${secret}` }],
+            },
+          ]);
+          expect(assistant.content).toEqual([{ type: "text", text: providerText }]);
+          expect(native.normalizeMessage(assistant).id).toBe(displayed[0]?.id);
+          const boundary = observation.historyBoundary();
+
+          settled = Promise.withResolvers<void>();
+          session.agent.emitExternalEvent({ type: "message_end", message: assistant });
+          await settled.promise;
+          await observation.settleHistory();
+          expect(observation.historyBoundary()).toBe(boundary);
+          expect(displayed[1]).toEqual(displayed[0]);
+        } finally {
+          observation.unsubscribe();
+        }
+      },
+      undefined,
+      obfuscator,
+    );
+  }, 30_000);
+
   it("retains assistant identity through deltas, interleaved messages and persistence", async () => {
     const options = { streaming: true, timestamp: 1, thinking: "Same reasoning" } as const;
     const turns = [
@@ -865,6 +930,10 @@ describe("native SessionPool ownership", () => {
               .pipe(Effect.forkChild);
             const sideContext = yield* Effect.promise(() => side.entered.promise);
             expect(JSON.stringify(sideContext.messages)).toContain("Main request");
+            const recovering = yield* pool.transcript(chatId);
+            expect(recovering.messages).toEqual(native.normalizeTranscript(before));
+            expect(recovering.runtime.run).toEqual({ kind: "running" });
+            expect(recovering.runtime.assistant).toEqual([]);
             const correction = yield* pool.send(chatId, prompt("Correct the main request"));
             if (correction.kind !== "steered")
               throw new Error("Expected immediate steering admission");
@@ -890,6 +959,7 @@ describe("native SessionPool ownership", () => {
               "Explain the current request",
             );
             expect(JSON.stringify(idleContext.messages)).not.toContain(side.text);
+            expect((yield* pool.transcript(chatId)).messages).toEqual(transcript);
             yield* pool.abort(chatId);
             idleSide.release.resolve();
             expect(yield* Fiber.join(idle)).toBe(idleSide.text);
@@ -1072,22 +1142,29 @@ describe("native SessionPool ownership", () => {
   }, 30_000);
 
   it("closes a live captured run before its provider finishes", async () => {
-    const scheduled = providerTurn("Must be aborted by close");
+    const scheduled = providerTurn("Must be aborted by close", "aborted", { streaming: true });
     await withSession([scheduled], (session) =>
       Effect.runPromise(
         Effect.scoped(
           Effect.gen(function* () {
             const pool = yield* makePool(session);
             const events: AgentEvent.AgentEvent[] = [];
+            const textReceived = Promise.withResolvers<void>();
             yield* Effect.gen(function* () {
               const capture = yield* pool
                 .sendCaptured(chatId, runId, prompt("Scheduled request"), (event) =>
                   Effect.sync(() => {
                     events.push(event);
+                    if (event.type === "text-delta") textReceived.resolve();
                   }),
                 )
                 .pipe(Effect.forkChild);
               yield* Effect.promise(() => scheduled.entered.promise);
+              yield* Effect.promise(() => textReceived.promise);
+              const snapshot = yield* pool.transcript(chatId);
+              expect(snapshot.runtime.assistant).toEqual([]);
+              expect(snapshot.runtime.tools).toEqual([]);
+              expect(snapshot.runtime.run).toEqual({ kind: "idle" });
               const closing = yield* pool.close(chatId).pipe(Effect.forkChild);
               const settled = yield* Effect.raceFirst(
                 Effect.all([Fiber.join(closing), Fiber.await(capture)]).pipe(Effect.as(true)),
@@ -1461,11 +1538,13 @@ describe("native SessionPool ownership", () => {
   }, 30_000);
 
   it("reserves native admission before delayed agent_start fanout without delaying busy steers", async () => {
-    const initial = providerTurn("Ordinary answer");
+    const initial = providerTurn("Ordinary answer", "aborted", { streaming: true });
     const steered = providerTurn("Steered answer");
     const scheduled = providerTurn("Scheduled answer");
     const startHook = Promise.withResolvers<void>();
     const releaseStartHook = Promise.withResolvers<void>();
+    const textReceived = Promise.withResolvers<void>();
+    const startPublished = Promise.withResolvers<void>();
     await withSession(
       [initial, steered, scheduled],
       (session) =>
@@ -1479,6 +1558,8 @@ describe("native SessionPool ownership", () => {
                 Stream.runForEach(({ event }) =>
                   Effect.sync(() => {
                     ordinary.push(event);
+                    if (event.type === "text-delta") textReceived.resolve();
+                    if (event.type === "run-started") startPublished.resolve();
                   }),
                 ),
                 Effect.forkChild,
@@ -1487,6 +1568,7 @@ describe("native SessionPool ownership", () => {
               expect(first.kind).toBe("started");
               yield* Effect.promise(() => startHook.promise);
               yield* Effect.promise(() => initial.entered.promise);
+              yield* Effect.promise(() => textReceived.promise);
               expect(ordinary.some((event) => event.type === "run-started")).toBe(false);
               const captured = yield* pool
                 .sendCaptured(chatId, runId, prompt("Scheduled request"), () => Effect.void)
@@ -1498,6 +1580,17 @@ describe("native SessionPool ownership", () => {
               expect(abort).not.toHaveBeenCalled();
               expect(session.agent.peekSteeringQueue()).toHaveLength(1);
               releaseStartHook.resolve();
+              yield* Effect.promise(() => startPublished.promise);
+              const prefix = ordinary.find((event) => event.type === "text-delta");
+              if (prefix === undefined) throw new Error("Expected pre-start assistant prefix");
+              const snapshot = yield* pool.transcript(chatId);
+              expect(snapshot.runtime.assistant).toEqual([
+                {
+                  kind: "draft",
+                  messageId: prefix.messageId,
+                  blocks: [prefix],
+                },
+              ]);
               initial.release.resolve();
               yield* Effect.promise(() => steered.entered.promise);
               expect(yield* steer.consumed).toBe("consumed");

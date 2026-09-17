@@ -1,3 +1,4 @@
+import type { EventsFrame } from "@pico/contract/agent-event";
 import { Application } from "@pico/contract/application";
 import type { ChatId } from "@pico/contract/chat-model";
 import { ChatRepository } from "@pico/contract/chat-repository";
@@ -274,7 +275,14 @@ const openWebEvents = Effect.fn("Rpc.openWebEvents")(function* (
     return platform.value === "web";
   });
   const route = yield* eventRouter.open(() => true);
-  return route.events.pipe(Stream.filterEffect(({ chatId }) => canReadChat(chatId)));
+  return Stream.make({ kind: "ready" } satisfies EventsFrame).pipe(
+    Stream.concat(
+      route.events.pipe(
+        Stream.filterEffect(({ chatId }) => canReadChat(chatId)),
+        Stream.map((envelope): EventsFrame => ({ kind: "event", envelope })),
+      ),
+    ),
+  );
 });
 
 const reportFailure = (cause: Cause.Cause<unknown>) => {

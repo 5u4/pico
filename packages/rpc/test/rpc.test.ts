@@ -5,8 +5,10 @@ import * as BunPath from "@effect/platform-bun/BunPath";
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import { assert, describe, it } from "@effect/vitest";
 import type * as AgentEvent from "@pico/contract/agent-event";
+import { Publication } from "@pico/contract/agent-event";
 import * as AgentMessage from "@pico/contract/agent-message";
-import type { ShakeResult, TranscriptSnapshot } from "@pico/contract/agent-runtime";
+import type { ShakeResult } from "@pico/contract/agent-runtime";
+import type { TranscriptSnapshot } from "@pico/contract/agent-snapshot";
 import { Application } from "@pico/contract/application";
 import * as Chat from "@pico/contract/chat-model";
 import { ChatRepository } from "@pico/contract/chat-repository";
@@ -109,13 +111,18 @@ const transcript: TranscriptSnapshot = {
   ],
   contextUsage: { kind: "unavailable" },
   todo: { kind: "ready", phases: [] },
+  runtime: { publication: Publication.make(0), run: { kind: "idle" }, assistant: [], tools: [] },
 };
 const firstEvent: AgentEvent.AgentEventEnvelope = {
   chatId: firstChatId,
+  publication: Publication.make(1),
+  origin: "session",
   event: { type: "notice", level: "info", message: "first" },
 };
 const secondEvent: AgentEvent.AgentEventEnvelope = {
   chatId: secondChatId,
+  publication: Publication.make(2),
+  origin: "session",
   event: { type: "title-changed", title: "Ship exchange titles" },
 };
 
@@ -485,6 +492,8 @@ describe("RPC", () => {
         const received: Array<AgentEvent.AgentEventEnvelope> = [];
 
         yield* client.Events().pipe(
+          Stream.filter((frame) => frame.kind === "event"),
+          Stream.map((frame) => frame.envelope),
           Stream.runForEach((event) =>
             Effect.gen(function* () {
               received.push(event);
@@ -639,8 +648,18 @@ describe("RPC", () => {
         yield* ownership.chats.archive(firstChatId, 2);
         assert.deepStrictEqual(yield* client.Transcript({ chatId: firstChatId }), transcript);
         yield* Queue.offerAll(eventQueue, [
-          { chatId: newChatId, event: { type: "notice", level: "info", message: "too early" } },
-          { chatId: foreignChatId, event: { type: "notice", level: "info", message: "private" } },
+          {
+            chatId: newChatId,
+            event: { type: "notice", level: "info", message: "too early" },
+            publication: Publication.make(3),
+            origin: "session",
+          },
+          {
+            chatId: foreignChatId,
+            event: { type: "notice", level: "info", message: "private" },
+            publication: Publication.make(4),
+            origin: "session",
+          },
           firstEvent,
         ]);
         assert.deepStrictEqual(yield* Queue.take(receivedEvents), firstEvent);
@@ -651,6 +670,8 @@ describe("RPC", () => {
         assert.strictEqual(created.id, newChatId);
         const createdEvent: AgentEvent.AgentEventEnvelope = {
           chatId: created.id,
+          publication: Publication.make(5),
+          origin: "session",
           event: {
             type: "text-delta",
             messageId: AgentMessage.AgentMessageId.make("new-web-chat"),
@@ -708,6 +729,8 @@ describe("RPC", () => {
         const client = yield* RpcClient.make(`ws://${host}:${server.address.port}/rpc`);
         const received: Array<AgentEvent.AgentEventEnvelope> = [];
         const subscription = yield* client.Events().pipe(
+          Stream.filter((frame) => frame.kind === "event"),
+          Stream.map((frame) => frame.envelope),
           Stream.runForEach((event) =>
             Effect.sync(() => {
               received.push(event);
@@ -787,6 +810,8 @@ describe("RPC", () => {
           const client = yield* RpcClient.make(`ws://${hostname}:${server.address.port}/rpc`);
           const received: Array<AgentEvent.AgentEventEnvelope> = [];
           const exit = yield* client.Events().pipe(
+            Stream.filter((frame) => frame.kind === "event"),
+            Stream.map((frame) => frame.envelope),
             Stream.runForEach((event) =>
               Effect.sync(() => {
                 received.push(event);

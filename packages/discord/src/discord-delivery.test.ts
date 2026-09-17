@@ -1,6 +1,7 @@
 import * as BunCrypto from "@effect/platform-bun/BunCrypto";
 import { assert, describe, it } from "@effect/vitest";
 import type { AgentEventEnvelope } from "@pico/contract/agent-event";
+import { Publication } from "@pico/contract/agent-event";
 import { AgentMessageId } from "@pico/contract/agent-message";
 import { AgentRuntime, type MessageDelivery } from "@pico/contract/agent-runtime";
 import { Application } from "@pico/contract/application";
@@ -185,6 +186,8 @@ describe("Discord message delivery", () => {
             });
             const publication: AgentEventEnvelope = {
               chatId,
+              publication: Publication.make(1),
+              origin: "delivery",
               localOnly: true,
               event: {
                 type: "message-settled",
@@ -202,10 +205,14 @@ describe("Discord message delivery", () => {
             yield* Queue.offer(events, publication);
             yield* Queue.offer(events, {
               chatId,
+              publication: Publication.make(2),
+              origin: "session",
               event: { type: "title-changed", title: "Scheduled title" },
             });
             yield* Queue.offer(events, {
               chatId,
+              publication: Publication.make(3),
+              origin: "delivery",
               event: { type: "run-finished", outcome: "completed" },
             });
             yield* Deferred.await(observed);
@@ -493,9 +500,16 @@ describe("Discord message delivery", () => {
             Effect.succeed({
               kind: "started",
               completed: Effect.gen(function* () {
-                yield* dispatch(20n, { chatId, event: { type: "run-started" } });
                 yield* dispatch(20n, {
                   chatId,
+                  event: { type: "run-started" },
+                  publication: Publication.make(1),
+                  origin: "session",
+                });
+                yield* dispatch(20n, {
+                  chatId,
+                  publication: Publication.make(2),
+                  origin: "session",
                   event: {
                     type: "message-settled",
                     message: {
@@ -512,6 +526,8 @@ describe("Discord message delivery", () => {
                 });
                 yield* dispatch(20n, {
                   chatId,
+                  publication: Publication.make(3),
+                  origin: "session",
                   event: { type: "run-finished", outcome: "failed" },
                 });
                 yield* Deferred.succeed(finished, undefined);
