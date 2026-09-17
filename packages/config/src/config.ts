@@ -28,6 +28,11 @@ const PicoConfigFile = Schema.Struct({
       ),
     }),
   ),
+  web: Schema.optionalKey(
+    Schema.Struct({
+      port: Schema.optionalKey(Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 65535 }))),
+    }),
+  ),
 });
 
 export interface DiscordConfig {
@@ -41,6 +46,7 @@ export interface DiscordConfig {
 export interface PicoConfig {
   readonly discord: Option.Option<DiscordConfig>;
   readonly browser: BrowserConfig;
+  readonly web: { readonly port: number };
 }
 
 const platformError = (operation: string) => (error: PlatformError.PlatformError) =>
@@ -55,11 +61,15 @@ const formatIssue = SchemaIssue.makeFormatterStandardSchemaV1({
 const fieldError = (field: string, expected: string) =>
   new ConfigError({ message: `Invalid config.toml field ${field}; ${expected}` });
 
+const defaultWeb: PicoConfig["web"] = { port: 7426 };
+
 const disabled = (
   browser: BrowserConfig = { externalBrowser: "off", idleTimeoutMs: 10_800_000 },
+  web: PicoConfig["web"] = defaultWeb,
 ): PicoConfig => ({
   discord: Option.none(),
   browser,
+  web,
 });
 
 export const load = Effect.fn("PicoConfig.load")(function* (paths: PicoPaths) {
@@ -105,7 +115,8 @@ export const load = Effect.fn("PicoConfig.load")(function* (paths: PicoPaths) {
     externalBrowser: config.browser?.external_browser ?? "off",
     idleTimeoutMs,
   };
-  if (config.discord === undefined) return disabled(browser);
+  const web = { port: config.web?.port ?? defaultWeb.port };
+  if (config.discord === undefined) return disabled(browser, web);
 
   const tokenPath = path.join(paths.secretsDir, "discord_bot_token");
   if (
@@ -113,7 +124,7 @@ export const load = Effect.fn("PicoConfig.load")(function* (paths: PicoPaths) {
       .exists(tokenPath)
       .pipe(Effect.mapError(platformError("Inspect Discord token file"))))
   ) {
-    return disabled(browser);
+    return disabled(browser, web);
   }
 
   const tokenValue = (yield* fileSystem
@@ -122,7 +133,7 @@ export const load = Effect.fn("PicoConfig.load")(function* (paths: PicoPaths) {
   const defaultCwd = config.discord.default_cwd.trim();
   const allowedGuildIds = config.discord.allowed_guild.map((guildId) => guildId.trim());
 
-  if (tokenValue.length === 0) return disabled(browser);
+  if (tokenValue.length === 0) return disabled(browser, web);
   if (defaultCwd.length === 0 || !path.isAbsolute(defaultCwd)) {
     return yield* fieldError("discord.default_cwd", "expected an absolute, nonblank path");
   }
@@ -136,6 +147,7 @@ export const load = Effect.fn("PicoConfig.load")(function* (paths: PicoPaths) {
 
   return {
     browser,
+    web,
     discord: Option.some<DiscordConfig>({
       token: Redacted.make(tokenValue, { label: "discord_bot_token" }),
       allowedGuildIds,

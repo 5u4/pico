@@ -246,8 +246,10 @@ describe("CLI foreground shutdown", () => {
             env.BUN_INSTALL_CACHE_DIR,
             env.BUN_RUNTIME_TRANSPILER_CACHE_PATH,
             env.TMPDIR,
+            root,
           ].map((directory) => mkdir(directory, { recursive: true })),
         );
+        await writeFile(join(root, "config.toml"), "[web]\nport = 0\n");
         await symlink(process.execPath, join(bin, "bun"));
         const linked = Bun.spawnSync({
           cmd: [process.execPath, "link"],
@@ -392,6 +394,8 @@ describe("CLI foreground shutdown", () => {
     it(`reports ${mode} once after resource finalization`, async () => {
       const temporaryDirectory = await mkdtemp(join(tmpdir(), "pico-cli-finalizer-"));
       const root = join(temporaryDirectory, "root");
+      await mkdir(root);
+      await writeFile(join(root, "config.toml"), "[web]\nport = 0\n");
       const spawned = spawnChild(fixturePath, [mode, root]);
       try {
         const result = await finish(spawned, 15_000);

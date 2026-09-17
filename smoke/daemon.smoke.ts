@@ -20,6 +20,7 @@ const smoke = Effect.fn("Daemon.smoke")(function* () {
   const sessionsDir = path.join(canonicalRoot, "sessions");
   const logsDir = path.join(canonicalRoot, "logs");
   const schedulesDir = path.join(canonicalRoot, "schedules");
+  yield* fileSystem.writeFileString(path.join(canonicalRoot, "config.toml"), "[web]\nport = 0\n");
 
   const webUrl = yield* Effect.scoped(
     Effect.gen(function* () {

@@ -8,21 +8,21 @@ import * as HttpServer from "effect/unstable/http/HttpServer";
 import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
 import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
 
-export const open = Effect.fn("Daemon.Web.open")(function* () {
+export const open = Effect.fn("Daemon.Web.open")(function* (port: number) {
   const assets = yield* WebAssets.build();
   const server = yield* BunHttpServer.make({
     hostname: "127.0.0.1",
-    port: 0,
+    port,
     disablePreemptiveShutdown: true,
   });
   if (server.address._tag !== "TcpAddress") {
     return yield* Effect.die(new Error("Web listener did not acquire a TCP address"));
   }
-  const host = `127.0.0.1:${server.address.port}`;
-  const webUrl = `http://${host}`;
+  const url = new URL(`http://127.0.0.1:${server.address.port}`);
+  const webUrl = url.origin;
   yield* Layer.build(
     HttpRouter.serve(
-      Layer.mergeAll(RpcServer.routes, assetRoutes(assets), boundary(host, webUrl, assets)),
+      Layer.mergeAll(RpcServer.routes, assetRoutes(assets), boundary(url.host, webUrl, assets)),
       { disableLogger: true, disableListenLog: true },
     ).pipe(Layer.provide(Layer.succeed(HttpServer.HttpServer)(server))),
   );
