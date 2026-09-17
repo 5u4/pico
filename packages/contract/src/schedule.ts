@@ -309,21 +309,26 @@ export class Schedules extends Context.Service<
       caller: ScheduleCaller,
       input: CreateSchedule,
     ) => Effect.Effect<ScheduleView, ScheduleError>;
+    /** OMP and web management list schedules owned by the selected workspace. */
     readonly list: (
-      caller: ScheduleCaller,
+      caller: Pick<ScheduleCaller, "workspaceId">,
     ) => Effect.Effect<ReadonlyArray<ScheduleView>, ScheduleError>;
     /** OMP calls this before reading or editing the current managed directory. */
     readonly get: (
-      caller: ScheduleCaller,
+      caller: Pick<ScheduleCaller, "workspaceId">,
       id: ScheduleId,
     ) => Effect.Effect<ScheduleView, ScheduleError>;
-    /** OMP calls this when changing schedule metadata or enabled state. */
+    /** OMP and web management call this when changing metadata or enabled state. */
     readonly update: (
-      caller: ScheduleCaller,
+      caller: Pick<ScheduleCaller, "workspaceId">,
       id: ScheduleId,
       input: UpdateSchedule,
     ) => Effect.Effect<ScheduleView, ScheduleError>;
-    readonly remove: (caller: ScheduleCaller, id: ScheduleId) => Effect.Effect<void, ScheduleError>;
+    /** OMP and web management remove the live definition, retaining run history. */
+    readonly remove: (
+      caller: Pick<ScheduleCaller, "workspaceId">,
+      id: ScheduleId,
+    ) => Effect.Effect<void, ScheduleError>;
     readonly start: (host: ScheduleRunHost) => Effect.Effect<void, ScheduleError, Scope.Scope>;
   }
 >()("@pico/contract/schedule/Schedules") {}

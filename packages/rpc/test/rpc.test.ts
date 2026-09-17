@@ -1,5 +1,7 @@
 import { Database } from "bun:sqlite";
+import * as BunCrypto from "@effect/platform-bun/BunCrypto";
 import * as BunFileSystem from "@effect/platform-bun/BunFileSystem";
+import * as BunPath from "@effect/platform-bun/BunPath";
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import { assert, describe, it } from "@effect/vitest";
 import type * as AgentEvent from "@pico/contract/agent-event";
@@ -11,6 +13,7 @@ import { ChatRepository } from "@pico/contract/chat-repository";
 import { ApplicationError, ChatClosed } from "@pico/contract/errors";
 import { type EventRoute, EventRouter } from "@pico/contract/event-router";
 import { AbsolutePath } from "@pico/contract/path";
+import * as Schedule from "@pico/contract/schedule";
 import * as Workspace from "@pico/contract/workspace-model";
 import { WorkspaceRepository } from "@pico/contract/workspace-repository";
 import * as RpcClient from "@pico/rpc/client";
@@ -31,6 +34,7 @@ import * as Stream from "effect/Stream";
 import * as HttpRouter from "effect/unstable/http/HttpRouter";
 import * as HttpServer from "effect/unstable/http/HttpServer";
 import * as Persistence from "../../persistence/src/layer.ts";
+import * as ScheduleLayer from "../../schedule/src/schedule.ts";
 
 const firstChatId = Chat.ChatId.make("018f47a0-0000-7000-8000-000000000001");
 const secondChatId = Chat.ChatId.make("018f47a0-0000-7000-8000-000000000002");
@@ -74,7 +78,22 @@ const ownershipFixture = Effect.fnUntraced(function* () {
       createdAt: 1,
     });
   }
-  return { workspaces, chats, storeFile, layer: Layer.succeedContext(context) };
+  const schedules = yield* ScheduleLayer.open(
+    AbsolutePath.make(`${directory}/schedules`),
+    (target) =>
+      target.kind === "chat" || target.kind === "workspace"
+        ? Effect.succeed(target)
+        : Effect.fail(new Schedule.ScheduleHostError({ message: "Unexpected external target" })),
+  ).pipe(Effect.provide(Layer.merge(BunCrypto.layer, BunPath.layer)));
+  return {
+    workspaces,
+    chats,
+    storeFile,
+    schedules,
+    fileSystem,
+    directory,
+    layer: Layer.merge(Layer.succeedContext(context), Layer.succeed(Schedule.Schedules, schedules)),
+  };
 }, Effect.provide(BunFileSystem.layer));
 const transcript: TranscriptSnapshot = {
   messages: [
@@ -124,6 +143,132 @@ const unusedApplication = Application.of({
 });
 
 describe("RPC", () => {
+  it.live(
+    "manages only owned schedules and guards changed web destinations without replacing source files",
+    () =>
+      Effect.gen(function* () {
+        const ownership = yield* ownershipFixture();
+        const emptyWorkspace = { ...webWorkspace, id: workspaceId(2) };
+        yield* ownership.workspaces.create(emptyWorkspace);
+        yield* ownership.workspaces.create(discordWorkspace);
+        yield* ownership.chats.create({
+          id: foreignChatId,
+          workspaceId: discordWorkspace.id,
+          cwd: discordWorkspace.defaultCwd,
+          externalId: "foreign-thread",
+          createdAt: 1,
+        });
+        const sourceDirectory = AbsolutePath.make(`${ownership.directory}/source`);
+        yield* ownership.fileSystem.makeDirectory(sourceDirectory);
+        yield* ownership.fileSystem.writeFileString(
+          `${sourceDirectory}/prompt.md`,
+          "Keep these instructions unchanged.",
+        );
+        const created = yield* ownership.schedules.create(
+          { workspaceId: webWorkspace.id, chatId: firstChatId },
+          {
+            name: "Foreign destination",
+            enabled: false,
+            sourceDirectory,
+            target: { kind: "workspace", workspaceId: discordWorkspace.id },
+            trigger: { kind: "cron", expression: "0 9 * * *", timeZone: "Asia/Taipei" },
+          },
+        );
+        const router = EventRouter.of({
+          drain: () => Effect.void,
+          open: () => Effect.die("unexpected events"),
+        });
+        yield* Effect.gen(function* () {
+          const server = yield* HttpServer.HttpServer;
+          if (server.address._tag === "UnixAddress")
+            return yield* Effect.die("Expected TCP server");
+          const host =
+            server.address.hostname === "0.0.0.0" ? "127.0.0.1" : server.address.hostname;
+          const client = yield* RpcClient.make(`ws://${host}:${server.address.port}/rpc`);
+          assert.deepStrictEqual(
+            yield* client.ListSchedules({ workspaceId: emptyWorkspace.id }),
+            [],
+          );
+          const wrongOwner = yield* client
+            .UpdateSchedule({
+              workspaceId: emptyWorkspace.id,
+              id: created.id,
+              input: { name: "Stolen" },
+            })
+            .pipe(Effect.flip);
+          assert.instanceOf(wrongOwner, Schedule.ScheduleError);
+          if (!(wrongOwner instanceof Schedule.ScheduleError))
+            return yield* Effect.die("Expected schedule error");
+          assert.strictEqual(wrongOwner.kind, "not-found");
+          const wrongDelete = yield* client
+            .DeleteSchedule({ workspaceId: emptyWorkspace.id, id: created.id })
+            .pipe(Effect.flip);
+          assert.instanceOf(wrongDelete, Schedule.ScheduleError);
+          const foreignList = yield* client
+            .ListSchedules({ workspaceId: discordWorkspace.id })
+            .pipe(Effect.flip);
+          assert.instanceOf(foreignList, ApplicationError);
+          for (const target of [
+            { kind: "workspace", workspaceId: discordWorkspace.id },
+            { kind: "chat", chatId: foreignChatId },
+            { kind: "external-workspace", platform: "discord", externalId: "channel" },
+          ] satisfies readonly Schedule.ScheduleTargetInput[]) {
+            assert.instanceOf(
+              yield* client
+                .UpdateSchedule({
+                  workspaceId: webWorkspace.id,
+                  id: created.id,
+                  input: { target },
+                })
+                .pipe(Effect.flip),
+              ApplicationError,
+            );
+          }
+          const updated = yield* client.UpdateSchedule({
+            workspaceId: webWorkspace.id,
+            id: created.id,
+            input: { name: "Renamed", enabled: true },
+          });
+          if (updated.kind !== "ready") return yield* Effect.die("Expected valid schedule");
+          assert.strictEqual(updated.state, "enabled");
+          assert.strictEqual(updated.definition.name, "Renamed");
+          assert.deepStrictEqual(updated.definition.target, {
+            kind: "workspace",
+            workspaceId: discordWorkspace.id,
+          });
+          assert.strictEqual(
+            yield* ownership.fileSystem.readFileString(`${updated.sourceDirectory}/prompt.md`),
+            "Keep these instructions unchanged.",
+          );
+          const moved = yield* client.UpdateSchedule({
+            workspaceId: webWorkspace.id,
+            id: created.id,
+            input: {
+              target: { kind: "workspace", workspaceId: emptyWorkspace.id },
+              enabled: false,
+            },
+          });
+          if (moved.kind !== "ready") return yield* Effect.die("Expected valid schedule");
+          assert.deepStrictEqual(moved.definition.target, {
+            kind: "workspace",
+            workspaceId: emptyWorkspace.id,
+          });
+          yield* client.DeleteSchedule({ workspaceId: webWorkspace.id, id: created.id });
+          assert.deepStrictEqual(yield* client.ListSchedules({ workspaceId: webWorkspace.id }), []);
+        }).pipe(
+          Effect.scoped,
+          Effect.provide(HttpRouter.serve(RpcServer.routes)),
+          Effect.provide(
+            Layer.mergeAll(
+              Layer.succeed(Application, unusedApplication),
+              Layer.succeed(EventRouter, router),
+              ownership.layer,
+            ),
+          ),
+          Effect.provide(NodeHttpServer.layerTest),
+        );
+      }).pipe(Effect.scoped),
+  );
   it.live("isolates web reads, mutations and live events through one scoped client", () =>
     Effect.gen(function* () {
       const ownership = yield* ownershipFixture();

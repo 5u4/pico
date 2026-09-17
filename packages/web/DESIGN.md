@@ -2,7 +2,7 @@
 
 Pico adapts [Beautiful UI](https://www.beautifului.dev/)'s quiet, transcript-first character to a developer chat workspace. Its light and dark themes use cool neutrals and one restrained cobalt interaction accent. Assistant prose stays in the reading flow. User messages, tool activity, and thinking use only enough enclosure to clarify their role. The composer is the sole elevated surface.
 
-The accepted screen has a workspace sidebar on the left and one chat column. Desktop collapse leaves a rail for expanding navigation, starting a chat, and adding a workspace. Mobile keeps the full tree in a native dialog, independent of desktop collapse.
+The accepted screen has a workspace sidebar on the left and one chat column. Desktop collapse leaves a rail for expanding navigation, starting a chat, managing schedules, and adding a workspace. Mobile keeps the full tree in a native dialog, independent of desktop collapse.
 
 The sidebar adapts [Beautiful UI's Sidebar Nav](https://www.beautifului.dev/r/sidebar-nav.json) without replacing the workspace tree with a switcher. Workspace disclosure controls lazy chat loading, not conversation selection. Collapse preserves that state and is not persisted. Hover decoration stays separate from selection and keyboard focus, with no continuous animation work.
 
@@ -14,6 +14,14 @@ When sources disagree, follow them in this order:
 4. External references.
 
 The application uses one registry-owned connection. `App` owns registry lifetime. `WorkspaceChat` owns workspace and chat selection, drafts, and commands. `transcript-presentation.ts` maps transcript records into display values. Presentation components remain controlled and domain-free.
+
+Schedules open in one controlled native dialog above the retained chat. An explicit workspace selector keeps management available when no chat tabs are open. Mobile closes its navigation dialog before opening Schedules and restores focus to the persistent navigation button.
+
+The list distinguishes valid definitions from invalid files. Enabled and paused describe scheduling state, not execution success. The editor changes metadata only. One-time input uses UTC with a named local-time preview; repeating input keeps the stored five-field cron and IANA timezone. Daily and weekly shortcuts only fill the cron field. Existing destinations remain untouched unless explicitly changed.
+
+Creation and instruction edits hand off to reviewable chat drafts because the schedule tools require a real chat identity and prepared source files. A nonempty draft is never overwritten, and nothing is sent automatically. Opening a draft does not create a schedule. Users refresh the list after the agent reports creation or repair.
+
+The existing registry connection serves schedule reads and mutations. Opening, changing workspace, refocusing the browser, explicit refresh, and successful mutations refresh server data without polling. Failed refreshes retain a labeled snapshot. Refresh does not replace an open form; changed definitions are flagged, and dirty navigation requires discard confirmation. Metadata saves are last-write-wins for the changed fields because the service has no revision precondition.
 
 Both themes use the same semantic token vocabulary. `WorkspaceChat` owns theme state and passes it into the controlled `ChatScreen`. A synchronous head bootstrap selects a stored choice or the initial operating-system preference before React and the stylesheet load.
 

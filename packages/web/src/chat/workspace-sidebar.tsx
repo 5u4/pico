@@ -1,5 +1,6 @@
 import {
   ArchiveIcon,
+  CalendarBlankIcon,
   CaretDownIcon,
   CaretRightIcon,
   DotsThreeIcon,
@@ -44,6 +45,7 @@ export interface WorkspaceSidebarProps {
   readonly onChatClose: (workspaceId: string, chatId: string, origin: HTMLElement) => void;
   readonly chatCloseDisabled: boolean;
   readonly onNewChat: (workspaceId?: string) => void;
+  readonly onOpenSchedules: (origin: HTMLElement) => void;
   readonly onAddWorkspace?: (() => void) | undefined;
   readonly onEditWorkspace?: ((workspaceId: string, origin: HTMLElement) => void) | undefined;
   readonly workspaceEditPending?: boolean | undefined;
@@ -63,6 +65,7 @@ export function WorkspaceSidebar({
   onChatClose,
   chatCloseDisabled,
   onNewChat,
+  onOpenSchedules,
   onAddWorkspace,
   onEditWorkspace,
   workspaceEditPending,
@@ -239,6 +242,20 @@ export function WorkspaceSidebar({
           </span>
           <span className="sidebar-copy ml-1.5 min-w-0 flex-1 truncate text-[14px] font-medium">
             New chat
+          </span>
+        </button>
+        <button
+          aria-label="Schedules"
+          className="sidebar-control sidebar-rail-row relative mx-2 flex shrink-0 items-center rounded-control px-2 text-left text-muted transition-colors hover:bg-surface-hover-strong hover:text-foreground"
+          onClick={(event) => onOpenSchedules(event.currentTarget)}
+          title="Schedules"
+          type="button"
+        >
+          <span className="flex size-5 shrink-0 items-center justify-center">
+            <CalendarBlankIcon aria-hidden="true" size={18} />
+          </span>
+          <span className="sidebar-copy ml-1.5 min-w-0 flex-1 truncate text-[14px] font-medium">
+            Schedules
           </span>
         </button>
 

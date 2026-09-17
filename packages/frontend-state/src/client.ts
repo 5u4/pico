@@ -7,7 +7,13 @@ import type {
   UpdateWorkspace,
 } from "@pico/contract/application";
 import type { ChatId, ChatListEntry } from "@pico/contract/chat-model";
-import type { ApplicationError } from "@pico/contract/errors";
+import { ApplicationError } from "@pico/contract/errors";
+import {
+  ScheduleError,
+  type ScheduleId,
+  type ScheduleView,
+  type UpdateSchedule,
+} from "@pico/contract/schedule";
 import type { Workspace, WorkspaceId } from "@pico/contract/workspace-model";
 import * as RpcClient from "@pico/rpc/client";
 import type * as Cause from "effect/Cause";
@@ -140,10 +146,10 @@ export const make = ({ url }: { readonly url: string }) => {
     return get(titleCell);
   }).pipe(Atom.keepAlive);
 
-  const list = <A>(
-    execute: (client: Client) => Effect.Effect<A, ApplicationError | RpcClientError>,
+  const list = <A, E = never>(
+    execute: (client: Client) => Effect.Effect<A, E | ApplicationError | RpcClientError>,
   ) => {
-    const result = Atom.make<AsyncResult.AsyncResult<A, ApplicationError | RpcClientError>>(
+    const result = Atom.make<AsyncResult.AsyncResult<A, E | ApplicationError | RpcClientError>>(
       AsyncResult.initial(),
     ).pipe(Atom.keepAlive);
     const read = Atom.make((get) => {
@@ -156,7 +162,12 @@ export const make = ({ url }: { readonly url: string }) => {
         const session = yield* get.resultOnce(owner);
         yield* session.available;
         const value = yield* execute(session.client).pipe(
-          Effect.tapErrorTag("ApplicationError", () => Effect.sync(session.recordResponse)),
+          Effect.tapError((error) =>
+            Effect.sync(() => {
+              if (error instanceof ApplicationError || error instanceof ScheduleError)
+                session.recordResponse();
+            }),
+          ),
         );
         session.recordResponse();
         return value;
@@ -192,6 +203,41 @@ export const make = ({ url }: { readonly url: string }) => {
   const chats = Atom.family((workspaceId: WorkspaceId) =>
     list<readonly ChatListEntry[]>((client) => client.ListChats({ workspaceId })),
   );
+  const schedules = Atom.family((workspaceId: WorkspaceId) =>
+    list<readonly ScheduleView[], ScheduleError>((client) => client.ListSchedules({ workspaceId })),
+  );
+  const updateSchedule = Atom.fn<{
+    readonly workspaceId: WorkspaceId;
+    readonly id: ScheduleId;
+    readonly input: UpdateSchedule;
+  }>()((input, get) =>
+    Effect.gen(function* () {
+      const session = yield* get.result(owner);
+      yield* session.available;
+      const schedule = yield* session.client.UpdateSchedule(input);
+      session.recordResponse();
+      get.set(schedules(input.workspaceId), (current) =>
+        current.map((existing) => (existing.id === schedule.id ? schedule : existing)),
+      );
+      get.registry.refresh(schedules(input.workspaceId));
+      return schedule;
+    }),
+  ).pipe(Atom.keepAlive, Atom.setLazy(false));
+  const deleteSchedule = Atom.fn<{
+    readonly workspaceId: WorkspaceId;
+    readonly id: ScheduleId;
+  }>()((input, get) =>
+    Effect.gen(function* () {
+      const session = yield* get.result(owner);
+      yield* session.available;
+      yield* session.client.DeleteSchedule(input);
+      session.recordResponse();
+      get.set(schedules(input.workspaceId), (current) =>
+        current.filter((existing) => existing.id !== input.id),
+      );
+      get.registry.refresh(schedules(input.workspaceId));
+    }),
+  ).pipe(Atom.keepAlive, Atom.setLazy(false));
   const createWorkspace = Atom.fn<CreateWorkspace>()((input, get) =>
     Effect.gen(function* () {
       const session = yield* get.result(owner);
@@ -410,6 +456,9 @@ export const make = ({ url }: { readonly url: string }) => {
     connection,
     workspaces,
     chats,
+    schedules,
+    updateSchedule,
+    deleteSchedule,
     titles,
     createWorkspace,
     updateWorkspace,

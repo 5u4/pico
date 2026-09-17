@@ -1,5 +1,7 @@
 import { Database } from "bun:sqlite";
+import * as BunCrypto from "@effect/platform-bun/BunCrypto";
 import * as BunFileSystem from "@effect/platform-bun/BunFileSystem";
+import * as BunPath from "@effect/platform-bun/BunPath";
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import { assert, describe, it } from "@effect/vitest";
 import type { AgentEventEnvelope } from "@pico/contract/agent-event";
@@ -16,6 +18,7 @@ import { ChatRepository } from "@pico/contract/chat-repository";
 import { ApplicationError, ChatClosed } from "@pico/contract/errors";
 import { EventRouter } from "@pico/contract/event-router";
 import { AbsolutePath } from "@pico/contract/path";
+import * as Schedule from "@pico/contract/schedule";
 import { type Workspace, WorkspaceId } from "@pico/contract/workspace-model";
 import { WorkspaceRepository } from "@pico/contract/workspace-repository";
 import * as RpcServer from "@pico/rpc/server";
@@ -35,6 +38,7 @@ import * as AsyncResult from "effect/unstable/reactivity/AsyncResult";
 import type * as Atom from "effect/unstable/reactivity/Atom";
 import * as AtomRegistry from "effect/unstable/reactivity/AtomRegistry";
 import * as Persistence from "../../persistence/src/layer.ts";
+import * as ScheduleLayer from "../../schedule/src/schedule.ts";
 import { type LiveChat, make } from "../src/client.ts";
 
 const firstChat = ChatId.make("018f47a0-0000-7000-8000-000000000001");
@@ -164,11 +168,25 @@ const fixture = Effect.fnUntraced(function* (
         })),
       ),
   });
+  const schedules = Layer.unwrap(
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const directory = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "pico-frontend-schedules-",
+      });
+      return ScheduleLayer.layer(AbsolutePath.make(directory), (target) =>
+        target.kind === "chat" || target.kind === "workspace"
+          ? Effect.succeed(target)
+          : Effect.fail(new Schedule.ScheduleHostError({ message: "Unexpected external target" })),
+      );
+    }),
+  ).pipe(Layer.provide(Layer.mergeAll(BunCrypto.layer, BunPath.layer, BunFileSystem.layer)));
   const layer = HttpRouter.serve(RpcServer.routes).pipe(
     Layer.provide(
       Layer.mergeAll(
         Layer.succeed(Application, application),
         Layer.succeed(EventRouter, router),
+        schedules,
         ownership,
       ),
     ),

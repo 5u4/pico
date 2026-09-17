@@ -4,6 +4,7 @@ import { ChatRepository } from "@pico/contract/chat-repository";
 import { ApplicationError, ChatClosed, WorkspaceBindingInvalid } from "@pico/contract/errors";
 import { EventRouter } from "@pico/contract/event-router";
 import { PicoRpcs } from "@pico/contract/rpc";
+import { ScheduleError, Schedules, type ScheduleTargetInput } from "@pico/contract/schedule";
 import type { WorkspaceId, WorkspacePlatform } from "@pico/contract/workspace-model";
 import { WorkspaceRepository } from "@pico/contract/workspace-repository";
 import * as Cause from "effect/Cause";
@@ -20,6 +21,7 @@ const handlers = PicoRpcs.toLayer(
     const eventRouter = yield* EventRouter;
     const workspaces = yield* WorkspaceRepository;
     const chats = yield* ChatRepository;
+    const schedules = yield* Schedules;
 
     return PicoRpcs.of({
       ListWorkspaces: (_, { requestId }) =>
@@ -40,6 +42,46 @@ const handlers = PicoRpcs.toLayer(
             component: "rpc",
             procedure: "ListChats",
             workspaceId,
+            requestId: String(requestId),
+          }),
+        ),
+      ListSchedules: ({ workspaceId }, { requestId }) =>
+        requireWebWorkspace(workspaces, workspaceId).pipe(
+          Effect.andThen(() => schedules.list({ workspaceId })),
+          Effect.tapCause(reportFailure),
+          Effect.annotateLogs({
+            component: "rpc",
+            procedure: "ListSchedules",
+            workspaceId,
+            requestId: String(requestId),
+          }),
+        ),
+      UpdateSchedule: ({ workspaceId, id, input }, { requestId }) =>
+        requireWebWorkspace(workspaces, workspaceId).pipe(
+          Effect.andThen(() =>
+            input.target === undefined
+              ? Effect.void
+              : requireWebScheduleTarget(workspaces, chats, input.target),
+          ),
+          Effect.andThen(() => schedules.update({ workspaceId }, id, input)),
+          Effect.tapCause(reportFailure),
+          Effect.annotateLogs({
+            component: "rpc",
+            procedure: "UpdateSchedule",
+            workspaceId,
+            scheduleId: id,
+            requestId: String(requestId),
+          }),
+        ),
+      DeleteSchedule: ({ workspaceId, id }, { requestId }) =>
+        requireWebWorkspace(workspaces, workspaceId).pipe(
+          Effect.andThen(() => schedules.remove({ workspaceId }, id)),
+          Effect.tapCause(reportFailure),
+          Effect.annotateLogs({
+            component: "rpc",
+            procedure: "DeleteSchedule",
+            workspaceId,
+            scheduleId: id,
             requestId: String(requestId),
           }),
         ),
@@ -200,6 +242,27 @@ const requireWebChat = Effect.fn("Rpc.requireWebChat")(function* (
   }
 });
 
+const requireWebScheduleTarget = (
+  workspaces: WorkspaceRepository["Service"],
+  chats: ChatRepository["Service"],
+  target: ScheduleTargetInput,
+) => {
+  switch (target.kind) {
+    case "workspace":
+      return requireWebWorkspace(workspaces, target.workspaceId);
+    case "chat":
+      return requireWebChat(workspaces, chats, target.chatId);
+    case "external-chat":
+    case "external-workspace":
+      return Effect.fail(
+        new ApplicationError({
+          reason: "invalid-state",
+          message: "Choose a web workspace or chat as the destination",
+        }),
+      );
+  }
+};
+
 const openWebEvents = Effect.fn("Rpc.openWebEvents")(function* (
   eventRouter: EventRouter["Service"],
   workspaces: WorkspaceRepository["Service"],
@@ -228,6 +291,7 @@ const reportFailure = (cause: Cause.Cause<unknown>) => {
     if (reason._tag === "Die") return true;
     const error = reason.error;
     if (error instanceof ApplicationError) return error.reason === "operation";
+    if (error instanceof ScheduleError) return error.kind === "io";
     return !(error instanceof ChatClosed || error instanceof WorkspaceBindingInvalid);
   });
   if (!operational) return Effect.void;

@@ -25,6 +25,7 @@ import { CloseChatDialog } from "./close-chat-dialog.tsx";
 import { Composer } from "./composer.tsx";
 import { ContextUsage } from "./context-usage.tsx";
 import { MobileSidebar } from "./mobile-sidebar.tsx";
+import { ScheduleDialog, type ScheduleDialogProps } from "./schedule-dialog.tsx";
 import { ToolDetailPane } from "./tool-detail-pane.tsx";
 import { Transcript } from "./transcript.tsx";
 import { WorkspaceDialog, type WorkspaceFormProps } from "./workspace-dialog.tsx";
@@ -59,6 +60,7 @@ export interface ChatScreenProps
   readonly workspaceForm: WorkspaceFormProps | null;
   readonly workspaceSettings: WorkspaceSettingsProps | null;
   readonly onAddWorkspace: () => void;
+  readonly schedules: ScheduleDialogProps;
   readonly closeChat: CloseChatPresentation;
   readonly onCloseChatConfirm: () => void;
   readonly onCloseChatDismiss: () => void;
@@ -97,6 +99,7 @@ export function ChatScreen({
   workspaceForm,
   workspaceSettings,
   onAddWorkspace,
+  schedules,
   onEditWorkspace,
   workspaceEditPending,
   closeChat,
@@ -111,6 +114,7 @@ export function ChatScreen({
   onChatsRetry,
   onChatSelect,
   onNewChat,
+  onOpenSchedules,
   onTabSelect,
   onTabClose,
   onSearchChange,
@@ -268,6 +272,7 @@ export function ChatScreen({
     navigation,
     search,
     onSearchChange,
+    onOpenSchedules,
     onWorkspaceToggle,
     onWorkspaceRetry,
     onChatsRetry,
@@ -617,6 +622,7 @@ export function ChatScreen({
             }}
           />
         )}
+      <ScheduleDialog {...schedules} />
       {workspaceForm && <WorkspaceDialog {...workspaceForm} key={workspaceForm.session} />}
       {workspaceSettings && (
         <WorkspaceSettingsDialog {...workspaceSettings} key={workspaceSettings.editor.session} />

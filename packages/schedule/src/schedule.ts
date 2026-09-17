@@ -69,7 +69,7 @@ const invalidExternalView = (loaded: LoadedSchedule): Schedule.ScheduleView => {
 };
 
 const authorize = (
-  caller: Schedule.ScheduleCaller,
+  caller: Pick<Schedule.ScheduleCaller, "workspaceId">,
   loaded: LoadedSchedule | undefined,
 ): Effect.Effect<LoadedSchedule, Schedule.ScheduleError> => {
   if (loaded === undefined || loaded.ownerWorkspaceId !== caller.workspaceId) {
@@ -146,7 +146,7 @@ const capture = Effect.fn("Schedules.capture")(function* (
   const storage: Storage = { fileSystem, path, schedulesDir, temporaryId: transactionId };
 
   const loadOwned = Effect.fn("Schedules.loadOwned")(function* (
-    caller: Schedule.ScheduleCaller,
+    caller: Pick<Schedule.ScheduleCaller, "workspaceId">,
     id: Schedule.ScheduleId,
   ) {
     return yield* authorize(caller, yield* loadSchedule(storage, id));
@@ -195,7 +195,9 @@ const capture = Effect.fn("Schedules.capture")(function* (
     return created;
   });
 
-  const list = Effect.fn("Schedules.list")(function* (caller: Schedule.ScheduleCaller) {
+  const list = Effect.fn("Schedules.list")(function* (
+    caller: Pick<Schedule.ScheduleCaller, "workspaceId">,
+  ) {
     return yield* mutation.withPermit(
       Effect.gen(function* () {
         yield* reconcileUpdates(storage);
@@ -208,7 +210,7 @@ const capture = Effect.fn("Schedules.capture")(function* (
   });
 
   const get = Effect.fn("Schedules.get")(function* (
-    caller: Schedule.ScheduleCaller,
+    caller: Pick<Schedule.ScheduleCaller, "workspaceId">,
     id: Schedule.ScheduleId,
   ) {
     return yield* mutation.withPermit(
@@ -220,7 +222,7 @@ const capture = Effect.fn("Schedules.capture")(function* (
   });
 
   const update = Effect.fn("Schedules.update")(function* (
-    caller: Schedule.ScheduleCaller,
+    caller: Pick<Schedule.ScheduleCaller, "workspaceId">,
     id: Schedule.ScheduleId,
     input: Schedule.UpdateSchedule,
   ) {
@@ -286,7 +288,7 @@ const capture = Effect.fn("Schedules.capture")(function* (
     return updated;
   });
   const remove = Effect.fn("Schedules.remove")(function* (
-    caller: Schedule.ScheduleCaller,
+    caller: Pick<Schedule.ScheduleCaller, "workspaceId">,
     id: Schedule.ScheduleId,
   ) {
     yield* mutation.withPermit(

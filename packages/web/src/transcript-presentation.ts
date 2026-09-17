@@ -5,6 +5,7 @@ import type {
   AgentTranscript,
 } from "@pico/contract/agent-message";
 import { ApplicationError, ChatClosed } from "@pico/contract/errors";
+import { ScheduleError } from "@pico/contract/schedule";
 import type * as FrontendState from "@pico/frontend-state/client";
 import * as Cause from "effect/Cause";
 import * as Option from "effect/Option";
@@ -26,7 +27,7 @@ const decodeArguments = Schema.decodeUnknownOption(
 
 export function errorMessage(cause: Cause.Cause<unknown>): string {
   const error = Option.getOrNull(Cause.findErrorOption(cause));
-  if (error instanceof ApplicationError) return error.message;
+  if (error instanceof ApplicationError || error instanceof ScheduleError) return error.message;
   if (error instanceof ChatClosed) return "This chat is closed. Create a new chat to continue.";
   return "The request could not be completed.";
 }

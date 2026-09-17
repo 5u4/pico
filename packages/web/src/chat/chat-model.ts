@@ -67,6 +67,71 @@ export interface NavigationPresentation {
   readonly activeChatId: string | null;
 }
 
+export type ScheduleTriggerDraft =
+  | { readonly kind: "once"; readonly utc: string }
+  | { readonly kind: "cron"; readonly expression: string; readonly timeZone: string };
+
+export interface ScheduleDraft {
+  readonly name: string;
+  readonly trigger: ScheduleTriggerDraft;
+  readonly destination:
+    | { readonly kind: "keep" }
+    | { readonly kind: "workspace"; readonly id: string }
+    | { readonly kind: "chat"; readonly id: string };
+  readonly timeout:
+    | { readonly kind: "default" }
+    | { readonly kind: "custom"; readonly milliseconds: string };
+}
+
+export type ScheduleRow =
+  | {
+      readonly kind: "ready";
+      readonly id: string;
+      readonly name: string;
+      readonly state: "enabled" | "disabled";
+      readonly triggerLabel: string;
+      readonly timing: string;
+      readonly timeZone: string;
+      readonly destination: string;
+      readonly sourceDirectory: string;
+    }
+  | {
+      readonly kind: "invalid";
+      readonly id: string;
+      readonly state: "enabled" | "disabled" | "conflicted";
+      readonly error: string;
+      readonly sourceDirectory: string | null;
+    };
+
+export type ScheduleListPresentation =
+  | { readonly kind: "loading" }
+  | { readonly kind: "error"; readonly message: string }
+  | {
+      readonly kind: "loaded";
+      readonly rows: readonly ScheduleRow[];
+      readonly freshness:
+        | { readonly kind: "current" }
+        | { readonly kind: "refreshing" }
+        | { readonly kind: "stale"; readonly message: string };
+    };
+
+export type ScheduleSubmission =
+  | { readonly kind: "ready" }
+  | { readonly kind: "pending" }
+  | { readonly kind: "error"; readonly message: string };
+
+export type ScheduleEditorPresentation =
+  | {
+      readonly kind: "ready";
+      readonly row: Extract<ScheduleRow, { readonly kind: "ready" }>;
+      readonly draft: ScheduleDraft;
+      readonly dirty: boolean;
+      readonly localPreview: string;
+      readonly warning: string | null;
+    }
+  | { readonly kind: "invalid"; readonly row: Extract<ScheduleRow, { readonly kind: "invalid" }> }
+  | { readonly kind: "missing" };
+
 export type AssistantBlock =
   | {
       readonly kind: "text";
