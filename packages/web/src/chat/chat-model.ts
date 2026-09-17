@@ -234,3 +234,7 @@ export type ContextUsagePresentation =
       readonly categories: readonly { readonly label: string; readonly tokens: string }[];
       readonly description: string;
     };
+
+export type ShakeFeedback =
+  | { readonly kind: "idle" }
+  | { readonly kind: "status" | "error"; readonly message: string };
