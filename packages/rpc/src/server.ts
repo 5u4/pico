@@ -4,7 +4,7 @@ import { ChatRepository } from "@pico/contract/chat-repository";
 import { ApplicationError, ChatClosed, WorkspaceBindingInvalid } from "@pico/contract/errors";
 import { EventRouter } from "@pico/contract/event-router";
 import { PicoRpcs } from "@pico/contract/rpc";
-import { ScheduleError, Schedules, type ScheduleTargetInput } from "@pico/contract/schedule";
+import { ScheduleError, Schedules } from "@pico/contract/schedule";
 import type { WorkspaceId, WorkspacePlatform } from "@pico/contract/workspace-model";
 import { WorkspaceRepository } from "@pico/contract/workspace-repository";
 import * as Cause from "effect/Cause";
@@ -45,43 +45,34 @@ const handlers = PicoRpcs.toLayer(
             requestId: String(requestId),
           }),
         ),
-      ListSchedules: ({ workspaceId }, { requestId }) =>
-        requireWebWorkspace(workspaces, workspaceId).pipe(
-          Effect.andThen(() => schedules.list({ workspaceId })),
+      ListSchedules: (_, { requestId }) =>
+        Effect.gen(function* () {
+          const snapshot = yield* schedules.overview();
+          const owners = yield* workspaces.list().pipe(
+            Effect.mapError(
+              () =>
+                new ApplicationError({
+                  reason: "operation",
+                  message: "Failed to read schedule owners",
+                }),
+            ),
+          );
+          const byId = new Map(
+            owners.map(({ id, name, platform }) => [id, { id, name, platform }]),
+          );
+          return {
+            observedAt: snapshot.observedAt,
+            entries: snapshot.entries.map((entry) => ({
+              ...entry,
+              owner:
+                entry.ownerWorkspaceId === null ? null : (byId.get(entry.ownerWorkspaceId) ?? null),
+            })),
+          };
+        }).pipe(
           Effect.tapCause(reportFailure),
           Effect.annotateLogs({
             component: "rpc",
             procedure: "ListSchedules",
-            workspaceId,
-            requestId: String(requestId),
-          }),
-        ),
-      UpdateSchedule: ({ workspaceId, id, input }, { requestId }) =>
-        requireWebWorkspace(workspaces, workspaceId).pipe(
-          Effect.andThen(() =>
-            input.target === undefined
-              ? Effect.void
-              : requireWebScheduleTarget(workspaces, chats, input.target),
-          ),
-          Effect.andThen(() => schedules.update({ workspaceId }, id, input)),
-          Effect.tapCause(reportFailure),
-          Effect.annotateLogs({
-            component: "rpc",
-            procedure: "UpdateSchedule",
-            workspaceId,
-            scheduleId: id,
-            requestId: String(requestId),
-          }),
-        ),
-      DeleteSchedule: ({ workspaceId, id }, { requestId }) =>
-        requireWebWorkspace(workspaces, workspaceId).pipe(
-          Effect.andThen(() => schedules.remove({ workspaceId }, id)),
-          Effect.tapCause(reportFailure),
-          Effect.annotateLogs({
-            component: "rpc",
-            procedure: "DeleteSchedule",
-            workspaceId,
-            scheduleId: id,
             requestId: String(requestId),
           }),
         ),
@@ -187,7 +178,7 @@ const handlers = PicoRpcs.toLayer(
   }),
 );
 
-/** Daemon composition installs these Web-only routes on its shared HTTP listener. */
+/** Daemon composition installs web chat routes and the root-local read-only schedule overview. */
 export const routes = RpcServer.layerHttp({ group: PicoRpcs, path: "/rpc" }).pipe(
   Layer.provide(handlers),
   Layer.provide(RpcSerialization.layerJson),
@@ -241,27 +232,6 @@ const requireWebChat = Effect.fn("Rpc.requireWebChat")(function* (
     return yield* new ApplicationError({ reason: "not-found", message: "Chat not found" });
   }
 });
-
-const requireWebScheduleTarget = (
-  workspaces: WorkspaceRepository["Service"],
-  chats: ChatRepository["Service"],
-  target: ScheduleTargetInput,
-) => {
-  switch (target.kind) {
-    case "workspace":
-      return requireWebWorkspace(workspaces, target.workspaceId);
-    case "chat":
-      return requireWebChat(workspaces, chats, target.chatId);
-    case "external-chat":
-    case "external-workspace":
-      return Effect.fail(
-        new ApplicationError({
-          reason: "invalid-state",
-          message: "Choose a web workspace or chat as the destination",
-        }),
-      );
-  }
-};
 
 const openWebEvents = Effect.fn("Rpc.openWebEvents")(function* (
   eventRouter: EventRouter["Service"],

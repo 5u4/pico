@@ -4,6 +4,7 @@ import type { TranscriptSnapshot } from "@pico/contract/agent-runtime";
 import { CreateWorkspace } from "@pico/contract/application";
 import type { Chat, ChatId } from "@pico/contract/chat-model";
 import { GitError, WorkspaceBindingInvalid } from "@pico/contract/errors";
+import type { ScheduleOverviewResponse } from "@pico/contract/rpc";
 import type * as Schedule from "@pico/contract/schedule";
 import type { Workspace, WorkspaceId } from "@pico/contract/workspace-model";
 import type * as FrontendState from "@pico/frontend-state/client";
@@ -24,10 +25,7 @@ import type {
   ContextUsagePresentation,
   NavigationPresentation,
   PromptSuggestion,
-  ScheduleDraft,
-  ScheduleEditorPresentation,
   ScheduleListPresentation,
-  ScheduleSubmission,
   SidebarSearchPresentation,
   ToolCallPresentation,
   TranscriptPresentation,
@@ -38,13 +36,7 @@ import type { WorkspaceFormProps } from "./chat/workspace-dialog.tsx";
 import type { WorkspaceSettingsEditor } from "./chat/workspace-settings-dialog.tsx";
 import { Button } from "./components/ui/button.tsx";
 import { type ConversationPage, type Page, pageFromMatches } from "./routes.tsx";
-import {
-  presentSchedule,
-  sameScheduleDraft,
-  scheduleDraft,
-  scheduleLocalPreview,
-  scheduleUpdate,
-} from "./schedule-presentation.ts";
+import { formatScheduleTime, presentSchedule } from "./schedule-presentation.ts";
 import { applyThemePreference, readBootstrappedTheme, type Theme } from "./theme.ts";
 import { errorMessage, presentTranscript } from "./transcript-presentation.ts";
 
@@ -103,34 +95,10 @@ type CloseChatFlow =
       readonly outcome: "closed" | "unconfirmed";
       readonly message: string;
     };
-type ScheduleEditor =
-  | { readonly kind: "list" }
-  | {
-      readonly kind: "ready";
-      readonly original: Schedule.ReadyScheduleView;
-      readonly draft: ScheduleDraft;
-    }
-  | { readonly kind: "invalid"; readonly original: Schedule.InvalidScheduleView };
-type ScheduleNavigation =
-  | { readonly kind: "close" }
-  | { readonly kind: "back" }
-  | { readonly kind: "workspace"; readonly id: WorkspaceId }
-  | { readonly kind: "author"; readonly id: Schedule.ScheduleId | null }
-  | { readonly kind: "add-workspace" };
-type ScheduleManager =
-  | { readonly kind: "closed" }
-  | {
-      readonly kind: "open";
-      readonly session: number;
-      readonly workspaceId: WorkspaceId | null;
-      readonly editor: ScheduleEditor;
-      readonly submission: ScheduleSubmission;
-      readonly confirmation:
-        | { readonly kind: "none" }
-        | { readonly kind: "discard"; readonly action: ScheduleNavigation }
-        | { readonly kind: "delete"; readonly id: Schedule.ScheduleId; readonly name: string };
-    };
-const emptySchedules = Atom.make(AsyncResult.initial<readonly Schedule.ScheduleView[]>());
+type AppView =
+  | { readonly kind: "chat" }
+  | { readonly kind: "schedules"; readonly expandedId: Schedule.ScheduleId | null };
+const emptySchedules = Atom.make(AsyncResult.initial<ScheduleOverviewResponse>());
 const emptyDraft: DraftValue = { text: "" };
 const workspaceStorageKey = "pico-last-workspace";
 const openingConnection = Atom.make<FrontendState.Connection>({ kind: "opening" });
@@ -354,16 +322,9 @@ export function WorkspaceChat({
     readonly visit: number;
     readonly element: HTMLElement | null;
   } | null>(null);
-  const [scheduleManager, setScheduleManager] = useState<ScheduleManager>({ kind: "closed" });
-  const scheduleManagerRef = useRef(scheduleManager);
-  const nextScheduleSession = useRef(0);
-  const preferredScheduleWorkspace = useRef<WorkspaceId | null>(null);
-  const scheduleOrigin = useRef<HTMLElement | null>(null);
-  const scheduleAfterClose = useRef<"origin" | "composer" | "workspace">("origin");
-  const scheduleMutationPending = useRef(false);
-  const scheduleWorkspaceId = scheduleManager.kind === "open" ? scheduleManager.workspaceId : null;
+  const [view, setView] = useState<AppView>({ kind: "chat" });
   const scheduleResult = useAtomValue(
-    state && scheduleWorkspaceId ? state.schedules(scheduleWorkspaceId) : emptySchedules,
+    state && view.kind === "schedules" ? state.schedules : emptySchedules,
   );
   const [closeFlow, setCloseFlow] = useState<CloseChatFlow>({ kind: "idle" });
   const closeFlowRef = useRef(closeFlow);
@@ -413,8 +374,7 @@ export function WorkspaceChat({
             workspace,
             chats:
               state &&
-              (scheduleManager.kind === "open" ||
-                search.kind === "open" ||
+              (search.kind === "open" ||
                 navigation.expanded.has(workspace.id) ||
                 workspace.id === closingWorkspaceId ||
                 workspace.id === routeChatWorkspaceId ||
@@ -431,7 +391,6 @@ export function WorkspaceChat({
       search.kind,
       closingWorkspaceId,
       routeChatWorkspaceId,
-      scheduleManager.kind,
     ],
   );
   const { result: workspaces, groups } = useAtomValue(groupedAtom);
@@ -670,11 +629,6 @@ export function WorkspaceChat({
       selection && !next.entries.has(selection.conversationKey) ? null : selection,
     );
   };
-  const selectDraft = (workspace: Workspace, text?: string) => {
-    const entry = retainEntry(workspace, { kind: "new" }, true);
-    if (text !== undefined) updateEntry(entry.key, (value) => ({ ...value, value: { text } }));
-    navigatePage({ kind: "draft", workspaceId: workspace.id });
-  };
 
   useEffect(() => {
     if (workspaces._tag !== "Success" || workspaces.waiting) return;
@@ -833,287 +787,69 @@ export function WorkspaceChat({
       },
     });
   };
-  const updateScheduleManager = (next: ScheduleManager) => {
-    scheduleManagerRef.current = next;
-    setScheduleManager(next);
-  };
-  const scheduleDirty =
-    scheduleManager.kind === "open" &&
-    scheduleManager.editor.kind === "ready" &&
-    !sameScheduleDraft(
-      scheduleManager.editor.draft,
-      scheduleDraft(scheduleManager.editor.original),
-    );
   const refreshSchedules = () => {
-    const current = scheduleManagerRef.current;
-    if (!state || current.kind !== "open" || registry.get(state.connection).kind !== "active")
-      return;
-    registry.refresh(state.workspaces);
-    if (current.workspaceId) registry.refresh(state.schedules(current.workspaceId));
-    for (const group of groups) registry.refresh(state.chats(group.workspace.id));
+    if (!state || registry.get(state.connection).kind !== "active") return;
+    if (!registry.get(state.schedules).waiting) registry.refresh(state.schedules);
   };
   useEffect(() => {
-    if (scheduleManager.kind !== "open") return;
-    const refocus = () => {
-      const current = scheduleManagerRef.current;
-      if (!state || current.kind !== "open" || registry.get(state.connection).kind !== "active")
-        return;
-      registry.refresh(state.workspaces);
-      if (current.workspaceId) registry.refresh(state.schedules(current.workspaceId));
+    if (view.kind !== "schedules" || !state || !available) return;
+    const refresh = () => {
+      if (registry.get(state.connection).kind !== "active") return;
+      if (document.visibilityState === "hidden") return;
+      if (!registry.get(state.schedules).waiting) registry.refresh(state.schedules);
     };
-    window.addEventListener("focus", refocus);
-    return () => window.removeEventListener("focus", refocus);
-  }, [state, registry, scheduleManager.kind]);
-  useEffect(() => {
-    if (!scheduleDirty) return;
-    const protect = (event: BeforeUnloadEvent) => {
-      event.preventDefault();
-      event.returnValue = "";
+    refresh();
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", refresh);
+    return () => {
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", refresh);
     };
-    window.addEventListener("beforeunload", protect);
-    return () => window.removeEventListener("beforeunload", protect);
-  }, [scheduleDirty]);
-  useEffect(() => {
-    const current = scheduleManagerRef.current;
-    if (current.kind !== "open" || current.workspaceId !== null || workspaces._tag !== "Success")
-      return;
-    const workspace =
-      workspaces.value.find((item) => item.id === preferredScheduleWorkspace.current) ??
-      workspaces.value[0];
-    if (workspace?.platform === "web") {
-      preferredScheduleWorkspace.current = workspace.id;
-      updateScheduleManager({ ...current, workspaceId: workspace.id });
-      if (state && registry.get(state.connection).kind === "active")
-        registry.refresh(state.schedules(workspace.id));
-    }
-  }, [workspaces, state, registry, scheduleManager.kind]);
-  const openSchedules = (origin: HTMLElement) => {
-    if (scheduleManagerRef.current.kind === "open") return;
-    const workspace =
-      groups.find((group) => group.workspace.id === selected?.workspace.id)?.workspace ??
-      groups.find((group) => group.workspace.id === preferredScheduleWorkspace.current)
-        ?.workspace ??
-      groups[0]?.workspace;
-    scheduleOrigin.current = origin;
-    scheduleAfterClose.current = "origin";
-    preferredScheduleWorkspace.current = workspace?.id ?? null;
-    updateScheduleManager({
-      kind: "open",
-      session: ++nextScheduleSession.current,
-      workspaceId: workspace?.id ?? null,
-      editor: { kind: "list" },
-      submission: { kind: scheduleMutationPending.current ? "pending" : "ready" },
-      confirmation: { kind: "none" },
-    });
-    refreshSchedules();
+  }, [state, registry, available, view.kind]);
+  const openSchedules = () => {
+    setContextDetailsKey(undefined);
+    setToolSelection(null);
+    setView((current) =>
+      current.kind === "schedules" ? current : { kind: "schedules", expandedId: null },
+    );
   };
-  const navigateSchedules = (action: ScheduleNavigation) => {
-    const current = scheduleManagerRef.current;
-    if (current.kind !== "open") return;
-    if (action.kind === "close" || action.kind === "add-workspace" || action.kind === "author") {
-      if (action.kind === "author") {
-        const workspace = groups.find(
-          (group) => group.workspace.id === current.workspaceId,
-        )?.workspace;
-        if (!workspace) return;
-        selectDraft(
-          workspace,
-          action.id === null
-            ? "Help me create a schedule in this workspace. Ask me what task to run, when to run it with an explicit timezone, and where to deliver the result. Prepare the source files and use the schedule tools. Create it paused, report its ID, and let me review it in Schedules before resuming. Do not create anything until we agree on the details."
-            : `Help me edit the instructions for schedule ${action.id} owned by workspace ${workspace.id}. First use schedule_get to read its current definition and managed source directory. Ask what I want to change before editing its files. Preserve its destination, timing, and enabled state unless I request a change. Report the result so I can refresh Schedules.`,
-        );
-        scheduleAfterClose.current = "composer";
-      } else if (action.kind === "add-workspace") scheduleAfterClose.current = "workspace";
-      updateScheduleManager({ kind: "closed" });
-      return;
-    }
-    if (action.kind === "workspace") preferredScheduleWorkspace.current = action.id;
-    updateScheduleManager({
-      ...current,
-      session: ++nextScheduleSession.current,
-      workspaceId: action.kind === "workspace" ? action.id : current.workspaceId,
-      editor: { kind: "list" },
-      submission: { kind: scheduleMutationPending.current ? "pending" : "ready" },
-      confirmation: { kind: "none" },
-    });
-    if (action.kind === "workspace") refreshSchedules();
-  };
-  const requestScheduleNavigation = (action: ScheduleNavigation) => {
-    const current = scheduleManagerRef.current;
-    if (current.kind !== "open") return;
-    if (
-      current.editor.kind === "ready" &&
-      !sameScheduleDraft(current.editor.draft, scheduleDraft(current.editor.original))
-    ) {
-      updateScheduleManager({ ...current, confirmation: { kind: "discard", action } });
-    } else navigateSchedules(action);
-  };
-  const selectSchedule = (id: string) => {
-    const current = scheduleManagerRef.current;
-    if (
-      !state ||
-      current.kind !== "open" ||
-      !current.workspaceId ||
-      scheduleMutationPending.current
-    )
-      return;
-    const row = Option.getOrElse(
-      AsyncResult.value(registry.get(state.schedules(current.workspaceId))),
-      () => [],
-    ).find((item) => item.id === id);
-    if (!row) return;
-    updateScheduleManager({
-      ...current,
-      session: ++nextScheduleSession.current,
-      submission: { kind: "ready" },
-      confirmation: { kind: "none" },
-      editor:
-        row.kind === "ready"
-          ? { kind: "ready", original: row, draft: scheduleDraft(row) }
-          : { kind: "invalid", original: row },
-    });
-  };
-  const mutateSchedule = async (
-    mutation:
-      | {
-          readonly kind: "update";
-          readonly id: Schedule.ScheduleId;
-          readonly input: Schedule.UpdateSchedule;
-        }
-      | { readonly kind: "delete"; readonly id: Schedule.ScheduleId },
-  ) => {
-    const current = scheduleManagerRef.current;
-    if (
-      !state ||
-      current.kind !== "open" ||
-      !current.workspaceId ||
-      scheduleMutationPending.current ||
-      registry.get(state.connection).kind !== "active"
-    )
-      return;
-    scheduleMutationPending.current = true;
-    updateScheduleManager({ ...current, submission: { kind: "pending" } });
-    const exit =
-      mutation.kind === "update"
-        ? await runCommand(registry, state.updateSchedule, {
-            workspaceId: current.workspaceId,
-            id: mutation.id,
-            input: mutation.input,
-          })
-        : await runCommand(registry, state.deleteSchedule, {
-            workspaceId: current.workspaceId,
-            id: mutation.id,
-          });
-    scheduleMutationPending.current = false;
-    const latest = scheduleManagerRef.current;
-    if (latest.kind !== "open") return;
-    if (latest.session !== current.session) {
-      if (latest.submission.kind === "pending")
-        updateScheduleManager({ ...latest, submission: { kind: "ready" } });
-      return;
-    }
-    if (exit._tag === "Failure") {
-      updateScheduleManager({
-        ...latest,
-        submission: { kind: "error", message: errorMessage(exit.cause) },
-      });
-      return;
-    }
-    const row = exit.value;
-    updateScheduleManager({
-      ...latest,
-      submission: { kind: "ready" },
-      confirmation: { kind: "none" },
-      editor: !row
-        ? { kind: "list" }
-        : row.kind === "ready"
-          ? { kind: "ready", original: row, draft: scheduleDraft(row) }
-          : { kind: "invalid", original: row },
-    });
-  };
-  const saveSchedule = () => {
-    const current = scheduleManagerRef.current;
-    if (
-      current.kind !== "open" ||
-      current.editor.kind !== "ready" ||
-      current.submission.kind === "pending"
-    )
-      return;
-    const update = scheduleUpdate(current.editor.original, current.editor.draft);
-    if (update.kind === "error") updateScheduleManager({ ...current, submission: update });
-    else
-      void mutateSchedule({ kind: "update", id: current.editor.original.id, input: update.input });
-  };
-  const scheduleRows = Option.getOrElse(AsyncResult.value(scheduleResult), () => []);
-  const workspaceNames = new Map(groups.map((group) => [group.workspace.id, group.workspace.name]));
-  const scheduleList: ScheduleListPresentation = Option.isNone(AsyncResult.value(scheduleResult))
-    ? scheduleResult._tag === "Failure"
-      ? { kind: "error", message: errorMessage(scheduleResult.cause) }
-      : { kind: "loading" }
-    : {
-        kind: "loaded",
-        rows: scheduleRows.map((row) => presentSchedule(row, workspaceNames, titles)),
-        freshness: !available
-          ? {
-              kind: "stale",
+  const scheduleSnapshot = Option.getOrNull(AsyncResult.value(scheduleResult));
+  const scheduleRows = useMemo(
+    () => scheduleSnapshot?.entries.map(presentSchedule) ?? [],
+    [scheduleSnapshot],
+  );
+  const scheduleList: ScheduleListPresentation =
+    scheduleSnapshot === null
+      ? connection.kind === "unavailable"
+        ? { kind: "disconnected" }
+        : scheduleResult._tag === "Failure"
+          ? { kind: "error", message: errorMessage(scheduleResult.cause) }
+          : {
+              kind: "loading",
               message:
-                connection.kind === "opening" ? "Connecting to pico." : "Connection unavailable.",
+                connection.kind === "opening" ? "Connecting to pico..." : "Loading schedules...",
             }
-          : scheduleResult._tag === "Failure"
-            ? { kind: "stale", message: errorMessage(scheduleResult.cause) }
-            : scheduleResult.waiting
-              ? { kind: "refreshing" }
-              : { kind: "current" },
-      };
-  let scheduleEditor: ScheduleEditorPresentation | null = null;
-  if (scheduleManager.kind === "open" && scheduleManager.editor.kind !== "list") {
-    const editor = scheduleManager.editor;
-    const latest = scheduleRows.find((row) => row.id === editor.original.id);
-    const missing = scheduleResult._tag === "Success" && !scheduleResult.waiting && !latest;
-    const row = presentSchedule(editor.original, workspaceNames, titles);
-    scheduleEditor = missing
-      ? { kind: "missing" }
-      : editor.kind === "ready" && row.kind === "ready"
-        ? {
-            kind: "ready",
-            row,
-            draft: editor.draft,
-            dirty: scheduleDirty,
-            localPreview: scheduleLocalPreview(editor.draft),
-            warning:
-              scheduleList.kind === "loaded" && scheduleList.freshness.kind === "stale"
-                ? "This is a saved snapshot. Refresh before saving if another client may have changed it."
-                : latest &&
-                    (latest.kind !== "ready" ||
-                      latest.definition.revision !== editor.original.definition.revision ||
-                      latest.sourceDirectory !== editor.original.sourceDirectory)
-                  ? "This schedule changed elsewhere. Your form is kept. Go back and reopen it to load the latest values. Saving replaces the fields you changed."
-                  : null,
-          }
-        : row.kind === "invalid"
-          ? { kind: "invalid", row }
-          : null;
-  }
-  const scheduleDestinations: Array<{
-    readonly kind: "workspace" | "chat";
-    readonly id: string;
-    readonly label: string;
-  }> = [];
-  for (const { workspace, chats } of groups) {
-    scheduleDestinations.push({
-      kind: "workspace",
-      id: workspace.id,
-      label: `${workspace.name} · New chat for each run`,
-    });
-    for (const chat of chats ? Option.getOrElse(AsyncResult.value(chats), () => []) : []) {
-      scheduleDestinations.push({
-        kind: "chat",
-        id: chat.id,
-        label: `${workspace.name} · ${titles.get(chat.id) ?? `Chat ${chat.id.slice(-8)}`}`,
-      });
-    }
-  }
+      : {
+          kind: "loaded",
+          observedAt: formatScheduleTime(scheduleSnapshot.observedAt),
+          rows: scheduleRows,
+          freshness: !available
+            ? {
+                kind: "stale",
+                message:
+                  connection.kind === "opening" ? "Connecting to pico." : "Connection unavailable.",
+              }
+            : scheduleResult._tag === "Failure"
+              ? {
+                  kind: "stale",
+                  message: `Could not refresh schedules. ${errorMessage(scheduleResult.cause)}`,
+                }
+              : scheduleResult.waiting
+                ? { kind: "refreshing" }
+                : { kind: "current" },
+        };
   const newChat = (workspaceId?: string) => {
+    setView({ kind: "chat" });
     const workspace = workspaceId
       ? groups.find((group) => group.workspace.id === workspaceId)?.workspace
       : (groups.find((group) => group.workspace.id === routeWorkspaceId)?.workspace ??
@@ -1123,6 +859,7 @@ export function WorkspaceChat({
     else if (!workspaceId) addWorkspace();
   };
   const selectChat = (workspaceId: string, id: string) => {
+    setView({ kind: "chat" });
     const group = groups.find((item) => item.workspace.id === workspaceId);
     if (!group) return;
     const current = navigationRef.current;
@@ -1139,6 +876,7 @@ export function WorkspaceChat({
     if (target) navigatePage({ kind: "chat", workspaceId: group.workspace.id, chatId: target.id });
   };
   const selectTab = (id: string) => {
+    setView({ kind: "chat" });
     const current = navigationRef.current;
     const key = current.openKeys.find((key) => String(key) === id);
     const entry = key === undefined ? undefined : current.entries.get(key);
@@ -1246,6 +984,7 @@ export function WorkspaceChat({
         : group.chats &&
           Option.getOrElse(AsyncResult.value(group.chats), () => []).find((chat) => chat.id === id);
     if (!chat) return;
+    setView({ kind: "chat" });
     void runCloseChat(
       {
         chatId: chat.id,
@@ -1651,17 +1390,19 @@ export function WorkspaceChat({
         onKeepEditing={() => setRecoveryOpen(false)}
         onDiscardAndReload={() => window.location.reload()}
       />
-      {conversation?.snapshot._tag === "Failure" && transcript.state !== "error" && (
-        <div className="flex shrink-0 flex-wrap items-center gap-3 border-b border-border bg-panel p-3 text-label">
-          <p className="min-w-0 flex-1 text-danger" role="alert">
-            {errorMessage(conversation.snapshot.cause)} Displayed history may be incomplete.
-          </p>
-          <Button onClick={retryTranscript} size="small" tone="secondary">
-            {unavailable ? "Reload" : "Retry history"}
-          </Button>
-        </div>
-      )}
-      {selected?.submission.kind === "error" && (
+      {view.kind === "chat" &&
+        conversation?.snapshot._tag === "Failure" &&
+        transcript.state !== "error" && (
+          <div className="flex shrink-0 flex-wrap items-center gap-3 border-b border-border bg-panel p-3 text-label">
+            <p className="min-w-0 flex-1 text-danger" role="alert">
+              {errorMessage(conversation.snapshot.cause)} Displayed history may be incomplete.
+            </p>
+            <Button onClick={retryTranscript} size="small" tone="secondary">
+              {unavailable ? "Reload" : "Retry history"}
+            </Button>
+          </div>
+        )}
+      {view.kind === "chat" && selected?.submission.kind === "error" && (
         <p
           className="shrink-0 border-b border-border bg-panel p-3 text-label text-danger"
           role="alert"
@@ -1669,7 +1410,7 @@ export function WorkspaceChat({
           {selected.submission.message}
         </p>
       )}
-      {conversation?.stopping._tag === "Failure" && (
+      {view.kind === "chat" && conversation?.stopping._tag === "Failure" && (
         <p
           className="shrink-0 border-b border-border bg-panel p-3 text-label text-danger"
           role="alert"
@@ -1678,145 +1419,57 @@ export function WorkspaceChat({
           reload to reconnect.
         </p>
       )}
-      {available && conversation?.live.run.kind === "unknown" && !sending && (
-        <div className="flex shrink-0 flex-wrap items-center gap-3 border-b border-border bg-panel px-4 py-2 text-label">
-          <p className="min-w-0 flex-1 text-muted">
-            Run status is unknown. History does not confirm whether a response is still running.
-          </p>
-          <Button
-            disabled={conversation.stopping.waiting}
-            onClick={stop}
-            size="small"
-            tone="secondary"
-          >
-            Request Stop
-          </Button>
-        </div>
-      )}
+      {view.kind === "chat" &&
+        available &&
+        conversation?.live.run.kind === "unknown" &&
+        !sending && (
+          <div className="flex shrink-0 flex-wrap items-center gap-3 border-b border-border bg-panel px-4 py-2 text-label">
+            <p className="min-w-0 flex-1 text-muted">
+              Run status is unknown. History does not confirm whether a response is still running.
+            </p>
+            <Button
+              disabled={conversation.stopping.waiting}
+              onClick={stop}
+              size="small"
+              tone="secondary"
+            >
+              Request Stop
+            </Button>
+          </div>
+        )}
       <div className="min-h-0 flex-1">
         <ChatScreen
           onOpenSchedules={openSchedules}
-          schedules={{
-            open: scheduleManager.kind === "open",
-            available,
-            workspaceId: scheduleWorkspaceId,
-            workspaces: groups.map(({ workspace }) => ({ id: workspace.id, name: workspace.name })),
-            workspaceStatus:
-              workspaces._tag === "Failure"
-                ? errorMessage(workspaces.cause)
-                : workspaces._tag === "Initial" || workspaces.waiting
-                  ? "Loading workspaces..."
-                  : null,
-            list: scheduleList,
-            editor: scheduleEditor,
-            destinations: scheduleDestinations,
-            destinationStatus: groups.some((group) => group.chats?._tag === "Failure")
-              ? "Some chats could not be loaded. Keep the current destination or use Refresh to try again."
-              : groups.some((group) => group.chats?._tag === "Initial" || group.chats?.waiting)
-                ? "Loading chat destinations..."
-                : null,
-            connectionMessage:
-              connection.kind === "opening"
-                ? "Connecting to pico. You can keep drafting while it opens."
-                : connection.kind === "unavailable"
-                  ? "Connection unavailable. Showing any saved snapshot. Reconnect to save or refresh."
-                  : null,
-            submission:
-              scheduleManager.kind === "open" ? scheduleManager.submission : { kind: "ready" },
-            confirmation:
-              scheduleManager.kind === "open" ? scheduleManager.confirmation : { kind: "none" },
-            onClose: () => requestScheduleNavigation({ kind: "close" }),
-            onClosed: () => {
-              const action = scheduleAfterClose.current;
-              scheduleAfterClose.current = "origin";
-              if (action === "composer") document.getElementById("chat-composer")?.focus();
-              else if (action === "workspace") addWorkspace();
-              else if (scheduleOrigin.current?.isConnected) scheduleOrigin.current.focus();
-            },
-            onWorkspaceChange: (id) => {
-              const workspace = groups.find((group) => group.workspace.id === id)?.workspace;
-              if (workspace) requestScheduleNavigation({ kind: "workspace", id: workspace.id });
-            },
-            onRefresh: refreshSchedules,
-            onAddWorkspace: () => requestScheduleNavigation({ kind: "add-workspace" }),
-            onSelect: selectSchedule,
-            onBack: () => requestScheduleNavigation({ kind: "back" }),
-            onChange: (draft) => {
-              const current = scheduleManagerRef.current;
-              if (
-                current.kind === "open" &&
-                current.editor.kind === "ready" &&
-                current.submission.kind !== "pending"
-              ) {
-                updateScheduleManager({
-                  ...current,
-                  editor: { ...current.editor, draft },
-                  submission: { kind: "ready" },
-                });
-              }
-            },
-            onSave: saveSchedule,
-            onEnabledChange: (id, enabled) => {
-              const current = scheduleManagerRef.current;
-              if (
-                current.kind !== "open" ||
-                current.editor.kind === "list" ||
-                current.editor.original.id !== id
-              )
-                return;
-              if (
-                current.editor.kind === "ready" &&
-                !sameScheduleDraft(current.editor.draft, scheduleDraft(current.editor.original))
-              )
-                return;
-              const row = current.editor.original;
-              if (row.state === "conflicted" || (enabled && row.kind !== "ready")) return;
-              void mutateSchedule({ kind: "update", id: row.id, input: { enabled } });
-            },
-            onDelete: (id) => {
-              const current = scheduleManagerRef.current;
-              if (
-                current.kind !== "open" ||
-                current.editor.kind === "list" ||
-                current.editor.original.id !== id
-              )
-                return;
-              const row = current.editor.original;
-              if (row.state === "conflicted" || row.sourceDirectory === null) return;
-              updateScheduleManager({
-                ...current,
-                confirmation: {
-                  kind: "delete",
-                  id: row.id,
-                  name: row.kind === "ready" ? row.definition.name : row.id,
-                },
-                submission: { kind: "ready" },
-              });
-            },
-            onAuthor: (id) => {
-              const current = scheduleManagerRef.current;
-              if (current.kind !== "open") return;
-              const row = current.editor.kind === "list" ? null : current.editor.original;
-              if (id !== undefined && row?.id !== id) return;
-              requestScheduleNavigation({
-                kind: "author",
-                id: id === undefined ? null : (row?.id ?? null),
-              });
-            },
-            onConfirm: () => {
-              const current = scheduleManagerRef.current;
-              if (current.kind !== "open") return;
-              if (current.confirmation.kind === "discard")
-                navigateSchedules(current.confirmation.action);
-              else if (current.confirmation.kind === "delete")
-                void mutateSchedule({ kind: "delete", id: current.confirmation.id });
-            },
-            onCancelConfirmation: () => {
-              const current = scheduleManagerRef.current;
-              if (current.kind === "open")
-                updateScheduleManager({ ...current, confirmation: { kind: "none" } });
-            },
-          }}
+          view={
+            view.kind === "chat"
+              ? view
+              : {
+                  kind: "schedules",
+                  page: {
+                    list: scheduleList,
+                    expandedId: view.expandedId,
+                    refreshEnabled: available && !scheduleResult.waiting,
+                    onRefresh: refreshSchedules,
+                    onExpandedChange: (id, open) => {
+                      const entry = scheduleSnapshot?.entries.find((item) => item.view.id === id);
+                      if (!entry) return;
+                      setView((current) =>
+                        current.kind === "schedules"
+                          ? {
+                              kind: "schedules",
+                              expandedId: open
+                                ? entry.view.id
+                                : current.expandedId === id
+                                  ? null
+                                  : current.expandedId,
+                            }
+                          : current,
+                      );
+                    },
+                  },
+                }
+          }
+          onReturnToChat={() => setView({ kind: "chat" })}
           closeChat={closePresentation}
           chatCloseDisabled={!available || closeFlow.kind !== "idle"}
           onChatClose={closeChat}

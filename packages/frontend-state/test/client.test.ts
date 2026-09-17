@@ -103,6 +103,7 @@ const fixture = Effect.fnUntraced(function* (
 ) {
   const opened = yield* Queue.unbounded<Route>();
   const storeFile = yield* Deferred.make<AbsolutePath>();
+  const scheduleDirectory = yield* Deferred.make<AbsolutePath>();
   const persistence = Layer.unwrap(
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
@@ -174,6 +175,7 @@ const fixture = Effect.fnUntraced(function* (
       const directory = yield* fileSystem.makeTempDirectoryScoped({
         prefix: "pico-frontend-schedules-",
       });
+      yield* Deferred.succeed(scheduleDirectory, AbsolutePath.make(directory));
       return ScheduleLayer.layer(AbsolutePath.make(directory), (target) =>
         target.kind === "chat" || target.kind === "workspace"
           ? Effect.succeed(target)
@@ -192,7 +194,12 @@ const fixture = Effect.fnUntraced(function* (
     ),
     Layer.provideMerge(NodeHttpServer.layerTest),
   );
-  return { opened, layer, storeFile: Deferred.await(storeFile) };
+  return {
+    opened,
+    layer,
+    storeFile: Deferred.await(storeFile),
+    scheduleDirectory: Deferred.await(scheduleDirectory),
+  };
 });
 
 const endpoint = Effect.gen(function* () {
@@ -248,6 +255,57 @@ const snapshotFixture = Effect.fnUntraced(function* () {
 });
 
 describe("frontend state over WebSocket", () => {
+  it.live("retains the global schedule snapshot after ScheduleError and recovers on refresh", () =>
+    Effect.gen(function* () {
+      const server = yield* fixture({
+        transcript: () => Effect.succeed(snapshot()),
+        sendMessage: () => Effect.succeed({ kind: "handled" }),
+        abort: () => Effect.void,
+      });
+      yield* Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const directory = yield* server.scheduleDirectory;
+        const id = Schedule.ScheduleId.make("018f47a0-0000-7000-8000-000000000088");
+        const definition = `${directory}/enabled/${id}`;
+        yield* fileSystem.makeDirectory(definition);
+        yield* fileSystem.writeFileString(`${definition}/meta.json`, "invalid metadata");
+        const state = make({ url: yield* endpoint });
+        const registry = yield* registryInScope;
+        registry.mount(state.schedules);
+        const loaded = yield* AtomRegistry.getResult(registry, state.schedules);
+        assert.strictEqual(loaded.entries[0]?.view.id, id);
+        assert.strictEqual(loaded.entries[0]?.view.kind, "invalid");
+        assert.isNull(loaded.entries[0]?.ownerWorkspaceId);
+        const revision = Schedule.ScheduleRevision.make("018f47a0-0000-7000-8000-000000000099");
+        const runDirectory = `${directory}/runs/${id}/scheduled-1000-${revision}`;
+        yield* fileSystem.makeDirectory(runDirectory, { recursive: true });
+        yield* fileSystem.writeFileString(`${runDirectory}/run.json`, "broken run metadata");
+        registry.refresh(state.schedules);
+        yield* waitFor(
+          registry,
+          state.schedules,
+          (value) => value._tag === "Failure" && !value.waiting,
+        );
+        const failed = registry.get(state.schedules);
+        if (failed._tag !== "Failure") return yield* Effect.die("Expected schedule read failure");
+        assert.instanceOf(
+          Option.getOrNull(Cause.findErrorOption(failed.cause)),
+          Schedule.ScheduleError,
+        );
+        assert.deepStrictEqual(Option.getOrThrow(AsyncResult.value(failed)), loaded);
+        assert.strictEqual(registry.get(state.connection).kind, "active");
+
+        yield* fileSystem.remove(runDirectory, { recursive: true });
+        yield* fileSystem.remove(definition, { recursive: true });
+        registry.refresh(state.schedules);
+        const recovered = yield* AtomRegistry.getResult(registry, state.schedules, {
+          suspendOnWaiting: true,
+        });
+        assert.deepStrictEqual(recovered.entries, []);
+      }).pipe(Effect.scoped, Effect.provide(server.layer), Effect.provide(BunFileSystem.layer));
+    }),
+  );
+
   it.live("refreshes changed context without losing drafts or mixing chats", () =>
     Effect.gen(function* () {
       let usage: ContextUsage = {

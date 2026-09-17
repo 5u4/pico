@@ -32,6 +32,7 @@ import type { NavigationPresentation, SidebarSearchPresentation } from "./chat-m
 
 export interface WorkspaceSidebarProps {
   readonly navigation: NavigationPresentation;
+  readonly currentPage: "chat" | "schedules";
   readonly search: SidebarSearchPresentation;
   readonly onSearchChange: (search: SidebarSearchPresentation) => void;
   readonly desktopCollapse?: {
@@ -55,6 +56,7 @@ export interface WorkspaceSidebarProps {
 
 export function WorkspaceSidebar({
   navigation,
+  currentPage,
   search,
   onSearchChange,
   desktopCollapse,
@@ -246,7 +248,8 @@ export function WorkspaceSidebar({
         </button>
         <button
           aria-label="Schedules"
-          className="sidebar-control sidebar-rail-row relative mx-2 flex shrink-0 items-center rounded-control px-2 text-left text-muted transition-colors hover:bg-surface-hover-strong hover:text-foreground"
+          aria-current={currentPage === "schedules" ? "page" : undefined}
+          className={`sidebar-control sidebar-rail-row relative mx-2 flex shrink-0 items-center rounded-control px-2 text-left transition-colors hover:bg-surface-hover-strong hover:text-foreground ${currentPage === "schedules" ? "bg-surface-hover-strong text-foreground" : "text-muted"}`}
           onClick={(event) => onOpenSchedules(event.currentTarget)}
           title="Schedules"
           type="button"

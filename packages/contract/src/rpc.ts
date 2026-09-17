@@ -10,6 +10,23 @@ import * as Errors from "./errors.ts";
 import * as Schedule from "./schedule.ts";
 import * as Workspace from "./workspace-model.ts";
 
+export const ScheduleOverviewResponse = Schema.Struct({
+  observedAt: Schema.Natural,
+  entries: Schema.Array(
+    Schema.Struct({
+      ...Schedule.ScheduleOverviewEntry.fields,
+      owner: Schema.NullOr(
+        Schema.Struct({
+          id: Workspace.WorkspaceId,
+          name: Workspace.Workspace.members[0].fields.name,
+          platform: Workspace.WorkspacePlatform,
+        }),
+      ),
+    }),
+  ),
+});
+export type ScheduleOverviewResponse = typeof ScheduleOverviewResponse.Type;
+
 export const PicoRpcs = RpcGroup.make(
   Rpc.make("ListWorkspaces", {
     payload: Schema.Void,
@@ -22,22 +39,8 @@ export const PicoRpcs = RpcGroup.make(
     error: Errors.ApplicationError,
   }),
   Rpc.make("ListSchedules", {
-    payload: { workspaceId: Workspace.WorkspaceId },
-    success: Schema.Array(Schedule.ScheduleView),
-    error: Schema.Union([Errors.ApplicationError, Schedule.ScheduleError]),
-  }),
-  Rpc.make("UpdateSchedule", {
-    payload: {
-      workspaceId: Workspace.WorkspaceId,
-      id: Schedule.ScheduleId,
-      input: Schedule.UpdateSchedule,
-    },
-    success: Schedule.ScheduleView,
-    error: Schema.Union([Errors.ApplicationError, Schedule.ScheduleError]),
-  }),
-  Rpc.make("DeleteSchedule", {
-    payload: { workspaceId: Workspace.WorkspaceId, id: Schedule.ScheduleId },
-    success: Schema.Void,
+    payload: Schema.Void,
+    success: ScheduleOverviewResponse,
     error: Schema.Union([Errors.ApplicationError, Schedule.ScheduleError]),
   }),
   Rpc.make("CreateWorkspace", {

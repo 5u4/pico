@@ -111,6 +111,7 @@ try {
   const schedules = Schedules.of({
     create: unusedSchedule,
     list: unusedSchedule,
+    overview: unusedSchedule,
     get: unusedSchedule,
     update: unusedSchedule,
     remove: unusedSchedule,

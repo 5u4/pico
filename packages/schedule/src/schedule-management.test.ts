@@ -47,6 +47,143 @@ describe("schedule management", () => {
     ),
   );
 
+  it.effect("keeps previous-revision run status compact and orders claims deterministically", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-schedule-overview-" });
+      const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
+      const schedules = yield* open(schedulesDir, resolveTarget);
+      const created = yield* schedules.create(caller, {
+        name: "Recorded status",
+        enabled: true,
+        target: { kind: "chat", chatId },
+        trigger: { kind: "once", at: 1_000 },
+        sourceDirectory: yield* prepareSource({ "prompt.md": "Private instructions" }),
+      });
+      if (created.kind !== "ready") return yield* Effect.die("Expected valid definition");
+      const updated = yield* schedules.update(caller, created.id, { name: "New revision" });
+      if (updated.kind !== "ready") return yield* Effect.die("Expected valid revision");
+      const saveRun = Effect.fn("Schedules.test.saveRecordedRun")(function* (
+        scheduledFor: number,
+        claimedAt: number,
+        state: Schedule.ScheduleRunLifecycle["state"],
+      ) {
+        const id = Schedule.ScheduleRunId.make(
+          `scheduled-${scheduledFor}-${created.definition.revision}`,
+        );
+        const directory = path.join(schedulesDir, "runs", created.id, id);
+        yield* fileSystem.makeDirectory(directory, { recursive: true });
+        yield* fileSystem.writeFileString(
+          path.join(directory, "run.json"),
+          JSON.stringify({
+            version: 1,
+            id,
+            scheduleId: created.id,
+            definitionRevision: created.definition.revision,
+            source: { kind: "scheduled", scheduledFor },
+            plannedTarget: { kind: "existing-chat", ownerWorkspaceId: workspaceId, chatId },
+            claimedAt,
+            state,
+          }),
+        );
+        return id;
+      });
+      yield* saveRun(9_000, 100, {
+        kind: "finished",
+        finishedAt: 10_000,
+        outcome: { kind: "published", content: "Private published output" },
+      });
+      const completedId = yield* saveRun(1_000, 200, {
+        kind: "finished",
+        finishedAt: 300,
+        outcome: { kind: "completed", finalAssistantText: "Private assistant output" },
+      });
+      yield* TestClock.setTime(2_000);
+      const snapshot = yield* schedules.overview();
+      const entry = snapshot.entries[0];
+      assert.deepStrictEqual(entry?.lastRun, {
+        id: completedId,
+        definitionRevision: created.definition.revision,
+        scheduledFor: 1_000,
+        claimedAt: 200,
+        state: { kind: "finished", finishedAt: 300, outcome: { kind: "completed" } },
+      });
+      assert.notStrictEqual(entry?.lastRun?.definitionRevision, updated.definition.revision);
+      assert.deepStrictEqual(entry?.nextTrigger, { kind: "none", reason: "past-once" });
+      assert.strictEqual(entry?.view.state, "enabled");
+      assert.isFalse(JSON.stringify(snapshot).includes("Private"));
+
+      const recordedId = yield* saveRun(2_000, 200, {
+        kind: "running-script",
+        startedAt: 250,
+        target: { chatId, workspaceId, cwd: AbsolutePath.make("/private/execution-directory") },
+      });
+      const refreshed = yield* schedules.overview();
+      assert.deepStrictEqual(refreshed.entries[0]?.lastRun, {
+        id: recordedId,
+        definitionRevision: created.definition.revision,
+        scheduledFor: 2_000,
+        claimedAt: 200,
+        state: { kind: "running-script", startedAt: 250 },
+      });
+      assert.isFalse(JSON.stringify(refreshed).includes("/private/execution-directory"));
+      yield* schedules.remove(caller, created.id);
+      assert.deepStrictEqual((yield* schedules.overview()).entries, []);
+      assert.isTrue(
+        yield* fileSystem.exists(
+          path.join(schedulesDir, "runs", created.id, recordedId, "run.json"),
+        ),
+      );
+    }).pipe(Effect.provide(platformLayer), Effect.scoped),
+  );
+
+  it.effect(
+    "calculates timezone-aware future triggers and distinguishes impossible cron dates",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-schedule-next-" });
+        const schedules = yield* open(
+          AbsolutePath.make(path.join(root, "schedules")),
+          resolveTarget,
+        );
+        const now = Date.parse("2026-09-16T00:00:00Z");
+        yield* TestClock.setTime(now);
+        const sourceDirectory = yield* prepareSource({
+          "prompt.md": "Run at the configured time.",
+        });
+        const cron = yield* schedules.create(caller, {
+          name: "Taipei morning",
+          enabled: true,
+          target: { kind: "chat", chatId },
+          trigger: { kind: "cron", expression: "0 9 * * *", timeZone: "Asia/Taipei" },
+          sourceDirectory,
+        });
+        const impossible = yield* schedules.create(caller, {
+          name: "Impossible date",
+          enabled: true,
+          target: { kind: "chat", chatId },
+          trigger: { kind: "cron", expression: "0 0 30 2 *", timeZone: "UTC" },
+          sourceDirectory,
+        });
+        const next = new Map(
+          (yield* schedules.overview()).entries.map((entry) => [entry.view.id, entry.nextTrigger]),
+        );
+        assert.deepStrictEqual(next.get(cron.id), {
+          kind: "scheduled",
+          at: Date.parse("2026-09-16T01:00:00Z"),
+        });
+        assert.deepStrictEqual(next.get(impossible.id), { kind: "unavailable" });
+        yield* schedules.update(caller, cron.id, { enabled: false });
+        const disabled = (yield* schedules.overview()).entries.find(
+          (entry) => entry.view.id === cron.id,
+        );
+        assert.deepStrictEqual(disabled?.nextTrigger, { kind: "none", reason: "disabled" });
+      }).pipe(Effect.provide(platformLayer), Effect.scoped),
+  );
+
   it.effect("keeps management in the owning workspace after selecting another destination", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;

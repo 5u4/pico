@@ -79,6 +79,7 @@ const unusedSchedule = () => Effect.die("Unexpected schedule operation");
 const schedules = Schedule.Schedules.of({
   create: unusedSchedule,
   list: unusedSchedule,
+  overview: unusedSchedule,
   get: unusedSchedule,
   update: unusedSchedule,
   remove: unusedSchedule,

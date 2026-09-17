@@ -2,7 +2,7 @@
 
 Pico adapts [Beautiful UI](https://www.beautifului.dev/)'s quiet, transcript-first character to a developer chat workspace. Its light and dark themes use cool neutrals and one restrained cobalt interaction accent. Assistant prose stays in the reading flow. User messages, tool activity, and thinking use only enough enclosure to clarify their role. The composer is the sole elevated surface.
 
-The accepted screen has a workspace sidebar on the left and one chat column. Desktop collapse leaves a rail for expanding navigation, starting a chat, managing schedules, and adding a workspace. Mobile keeps the full tree in a native dialog, independent of desktop collapse.
+The accepted screen has a workspace sidebar on the left and one main-content column. Desktop collapse leaves a rail for expanding navigation, starting a chat, viewing schedules, and adding a workspace. Mobile keeps the full tree in a native dialog, independent of desktop collapse.
 
 The sidebar adapts [Beautiful UI's Sidebar Nav](https://www.beautifului.dev/r/sidebar-nav.json) without replacing the workspace tree with a switcher. Workspace disclosure controls lazy chat loading, not conversation selection. Collapse preserves that state and is not persisted. Hover decoration stays separate from selection and keyboard focus, with no continuous animation work.
 
@@ -15,13 +15,13 @@ When sources disagree, follow them in this order:
 
 The application uses one registry-owned connection. `App` owns registry lifetime. `WorkspaceChat` owns workspace and chat selection, drafts, and commands. `transcript-presentation.ts` maps transcript records into display values. Presentation components remain controlled and domain-free.
 
-Schedules open in one controlled native dialog above the retained chat. An explicit workspace selector keeps management available when no chat tabs are open. Mobile closes its navigation dialog before opening Schedules and restores focus to the persistent navigation button.
+Schedules is a read-only main-content page above the retained chat state. It shows all current definitions across every platform, including invalid definitions with unknown owners. It does not depend on a selected web workspace. Chat tabs, drafts, disclosure choices, and scroll positions remain mounted. Hidden chat content is inert, and its measurement, focus, and native-overlay behavior is suspended.
 
-The list distinguishes valid definitions from invalid files. Enabled and paused describe scheduling state, not execution success. The editor changes metadata only. One-time input uses UTC with a named local-time preview; repeating input keeps the stored five-field cron and IANA timezone. Daily and weekly shortcuts only fill the cron field. Existing destinations remain untouched unless explicitly changed.
+Rows keep definition state separate from the last recorded run. Disabled does not mean manually paused or successfully completed. Persisted execution phases do not prove current liveness. A previous definition revision's outcome stays labeled as a previous revision. The daemon calculates the next future calendar trigger using the stored cron timezone, not an execution-start promise.
 
-Creation and instruction edits hand off to reviewable chat drafts because the schedule tools require a real chat identity and prepared source files. A nonempty draft is never overwritten, and nothing is sent automatically. Opening a draft does not create a schedule. Users refresh the list after the agent reports creation or repair.
+Creation and management remain LLM-only through the existing schedule tools. The page has no authoring handoff, metadata editor, or mutation controls. Read-only details show identity, targets, source paths, timeouts, and compact run status. Prompts, successful output, and execution working directories are not part of the overview response.
 
-The existing registry connection serves schedule reads and mutations. Opening, changing workspace, refocusing the browser, explicit refresh, and successful mutations refresh server data without polling. Failed refreshes retain a labeled snapshot. Refresh does not replace an open form; changed definitions are flagged, and dirty navigation requires discard confirmation. Metadata saves are last-write-wins for the changed fields because the service has no revision precondition.
+One global schedule atom uses the existing registry connection. Entry, browser focus or visibility return, and explicit refresh request a snapshot without polling. A timestamp identifies the snapshot, and failed or disconnected reads retain a labeled previous result. Mobile closes its navigation dialog before entering the page. Entry focuses the page heading. Back to chats restores the visible opener or a persistent navigation control without opening the mobile keyboard.
 
 Both themes use the same semantic token vocabulary. `WorkspaceChat` owns theme state and passes it into the controlled `ChatScreen`. A synchronous head bootstrap selects a stored choice or the initial operating-system preference before React and the stylesheet load.
 
