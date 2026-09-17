@@ -216,7 +216,12 @@ export function ChatScreen({
   }, [chatVisible, conversationKey, tabButtons]);
   const welcome = transcript.state === "empty" && todo === null;
   const showSuggestions =
-    welcome && conversationKey !== null && composer.editable && suggestions.length > 0;
+    welcome &&
+    conversationKey !== null &&
+    composer.editable &&
+    composer.mode === "send" &&
+    composer.canSubmit &&
+    suggestions.length > 0;
   const onboarding =
     search.kind === "closed" &&
     navigation.groups.length === 0 &&

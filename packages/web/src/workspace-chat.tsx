@@ -59,6 +59,8 @@ interface DraftEntry {
     | { readonly kind: "sending" }
     | { readonly kind: "error"; readonly message: string };
 }
+const isCreationUnconfirmed = (entry: DraftEntry | undefined) =>
+  entry?.target.kind === "new" && entry.submission.kind === "error";
 interface TabState {
   readonly openKeys: readonly string[];
   readonly entries: ReadonlyMap<string, DraftEntry>;
@@ -1278,6 +1280,7 @@ export function WorkspaceChat({
   const ensureChat = async (entry: DraftEntry): Promise<Chat | undefined> => {
     if (!state) return;
     if (entry.target.kind === "chat") return entry.target.chat;
+    if (isCreationUnconfirmed(entry)) return;
     if (creatingChats.current.has(entry.workspace.id)) return;
     creatingChats.current.add(entry.workspace.id);
     updateEntry(entry.key, (value) => ({ ...value, submission: { kind: "creating" } }));
@@ -1290,7 +1293,7 @@ export function WorkspaceChat({
         ...value,
         submission: {
           kind: "error",
-          message: `${errorMessage(exit.cause)} Your draft is kept. Check the chat list before creating another chat.`,
+          message: `${errorMessage(exit.cause)} Your draft is kept. Check the chat list, then close this tab before starting another chat.`,
         },
       }));
       return;
@@ -1309,7 +1312,13 @@ export function WorkspaceChat({
   const modelEntry = () => {
     if (!state || !ownsVisit() || registry.get(state.connection).kind !== "active") return;
     const entry = findPageEntry(page, navigationRef.current.entries);
-    if (!entry || entry.key !== selected?.key || entry.submission.kind === "creating") return;
+    if (
+      !entry ||
+      entry.key !== selected?.key ||
+      entry.submission.kind === "creating" ||
+      isCreationUnconfirmed(entry)
+    )
+      return;
     if (entry.target.kind === "chat") {
       const id = entry.target.chat.id;
       if (
@@ -1368,7 +1377,8 @@ export function WorkspaceChat({
       !entry ||
       entry.value.text.trim().length === 0 ||
       entry.submission.kind === "creating" ||
-      entry.submission.kind === "sending"
+      entry.submission.kind === "sending" ||
+      isCreationUnconfirmed(entry)
     )
       return;
     const key = entry.key;
@@ -1411,7 +1421,8 @@ export function WorkspaceChat({
       !entry ||
       entry.key !== selected?.key ||
       entry.submission.kind === "creating" ||
-      entry.submission.kind === "sending"
+      entry.submission.kind === "sending" ||
+      isCreationUnconfirmed(entry)
     )
       return;
     if (entry.target.kind === "new") {
@@ -1576,6 +1587,7 @@ export function WorkspaceChat({
     conversationEntry?.submission.kind === "creating" ||
     (conversationEntry?.target.kind === "new" &&
       creatingChats.current.has(conversationEntry.workspace.id));
+  const creationUnconfirmed = isCreationUnconfirmed(conversationEntry);
   const sending = conversationEntry?.submission.kind === "sending" || conversation?.sending.waiting;
   const running = conversation?.live.run.kind === "running";
   const switching = conversation?.switching.waiting === true;
@@ -1583,31 +1595,33 @@ export function WorkspaceChat({
     ? groups.length > 0
       ? "Choose a chat or start a new one"
       : "Add a workspace to start a chat"
-    : connection.kind === "opening"
-      ? "Opening connection. Draft kept."
-      : !available
-        ? "Connection unavailable. Draft kept."
-        : creating
-          ? conversationEntry.submission.kind === "creating"
-            ? "Creating chat. Draft kept."
-            : "Another chat is being created. Draft kept."
-          : switching
-            ? "Switching model. Draft kept."
-            : conversation?.stopping.waiting
-              ? "Stop requested..."
-              : running
-                ? "Pico is working"
-                : sending
-                  ? "Waiting for response completion..."
-                  : conversation?.live.run.kind === "unknown"
-                    ? "Run status unknown. You can send or request Stop."
-                    : conversation?.live.run.kind === "finished" &&
-                        conversation.live.run.outcome === "aborted"
-                      ? "Response stopped"
+    : creationUnconfirmed
+      ? "Chat creation was not confirmed. Check the chat list, then close this tab before starting another chat."
+      : connection.kind === "opening"
+        ? "Opening connection. Draft kept."
+        : !available
+          ? "Connection unavailable. Draft kept."
+          : creating
+            ? conversationEntry.submission.kind === "creating"
+              ? "Creating chat. Draft kept."
+              : "Another chat is being created. Draft kept."
+            : switching
+              ? "Switching model. Draft kept."
+              : conversation?.stopping.waiting
+                ? "Stop requested..."
+                : running
+                  ? "Pico is working"
+                  : sending
+                    ? "Waiting for response completion..."
+                    : conversation?.live.run.kind === "unknown"
+                      ? "Run status unknown. You can send or request Stop."
                       : conversation?.live.run.kind === "finished" &&
-                          conversation.live.run.outcome === "failed"
-                        ? "Response failed. Review the error before sending again."
-                        : "Enter to send · Shift+Enter for a new line";
+                          conversation.live.run.outcome === "aborted"
+                        ? "Response stopped"
+                        : conversation?.live.run.kind === "finished" &&
+                            conversation.live.run.outcome === "failed"
+                          ? "Response failed. Review the error before sending again."
+                          : "Enter to send · Shift+Enter for a new line";
   const composer: ComposerPresentation =
     running || sending
       ? {
@@ -1631,6 +1645,7 @@ export function WorkspaceChat({
             available &&
             !!selected &&
             !creating &&
+            !creationUnconfirmed &&
             !switching &&
             selected.value.text.trim().length > 0,
           statusLabel,
@@ -1647,7 +1662,11 @@ export function WorkspaceChat({
     const label = current ? modelLabel(current) : "Choose model";
     const busy = creating || switching;
     const retry =
-      available && !busy && !conversation?.models.waiting && !conversation?.currentModel.waiting
+      available &&
+      !busy &&
+      !creationUnconfirmed &&
+      !conversation?.models.waiting &&
+      !conversation?.currentModel.waiting
         ? "enabled"
         : "disabled";
     const switched = conversation
@@ -1679,6 +1698,13 @@ export function WorkspaceChat({
                 : { kind: "none" };
     if (!conversationEntry) {
       return { label, control: { kind: "disabled", reason: "Choose a chat first." }, feedback };
+    }
+    if (creationUnconfirmed) {
+      return {
+        label,
+        control: { kind: "disabled", reason: "Chat creation was not confirmed." },
+        feedback,
+      };
     }
     if (!available || busy) {
       const reason = !available

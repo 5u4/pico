@@ -458,8 +458,9 @@ export const make = ({ url }: { readonly url: string }) => {
             return { ...state, live: cut?.generation === generation ? live : unconfirmChat(live) };
           });
         },
-        run: ({ generation }) =>
+        run: (flight) =>
           Effect.gen(function* () {
+            const { generation } = flight;
             const manager = yield* get.resultOnce(owner);
             if (!manager.isCurrent(generation)) return;
             if (buffered?.generation !== generation)
@@ -492,16 +493,21 @@ export const make = ({ url }: { readonly url: string }) => {
             }
             Atom.batch(() =>
               get.registry.update(cell, (state) => {
-                let live = rehydrateChat({ ...baseline, notices: state.live.notices }, exit.value);
+                const currentModel = Option.match(AsyncResult.value(state.transcriptResult), {
+                  onNone: () => null,
+                  onSome: (snapshot) => snapshot.currentModel,
+                });
+                const snapshot = flight.dirty ? { ...exit.value, currentModel } : exit.value;
+                let live = rehydrateChat({ ...baseline, notices: state.live.notices }, snapshot);
                 for (const envelope of pending.events)
                   if (
                     outsideSnapshot(envelope) ||
-                    envelope.publication > exit.value.runtime.publication
+                    envelope.publication > snapshot.runtime.publication
                   )
                     live = reduce(live, envelope);
-                cut = { generation, publication: exit.value.runtime.publication };
+                cut = { generation, publication: snapshot.runtime.publication };
                 buffered = undefined;
-                return { live, transcriptResult: AsyncResult.success(exit.value) };
+                return { live, transcriptResult: AsyncResult.success(snapshot) };
               }),
             );
           }),
@@ -559,14 +565,17 @@ export const make = ({ url }: { readonly url: string }) => {
         const manager = yield* get.result(owner);
         return yield* manager.write(
           (client) => client.SwitchModel({ chatId, model }),
-          (result) =>
+          (result) => {
+            const pending = get.registry.get(transcriptRecord(chatId)).flight;
+            if (pending !== undefined) pending.dirty = true;
             get.registry.update(chatCell(chatId), (current) => ({
               ...current,
               transcriptResult: AsyncResult.map(current.transcriptResult, (snapshot) => ({
                 ...snapshot,
                 currentModel: result.model,
               })),
-            })),
+            }));
+          },
           () => get.registry.refresh(transcriptRead(chatId)),
         );
       }),

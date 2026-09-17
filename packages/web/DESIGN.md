@@ -19,7 +19,7 @@ New tabs have independent UUIDs in the workspace route's `tab` search parameter.
 
 New tab labels use the draft's first line, trimmed, or `New chat` when that line is blank. Long labels truncate visually and expose the full first line in the tab tooltip. The label does not determine whether a draft is empty: a blank first line can still precede retained text.
 
-While a chat is being created, other New tabs in that workspace remain editable but cannot send or select a suggestion until creation completes. Their status identifies the shared wait instead of implying that a message was submitted.
+While a chat is being created, other New tabs in that workspace remain editable but cannot send or select a suggestion until creation completes. Their status identifies the shared wait instead of implying that a message was submitted. If creation returns without confirmation, the draft remains editable and copyable, but every action that could create the chat stays disabled. The user must check the chat list and close that tab before starting another chat.
 
 The last-workspace preference is written only when the selected workspace changes. Typing and switching tabs within that workspace do not write it. If browser storage is blocked, the in-memory preference still changes without retrying on each keystroke.
 
@@ -69,4 +69,4 @@ The native model select at the lower left changes only the current chat through 
 
 Cold reads and session opening respect the latest intentional model change. A trailing temporary retry fallback does not become durable; Pico restores the latest non-fallback role selection.
 
-The picker stays available during an active response, including tool execution. The native model switch takes effect at the next provider call, which may occur in the same run. Pico does not abort or restart the run to switch models. Provider-specific connection resets and recovery remain OMP's responsibility. Another switch blocks selection until it finishes. A successful switch supplies the displayed model even if no history snapshot has loaded. An unconfirmed journal save shows the active selection with a warning instead of reporting the switch as failed.
+The picker stays available during an active response, including tool execution. The native model switch takes effect at the next provider call, which may occur in the same run. Pico does not abort or restart the run to switch models. Provider-specific connection resets and recovery remain OMP's responsibility. Another switch blocks selection until it finishes. A successful switch supplies the displayed model even if no history snapshot has loaded. If that switch dirties an in-flight snapshot, the snapshot still updates history and runtime state but preserves the cached model until the follow-up read returns. A later clean snapshot can supersede it. An unconfirmed journal save shows the active selection with a warning instead of reporting the switch as failed.

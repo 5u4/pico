@@ -606,6 +606,78 @@ describe("frontend state over WebSocket", () => {
     }),
   );
 
+  it.live("retains a confirmed model across a stale read and failed refresh", () =>
+    Effect.gen(function* () {
+      const previous = { provider: "fixture", id: "previous", name: "Previous" };
+      const selected = { provider: "fixture", id: "selected", name: "Selected" };
+      const requests =
+        yield* Queue.unbounded<Deferred.Deferred<TranscriptSnapshot, ApplicationError>>();
+      const switchStarted = yield* Deferred.make<void>();
+      const switchReply = yield* Deferred.make<void>();
+      const server = yield* fixture({
+        transcript: () =>
+          Effect.gen(function* () {
+            const reply = yield* Deferred.make<TranscriptSnapshot, ApplicationError>();
+            yield* Queue.offer(requests, reply);
+            return yield* Deferred.await(reply);
+          }),
+        sendMessage: () => Effect.succeed({ kind: "handled" }),
+        abort: () => Effect.void,
+        switchModel: () =>
+          Deferred.succeed(switchStarted, undefined).pipe(
+            Effect.andThen(Deferred.await(switchReply)),
+            Effect.as({ kind: "persistence-unconfirmed" as const, model: selected }),
+          ),
+      });
+      yield* Effect.gen(function* () {
+        const state = make({ url: yield* endpoint });
+        const registry = yield* registryInScope;
+        const current = state.currentModel(firstChat);
+        const switching = state.switchModel(firstChat);
+        registry.mount(current);
+        yield* Deferred.succeed(yield* Queue.take(requests), {
+          ...snapshot(),
+          currentModel: previous,
+        });
+        yield* waitFor(
+          registry,
+          current,
+          (result) => AsyncResult.isSuccess(result) && !result.waiting,
+        );
+
+        registry.set(switching, selected);
+        yield* Deferred.await(switchStarted);
+        registry.refresh(current);
+        const stale = yield* Queue.take(requests);
+        yield* Deferred.succeed(switchReply, undefined);
+        yield* waitFor(
+          registry,
+          switching,
+          (result) => AsyncResult.isSuccess(result) && !result.waiting,
+        );
+        yield* Deferred.succeed(stale, { ...snapshot(), currentModel: previous });
+        const followup = yield* Queue.take(requests);
+        assert.deepStrictEqual(
+          Option.getOrThrow(AsyncResult.value(registry.get(current))),
+          selected,
+        );
+        yield* Deferred.fail(
+          followup,
+          new ApplicationError({ reason: "operation", message: "Read failed" }),
+        );
+        yield* waitFor(
+          registry,
+          current,
+          (result) => AsyncResult.isFailure(result) && !result.waiting,
+        );
+        assert.deepStrictEqual(
+          Option.getOrThrow(AsyncResult.value(registry.get(current))),
+          selected,
+        );
+      }).pipe(Effect.scoped, Effect.provide(server.layer));
+    }),
+  );
+
   it.live(
     "activates the connection after an initial list rejection and allows a successful retry",
     () =>

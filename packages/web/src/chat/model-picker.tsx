@@ -93,7 +93,10 @@ export function ModelPicker({ presentation, onOpen, onSelect, onRetry }: ModelPi
             <button
               className="min-h-8 rounded-control px-1 underline underline-offset-2 disabled:opacity-50"
               disabled={feedback.retry === "disabled"}
-              onClick={onRetry}
+              onClick={() => {
+                focusWhenReady.current = true;
+                onRetry();
+              }}
               type="button"
             >
               Retry model selection
