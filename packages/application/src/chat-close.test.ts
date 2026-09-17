@@ -3,7 +3,11 @@ import * as BunFileSystem from "@effect/platform-bun/BunFileSystem";
 import * as BunPath from "@effect/platform-bun/BunPath";
 import { assert, describe, it } from "@effect/vitest";
 import * as AgentMessage from "@pico/contract/agent-message";
-import { AgentRuntime, type TranscriptSnapshot } from "@pico/contract/agent-runtime";
+import {
+  AgentRuntime,
+  type ShakeResult,
+  type TranscriptSnapshot,
+} from "@pico/contract/agent-runtime";
 import { AgentSessionStore } from "@pico/contract/agent-session-store";
 import { Application } from "@pico/contract/application";
 import * as Chat from "@pico/contract/chat-model";
@@ -293,7 +297,7 @@ describe("Chat close", () => {
   );
 
   it.effect(
-    "admits normal input during a side question and cancels the side before chat disposal",
+    "admits input and more Shake work during a main run and waits for Shake before closing",
     () =>
       Effect.gen(function* () {
         const fileSystem = yield* FileSystem.FileSystem;
@@ -306,6 +310,10 @@ describe("Chat close", () => {
         const mainFinished = yield* Deferred.make<void>();
         const cleaning = yield* Deferred.make<void>();
         const releaseCleanup = yield* Deferred.make<void>();
+        const shakeStarted = yield* Deferred.make<void>();
+        const anotherShakeStarted = yield* Deferred.make<void>();
+        const releaseShake = yield* Deferred.make<void>();
+        const releaseAnotherShake = yield* Deferred.make<void>();
         const sent: string[] = [];
         const order: string[] = [];
         const runtime = Layer.succeed(
@@ -344,7 +352,27 @@ describe("Chat close", () => {
               }),
             abort: () => Effect.die("unexpected main abort"),
             contextUsage: () => Effect.die("unexpected context read"),
-            shake: () => Effect.die("unexpected shake"),
+            shake: (_id, mode) =>
+              Effect.gen(function* () {
+                switch (mode) {
+                  case "images":
+                    yield* Deferred.succeed(shakeStarted, undefined);
+                    yield* Deferred.await(releaseShake);
+                    return { mode, imagesDropped: 1, tokensFreed: 0 } satisfies ShakeResult;
+                  case "thinking":
+                    yield* Deferred.succeed(anotherShakeStarted, undefined);
+                    yield* Deferred.await(releaseAnotherShake);
+                    return { mode, thinkingBlocksDropped: 1, tokensFreed: 0 } satisfies ShakeResult;
+                  case "elide":
+                    return yield* Effect.die("unexpected elide");
+                }
+              }).pipe(
+                Effect.ensuring(
+                  Effect.sync(() => {
+                    order.push(`shake-${mode}-settled`);
+                  }),
+                ),
+              ),
           }),
         );
         const git: GitWorktree = {
@@ -380,25 +408,55 @@ describe("Chat close", () => {
             .askBtw(chat.id, "side")
             .pipe(Effect.exit, Effect.forkChild);
           yield* Deferred.await(started);
+          const shaking = yield* application.shake(chat.id, "images").pipe(Effect.forkChild);
+          yield* Deferred.await(shakeStarted);
           yield* application.sendMessage(chat.id, textPrompt("later"));
           assert.deepStrictEqual(sent, ["main", "later"]);
+          const anotherShake = yield* application.shake(chat.id, "thinking").pipe(Effect.forkChild);
+          yield* Deferred.await(anotherShakeStarted);
           yield* Deferred.succeed(mainFinished, undefined);
           const closing = yield* application
             .closeChat(chat.id, { allowDirtyWorktree: false })
             .pipe(Effect.forkChild);
-          yield* Deferred.await(cleaning);
+          yield* Effect.yieldNow;
+          const chats = yield* ChatRepository;
+          assert.isNull(Option.getOrThrow(yield* chats.findById(chat.id)).archivedAt);
           assert.deepStrictEqual(order, []);
+          yield* Deferred.succeed(releaseShake, undefined);
+          yield* Fiber.join(shaking);
+          assert.isNull(Option.getOrThrow(yield* chats.findById(chat.id)).archivedAt);
+          assert.isFalse(yield* Deferred.isDone(cleaning));
+          yield* Deferred.succeed(releaseAnotherShake, undefined);
+          yield* Fiber.join(anotherShake);
+          yield* Deferred.await(cleaning);
+          assert.deepStrictEqual(order, ["shake-images-settled", "shake-thinking-settled"]);
           yield* Deferred.succeed(releaseCleanup, undefined);
           assert.deepStrictEqual(yield* Fiber.join(closing), { kind: "closed" });
           const result = yield* Fiber.join(aside);
           assert.isTrue(Exit.isFailure(result) && Cause.hasInterruptsOnly(result.cause));
-          assert.deepStrictEqual(order, ["side-settled", "runtime-close", "worktree-remove"]);
+          assert.deepStrictEqual(order, [
+            "shake-images-settled",
+            "shake-thinking-settled",
+            "side-settled",
+            "runtime-close",
+            "worktree-remove",
+          ]);
           assert.instanceOf(
             yield* application.askBtw(chat.id, "closed").pipe(Effect.flip),
             ChatClosed,
           );
         }).pipe(
-          Effect.ensuring(Deferred.succeed(releaseCleanup, undefined)),
+          Effect.ensuring(
+            Effect.all(
+              [
+                Deferred.succeed(mainFinished, undefined),
+                Deferred.succeed(releaseShake, undefined),
+                Deferred.succeed(releaseAnotherShake, undefined),
+                Deferred.succeed(releaseCleanup, undefined),
+              ],
+              { discard: true },
+            ),
+          ),
           Effect.provide(ApplicationLayer.layer(git).pipe(Layer.provide(unusedSchedulesLayer))),
           Effect.provide(persistence),
           Effect.provide(runtime),

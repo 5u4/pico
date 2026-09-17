@@ -1,6 +1,6 @@
 import { useAtomValue } from "@effect/atom-react/Hooks";
 import { RegistryContext } from "@effect/atom-react/RegistryContext";
-import type { TranscriptSnapshot } from "@pico/contract/agent-runtime";
+import type { ShakeMode, ShakeResult, TranscriptSnapshot } from "@pico/contract/agent-runtime";
 import { CreateWorkspace } from "@pico/contract/application";
 import type { Chat, ChatId } from "@pico/contract/chat-model";
 import { GitError, WorkspaceBindingInvalid } from "@pico/contract/errors";
@@ -26,6 +26,7 @@ import type {
   NavigationPresentation,
   PromptSuggestion,
   ScheduleListPresentation,
+  ShakeFeedback,
   SidebarSearchPresentation,
   ToolCallPresentation,
   TranscriptPresentation,
@@ -306,6 +307,39 @@ function runCommand<A, E, Input>(
   );
 }
 
+function presentShake(result: ShakeResult): string {
+  switch (result.mode) {
+    case "elide": {
+      const { toolResultsDropped, blocksDropped } = result;
+      if (toolResultsDropped === 0 && blocksDropped === 0) return "Nothing to shake.";
+      const removed = [];
+      if (toolResultsDropped > 0) {
+        removed.push(
+          `${tokenFormat.format(toolResultsDropped)} tool result${toolResultsDropped === 1 ? "" : "s"}`,
+        );
+      }
+      if (blocksDropped > 0) {
+        removed.push(
+          `${tokenFormat.format(blocksDropped)} large block${blocksDropped === 1 ? "" : "s"}`,
+        );
+      }
+      return `Shake removed ${removed.join(" and ")}.`;
+    }
+    case "images":
+      return result.imagesDropped === 0
+        ? "Nothing to shake."
+        : `Shake removed ${tokenFormat.format(result.imagesDropped)} image block${result.imagesDropped === 1 ? "" : "s"}.`;
+    case "thinking":
+      return result.thinkingBlocksDropped === 0
+        ? "Nothing to shake."
+        : `Shake removed ${tokenFormat.format(result.thinkingBlocksDropped)} thinking block${result.thinkingBlocksDropped === 1 ? "" : "s"}.`;
+    default: {
+      const exhaustive: never = result;
+      return exhaustive;
+    }
+  }
+}
+
 export function WorkspaceChat({
   state,
   page,
@@ -378,6 +412,11 @@ export function WorkspaceChat({
   } | null>(null);
   const [recoveryOpen, setRecoveryOpen] = useState(false);
   const [contextDetailsKey, setContextDetailsKey] = useState<string | null>();
+  const [shakeFeedback, setShakeFeedback] = useState<{
+    readonly visit: number;
+    readonly key: string;
+    readonly value: ShakeFeedback;
+  } | null>(null);
   const routeWorkspaceId =
     page.kind === "draft" || page.kind === "chat" || page.kind === "settings"
       ? page.workspaceId
@@ -557,6 +596,7 @@ export function WorkspaceChat({
   useEffect(() => {
     setContextDetailsKey(undefined);
     setToolSelection(null);
+    setShakeFeedback(null);
   }, [visit, selected?.key]);
 
   useEffect(() => {
@@ -1347,6 +1387,22 @@ export function WorkspaceChat({
     await runCommand(registry, state.abort(id), undefined);
     stoppingChats.current.delete(id);
   };
+  const shake = async (mode: ShakeMode) => {
+    if (!state || !ownsVisit() || registry.get(state.connection).kind !== "active") return;
+    const entry = findPageEntry(page, navigationRef.current.entries);
+    if (entry?.target.kind !== "chat") return;
+    setShakeFeedback(null);
+    const exit = await Effect.runPromiseExit(state.shake(registry, entry.target.chat.id, mode));
+    if (!ownsVisit() || findPageEntry(page, navigationRef.current.entries)?.key !== entry.key)
+      return;
+    setShakeFeedback({
+      visit,
+      key: entry.key,
+      value: Exit.isSuccess(exit)
+        ? { kind: "status", message: presentShake(exit.value) }
+        : { kind: "error", message: `Shake was not confirmed. ${errorMessage(exit.cause)}` },
+    });
+  };
 
   const draftValues = [...navigation.entries.values()].filter(
     (entry) => entry.value.text.length > 0,
@@ -1686,6 +1742,13 @@ export function WorkspaceChat({
           onCloseChatDismiss={dismissCloseChat}
           onCloseChatRetry={retryCloseChat}
           composer={composer}
+          shakeEnabled={available && page.kind === "chat" && selected?.target.kind === "chat"}
+          onShake={shake}
+          shakeFeedback={
+            shakeFeedback?.visit === visit && shakeFeedback.key === selected?.key
+              ? shakeFeedback.value
+              : { kind: "idle" }
+          }
           contextUsage={presentContextUsage(conversation?.contextUsage, connection)}
           contextDetailsOpen={
             contextDetailsKey !== undefined && contextDetailsKey === (selected?.key ?? null)
