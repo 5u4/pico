@@ -946,7 +946,9 @@ export function WorkspaceChat({
         kind: "settings",
         workspaceId: workspace.id,
         tabKey:
-          (currentPage.kind === "draft" || currentPage.kind === "settings") &&
+          (currentPage.kind === "draft" ||
+            currentPage.kind === "chat" ||
+            currentPage.kind === "settings") &&
           currentPage.workspaceId === workspace.id
             ? (findPageEntry(currentPage, navigationRef.current.entries)?.key ?? null)
             : null,
