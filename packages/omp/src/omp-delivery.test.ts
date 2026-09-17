@@ -139,6 +139,7 @@ const withSession = async (
   turns: ReturnType<typeof providerTurn>[],
   run: (session: AgentSession, directory: string) => Promise<void>,
   extensionFactory?: ExtensionFactory,
+  skillsSettings = { enableSkillCommands: true },
 ) => {
   const directory = await mkdtemp(join(root, "session-"));
   const auth = new native.AuthStorage(
@@ -236,7 +237,7 @@ const withSession = async (
         source: "test",
       },
     ],
-    skillsSettings: { enableSkillCommands: true },
+    skillsSettings,
     memoryAgentDir: join(directory, "agent"),
     disableExtensionDiscovery: true,
   });
@@ -668,6 +669,83 @@ describe("native OMP prompt delivery", () => {
       },
     );
   }, 30_000);
+
+  it("expands a known skill through the sender before reaching the provider", async () => {
+    const turn = providerTurn();
+    await withSession([turn], async (session) => {
+      const send = await makeSender(session);
+      const request = "Review the queued delivery change.";
+      const delivery = await send({ text: `/skill:delivery ${request}`, attachments: [] });
+      if (delivery.kind !== "started")
+        throw new Error("Expected the skill to start a provider turn");
+      try {
+        const context = await turn.entered.promise;
+        const text = context.messages
+          .filter((message) => message.role === "user")
+          .flatMap((message) =>
+            typeof message.content === "string"
+              ? message.content
+              : message.content.flatMap((part) => (part.type === "text" ? part.text : [])),
+          )
+          .join("\n");
+        expect(text).toContain("Inspect the requested change.");
+        expect(text).toContain(request);
+      } finally {
+        turn.release.resolve();
+        await Effect.runPromise(delivery.completed);
+      }
+    });
+  }, 30_000);
+
+  it.each([
+    {
+      name: "ordinary text",
+      text: "Review the queued delivery change.",
+      enableSkillCommands: true,
+    },
+    {
+      name: "an unknown skill",
+      text: "/skill:missing Review the queued delivery change.",
+      enableSkillCommands: true,
+    },
+    {
+      name: "a disabled known skill",
+      text: "/skill:delivery Review the queued delivery change.",
+      enableSkillCommands: false,
+    },
+  ])(
+    "delivers $name literally through the sender",
+    async ({ text: input, enableSkillCommands }) => {
+      const turn = providerTurn();
+      await withSession(
+        [turn],
+        async (session) => {
+          const send = await makeSender(session);
+          const delivery = await send({ text: input, attachments: [] });
+          if (delivery.kind !== "started")
+            throw new Error("Expected text to start a provider turn");
+          try {
+            const context = await turn.entered.promise;
+            const text = context.messages
+              .filter((message) => message.role === "user")
+              .flatMap((message) =>
+                typeof message.content === "string"
+                  ? message.content
+                  : message.content.flatMap((part) => (part.type === "text" ? part.text : [])),
+              )
+              .join("\n");
+            expect(text).toBe(input);
+          } finally {
+            turn.release.resolve();
+            await Effect.runPromise(delivery.completed);
+          }
+        },
+        undefined,
+        { enableSkillCommands },
+      );
+    },
+    30_000,
+  );
 
   it("rejects sender admission when an idle native image prompt is discarded before dispatch", async () => {
     const entered = Promise.withResolvers<void>();
