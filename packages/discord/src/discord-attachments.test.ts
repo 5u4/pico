@@ -11,6 +11,7 @@ import * as TestClock from "effect/testing/TestClock";
 import * as HttpClient from "effect/unstable/http/HttpClient";
 import * as HttpClientResponse from "effect/unstable/http/HttpClientResponse";
 import {
+  acknowledgeInteraction,
   chatId,
   config,
   defaultCwd,
@@ -144,7 +145,7 @@ describe("discord attachments", () => {
           closeChat: () => Effect.die("unexpected chat close"),
         });
 
-        yield* install(bot, config, () => Effect.void, httpClient).pipe(
+        yield* install(bot, config, acknowledgeInteraction, () => Effect.void, httpClient).pipe(
           Effect.provideService(Application, application),
           Effect.provide(BunCrypto.layer),
         );
@@ -318,7 +319,7 @@ describe("discord attachments", () => {
           closeChat: () => Effect.die("unexpected chat close"),
         });
 
-        yield* install(bot, config, () => Effect.void, httpClient).pipe(
+        yield* install(bot, config, acknowledgeInteraction, () => Effect.void, httpClient).pipe(
           Effect.provideService(Application, application),
           Effect.provide(BunCrypto.layer),
           Effect.provide(Logger.layer([logger])),

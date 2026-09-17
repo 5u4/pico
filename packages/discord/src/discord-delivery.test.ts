@@ -21,6 +21,7 @@ import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 import * as EventRouterLayer from "../../event-router/src/layer.ts";
+import { acknowledgeInteraction } from "./discord-input.fixture.ts";
 import { type DiscordInputBot, install } from "./discord-input.ts";
 import * as DiscordOutput from "./discord-output.ts";
 import type { DiscordMessage } from "./discord-prompt.ts";
@@ -106,13 +107,17 @@ const installInput = Effect.fn("test.installDeliveryInput")(function* (options: 
     shake: () => Effect.die("unexpected chat shake"),
     closeChat: () => Effect.die("unexpected chat close"),
   });
-  yield* install(bot, {
-    token: Redacted.make("test"),
-    allowedGuildIds: ["1"],
-    defaultCwd: cwd,
-    showToolCalls: true,
-    showThinking: false,
-  }).pipe(Effect.provideService(Application, application), Effect.provide(BunCrypto.layer));
+  yield* install(
+    bot,
+    {
+      token: Redacted.make("test"),
+      allowedGuildIds: ["1"],
+      defaultCwd: cwd,
+      showToolCalls: true,
+      showThinking: false,
+    },
+    acknowledgeInteraction,
+  ).pipe(Effect.provideService(Application, application), Effect.provide(BunCrypto.layer));
   const handle = bot.events.messageCreate;
   if (handle === undefined) return yield* Effect.die("Discord input handler was not installed");
   return handle;

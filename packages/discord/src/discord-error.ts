@@ -4,6 +4,51 @@ import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
+const AcknowledgementAttemptNumber = Schema.Literals([1, 2]);
+
+const DiscordAcknowledgementAttemptEvidenceSchema = Schema.Union([
+  Schema.Struct({
+    attempt: AcknowledgementAttemptNumber,
+    outcome: Schema.Literal("not-started"),
+  }),
+  Schema.Struct({
+    attempt: AcknowledgementAttemptNumber,
+    outcome: Schema.Literal("pending"),
+    startedAfterAcknowledgementMs: Schema.Number,
+  }),
+  Schema.Struct({
+    attempt: AcknowledgementAttemptNumber,
+    outcome: Schema.Literal("fulfilled"),
+    startedAfterAcknowledgementMs: Schema.Number,
+    elapsedMs: Schema.Number,
+  }),
+  Schema.Struct({
+    attempt: AcknowledgementAttemptNumber,
+    outcome: Schema.Literal("rejected"),
+    startedAfterAcknowledgementMs: Schema.Number,
+    elapsedMs: Schema.Number,
+    status: Schema.optional(Schema.Number),
+    discordCode: Schema.optional(Schema.Number),
+  }),
+]);
+export type DiscordAcknowledgementAttemptEvidence =
+  typeof DiscordAcknowledgementAttemptEvidenceSchema.Type;
+
+const DiscordAcknowledgementEvidenceSchema = Schema.Struct({
+  mode: Schema.Literals(["defer", "defer-edit"]),
+  decision: Schema.Literals(["fulfilled", "qualified-40060", "rejected"]),
+  winningAttempt: Schema.optional(AcknowledgementAttemptNumber),
+  deliveryAgeAtAcknowledgementMs: Schema.Number,
+  firstStartedAfterAcknowledgementMs: Schema.optional(Schema.Number),
+  hedgeDueAfterFirstStartMs: Schema.optional(Schema.Number),
+  decisionAfterAcknowledgementMs: Schema.Number,
+  attempts: Schema.Tuple([
+    DiscordAcknowledgementAttemptEvidenceSchema,
+    DiscordAcknowledgementAttemptEvidenceSchema,
+  ]),
+});
+export type DiscordAcknowledgementEvidence = typeof DiscordAcknowledgementEvidenceSchema.Type;
+
 export class DiscordError extends Schema.TaggedError<DiscordError>()("DiscordError", {
   message: Schema.String,
   operation: Schema.String,
@@ -15,7 +60,25 @@ export class DiscordError extends Schema.TaggedError<DiscordError>()("DiscordErr
   chunkIndex: Schema.optional(Schema.Number),
   chunkCount: Schema.optional(Schema.Number),
   editDiscordCode: Schema.optional(Schema.Number),
+  acknowledgement: Schema.optional(DiscordAcknowledgementEvidenceSchema),
 }) {}
+
+export const acknowledgementLogAnnotations = (evidence: DiscordAcknowledgementEvidence) => ({
+  acknowledgementMode: evidence.mode,
+  acknowledgementDecision: evidence.decision,
+  ...(evidence.winningAttempt === undefined
+    ? {}
+    : { acknowledgementWinningAttempt: evidence.winningAttempt }),
+  deliveryAgeAtAcknowledgementMs: evidence.deliveryAgeAtAcknowledgementMs,
+  ...(evidence.firstStartedAfterAcknowledgementMs === undefined
+    ? {}
+    : { firstStartedAfterAcknowledgementMs: evidence.firstStartedAfterAcknowledgementMs }),
+  ...(evidence.hedgeDueAfterFirstStartMs === undefined
+    ? {}
+    : { hedgeDueAfterFirstStartMs: evidence.hedgeDueAfterFirstStartMs }),
+  acknowledgementDecisionAfterMs: evidence.decisionAfterAcknowledgementMs,
+  acknowledgementAttempts: evidence.attempts,
+});
 
 const Rejection = Schema.Struct({
   status: Schema.optional(Schema.Int),
@@ -110,6 +173,9 @@ export const reportFailure = (
               : { editDiscordCode: error.editDiscordCode }),
             ...(error.chunkIndex === undefined ? {} : { chunkIndex: error.chunkIndex }),
             ...(error.chunkCount === undefined ? {} : { chunkCount: error.chunkCount }),
+            ...(error.acknowledgement === undefined
+              ? {}
+              : acknowledgementLogAnnotations(error.acknowledgement)),
           }),
     }),
   );

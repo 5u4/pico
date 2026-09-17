@@ -1,9 +1,13 @@
 import { assert, describe, it } from "@effect/vitest";
 import { ApplicationError } from "@pico/contract/errors";
+import { InteractionTypes } from "discordeno";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import * as Logger from "effect/Logger";
+import * as TestClock from "effect/testing/TestClock";
+import { make } from "./discord-acknowledgement.ts";
 import { discordError, promiseBoundary, reportFailure } from "./discord-error.ts";
 import { sdkLoggerFactory } from "./layer.ts";
 
@@ -37,6 +41,68 @@ describe("Discord error ownership", () => {
       );
       assert.strictEqual(network.status, 999);
       assert.notInclude(JSON.stringify(network), "private-");
+    }),
+  );
+
+  it.effect("reports one failed callback with safe acknowledgement timing", () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(1_420_070_401_750);
+      const response = Promise.withResolvers<void>();
+      const acknowledge = make(() => response.promise);
+      const logs: Array<ReturnType<typeof Logger.formatStructured.log>> = [];
+      const logger = Logger.make((options) => logs.push(Logger.formatStructured.log(options)));
+      const callback = yield* acknowledge(
+        {
+          id: 0n,
+          token: "private-interaction-token",
+          acknowledged: false,
+          type: InteractionTypes.MessageComponent,
+        },
+        { kind: "update-source-message" },
+      ).pipe(
+        Effect.catchCause((cause) => reportFailure("interaction-request", cause)),
+        Effect.provide(Logger.layer([logger])),
+        Effect.forkChild,
+      );
+
+      yield* Effect.yieldNow;
+      yield* TestClock.adjust("125 millis");
+      response.reject(
+        new Error("private-sdk-wrapper", {
+          cause: {
+            status: 404,
+            body: '{"code":10062,"message":"private-response"}',
+            route: "/interactions/private-interaction-token/callback",
+          },
+        }),
+      );
+      yield* Fiber.join(callback);
+
+      assert.strictEqual(logs.length, 1);
+      assert.strictEqual(logs[0]?.level, "ERROR");
+      assert.strictEqual(logs[0]?.annotations.operation, "interaction-request");
+      assert.strictEqual(logs[0]?.annotations.discordOperation, "defer-interaction");
+      assert.strictEqual(logs[0]?.annotations.status, 404);
+      assert.strictEqual(logs[0]?.annotations.discordCode, 10_062);
+      assert.strictEqual(logs[0]?.annotations.acknowledgementMode, "defer-edit");
+      assert.strictEqual(logs[0]?.annotations.acknowledgementDecision, "rejected");
+      assert.isUndefined(logs[0]?.annotations.acknowledgementWinningAttempt);
+      assert.strictEqual(logs[0]?.annotations.deliveryAgeAtAcknowledgementMs, 1_750);
+      assert.strictEqual(logs[0]?.annotations.firstStartedAfterAcknowledgementMs, 0);
+      assert.strictEqual(logs[0]?.annotations.hedgeDueAfterFirstStartMs, 500);
+      assert.strictEqual(logs[0]?.annotations.acknowledgementDecisionAfterMs, 125);
+      assert.deepStrictEqual(logs[0]?.annotations.acknowledgementAttempts, [
+        {
+          attempt: 1,
+          outcome: "rejected",
+          startedAfterAcknowledgementMs: 0,
+          elapsedMs: 125,
+          status: 404,
+          discordCode: 10_062,
+        },
+        { attempt: 2, outcome: "not-started" },
+      ]);
+      assert.notInclude(JSON.stringify(logs), "private-");
     }),
   );
 
