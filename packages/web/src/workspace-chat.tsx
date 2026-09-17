@@ -1290,7 +1290,7 @@ export function WorkspaceChat({
         ...value,
         submission: {
           kind: "error",
-          message: `${errorMessage(exit.cause)} Your draft is kept. Try again.`,
+          message: `${errorMessage(exit.cause)} Your draft is kept. Check the chat list before creating another chat.`,
         },
       }));
       return;

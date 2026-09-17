@@ -1,6 +1,6 @@
 import NodeFileSystem from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import * as BunCrypto from "@effect/platform-bun/BunCrypto";
 import * as BunFileSystem from "@effect/platform-bun/BunFileSystem";
 import * as BunPath from "@effect/platform-bun/BunPath";
@@ -894,6 +894,81 @@ describe("native SessionPool ownership", () => {
       );
     });
   });
+
+  it("preserves a model switch across a native image Shake atomic rewrite", async () => {
+    await withSession([], async (session) => {
+      const { original, file } = await seedShake(session);
+      const staged = Promise.withResolvers<void>();
+      const releaseRewrite = Promise.withResolvers<void>();
+      const writeFile = NodeFileSystem.writeFile;
+      const tempPrefix = join(dirname(file), `.${basename(file)}.`);
+      let intercepted = false;
+      const rewrite = vi
+        .spyOn(NodeFileSystem, "writeFile")
+        .mockImplementation(async (path, content, options) => {
+          if (
+            intercepted ||
+            typeof path !== "string" ||
+            !path.startsWith(tempPrefix) ||
+            !path.endsWith(".tmp")
+          ) {
+            return writeFile(path, content, options);
+          }
+          intercepted = true;
+          await writeFile(path, content, options);
+          staged.resolve();
+          await releaseRewrite.promise;
+        });
+      try {
+        await Effect.runPromise(
+          Effect.scoped(
+            Effect.gen(function* () {
+              const pool = yield* makePool(session);
+              const shaking = yield* pool.shake(chatId, "images").pipe(Effect.forkChild);
+              yield* Effect.promise(() => staged.promise);
+              expect(
+                session.sessionManager
+                  .buildSessionContext()
+                  .messages.find((message) => message.role === "toolResult"),
+              ).toMatchObject({
+                toolCallId: "shake-tool",
+                content: [{ type: "text", text: original }],
+              });
+
+              const chosen = { provider: "openai", id: "gpt-4.1-mini" };
+              expect(yield* pool.switchModel(chatId, chosen)).toMatchObject({
+                kind: "persisted",
+                model: chosen,
+              });
+              releaseRewrite.resolve();
+              expect(yield* Fiber.join(shaking)).toMatchObject({
+                mode: "images",
+                imagesDropped: 1,
+              });
+
+              const entries = yield* Effect.promise(() => native.loadEntriesFromFile(file));
+              const restored = native.buildSessionContext(
+                entries.filter((entry) => entry.type !== "session"),
+              );
+              expect(restored.models.temporary).toBe(`${chosen.provider}/${chosen.id}`);
+              expect(
+                restored.messages.find((message) => message.role === "toolResult"),
+              ).toMatchObject({
+                toolCallId: "shake-tool",
+                content: [{ type: "text", text: original }],
+              });
+            }).pipe(
+              Effect.ensuring(Effect.sync(() => releaseRewrite.resolve())),
+              Effect.provide(platform),
+            ),
+          ),
+        );
+      } finally {
+        releaseRewrite.resolve();
+        rewrite.mockRestore();
+      }
+    });
+  }, 5_000);
 
   it("cancels native shake artifact staging without changing history, then shakes normally", async () => {
     await withSession([], async (session, reopen) => {
