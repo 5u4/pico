@@ -68,6 +68,7 @@ export interface ChatScreenProps
     | { readonly kind: "chat" }
     | { readonly kind: "schedules"; readonly page: SchedulePageProps };
   readonly onReturnToChat: () => void;
+  readonly returnToChatHref: string;
   readonly closeChat: CloseChatPresentation;
   readonly onCloseChatConfirm: () => void;
   readonly onCloseChatDismiss: () => void;
@@ -108,6 +109,7 @@ export function ChatScreen({
   onAddWorkspace,
   view,
   onReturnToChat,
+  returnToChatHref,
   onEditWorkspace,
   workspaceEditPending,
   closeChat,
@@ -122,6 +124,7 @@ export function ChatScreen({
   onChatsRetry,
   onChatSelect,
   onNewChat,
+  schedulesHref,
   onOpenSchedules,
   onTabSelect,
   onTabClose,
@@ -158,7 +161,7 @@ export function ChatScreen({
   const scheduleContent = useRef<HTMLDivElement>(null);
   const scheduleOrigin = useRef<HTMLElement | null>(null);
   const restoreScheduleFocus = useRef(false);
-  const previousChatVisible = useRef(chatVisible);
+  const previousChatVisible = useRef<boolean | null>(null);
 
   useLayoutEffect(() => {
     if (previousChatVisible.current === chatVisible) return;
@@ -316,6 +319,7 @@ export function ChatScreen({
     currentPage: view.kind,
     search,
     onSearchChange,
+    schedulesHref,
     onOpenSchedules: (origin) => {
       if (chatVisible) scheduleOrigin.current = origin;
       onOpenSchedules(origin);
@@ -455,17 +459,28 @@ export function ChatScreen({
             </div>
             {!chatVisible && (
               <div className="min-w-0 flex-1">
-                <Button
-                  onClick={() => {
+                <a
+                  className="press-feedback inline-flex h-8 shrink-0 items-center justify-center gap-2 rounded-control px-3 text-label font-medium text-muted transition-[transform,background-color,color,opacity] duration-feedback ease-feedback hover:bg-surface-hover hover:text-foreground"
+                  href={returnToChatHref}
+                  onClick={(event) => {
+                    if (
+                      event.defaultPrevented ||
+                      event.button !== 0 ||
+                      event.metaKey ||
+                      event.ctrlKey ||
+                      event.altKey ||
+                      event.shiftKey ||
+                      (event.currentTarget.target && event.currentTarget.target !== "_self")
+                    )
+                      return;
+                    event.preventDefault();
                     restoreScheduleFocus.current = true;
                     onReturnToChat();
                   }}
-                  size="small"
-                  tone="ghost"
                 >
                   <ArrowLeftIcon aria-hidden="true" size={16} />
                   Back to chats
-                </Button>
+                </a>
               </div>
             )}
             <Button
@@ -670,11 +685,7 @@ export function ChatScreen({
                         </>
                       )}
                       {onboarding && (
-                        <Button
-                          className="mt-4"
-                          onClick={onAddWorkspace}
-                          tone="primary"
-                        >
+                        <Button className="mt-4" onClick={onAddWorkspace} tone="primary">
                           <PlusIcon aria-hidden="true" size={17} />
                           Add workspace
                         </Button>

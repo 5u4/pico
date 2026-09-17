@@ -46,6 +46,7 @@ export interface WorkspaceSidebarProps {
   readonly onChatClose: (workspaceId: string, chatId: string, origin: HTMLElement) => void;
   readonly chatCloseDisabled: boolean;
   readonly onNewChat: (workspaceId?: string) => void;
+  readonly schedulesHref: string;
   readonly onOpenSchedules: (origin: HTMLElement) => void;
   readonly onAddWorkspace?: (() => void) | undefined;
   readonly onEditWorkspace?: ((workspaceId: string, origin: HTMLElement) => void) | undefined;
@@ -67,6 +68,7 @@ export function WorkspaceSidebar({
   onChatClose,
   chatCloseDisabled,
   onNewChat,
+  schedulesHref,
   onOpenSchedules,
   onAddWorkspace,
   onEditWorkspace,
@@ -246,13 +248,26 @@ export function WorkspaceSidebar({
             New chat
           </span>
         </button>
-        <button
+        <a
           aria-label="Schedules"
           aria-current={currentPage === "schedules" ? "page" : undefined}
           className={`sidebar-control sidebar-rail-row relative mx-2 flex shrink-0 items-center rounded-control px-2 text-left transition-colors hover:bg-surface-hover-strong hover:text-foreground ${currentPage === "schedules" ? "bg-surface-hover-strong text-foreground" : "text-muted"}`}
-          onClick={(event) => onOpenSchedules(event.currentTarget)}
+          href={schedulesHref}
+          onClick={(event) => {
+            if (
+              event.defaultPrevented ||
+              event.button !== 0 ||
+              event.metaKey ||
+              event.ctrlKey ||
+              event.altKey ||
+              event.shiftKey ||
+              (event.currentTarget.target && event.currentTarget.target !== "_self")
+            )
+              return;
+            event.preventDefault();
+            onOpenSchedules(event.currentTarget);
+          }}
           title="Schedules"
-          type="button"
         >
           <span className="flex size-5 shrink-0 items-center justify-center">
             <CalendarBlankIcon aria-hidden="true" size={18} />
@@ -260,7 +275,7 @@ export function WorkspaceSidebar({
           <span className="sidebar-copy ml-1.5 min-w-0 flex-1 truncate text-[14px] font-medium">
             Schedules
           </span>
-        </button>
+        </a>
 
         <nav
           aria-label={searchOpen ? "Chat search results" : "Workspaces"}

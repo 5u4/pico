@@ -63,6 +63,7 @@ interface TabState {
 }
 type PageContent =
   | { readonly kind: "home" }
+  | { readonly kind: "schedules" }
   | { readonly kind: "loading"; readonly label: string }
   | {
       readonly kind: "error";
@@ -95,9 +96,6 @@ type CloseChatFlow =
       readonly outcome: "closed" | "unconfirmed";
       readonly message: string;
     };
-type AppView =
-  | { readonly kind: "chat" }
-  | { readonly kind: "schedules"; readonly expandedId: Schedule.ScheduleId | null };
 const emptySchedules = Atom.make(AsyncResult.initial<ScheduleOverviewResponse>());
 const emptyDraft: DraftValue = { text: "" };
 const workspaceStorageKey = "pico-last-workspace";
@@ -304,6 +302,7 @@ export function WorkspaceChat({
     expanded: new Set(),
   }));
   const navigationRef = useRef(navigation);
+  const lastConversationKey = useRef<number | null>(null);
   const nextDraftKey = useRef(0);
   const [initialWorkspace] = useState(readWorkspacePreference);
   const preferredWorkspace = useRef(initialWorkspace);
@@ -322,9 +321,9 @@ export function WorkspaceChat({
     readonly visit: number;
     readonly element: HTMLElement | null;
   } | null>(null);
-  const [view, setView] = useState<AppView>({ kind: "chat" });
+  const [expandedScheduleId, setExpandedScheduleId] = useState<Schedule.ScheduleId | null>(null);
   const scheduleResult = useAtomValue(
-    state && view.kind === "schedules" ? state.schedules : emptySchedules,
+    state && page.kind === "schedules" ? state.schedules : emptySchedules,
   );
   const [closeFlow, setCloseFlow] = useState<CloseChatFlow>({ kind: "idle" });
   const closeFlowRef = useRef(closeFlow);
@@ -408,6 +407,7 @@ export function WorkspaceChat({
   }, [groups, liveTitles]);
   const content = ((): PageContent => {
     if (page.kind === "home" || page.kind === "new-workspace") return { kind: "home" };
+    if (page.kind === "schedules") return { kind: "schedules" };
     if (page.kind === "invalid") {
       return {
         kind: "error",
@@ -485,7 +485,25 @@ export function WorkspaceChat({
       : { kind: "loading", label: "Loading chat..." };
   })();
   const selected = content.kind === "ready" ? findPageEntry(page, navigation.entries) : undefined;
-  const chatId = selected?.target.kind === "chat" ? selected.target.chat.id : null;
+  const returnEntry =
+    lastConversationKey.current === null
+      ? undefined
+      : navigation.entries.get(lastConversationKey.current);
+  const conversationEntry = page.kind === "schedules" ? returnEntry : selected;
+  const chatId =
+    conversationEntry?.target.kind === "chat" ? conversationEntry.target.chat.id : null;
+  const schedulesHref = router.buildLocation({ to: "/schedules" }).href;
+  const returnToChatHref = !returnEntry
+    ? router.buildLocation({ to: "/" }).href
+    : returnEntry.target.kind === "chat"
+      ? router.buildLocation({
+          to: "/workspaces/$workspaceId/chats/$chatId",
+          params: { workspaceId: returnEntry.workspace.id, chatId: returnEntry.target.chat.id },
+        }).href
+      : router.buildLocation({
+          to: "/workspaces/$workspaceId",
+          params: { workspaceId: returnEntry.workspace.id },
+        }).href;
   const conversationAtom = useMemo(
     () =>
       Atom.make((get) =>
@@ -546,6 +564,9 @@ export function WorkspaceChat({
     switch (destination.kind) {
       case "home":
         void router.navigate({ to: "/", replace });
+        break;
+      case "schedules":
+        void router.navigate({ to: "/schedules", replace });
         break;
       case "new-workspace":
         void router.navigate({ to: "/workspaces/new", replace });
@@ -642,7 +663,8 @@ export function WorkspaceChat({
     const chats = groups.find((group) => group.workspace.id === content.workspace.id)?.chats;
     if (page.kind === "chat" && chats && registry.get(state.chats(page.workspaceId)) !== chats)
       return;
-    retainEntry(content.workspace, content.target, true);
+    const entry = retainEntry(content.workspace, content.target, true);
+    if (page.kind === "draft" || page.kind === "chat") lastConversationKey.current = entry.key;
     try {
       window.localStorage.setItem(workspaceStorageKey, content.workspace.id);
     } catch {}
@@ -792,7 +814,7 @@ export function WorkspaceChat({
     if (!registry.get(state.schedules).waiting) registry.refresh(state.schedules);
   };
   useEffect(() => {
-    if (view.kind !== "schedules" || !state || !available) return;
+    if (page.kind !== "schedules" || !state || !available) return;
     const refresh = () => {
       if (registry.get(state.connection).kind !== "active") return;
       if (document.visibilityState === "hidden") return;
@@ -805,13 +827,15 @@ export function WorkspaceChat({
       window.removeEventListener("focus", refresh);
       document.removeEventListener("visibilitychange", refresh);
     };
-  }, [state, registry, available, view.kind]);
+  }, [state, registry, available, page.kind]);
   const openSchedules = () => {
-    setContextDetailsKey(undefined);
-    setToolSelection(null);
-    setView((current) =>
-      current.kind === "schedules" ? current : { kind: "schedules", expandedId: null },
-    );
+    if (pageFromMatches(router.state.matches).kind !== "schedules")
+      navigatePage({ kind: "schedules" });
+  };
+  const returnToChat = () => {
+    const key = lastConversationKey.current;
+    const entry = key === null ? undefined : navigationRef.current.entries.get(key);
+    navigatePage(entry ? entryPage(entry) : { kind: "home" });
   };
   const scheduleSnapshot = Option.getOrNull(AsyncResult.value(scheduleResult));
   const scheduleRows = useMemo(
@@ -849,7 +873,6 @@ export function WorkspaceChat({
                 : { kind: "current" },
         };
   const newChat = (workspaceId?: string) => {
-    setView({ kind: "chat" });
     const workspace = workspaceId
       ? groups.find((group) => group.workspace.id === workspaceId)?.workspace
       : (groups.find((group) => group.workspace.id === routeWorkspaceId)?.workspace ??
@@ -859,7 +882,6 @@ export function WorkspaceChat({
     else if (!workspaceId) addWorkspace();
   };
   const selectChat = (workspaceId: string, id: string) => {
-    setView({ kind: "chat" });
     const group = groups.find((item) => item.workspace.id === workspaceId);
     if (!group) return;
     const current = navigationRef.current;
@@ -876,7 +898,6 @@ export function WorkspaceChat({
     if (target) navigatePage({ kind: "chat", workspaceId: group.workspace.id, chatId: target.id });
   };
   const selectTab = (id: string) => {
-    setView({ kind: "chat" });
     const current = navigationRef.current;
     const key = current.openKeys.find((key) => String(key) === id);
     const entry = key === undefined ? undefined : current.entries.get(key);
@@ -984,7 +1005,7 @@ export function WorkspaceChat({
         : group.chats &&
           Option.getOrElse(AsyncResult.value(group.chats), () => []).find((chat) => chat.id === id);
     if (!chat) return;
-    setView({ kind: "chat" });
+    if (pageFromMatches(router.state.matches).kind === "schedules") returnToChat();
     void runCloseChat(
       {
         chatId: chat.id,
@@ -1228,7 +1249,7 @@ export function WorkspaceChat({
     );
   const presentation: NavigationPresentation = {
     activeWorkspaceId: routeWorkspaceId,
-    activeChatId: chatId,
+    activeChatId: selected?.target.kind === "chat" ? selected.target.chat.id : null,
     status:
       workspaces._tag === "Failure"
         ? { kind: "error", label: errorMessage(workspaces.cause) }
@@ -1254,10 +1275,10 @@ export function WorkspaceChat({
       contextLabel: `${entry.workspace.name} · ${entry.target.kind === "chat" ? entry.target.chat.cwd : entry.workspace.defaultCwd}`,
     });
   }
-  const creating = selected?.submission.kind === "creating";
-  const sending = selected?.submission.kind === "sending" || conversation?.sending.waiting;
+  const creating = conversationEntry?.submission.kind === "creating";
+  const sending = conversationEntry?.submission.kind === "sending" || conversation?.sending.waiting;
   const running = conversation?.live.run.kind === "running";
-  const statusLabel = !selected
+  const statusLabel = !conversationEntry
     ? groups.length > 0
       ? "Choose a chat or start a new one"
       : "Add a workspace to start a chat"
@@ -1286,7 +1307,7 @@ export function WorkspaceChat({
     running || sending
       ? {
           mode: "stop",
-          value: selected?.value.text ?? "",
+          value: conversationEntry?.value.text ?? "",
           placeholder: "Write your next message...",
           editable: true,
           canStop: available && !conversation?.stopping.waiting,
@@ -1294,13 +1315,13 @@ export function WorkspaceChat({
         }
       : {
           mode: "send",
-          value: selected?.value.text ?? "",
-          placeholder: selected
+          value: conversationEntry?.value.text ?? "",
+          placeholder: conversationEntry
             ? "Ask pico to help with your project..."
             : groups.length > 0
               ? "Choose a chat or start a new one"
               : "Add a workspace to start",
-          editable: !!selected,
+          editable: !!conversationEntry,
           canSubmit: available && !!selected && !creating && selected.value.text.trim().length > 0,
           statusLabel,
         };
@@ -1325,18 +1346,18 @@ export function WorkspaceChat({
         ? { state: "loading", label: content.label }
         : content.kind === "ready" && !selected
           ? { state: "loading", label: "Opening chat..." }
-          : conversation && selected
+          : conversation && conversationEntry
             ? presentTranscript(
                 conversation.snapshot,
                 conversation.live,
-                selected.disclosures,
+                conversationEntry.disclosures,
                 connection,
               )
-            : selected
+            : conversationEntry
               ? {
                   state: "empty",
                   title: "What are you working on?",
-                  description: `Start a conversation in ${selected.workspace.name}.`,
+                  description: `Start a conversation in ${conversationEntry.workspace.name}.`,
                 }
               : workspaces._tag === "Failure"
                 ? {
@@ -1390,7 +1411,7 @@ export function WorkspaceChat({
         onKeepEditing={() => setRecoveryOpen(false)}
         onDiscardAndReload={() => window.location.reload()}
       />
-      {view.kind === "chat" &&
+      {page.kind !== "schedules" &&
         conversation?.snapshot._tag === "Failure" &&
         transcript.state !== "error" && (
           <div className="flex shrink-0 flex-wrap items-center gap-3 border-b border-border bg-panel p-3 text-label">
@@ -1402,7 +1423,7 @@ export function WorkspaceChat({
             </Button>
           </div>
         )}
-      {view.kind === "chat" && selected?.submission.kind === "error" && (
+      {page.kind !== "schedules" && selected?.submission.kind === "error" && (
         <p
           className="shrink-0 border-b border-border bg-panel p-3 text-label text-danger"
           role="alert"
@@ -1410,7 +1431,7 @@ export function WorkspaceChat({
           {selected.submission.message}
         </p>
       )}
-      {view.kind === "chat" && conversation?.stopping._tag === "Failure" && (
+      {page.kind !== "schedules" && conversation?.stopping._tag === "Failure" && (
         <p
           className="shrink-0 border-b border-border bg-panel p-3 text-label text-danger"
           role="alert"
@@ -1419,7 +1440,7 @@ export function WorkspaceChat({
           reload to reconnect.
         </p>
       )}
-      {view.kind === "chat" &&
+      {page.kind !== "schedules" &&
         available &&
         conversation?.live.run.kind === "unknown" &&
         !sending && (
@@ -1440,36 +1461,29 @@ export function WorkspaceChat({
       <div className="min-h-0 flex-1">
         <ChatScreen
           onOpenSchedules={openSchedules}
+          schedulesHref={schedulesHref}
+          returnToChatHref={returnToChatHref}
           view={
-            view.kind === "chat"
-              ? view
+            page.kind !== "schedules"
+              ? { kind: "chat" }
               : {
                   kind: "schedules",
                   page: {
                     list: scheduleList,
-                    expandedId: view.expandedId,
+                    expandedId: expandedScheduleId,
                     refreshEnabled: available && !scheduleResult.waiting,
                     onRefresh: refreshSchedules,
                     onExpandedChange: (id, open) => {
                       const entry = scheduleSnapshot?.entries.find((item) => item.view.id === id);
                       if (!entry) return;
-                      setView((current) =>
-                        current.kind === "schedules"
-                          ? {
-                              kind: "schedules",
-                              expandedId: open
-                                ? entry.view.id
-                                : current.expandedId === id
-                                  ? null
-                                  : current.expandedId,
-                            }
-                          : current,
+                      setExpandedScheduleId((current) =>
+                        open ? entry.view.id : current === id ? null : current,
                       );
                     },
                   },
                 }
           }
-          onReturnToChat={() => setView({ kind: "chat" })}
+          onReturnToChat={returnToChat}
           closeChat={closePresentation}
           chatCloseDisabled={!available || closeFlow.kind !== "idle"}
           onChatClose={closeChat}
@@ -1488,11 +1502,11 @@ export function WorkspaceChat({
             }
           }}
           contextLabel={
-            selected
-              ? `${selected.workspace.name} · ${selected.target.kind === "chat" ? selected.target.chat.cwd : selected.workspace.defaultCwd}`
+            conversationEntry
+              ? `${conversationEntry.workspace.name} · ${conversationEntry.target.kind === "chat" ? conversationEntry.target.chat.cwd : conversationEntry.workspace.defaultCwd}`
               : "Your project conversations"
           }
-          conversationKey={selected ? String(selected.key) : null}
+          conversationKey={conversationEntry ? String(conversationEntry.key) : null}
           desktopCollapse={{ collapsed: sidebarCollapsed, onCollapsedChange: setSidebarCollapsed }}
           navigation={presentation}
           onChatSelect={selectChat}
@@ -1561,7 +1575,7 @@ export function WorkspaceChat({
           search={search}
           sidebarOpen={sidebarOpen}
           suggestions={
-            available && selected && !creating && !sending && !running ? suggestions : []
+            available && conversationEntry && !creating && !sending && !running ? suggestions : []
           }
           tabs={tabs}
           theme={theme}

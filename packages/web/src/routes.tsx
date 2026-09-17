@@ -17,6 +17,7 @@ export type ConversationPage =
 export type Page =
   | ConversationPage
   | { readonly kind: "home" }
+  | { readonly kind: "schedules" }
   | { readonly kind: "new-workspace" }
   | { readonly kind: "settings"; readonly workspaceId: WorkspaceId }
   | { readonly kind: "invalid" };
@@ -32,6 +33,7 @@ export function createAppRouter(component: FunctionComponent) {
   });
   const routeTree = root.addChildren([
     createRoute({ getParentRoute: () => root, path: "/" }),
+    createRoute({ getParentRoute: () => root, path: "/schedules" }),
     createRoute({ getParentRoute: () => root, path: "/workspaces/new" }),
     createRoute({ getParentRoute: () => root, path: "/workspaces/$workspaceId" }),
     createRoute({ getParentRoute: () => root, path: "/workspaces/$workspaceId/chats/$chatId" }),
@@ -56,6 +58,8 @@ export function pageFromMatches(
   switch (match.routeId) {
     case "/":
       return { kind: "home" };
+    case "/schedules":
+      return { kind: "schedules" };
     case "/workspaces/new":
       return { kind: "new-workspace" };
     case "/workspaces/$workspaceId":
