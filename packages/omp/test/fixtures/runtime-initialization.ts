@@ -77,6 +77,7 @@ const chat = Chat.Chat.make({
 });
 const unusedSchedule = () => Effect.die("Unexpected schedule operation");
 const schedules = Schedule.Schedules.of({
+  withCurrentTargets: () => Effect.die("unexpected schedule target scan"),
   create: unusedSchedule,
   list: unusedSchedule,
   overview: unusedSchedule,

@@ -121,6 +121,7 @@ describe("BranchNaming", () => {
         Layer.succeed(
           WorkspaceRepository,
           WorkspaceRepository.of({
+            softDelete: () => Effect.die("unexpected workspace deletion"),
             list: () => Effect.die("unexpected workspace list"),
             create: () => Effect.die("unexpected workspace create"),
             getOrCreateByBinding: () => Effect.die("unexpected bound workspace creation"),
@@ -237,6 +238,7 @@ describe("BranchNaming", () => {
         Layer.succeed(
           WorkspaceRepository,
           WorkspaceRepository.of({
+            softDelete: () => Effect.die("unexpected workspace deletion"),
             list: () => Effect.die("unexpected workspace list"),
             create: () => Effect.die("unexpected workspace create"),
             getOrCreateByBinding: () => Effect.die("unexpected bound workspace creation"),
@@ -399,6 +401,7 @@ describe("BranchNaming", () => {
         Layer.succeed(
           WorkspaceRepository,
           WorkspaceRepository.of({
+            softDelete: () => Effect.die("unexpected workspace deletion"),
             list: () => Effect.die("unexpected workspace list"),
             create: () => Effect.die("unexpected workspace create"),
             getOrCreateByBinding: () => Effect.die("unexpected bound workspace creation"),

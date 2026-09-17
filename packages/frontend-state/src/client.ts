@@ -226,6 +226,19 @@ export const make = ({ url }: { readonly url: string }) => {
       return workspace;
     }),
   ).pipe(Atom.keepAlive, Atom.setLazy(false));
+  const deleteWorkspace = Atom.fn<{ readonly workspaceId: WorkspaceId }>()((input, get) =>
+    Effect.gen(function* () {
+      const session = yield* get.result(owner);
+      yield* session.available;
+      yield* session.client
+        .DeleteWorkspace(input)
+        .pipe(Effect.tapErrorTag("ApplicationError", () => Effect.sync(session.recordResponse)));
+      session.recordResponse();
+      get.set(workspaces, (current) =>
+        current.filter((workspace) => workspace.id !== input.workspaceId),
+      );
+    }).pipe(Effect.onExit(() => Effect.sync(() => get.registry.refresh(workspaces)))),
+  ).pipe(Atom.keepAlive, Atom.setLazy(false));
   const createChat = Atom.family((workspaceId: WorkspaceId) =>
     Atom.fn<Omit<CreateChat, "workspaceId">>()((input, get) =>
       Effect.gen(function* () {
@@ -424,6 +437,7 @@ export const make = ({ url }: { readonly url: string }) => {
     titles,
     createWorkspace,
     updateWorkspace,
+    deleteWorkspace,
     createChat,
     closeChat,
     transcript,

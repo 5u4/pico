@@ -96,6 +96,14 @@ type CloseChatFlow =
       readonly outcome: "closed" | "unconfirmed";
       readonly message: string;
     };
+type DeleteWorkspaceFlow =
+  | { readonly kind: "idle" }
+  | {
+      readonly kind: "confirmation";
+      readonly target: Pick<Workspace, "id" | "name">;
+      readonly error: string | null;
+    }
+  | { readonly kind: "deleting"; readonly target: Pick<Workspace, "id" | "name"> };
 const emptySchedules = Atom.make(AsyncResult.initial<ScheduleOverviewResponse>());
 const emptyDraft: DraftValue = { text: "" };
 const workspaceStorageKey = "pico-last-workspace";
@@ -236,6 +244,19 @@ function removeClosedChat(current: TabState, chatId: ChatId): TabState {
   return { ...current, entries, openKeys };
 }
 
+function removeWorkspace(current: TabState, workspaceId: WorkspaceId): TabState {
+  const entries = new Map(
+    [...current.entries].filter(([, entry]) => entry.workspace.id !== workspaceId),
+  );
+  const expanded = new Set(current.expanded);
+  expanded.delete(workspaceId);
+  return {
+    entries,
+    expanded,
+    openKeys: current.openKeys.filter((key) => entries.has(key)),
+  };
+}
+
 function findPageEntry(
   page: Page,
   entries: ReadonlyMap<number, DraftEntry>,
@@ -302,6 +323,7 @@ export function WorkspaceChat({
     expanded: new Set(),
   }));
   const navigationRef = useRef(navigation);
+  const removedWorkspaceIds = useRef(new Set<WorkspaceId>());
   const lastConversationKey = useRef<number | null>(null);
   const nextDraftKey = useRef(0);
   const [initialWorkspace] = useState(readWorkspacePreference);
@@ -327,6 +349,8 @@ export function WorkspaceChat({
   );
   const [closeFlow, setCloseFlow] = useState<CloseChatFlow>({ kind: "idle" });
   const closeFlowRef = useRef(closeFlow);
+  const [deleteFlow, setDeleteFlow] = useState<DeleteWorkspaceFlow>({ kind: "idle" });
+  const deleteFlowRef = useRef(deleteFlow);
   const unsettledCloseMembership = useRef(
     new Map<ChatId, { readonly workspaceId: WorkspaceId; readonly visit: number }>(),
   );
@@ -651,14 +675,75 @@ export function WorkspaceChat({
     );
   };
 
+  const pruneWorkspace = (workspaceId: WorkspaceId) => {
+    removedWorkspaceIds.current.add(workspaceId);
+    const current = navigationRef.current;
+    const livePage = pageFromMatches(router.state.matches);
+    const next = removeWorkspace(current, workspaceId);
+    if (
+      (livePage.kind === "draft" || livePage.kind === "chat" || livePage.kind === "settings") &&
+      livePage.workspaceId === workspaceId &&
+      router.state.status === "idle"
+    ) {
+      const selectedEntry = findPageEntry(livePage, current.entries);
+      const index = selectedEntry ? current.openKeys.indexOf(selectedEntry.key) : 0;
+      const nextKey = next.openKeys[Math.max(0, Math.min(index, next.openKeys.length - 1))];
+      const neighbor = nextKey === undefined ? undefined : next.entries.get(nextKey);
+      navigatePage(neighbor ? entryPage(neighbor) : { kind: "home" }, true);
+    }
+    if (lastConversationKey.current !== null && !next.entries.has(lastConversationKey.current)) {
+      lastConversationKey.current = null;
+    }
+    if (preferredWorkspace.current === workspaceId) preferredWorkspace.current = null;
+    try {
+      if (window.localStorage.getItem(workspaceStorageKey) === workspaceId) {
+        window.localStorage.removeItem(workspaceStorageKey);
+      }
+    } catch {}
+    for (const [chatId, pending] of unsettledCloseMembership.current) {
+      if (pending.workspaceId === workspaceId) unsettledCloseMembership.current.delete(chatId);
+    }
+    if (workspaceEditorRef.current?.workspace.id === workspaceId) {
+      workspaceEditorRef.current = null;
+      setWorkspaceEditor(null);
+    }
+    if (
+      closeFlowRef.current.kind !== "idle" &&
+      closeFlowRef.current.target.workspaceId === workspaceId
+    ) {
+      closeFlowRef.current = { kind: "idle" };
+      setCloseFlow(closeFlowRef.current);
+    }
+    updateNavigation(() => next);
+    setToolSelection((selection) =>
+      selection && !next.entries.has(selection.conversationKey) ? null : selection,
+    );
+    setContextDetailsKey((key) => (key != null && !next.entries.has(key) ? undefined : key));
+  };
+
+  useEffect(() => {
+    if (routeWorkspaceId && removedWorkspaceIds.current.has(routeWorkspaceId) && ownsVisit()) {
+      pruneWorkspace(routeWorkspaceId);
+    }
+  }, [routeWorkspaceId, routeState.status, visit]);
+
   useEffect(() => {
     if (workspaces._tag !== "Success" || workspaces.waiting) return;
     if (state && registry.get(state.workspaces) !== workspaces) return;
+    const existingIds = new Set(workspaces.value.map((workspace) => workspace.id));
+    const retainedIds = new Set([
+      ...navigationRef.current.expanded,
+      ...[...navigationRef.current.entries.values()].map((entry) => entry.workspace.id),
+    ]);
+    for (const id of retainedIds) {
+      if (!existingIds.has(id)) pruneWorkspace(id);
+    }
     updateNavigation((current) => reconcileWorkspaceSnapshots(current, workspaces.value));
   }, [state, registry, workspaces]);
 
   useEffect(() => {
     if (!state || !ownsVisit() || content.kind !== "ready") return;
+    if (removedWorkspaceIds.current.has(content.workspace.id)) return;
     if (registry.get(state.workspaces) !== workspaces) return;
     const chats = groups.find((group) => group.workspace.id === content.workspace.id)?.chats;
     if (page.kind === "chat" && chats && registry.get(state.chats(page.workspaceId)) !== chats)
@@ -764,6 +849,43 @@ export function WorkspaceChat({
     const workspace = groups.find((group) => group.workspace.id === workspaceId)?.workspace;
     if (workspace?.platform !== "web") return;
     navigatePage({ kind: "settings", workspaceId: workspace.id }, false, origin);
+  };
+  const updateDeleteFlow = (next: DeleteWorkspaceFlow) => {
+    deleteFlowRef.current = next;
+    setDeleteFlow(next);
+  };
+  const deleteWorkspace = (workspaceId: string) => {
+    if (
+      !state ||
+      workspaceSavePending.current ||
+      deleteFlowRef.current.kind !== "idle" ||
+      registry.get(state.connection).kind !== "active"
+    )
+      return;
+    const workspace = groups.find((group) => group.workspace.id === workspaceId)?.workspace;
+    if (workspace?.platform !== "web") return;
+    updateDeleteFlow({
+      kind: "confirmation",
+      target: { id: workspace.id, name: workspace.name },
+      error: null,
+    });
+  };
+  const confirmDeleteWorkspace = async () => {
+    const flow = deleteFlowRef.current;
+    if (!state || flow.kind !== "confirmation" || registry.get(state.connection).kind !== "active")
+      return;
+    updateDeleteFlow({ kind: "deleting", target: flow.target });
+    const exit = await runCommand(registry, state.deleteWorkspace, { workspaceId: flow.target.id });
+    if (Exit.isFailure(exit)) {
+      updateDeleteFlow({
+        kind: "confirmation",
+        target: flow.target,
+        error: errorMessage(exit.cause),
+      });
+      return;
+    }
+    pruneWorkspace(flow.target.id);
+    updateDeleteFlow({ kind: "idle" });
   };
   const closeWorkspaceEditor = () => {
     if (page.kind === "settings" && ownsVisit()) {
@@ -1535,6 +1657,22 @@ export function WorkspaceChat({
           }}
           onAddWorkspace={addWorkspace}
           onEditWorkspace={editWorkspace}
+          onDeleteWorkspace={deleteWorkspace}
+          workspaceDeleteDisabled={!available || workspaceSaving || deleteFlow.kind !== "idle"}
+          deleteWorkspace={
+            deleteFlow.kind === "idle"
+              ? null
+              : {
+                  workspaceName: deleteFlow.target.name,
+                  pending: deleteFlow.kind === "deleting",
+                  error: deleteFlow.kind === "confirmation" ? deleteFlow.error : null,
+                  canConfirm: available && deleteFlow.kind === "confirmation",
+                }
+          }
+          onDeleteWorkspaceConfirm={confirmDeleteWorkspace}
+          onDeleteWorkspaceDismiss={() => {
+            if (deleteFlowRef.current.kind === "confirmation") updateDeleteFlow({ kind: "idle" });
+          }}
           onNewChat={newChat}
           onSearchChange={changeSearch}
           onSidebarOpenChange={setSidebarOpen}

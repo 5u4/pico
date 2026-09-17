@@ -10,6 +10,7 @@ import {
   PlusIcon,
   SidebarSimpleIcon,
   SparkleIcon,
+  TrashIcon,
   XIcon,
 } from "@phosphor-icons/react";
 import {
@@ -51,6 +52,8 @@ export interface WorkspaceSidebarProps {
   readonly onAddWorkspace?: (() => void) | undefined;
   readonly onEditWorkspace?: ((workspaceId: string, origin: HTMLElement) => void) | undefined;
   readonly workspaceEditPending?: boolean | undefined;
+  readonly onDeleteWorkspace?: ((workspaceId: string, origin: HTMLElement) => void) | undefined;
+  readonly workspaceDeleteDisabled?: boolean | undefined;
   readonly contextMenuContainer?: HTMLElement | null | undefined;
   readonly onClose: () => void;
 }
@@ -73,6 +76,8 @@ export function WorkspaceSidebar({
   onAddWorkspace,
   onEditWorkspace,
   workspaceEditPending,
+  onDeleteWorkspace,
+  workspaceDeleteDisabled,
   contextMenuContainer,
   onClose,
 }: WorkspaceSidebarProps) {
@@ -374,6 +379,8 @@ export function WorkspaceSidebar({
                       expanded={expanded}
                       listId={listId}
                       onEditWorkspace={onEditWorkspace}
+                      onDeleteWorkspace={onDeleteWorkspace}
+                      workspaceDeleteDisabled={workspaceDeleteDisabled}
                       onWorkspaceToggle={onWorkspaceToggle}
                       searching={searchOpen}
                       workspace={workspace}
@@ -591,10 +598,17 @@ function WorkspaceToggle({
   onWorkspaceToggle,
   onEditWorkspace,
   workspaceEditPending,
+  onDeleteWorkspace,
+  workspaceDeleteDisabled,
   contextMenuContainer,
 }: Pick<
   WorkspaceSidebarProps,
-  "onWorkspaceToggle" | "onEditWorkspace" | "workspaceEditPending" | "contextMenuContainer"
+  | "onWorkspaceToggle"
+  | "onEditWorkspace"
+  | "workspaceEditPending"
+  | "contextMenuContainer"
+  | "onDeleteWorkspace"
+  | "workspaceDeleteDisabled"
 > & {
   readonly workspace: NavigationPresentation["groups"][number]["workspace"];
   readonly expanded: boolean;
@@ -603,81 +617,96 @@ function WorkspaceToggle({
   readonly searching: boolean;
 }) {
   const trigger = useRef<HTMLButtonElement>(null);
-  const pendingEdit = useRef<HTMLElement | null>(null);
+  const pendingAction = useRef<"edit" | "delete" | null>(null);
   const editable = workspace.canEditConfiguration && onEditWorkspace !== undefined;
-  if (searching) {
-    return (
-      <div
-        className="flex min-w-0 flex-1 items-center gap-2 px-2 text-[12.5px] font-medium text-subtle"
-        title={workspace.contextLabel}
-      >
-        <FolderSimpleIcon aria-hidden="true" className="shrink-0" size={15} />
-        <span className="truncate">{workspace.name}</span>
-      </div>
+  const deletable = onDeleteWorkspace !== undefined;
+  const hasMenu = editable || deletable;
+  const openMenu = (button: HTMLButtonElement) => {
+    const bounds = button.getBoundingClientRect();
+    button.dispatchEvent(
+      new MouseEvent("contextmenu", {
+        bubbles: true,
+        cancelable: true,
+        clientX: bounds.left + bounds.width / 2,
+        clientY: bounds.bottom,
+        button: 2,
+      }),
     );
-  }
+  };
   const toggle = (
     <button
-      aria-controls={listId}
-      aria-expanded={expanded}
+      aria-controls={searching ? undefined : listId}
+      aria-expanded={searching ? undefined : expanded}
+      aria-haspopup={searching && hasMenu ? "menu" : undefined}
       className={`sidebar-row flex min-w-0 flex-1 items-center gap-2 px-2 text-left text-label ${active ? "font-medium text-foreground" : "text-muted"}`}
-      onClick={() => onWorkspaceToggle(workspace.id)}
+      onClick={(event) => {
+        if (searching && hasMenu) openMenu(event.currentTarget);
+        else if (!searching) onWorkspaceToggle(workspace.id);
+      }}
       onContextMenu={
-        editable ? (event) => event.currentTarget.focus({ preventScroll: true }) : undefined
+        hasMenu ? (event) => event.currentTarget.focus({ preventScroll: true }) : undefined
       }
       onKeyDown={(event) => {
-        if (!editable || (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")))
+        if (!hasMenu || (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")))
           return;
         event.preventDefault();
-        const button = event.currentTarget;
-        const bounds = button.getBoundingClientRect();
-        button.dispatchEvent(
-          new MouseEvent("contextmenu", {
-            bubbles: true,
-            cancelable: true,
-            clientX: bounds.left + bounds.width / 2,
-            clientY: bounds.bottom,
-            button: 2,
-          }),
-        );
+        openMenu(event.currentTarget);
       }}
       ref={trigger}
       title={workspace.contextLabel}
       type="button"
     >
-      {expanded ? (
-        <CaretDownIcon aria-hidden="true" className="shrink-0" size={12} />
-      ) : (
-        <CaretRightIcon aria-hidden="true" className="shrink-0" size={12} />
-      )}
+      {!searching &&
+        (expanded ? (
+          <CaretDownIcon aria-hidden="true" className="shrink-0" size={12} />
+        ) : (
+          <CaretRightIcon aria-hidden="true" className="shrink-0" size={12} />
+        ))}
       <FolderSimpleIcon aria-hidden="true" className="shrink-0" size={17} />
       <span className="truncate">{workspace.name}</span>
     </button>
   );
-  if (!editable) return toggle;
+  if (!hasMenu) return toggle;
   return (
     <ContextMenu>
       <ContextMenuTrigger asChild>{toggle}</ContextMenuTrigger>
       <ContextMenuContent
         container={contextMenuContainer}
         onCloseAutoFocus={(event) => {
-          const origin = pendingEdit.current;
-          if (!origin) return;
-          pendingEdit.current = null;
+          const action = pendingAction.current;
+          const origin = trigger.current;
+          if (!action || !origin) return;
+          pendingAction.current = null;
           event.preventDefault();
           // Radix must release its focus scope before the native dialog opens.
-          queueMicrotask(() => onEditWorkspace?.(workspace.id, origin));
+          queueMicrotask(() => {
+            if (action === "edit") onEditWorkspace?.(workspace.id, origin);
+            else onDeleteWorkspace?.(workspace.id, origin);
+          });
         }}
       >
-        <ContextMenuItem
-          disabled={workspaceEditPending ?? false}
-          onSelect={() => {
-            pendingEdit.current = trigger.current;
-          }}
-        >
-          <PencilSimpleLineIcon aria-hidden="true" size={17} />
-          Edit workspace
-        </ContextMenuItem>
+        {editable && (
+          <ContextMenuItem
+            disabled={workspaceEditPending ?? false}
+            onSelect={() => {
+              pendingAction.current = "edit";
+            }}
+          >
+            <PencilSimpleLineIcon aria-hidden="true" size={17} />
+            Edit workspace
+          </ContextMenuItem>
+        )}
+        {deletable && (
+          <ContextMenuItem
+            disabled={workspaceDeleteDisabled ?? false}
+            onSelect={() => {
+              pendingAction.current = "delete";
+            }}
+          >
+            <TrashIcon aria-hidden="true" size={17} />
+            Delete workspace
+          </ContextMenuItem>
+        )}
       </ContextMenuContent>
     </ContextMenu>
   );

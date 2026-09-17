@@ -104,6 +104,17 @@ const handlers = PicoRpcs.toLayer(
             requestId: String(requestId),
           }),
         ),
+      DeleteWorkspace: ({ workspaceId }, { requestId }) =>
+        requireWebWorkspace(workspaces, workspaceId).pipe(
+          Effect.andThen(() => application.deleteWorkspace(workspaceId)),
+          Effect.tapCause(reportFailure),
+          Effect.annotateLogs({
+            component: "rpc",
+            procedure: "DeleteWorkspace",
+            workspaceId,
+            requestId: String(requestId),
+          }),
+        ),
       CreateChat: (input, { requestId }) =>
         requireWebWorkspace(workspaces, input.workspaceId).pipe(
           Effect.andThen(() => application.createChat(input)),

@@ -102,6 +102,7 @@ const installThreadInput = Effect.fn("test.installThreadInput")(function* (optio
     },
   };
   const application = Application.of({
+    deleteWorkspace: () => Effect.die("unexpected workspace deletion"),
     updateWorkspace: () => Effect.die("unexpected workspace update"),
     availableWorkspaceModels:
       options.availableWorkspaceModels ??
@@ -1049,6 +1050,7 @@ describe("discord interactions", () => {
           },
         } satisfies DiscordInputBot;
         const application = Application.of({
+          deleteWorkspace: () => Effect.die("unexpected workspace deletion"),
           updateWorkspace: () => Effect.die("unexpected workspace update"),
           availableWorkspaceModels: () => Effect.die("unexpected workspace model discovery"),
           setWorkspaceModel: () => Effect.die("unexpected workspace model update"),
@@ -1274,6 +1276,7 @@ describe("discord interactions", () => {
         };
         const failedChat = { ...chat, id: failingChatId, externalId: "22" };
         const application = Application.of({
+          deleteWorkspace: () => Effect.die("unexpected workspace deletion"),
           updateWorkspace: () => Effect.die("unexpected workspace update"),
           availableWorkspaceModels: () => Effect.die("unexpected workspace model discovery"),
           setWorkspaceModel: () => Effect.die("unexpected workspace model update"),
@@ -1466,6 +1469,7 @@ describe("discord interactions", () => {
           archivedAt: null,
         });
         const application = Application.of({
+          deleteWorkspace: () => Effect.die("unexpected workspace deletion"),
           updateWorkspace: () => Effect.die("unexpected workspace update"),
           availableWorkspaceModels: () => Effect.die("unexpected workspace model discovery"),
           setWorkspaceModel: () => Effect.die("unexpected workspace model update"),
@@ -1615,6 +1619,7 @@ describe("discord interactions", () => {
           },
         } satisfies DiscordInputBot;
         const application = Application.of({
+          deleteWorkspace: () => Effect.die("unexpected workspace deletion"),
           updateWorkspace: () => Effect.die("unexpected workspace update"),
           availableWorkspaceModels: () => Effect.die("unexpected workspace model discovery"),
           setWorkspaceModel: () => Effect.die("unexpected workspace model update"),
@@ -1775,6 +1780,7 @@ describe("discord interactions", () => {
           archivedAt: null,
         };
         const application = Application.of({
+          deleteWorkspace: () => Effect.die("unexpected workspace deletion"),
           updateWorkspace: () => Effect.die("unexpected workspace update"),
           availableWorkspaceModels: () => Effect.die("unexpected workspace model discovery"),
           setWorkspaceModel: () => Effect.die("unexpected workspace model update"),

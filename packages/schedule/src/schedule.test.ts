@@ -64,6 +64,7 @@ describe("Schedules", () => {
         const schedules = yield* make(schedulesDir, resolveTarget);
         const cwd = AbsolutePath.make(root);
         yield* schedules.start({
+          withScriptActivity: (_chatId, script) => script,
           resolveTarget,
           materialize: () => Effect.void,
           prepare: () => Effect.succeed({ chatId, workspaceId, cwd }),
@@ -90,6 +91,7 @@ describe("Schedules", () => {
         const published = yield* Queue.unbounded<string>();
         const schedules = yield* make(schedulesDir, resolveTarget);
         const host: Schedule.ScheduleRunHost = {
+          withScriptActivity: (_chatId, script) => script,
           resolveTarget,
           materialize: () => Effect.void,
           prepare: () => Effect.succeed({ chatId, workspaceId, cwd }),
@@ -225,6 +227,7 @@ describe("Schedules", () => {
       const publishedEvents = yield* Queue.unbounded<void>();
       yield* TestClock.setTime(1_000);
       yield* schedules.start({
+        withScriptActivity: (_chatId, script) => script,
         resolveTarget,
         materialize: () => Effect.void,
         prepare: () => Effect.succeed({ chatId, workspaceId, cwd: AbsolutePath.make(root) }),
@@ -297,6 +300,7 @@ describe("Schedules", () => {
         timestamp: 1,
       };
       const host: Schedule.ScheduleRunHost = {
+        withScriptActivity: (_chatId, script) => script,
         resolveTarget,
         materialize: () => Effect.void,
         prepare: () => Effect.succeed({ chatId, workspaceId, cwd }),
@@ -420,6 +424,7 @@ describe("Schedules", () => {
           Effect.gen(function* () {
             const restarted = yield* make(schedulesDir, resolveTarget);
             yield* restarted.start({
+              withScriptActivity: (_chatId, script) => script,
               resolveTarget,
               materialize: () => Effect.void,
               prepare: () => Effect.succeed({ chatId, workspaceId, cwd }),
@@ -464,6 +469,7 @@ describe("Schedules", () => {
       const materialized = new Set<string>();
       const schedules = yield* make(schedulesDir, resolveTarget);
       const host: Schedule.ScheduleRunHost = {
+        withScriptActivity: (_chatId, script) => script,
         resolveTarget,
         materialize: ({ title }) =>
           Effect.sync(() => {
@@ -596,6 +602,7 @@ describe("Schedules", () => {
         const schedules = yield* open(schedulesDir, resolveTarget);
         yield* TestClock.setTime(1_000);
         yield* schedules.start({
+          withScriptActivity: (_chatId, script) => script,
           resolveTarget,
           materialize: () => Effect.void,
           prepare: () =>
@@ -728,6 +735,7 @@ describe("Schedules", () => {
       const releasePrepare = yield* Deferred.make<void>();
       const schedules = yield* make(schedulesDir, resolveTarget);
       const host: Schedule.ScheduleRunHost = {
+        withScriptActivity: (_chatId, script) => script,
         resolveTarget,
         materialize: () => Effect.void,
         prepare: (destination) =>
@@ -867,6 +875,7 @@ describe("Schedules", () => {
       const invoked = yield* Deferred.make<void>();
       const schedules = yield* make(schedulesDir, resolveTarget);
       const host: Schedule.ScheduleRunHost = {
+        withScriptActivity: (_chatId, script) => script,
         resolveTarget,
         materialize: () => Effect.void,
         prepare: () => Effect.succeed({ chatId, workspaceId, cwd }),
@@ -924,6 +933,7 @@ describe("Schedules", () => {
         const published = yield* Queue.unbounded<string>();
         yield* TestClock.setTime(1_000);
         yield* schedules.start({
+          withScriptActivity: (_chatId, script) => script,
           resolveTarget,
           materialize: () => Effect.void,
           prepare: () => Effect.succeed({ chatId, workspaceId, cwd: AbsolutePath.make(root) }),
@@ -1014,6 +1024,7 @@ describe("Schedules", () => {
         const delivered = yield* Deferred.make<void>();
         const schedules = yield* make(schedulesDir, resolveTarget);
         const host: Schedule.ScheduleRunHost = {
+          withScriptActivity: (_chatId, script) => script,
           resolveTarget,
           materialize: () => Effect.void,
           prepare: () => Effect.succeed({ chatId, workspaceId, cwd }),
@@ -1091,6 +1102,7 @@ describe("Schedules", () => {
       yield* Effect.gen(function* () {
         const schedules = yield* make(schedulesDir, resolveTarget);
         const host: Schedule.ScheduleRunHost = {
+          withScriptActivity: (_chatId, script) => script,
           resolveTarget,
           materialize: () => Effect.void,
           prepare: () => Effect.succeed({ chatId, workspaceId, cwd }),
@@ -1307,6 +1319,7 @@ describe("Schedules", () => {
       yield* TestClock.setTime(1_000);
       const operation = yield* schedules
         .start({
+          withScriptActivity: (_chatId, script) => script,
           resolveTarget,
           materialize: () => Effect.void,
           prepare: () => Effect.succeed({ chatId, workspaceId, cwd: AbsolutePath.make(root) }),
@@ -1415,6 +1428,7 @@ describe("Schedules", () => {
       yield* Effect.gen(function* () {
         const schedules = yield* make(schedulesDir, resolveTarget);
         const host: Schedule.ScheduleRunHost = {
+          withScriptActivity: (_chatId, script) => script,
           resolveTarget,
           materialize: () => Effect.void,
           prepare: () => Effect.die("Claimed runs must not dispatch after the scan fails"),
@@ -1507,6 +1521,7 @@ describe("Schedules", () => {
       yield* Effect.gen(function* () {
         const schedules = yield* make(schedulesDir, resolveTarget);
         const host: Schedule.ScheduleRunHost = {
+          withScriptActivity: (_chatId, script) => script,
           resolveTarget,
           materialize: () => Effect.void,
           prepare: () => Effect.die("Missed runs must not dispatch"),
@@ -1547,6 +1562,7 @@ describe("Schedules", () => {
           const schedules = yield* make(schedulesDir, resolveTarget);
           yield* TestClock.setTime(1_000);
           yield* schedules.start({
+            withScriptActivity: (_chatId, script) => script,
             resolveTarget,
             materialize: () => Effect.void,
             prepare: () =>
@@ -1603,6 +1619,7 @@ describe("Schedules", () => {
             const schedules = yield* make(schedulesDir, resolveTarget);
             yield* TestClock.setTime(1_000);
             yield* schedules.start({
+              withScriptActivity: (_chatId, script) => script,
               resolveTarget,
               materialize: () => Effect.void,
               prepare: () => Effect.die(new Error("private SDK payload")),
@@ -1657,6 +1674,7 @@ describe("Schedules", () => {
             const schedules = yield* make(schedulesDir, resolveTarget);
             yield* TestClock.setTime(1_000);
             yield* schedules.start({
+              withScriptActivity: (_chatId, script) => script,
               resolveTarget,
               materialize: () => Effect.void,
               prepare: () => Effect.succeed({ chatId, workspaceId, cwd: AbsolutePath.make(root) }),
@@ -1750,6 +1768,7 @@ describe("Schedules", () => {
           const validSource = yield* fileSystem.readFileString(metadata);
           yield* fileSystem.writeFileString(metadata, '{"private":"invalid metadata"}');
           yield* schedules.start({
+            withScriptActivity: (_chatId, script) => script,
             resolveTarget,
             materialize: () => Effect.void,
             prepare: () => Effect.die("Disabled schedules cannot execute"),

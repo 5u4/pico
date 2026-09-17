@@ -36,6 +36,7 @@ import * as Path from "effect/Path";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 import * as ApplicationLayer from "./application.ts";
+import { unusedSchedulesLayer } from "./test-schedules.ts";
 
 const platformLayer = Layer.merge(BunFileSystem.layer, BunPath.layer);
 
@@ -346,12 +347,10 @@ describe("Application", () => {
         assert.isTrue(Option.isNone(yield* application.findChatPlatformBinding(missingChatId)));
 
         assert.deepStrictEqual(yield* application.transcript(discordChat.id), runtimeTranscript);
-        assert.deepStrictEqual(transcriptChatIds, [discordChat.id]);
         assertApplicationError(
           yield* application.transcript(missingChatId).pipe(Effect.flip),
-          "operation",
+          "not-found",
         );
-        assert.deepStrictEqual(transcriptChatIds, [discordChat.id, missingChatId]);
 
         const attachedPrompt = AgentMessage.AgentPrompt.make({
           text: "hello",
@@ -795,7 +794,9 @@ describe("Application", () => {
           Option.isNone(yield* chats.findByExternalId(regularWorkspace.id, "missing-cwd")),
         );
       }).pipe(
-        Effect.provide(ApplicationLayer.layer(gitWorktree)),
+        Effect.provide(
+          ApplicationLayer.layer(gitWorktree).pipe(Layer.provide(unusedSchedulesLayer)),
+        ),
         Effect.provide(sessionsLayer),
         Effect.provide(persistenceLayer),
         Effect.provide(runtimeLayer),
@@ -979,7 +980,9 @@ describe("Application", () => {
         });
         assert.notInclude(JSON.stringify(logs), "private cleanup details");
       }).pipe(
-        Effect.provide(ApplicationLayer.layer(gitWorktree)),
+        Effect.provide(
+          ApplicationLayer.layer(gitWorktree).pipe(Layer.provide(unusedSchedulesLayer)),
+        ),
         Effect.provide(repositories),
         Effect.provide(sessionsLayer),
         Effect.provide(runtimeLayer),

@@ -68,6 +68,132 @@ const worktreeWorkspace: Workspace.Workspace = {
 };
 
 describe("Persistence.layer", () => {
+  it.effect(
+    "retains tombstoned records and bindings while rejecting live access after reopen",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const directory = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "pico-workspace-delete-",
+        });
+        const storeFile = AbsolutePath.make(path.join(directory, "store.db"));
+        let retainedChats: readonly Chat.Chat[] = [];
+        yield* Effect.gen(function* () {
+          const workspaces = yield* WorkspaceRepository;
+          const chats = yield* ChatRepository;
+          yield* workspaces.create(worktreeWorkspace);
+          yield* workspaces.create(regularWorkspace);
+          const first = yield* chats.create({
+            id: chatId(1),
+            workspaceId: worktreeWorkspaceId,
+            cwd: worktreeCwd,
+            externalId: "retained-thread",
+            createdAt: 1,
+          });
+          const second = yield* chats.create({
+            id: chatId(2),
+            workspaceId: worktreeWorkspaceId,
+            cwd: cwdA,
+            externalId: null,
+            createdAt: 2,
+          });
+          assert.strictEqual(
+            yield* workspaces.softDelete({
+              id: worktreeWorkspaceId,
+              deletedAt: 10,
+              checkedChatIds: [first.id],
+            }),
+            "conflict",
+          );
+          assert.isTrue(Option.isSome(yield* workspaces.findById(worktreeWorkspaceId)));
+          const archived = Option.getOrThrow(yield* chats.archive(second.id, 5));
+          retainedChats = [first, archived];
+          assert.strictEqual(
+            yield* workspaces.softDelete({
+              id: worktreeWorkspaceId,
+              deletedAt: 10,
+              checkedChatIds: [first.id],
+            }),
+            "deleted",
+          );
+          assert.strictEqual(
+            yield* workspaces.softDelete({
+              id: worktreeWorkspaceId,
+              deletedAt: 20,
+              checkedChatIds: [first.id],
+            }),
+            "not-found",
+          );
+        }).pipe(Effect.provide(layer(storeFile)), Effect.scoped);
+
+        yield* Effect.gen(function* () {
+          const workspaces = yield* WorkspaceRepository;
+          const chats = yield* ChatRepository;
+          assert.deepStrictEqual(yield* workspaces.list(), [regularWorkspace]);
+          assert.isTrue(Option.isNone(yield* workspaces.findById(worktreeWorkspaceId)));
+          assert.isTrue(
+            Option.isNone(
+              yield* workspaces.findByBinding({
+                platform: "discord",
+                externalId: worktreeWorkspace.externalId ?? "",
+              }),
+            ),
+          );
+          assert.isTrue(
+            Option.isNone(
+              yield* workspaces.getOrCreateByBinding({
+                ...worktreeWorkspace,
+                id: secondWorkspaceId,
+                platform: "discord",
+                externalId: "9007199254740993.10",
+              }),
+            ),
+          );
+          for (const retained of retainedChats) {
+            assert.deepStrictEqual(Option.getOrThrow(yield* chats.findById(retained.id)), retained);
+          }
+          assert.deepStrictEqual(
+            Option.getOrThrow(
+              yield* chats.findByExternalId(worktreeWorkspaceId, "retained-thread"),
+            ),
+            retainedChats[0],
+          );
+          assert.instanceOf(
+            yield* workspaces
+              .replaceConfiguration(worktreeWorkspaceId, {
+                defaultCwd: cwdB,
+                worktree: null,
+              })
+              .pipe(Effect.flip),
+            PersistenceError,
+          );
+          assert.instanceOf(
+            yield* workspaces
+              .setModelOverride(worktreeWorkspaceId, {
+                provider: "test",
+                id: "deleted",
+              })
+              .pipe(Effect.flip),
+            PersistenceError,
+          );
+          assert.instanceOf(
+            yield* chats
+              .create({
+                id: chatId(3),
+                workspaceId: worktreeWorkspaceId,
+                cwd: cwdB,
+                externalId: null,
+                createdAt: 3,
+              })
+              .pipe(Effect.flip),
+            PersistenceError,
+          );
+          assert.isTrue(Option.isNone(yield* chats.findById(chatId(3))));
+        }).pipe(Effect.provide(layer(storeFile)), Effect.scoped);
+      }).pipe(Effect.provide(platformLayer)),
+  );
+
   it.effect("upgrades existing workspaces and enforces nullable model pairs across reopen", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
@@ -259,16 +385,17 @@ describe("Persistence.layer", () => {
             { concurrency: "unbounded" },
           );
           assert.deepStrictEqual(first, second);
-          const winner = first.id === firstCandidate.id ? firstCandidate : secondCandidate;
-          const loser = first.id === firstCandidate.id ? secondCandidate : firstCandidate;
-          assert.deepStrictEqual(first, winner);
+          const existing = Option.getOrThrow(first);
+          const winner = existing.id === firstCandidate.id ? firstCandidate : secondCandidate;
+          const loser = existing.id === firstCandidate.id ? secondCandidate : firstCandidate;
+          assert.deepStrictEqual(existing, winner);
           assert.deepStrictEqual(
             Option.getOrThrow(yield* workspaces.findByBinding(binding)),
             winner,
           );
           assert.isTrue(Option.isNone(yield* workspaces.findById(loser.id)));
 
-          const changed = yield* workspaces.replaceConfiguration(first.id, {
+          const changed = yield* workspaces.replaceConfiguration(existing.id, {
             defaultCwd: cwdB,
             worktree: { branch: "release", prefix: "bound/" },
           });
@@ -280,7 +407,7 @@ describe("Persistence.layer", () => {
               defaultCwd: cwdA,
               worktree: null,
             }),
-            changed,
+            Option.some(changed),
           );
           assert.instanceOf(
             yield* Effect.flip(
@@ -460,9 +587,7 @@ describe("Persistence.layer", () => {
           }),
         );
         assert.instanceOf(foreignKey, PersistenceError);
-        assert.include(foreignKey.message, "chat.create");
-        assert.include(foreignKey.message, "ConstraintError");
-        assert.match(foreignKey.message, /SQLite code \d+/);
+        assert.isTrue(Option.isNone(yield* chats.findById(chatId(6))));
         assert.notInclude(foreignKey.message, worktreeCwd);
 
         const externalChat = yield* chats.create({

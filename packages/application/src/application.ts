@@ -61,7 +61,8 @@ const failure =
       message:
         cause instanceof AgentError ||
         cause instanceof GitError ||
-        cause instanceof PersistenceError
+        cause instanceof PersistenceError ||
+        cause instanceof Schedule.ScheduleError
           ? `${message}: ${cause.message}`
           : message,
     });
@@ -76,12 +77,13 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
   const chats = yield* ChatRepository;
   const sessions = yield* AgentSessionStore;
   const runtime = yield* AgentRuntime;
+  const schedules = yield* Schedule.Schedules;
   const crypto = yield* Crypto.Crypto;
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const scope = yield* Effect.scope;
   type Operation =
-    | { readonly kind: "ordinary" | "captured" }
+    | { readonly kind: "ordinary" | "captured" | "script" }
     | { readonly kind: "btw"; readonly cancelled: Deferred.Deferred<void> };
   type ActiveOperation = Operation & { readonly finished: Deferred.Deferred<void> };
   const activeOperations = new Map<Chat.ChatId, Set<ActiveOperation>>();
@@ -115,7 +117,8 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
   const serialized = <A, E, R>(
     chatId: string,
     effect: Effect.Effect<A, E, R>,
-  ): Effect.Effect<A, E, R> =>
+    wait = true,
+  ): Effect.Effect<A, E | ApplicationError, R> =>
     Effect.acquireUseRelease(
       Effect.sync(() => {
         const existing = chatLocks.get(chatId);
@@ -127,7 +130,23 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
         chatLocks.set(chatId, created);
         return created;
       }),
-      (entry) => entry.semaphore.withPermit(effect),
+      (entry) =>
+        wait
+          ? entry.semaphore.withPermit(effect)
+          : entry.semaphore
+              .withPermitsIfAvailable(1)(effect)
+              .pipe(
+                Effect.flatMap((result) =>
+                  Option.isSome(result)
+                    ? Effect.succeed(result.value)
+                    : Effect.fail(
+                        new ApplicationError({
+                          reason: "conflict",
+                          message: "Workspace has active chat work. Try again when it finishes.",
+                        }),
+                      ),
+                ),
+              ),
       (entry) =>
         Effect.sync(() => {
           entry.users -= 1;
@@ -142,6 +161,12 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
     if (Option.isNone(chat)) {
       return yield* new ApplicationError({ reason: "not-found", message: "Chat not found" });
     }
+    const workspace = yield* workspaces
+      .findById(chat.value.workspaceId)
+      .pipe(Effect.mapError(failure("Failed to find chat workspace")));
+    if (Option.isNone(workspace)) {
+      return yield* new ApplicationError({ reason: "not-found", message: "Workspace not found" });
+    }
     return chat.value;
   });
 
@@ -149,12 +174,9 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
     chatId: Chat.ChatId,
     errorMessage: string,
   ) {
-    const chat = yield* chats.findById(chatId).pipe(Effect.mapError(failure(errorMessage)));
-    if (Option.isNone(chat)) {
-      return yield* new ApplicationError({ reason: "not-found", message: "Chat not found" });
-    }
-    if (chat.value.archivedAt !== null) return yield* new ChatClosed();
-    return chat.value;
+    const chat = yield* findChat(chatId).pipe(Effect.mapError(failure(errorMessage)));
+    if (chat.archivedAt !== null) return yield* new ChatClosed();
+    return chat;
   });
 
   const listWorkspaces = Effect.fn("Application.listWorkspaces")(
@@ -211,16 +233,101 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
       .pipe(Effect.mapError(failure("Failed to update workspace")));
   });
 
+  const deleteWorkspace = Effect.fn("Application.deleteWorkspace")(
+    function* (workspaceId: Workspace.WorkspaceId) {
+      if (Option.isNone(yield* workspaces.findById(workspaceId))) {
+        return yield* new ApplicationError({ reason: "not-found", message: "Workspace not found" });
+      }
+      const openChats = yield* chats.listOpenByWorkspace(workspaceId);
+      const checkedChatIds = openChats.map((chat) => chat.id).sort();
+      let deletion = Effect.gen(function* () {
+        for (const chatId of checkedChatIds) {
+          const chat = yield* findChat(chatId);
+          if (chat.archivedAt !== null) continue;
+          if ((activeOperations.get(chatId)?.size ?? 0) > 0) {
+            return yield* new ApplicationError({
+              reason: "conflict",
+              message: "Workspace has active chat work. Try again when it finishes.",
+            });
+          }
+          if ((yield* runtime.transcript(chatId)).messages.length > 0) {
+            return yield* new ApplicationError({
+              reason: "conflict",
+              message: "Archive chats with messages before deleting this workspace.",
+            });
+          }
+        }
+        yield* schedules.withCurrentTargets((targets) =>
+          Effect.gen(function* () {
+            for (const target of targets) {
+              let targetWorkspaceId: Workspace.WorkspaceId;
+              if (target.kind === "workspace") {
+                targetWorkspaceId = target.workspaceId;
+              } else {
+                const chat = yield* chats.findById(target.chatId);
+                if (Option.isNone(chat)) {
+                  return yield* new ApplicationError({
+                    reason: "operation",
+                    message:
+                      "Cannot verify a schedule's chat target. Remove or repair that schedule first.",
+                  });
+                }
+                targetWorkspaceId = chat.value.workspaceId;
+              }
+              if (targetWorkspaceId === workspaceId) {
+                return yield* new ApplicationError({
+                  reason: "conflict",
+                  message:
+                    "Remove schedules targeting this workspace or its chats before deleting it, including disabled schedules.",
+                });
+              }
+            }
+            const outcome = yield* workspaces.softDelete({
+              id: workspaceId,
+              deletedAt: yield* Clock.currentTimeMillis,
+              checkedChatIds,
+            });
+            if (outcome === "not-found") {
+              return yield* new ApplicationError({
+                reason: "not-found",
+                message: "Workspace not found",
+              });
+            }
+            if (outcome === "conflict") {
+              return yield* new ApplicationError({
+                reason: "conflict",
+                message: "Workspace chats changed while deleting. Try again.",
+              });
+            }
+          }),
+        );
+      }).pipe(Effect.mapError(failure("Failed to delete workspace")));
+      for (let index = checkedChatIds.length - 1; index >= 0; index -= 1) {
+        const chatId = checkedChatIds[index];
+        if (chatId !== undefined) deletion = serialized(chatId, deletion, false);
+      }
+      yield* deletion;
+    },
+    Effect.mapError(failure("Failed to delete workspace")),
+  );
+
   const getOrCreateWorkspaceByBinding = Effect.fn("Application.getOrCreateWorkspaceByBinding")(
     function* (input: Extract<CreateWorkspace, { readonly externalId: string }>) {
       const id = Workspace.WorkspaceId.make(yield* crypto.randomUUIDv7);
       const createdAt = yield* Clock.currentTimeMillis;
-      return yield* workspaces.getOrCreateByBinding({
+      const workspace = yield* workspaces.getOrCreateByBinding({
         ...input,
         modelOverride: null,
         id,
         createdAt,
       });
+      if (Option.isNone(workspace)) {
+        return yield* new ApplicationError({
+          reason: "conflict",
+          message: "This platform binding belongs to a deleted workspace.",
+        });
+      }
+      return workspace.value;
     },
     Effect.mapError(failure("Failed to get or create workspace")),
   );
@@ -467,8 +574,7 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
           message: "Scheduled chat identity belongs to another workspace",
         });
       }
-      if (existing.value.archivedAt !== null) return yield* new ChatClosed();
-      return existing.value;
+      return yield* ensureChatOpen(chatId, "Failed to create scheduled chat");
     }
     return yield* createChatWithId(
       { workspaceId, externalId: null },
@@ -533,6 +639,7 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
 
   const transcript = Effect.fn("Application.transcript")(
     function* (chatId: Chat.ChatId) {
+      yield* findChat(chatId);
       return yield* runtime.transcript(chatId);
     },
     Effect.mapError(failure("Failed to read transcript")),
@@ -763,13 +870,8 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
   });
 
   const abort = Effect.fn("Application.abort")(function* (chatId: Chat.ChatId) {
-    const chat = yield* chats
-      .findById(chatId)
-      .pipe(Effect.mapError(failure("Failed to abort chat")));
-    if (Option.isNone(chat)) {
-      return yield* new ApplicationError({ reason: "not-found", message: "Chat not found" });
-    }
-    if (chat.value.archivedAt !== null) return;
+    const chat = yield* findChat(chatId);
+    if (chat.archivedAt !== null) return;
     yield* runtime.abort(chatId).pipe(Effect.mapError(failure("Failed to abort chat")));
   });
 
@@ -823,6 +925,7 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
     listWorkspaces,
     createWorkspace,
     updateWorkspace,
+    deleteWorkspace,
     getOrCreateWorkspaceByBinding,
     bindWorkspace,
     availableWorkspaceModels,
@@ -1021,6 +1124,24 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
     }, Effect.mapError(scheduleHostError));
 
     return {
+      withScriptActivity: <A, E, R>(chatId: Chat.ChatId, script: Effect.Effect<A, E, R>) =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const operationScope = yield* Effect.scope;
+            const operation = yield* serialized(
+              chatId,
+              Effect.gen(function* () {
+                yield* ensureChatOpen(chatId, "Failed to run scheduled script");
+                return yield* Effect.uninterruptible(
+                  trackOperation(chatId, { kind: "script" }, script).pipe(
+                    Effect.forkIn(operationScope),
+                  ),
+                );
+              }),
+            ).pipe(Effect.mapError(scheduleHostError));
+            return yield* Fiber.join(operation);
+          }),
+        ),
       resolveTarget,
       prepare,
       materialize,

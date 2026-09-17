@@ -95,6 +95,7 @@ const workspaceLayer = (findById: WorkspaceRepository["Service"]["findById"]) =>
   Layer.succeed(
     WorkspaceRepository,
     WorkspaceRepository.of({
+      softDelete: () => Effect.die("unexpected workspace deletion"),
       list: () => Effect.die("unexpected workspace list"),
       create: () => Effect.die("unexpected workspace create"),
       getOrCreateByBinding: () => Effect.die("unexpected bound workspace creation"),
