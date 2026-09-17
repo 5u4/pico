@@ -31,6 +31,7 @@ import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
 import type * as HttpClient from "effect/unstable/http/HttpClient";
+import type { AcknowledgementIntent, InteractionAcknowledger } from "./discord-acknowledgement.ts";
 import * as DiscordBtw from "./discord-btw.ts";
 import * as DiscordCommand from "./discord-command.ts";
 import { discordError, promiseBoundary, reportFailure } from "./discord-error.ts";
@@ -49,7 +50,9 @@ export interface DiscordChannel {
 }
 
 export interface DiscordInteraction {
-  readonly id?: bigint;
+  readonly id: bigint;
+  readonly token: string;
+  acknowledged: boolean;
   readonly type: InteractionTypes;
   readonly guildId?: bigint;
   readonly channelId?: bigint;
@@ -60,8 +63,6 @@ export interface DiscordInteraction {
     readonly customId?: string;
     readonly options?: ReadonlyArray<DiscordCommand.CommandOption>;
   };
-  readonly defer: (isPrivate?: boolean) => Promise<unknown>;
-  readonly deferEdit: () => Promise<unknown>;
   readonly edit: (options: InteractionCallbackData) => Promise<unknown>;
   readonly respond: (options: InteractionCallbackData) => Promise<unknown>;
 }
@@ -165,6 +166,7 @@ export const install = Effect.fn("DiscordInput.install")(function* <
 >(
   bot: DiscordInputBot<Message, Interaction>,
   config: DiscordConfig,
+  acknowledgeInteraction: InteractionAcknowledger<Interaction>,
   drainOutput: () => Effect.Effect<void> = () => Effect.void,
   httpClient?: HttpClient.HttpClient,
 ) {
@@ -1248,7 +1250,7 @@ export const install = Effect.fn("DiscordInput.install")(function* <
             component: "discord",
             eventType: "interactionCreate",
             command: name,
-            interactionId: interaction.id?.toString(),
+            interactionId: interaction.id.toString(),
             guildId: interaction.guildId?.toString(),
             channelId: interaction.channelId?.toString(),
           }),
@@ -1283,11 +1285,14 @@ export const install = Effect.fn("DiscordInput.install")(function* <
               )) === undefined
             : false;
         yield* Effect.annotateLogsScoped({ phase: "defer" });
-        yield* promiseBoundary("defer-interaction", () =>
+        const acknowledgementIntent: AcknowledgementIntent =
           closeNonce === undefined
-            ? interaction.defer(name !== "btw" || btwClosed)
-            : interaction.deferEdit(),
-        );
+            ? {
+                kind: "reply",
+                visibility: name !== "btw" || btwClosed ? "private" : "public",
+              }
+            : { kind: "update-source-message" };
+        yield* acknowledgeInteraction(interaction, acknowledgementIntent);
         yield* Effect.annotateLogsScoped({ phase: "request" });
         if (btwClosed) return yield* editInteraction(interaction, closedMessage);
         const command =
@@ -1331,7 +1336,7 @@ export const install = Effect.fn("DiscordInput.install")(function* <
           component: "discord",
           eventType: "interactionCreate",
           command: closeNonce === undefined ? name : "close-confirmation",
-          interactionId: interaction.id?.toString(),
+          interactionId: interaction.id.toString(),
           guildId: interaction.guildId?.toString(),
           channelId: interaction.channelId?.toString(),
         }),

@@ -13,6 +13,7 @@ import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as FetchHttpClient from "effect/unstable/http/FetchHttpClient";
 import * as HttpClient from "effect/unstable/http/HttpClient";
+import * as DiscordAcknowledgement from "./discord-acknowledgement.ts";
 import * as DiscordCommand from "./discord-command.ts";
 import { DiscordError, discordError, promiseBoundary, reportFailure } from "./discord-error.ts";
 import * as DiscordInput from "./discord-input.ts";
@@ -304,9 +305,11 @@ const start = Effect.fn("Discord.start")(function* (
     triggerTyping: (threadId) =>
       promiseBoundary("trigger-typing", () => bot.helpers.triggerTypingIndicator(threadId)),
   };
+  const acknowledgeInteraction = DiscordAcknowledgement.make(bot.helpers.sendInteractionResponse);
   const { resolveThreadId, schedule } = yield* DiscordInput.install<InputMessage, InputInteraction>(
     bot,
     config,
+    acknowledgeInteraction,
     () => eventRouter.drain(),
     httpClient,
   );

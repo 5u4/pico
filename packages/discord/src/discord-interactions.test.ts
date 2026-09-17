@@ -15,8 +15,10 @@ import {
   ApplicationCommandOptionTypes,
   ButtonStyles,
   ChannelTypes,
+  InteractionResponseTypes,
   InteractionTypes,
   MessageComponentTypes,
+  MessageFlags,
 } from "discordeno";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -24,7 +26,10 @@ import * as Fiber from "effect/Fiber";
 import * as Logger from "effect/Logger";
 import * as Option from "effect/Option";
 import * as TestClock from "effect/testing/TestClock";
+import type { InteractionAcknowledger } from "./discord-acknowledgement.ts";
+import * as DiscordAcknowledgement from "./discord-acknowledgement.ts";
 import {
+  acknowledgeInteraction,
   bindOptions,
   boundWorkspace,
   chatId,
@@ -67,6 +72,7 @@ const installThreadInput = Effect.fn("test.installThreadInput")(function* (optio
   readonly getChannel?: DiscordInputBot["helpers"]["getChannel"];
   readonly editChannel?: DiscordInputBot["helpers"]["editChannel"];
   readonly drainOutput?: () => Effect.Effect<void>;
+  readonly acknowledger: InteractionAcknowledger;
 }) {
   const bot: DiscordInputBot = {
     id: 999n,
@@ -141,7 +147,7 @@ const installThreadInput = Effect.fn("test.installThreadInput")(function* (optio
     contextUsage: () => Effect.die("unexpected context read"),
     shake: () => Effect.die("unexpected shake"),
   });
-  yield* install(bot, config, options.drainOutput).pipe(
+  yield* install(bot, config, options.acknowledger, options.drainOutput).pipe(
     Effect.provideService(Application, application),
     Effect.provide(BunCrypto.layer),
   );
@@ -178,6 +184,7 @@ describe("discord interactions", () => {
           let writes = 0;
           let catalogUnavailable = false;
           const bot = yield* installThreadInput({
+            acknowledger: acknowledgeInteraction,
             availableWorkspaceModels: () =>
               catalogUnavailable
                 ? Effect.fail(
@@ -274,6 +281,7 @@ describe("discord interactions", () => {
           [25n, ChannelTypes.DM],
         ]);
         const bot = yield* installThreadInput({
+          acknowledger: acknowledgeInteraction,
           getChannel: async (id) => ({
             id,
             guildId: id === 26n ? 2n : 1n,
@@ -326,7 +334,11 @@ describe("discord interactions", () => {
     Effect.scoped(
       Effect.gen(function* () {
         const calls: string[] = [];
+        const recordAcknowledgement = DiscordAcknowledgement.make(async () => {
+          calls.push("acknowledge");
+        });
         const bot = yield* installThreadInput({
+          acknowledger: recordAcknowledgement,
           availableModels: () =>
             Effect.sync(() => {
               calls.push("models");
@@ -340,9 +352,6 @@ describe("discord interactions", () => {
         const stale = interaction({
           channelId: 20n,
           data: { name: "switch", options: modelOptions("model", true) },
-          defer: async () => {
-            calls.push("defer");
-          },
           edit: async () => {
             calls.push("edit");
           },
@@ -371,6 +380,7 @@ describe("discord interactions", () => {
           const selected = { provider: "native", id: "thread-model", name: "Thread model" };
           let active = "original";
           const bot = yield* installThreadInput({
+            acknowledger: acknowledgeInteraction,
             availableModels: (id) => Effect.succeed(id === chatId ? [selected] : []),
             switchModel: (id, model) =>
               Effect.sync(() => {
@@ -426,6 +436,7 @@ describe("discord interactions", () => {
           let catalogReads = 0;
           let switches = 0;
           const bot = yield* installThreadInput({
+            acknowledger: acknowledgeInteraction,
             getChannel: async (id) =>
               id === 23n
                 ? { id, guildId: 1n, type: ChannelTypes.PublicThread }
@@ -494,6 +505,7 @@ describe("discord interactions", () => {
         };
         const logs: Array<ReturnType<typeof Logger.formatStructured.log>> = [];
         const bot = yield* installThreadInput({
+          acknowledger: acknowledgeInteraction,
           availableModels: () => Effect.succeed([model]),
           switchModel: () => Effect.succeed({ kind: "persistence-unconfirmed", model }),
         }).pipe(
@@ -535,6 +547,7 @@ describe("discord interactions", () => {
           const model = { provider: "native", id: "model", name: "Model" };
           let closed = false;
           const bot = yield* installThreadInput({
+            acknowledger: acknowledgeInteraction,
             availableModels: () => Effect.succeed([model]),
             switchModel: () =>
               closed
@@ -572,7 +585,15 @@ describe("discord interactions", () => {
         const answer = `${"Answer ".repeat(700)}last-answer-marker`;
         const publicMessages: Array<{ kind: "edit" | "followup"; content: string }> = [];
         let deferred = false;
+        const acknowledgePublic = DiscordAcknowledgement.make(async (_id, _token, response) => {
+          assert.deepStrictEqual(response, {
+            type: InteractionResponseTypes.DeferredChannelMessageWithSource,
+            data: {},
+          });
+          deferred = true;
+        });
         const bot = yield* installThreadInput({
+          acknowledger: acknowledgePublic,
           sendMessage: (_id, prompt) =>
             Deferred.succeed(prompt.text === "main" ? mainStarted : laterSent, undefined).pipe(
               Effect.as({ kind: "started", completed: Deferred.await(mainFinished) }),
@@ -610,10 +631,6 @@ describe("discord interactions", () => {
                 },
               ],
             },
-            defer: async (isPrivate) => {
-              assert.isFalse(isPrivate);
-              deferred = true;
-            },
             edit: (response) => receive("edit", response),
             respond: (response) => receive("followup", response),
           }),
@@ -647,6 +664,7 @@ describe("discord interactions", () => {
             const answer = "The complete answer.";
             const order: string[] = [];
             const bot = yield* installThreadInput({
+              acknowledger: acknowledgeInteraction,
               askBtw: () =>
                 Deferred.succeed(asked, undefined).pipe(
                   Effect.andThen(
@@ -721,7 +739,13 @@ describe("discord interactions", () => {
         const closeReplied = yield* Deferred.make<void>();
         const releaseDefer = Promise.withResolvers<void>();
         const order: string[] = [];
+        const pendingAcknowledgement = DiscordAcknowledgement.make((_id, token) => {
+          if (token !== "pending") return Promise.resolve(undefined);
+          Effect.runSync(Deferred.succeed(deferStarted, undefined));
+          return releaseDefer.promise;
+        });
         const bot = yield* installThreadInput({
+          acknowledger: pendingAcknowledgement,
           askBtw: () => Effect.fail(new ChatClosed()),
           closeChat: () =>
             Effect.sync(() => {
@@ -736,6 +760,7 @@ describe("discord interactions", () => {
         yield* Effect.gen(function* () {
           interactionHandlerFor(bot)(
             interaction({
+              token: "pending",
               channelId: 20n,
               data: {
                 name: "btw",
@@ -746,10 +771,6 @@ describe("discord interactions", () => {
                     value: "Explain this",
                   },
                 ],
-              },
-              defer: async () => {
-                Effect.runSync(Deferred.succeed(deferStarted, undefined));
-                await releaseDefer.promise;
               },
               edit: async (response) => {
                 assert.include(response.content ?? "", "closed");
@@ -790,7 +811,18 @@ describe("discord interactions", () => {
         const deferrals: boolean[] = [];
         const publicFollowups: string[] = [];
         let asked = 0;
+        const pendingAcknowledgement = DiscordAcknowledgement.make((_id, token, response) => {
+          if (token !== "pending") return Promise.resolve(undefined);
+          assert.deepStrictEqual(response, {
+            type: InteractionResponseTypes.DeferredChannelMessageWithSource,
+            data: { flags: MessageFlags.Ephemeral },
+          });
+          deferrals.push(true);
+          Effect.runSync(Deferred.succeed(sideDeferred, undefined));
+          return releaseDefer.promise;
+        });
         const bot = yield* installThreadInput({
+          acknowledger: pendingAcknowledgement,
           askBtw: () =>
             Effect.sync(() => {
               asked += 1;
@@ -815,6 +847,7 @@ describe("discord interactions", () => {
           yield* Deferred.await(archiveStarted);
           interactionHandlerFor(bot)(
             interaction({
+              token: "pending",
               channelId: 20n,
               data: {
                 name: "btw",
@@ -825,11 +858,6 @@ describe("discord interactions", () => {
                     value: "Explain this",
                   },
                 ],
-              },
-              defer: async (isPrivate) => {
-                deferrals.push(isPrivate === true);
-                Effect.runSync(Deferred.succeed(sideDeferred, undefined));
-                await releaseDefer.promise;
               },
               edit: async (response) => {
                 Effect.runSync(Deferred.succeed(sideReplied, response.content ?? ""));
@@ -873,6 +901,7 @@ describe("discord interactions", () => {
           const archived = yield* Deferred.make<void>();
           const logs: Array<ReturnType<typeof Logger.formatStructured.log>> = [];
           const bot = yield* installThreadInput({
+            acknowledger: acknowledgeInteraction,
             askBtw: (_id, question) => {
               if (question === "cancel") return Effect.interrupt;
               if (question === "closed") return Effect.fail(new ChatClosed());
@@ -916,9 +945,6 @@ describe("discord interactions", () => {
                       },
                     ],
                   },
-                  defer: async (isPrivate) => {
-                    assert.isFalse(isPrivate);
-                  },
                   edit: async (response) => {
                     resolve(response.content ?? "");
                   },
@@ -952,6 +978,7 @@ describe("discord interactions", () => {
       Effect.gen(function* () {
         let asked = false;
         const bot = yield* installThreadInput({
+          acknowledger: acknowledgeInteraction,
           askBtw: () =>
             Effect.sync(() => {
               asked = true;
@@ -1117,8 +1144,16 @@ describe("discord interactions", () => {
           shake: () => Effect.die("unexpected chat shake"),
           closeChat: () => Effect.die("unexpected chat close"),
         });
+        let acknowledgements = 0;
+        const acknowledgeBind = DiscordAcknowledgement.make(async (_id, _token, response) => {
+          assert.deepStrictEqual(response, {
+            type: InteractionResponseTypes.DeferredChannelMessageWithSource,
+            data: { flags: MessageFlags.Ephemeral },
+          });
+          acknowledgements += 1;
+        });
 
-        yield* install(bot, config).pipe(
+        yield* install(bot, config, acknowledgeBind).pipe(
           Effect.provideService(Application, application),
           Effect.provide(BunCrypto.layer),
         );
@@ -1126,9 +1161,6 @@ describe("discord interactions", () => {
         const invoke = (overrides: Partial<DiscordInteraction> = {}, omittedId?: "channelId") =>
           new Promise<string>((resolve) => {
             const candidate = interaction({
-              defer: async (isPrivate) => {
-                assert.isTrue(isPrivate);
-              },
               edit: async (options) => {
                 assert.deepStrictEqual(options.allowedMentions, {
                   parse: [],
@@ -1199,24 +1231,18 @@ describe("discord interactions", () => {
           "Workspace worktrees configured from /repo. This affects new chats only.",
         );
 
-        let ignoredDefers = 0;
+        const acknowledgementsBeforeIgnored = acknowledgements;
         handleInteraction(
           interaction({
             type: InteractionTypes.Ping,
-            defer: async () => {
-              ignoredDefers += 1;
-            },
           }),
         );
         handleInteraction(
           interaction({
             data: { name: "other", options: bindOptions("/repo") },
-            defer: async () => {
-              ignoredDefers += 1;
-            },
           }),
         );
-        assert.strictEqual(ignoredDefers, 0);
+        assert.strictEqual(acknowledgements, acknowledgementsBeforeIgnored);
       }),
     ),
   );
@@ -1225,7 +1251,7 @@ describe("discord interactions", () => {
     Effect.scoped(
       Effect.gen(function* () {
         const shakes: Array<[Chat.ChatId, string]> = [];
-        let privateDefers = 0;
+        let privateAcknowledgements = 0;
         const bot = {
           id: 999n,
           events: {},
@@ -1328,8 +1354,15 @@ describe("discord interactions", () => {
           },
           closeChat: () => Effect.die("unexpected chat close"),
         });
+        const acknowledgePrivate = DiscordAcknowledgement.make(async (_id, _token, response) => {
+          assert.deepStrictEqual(response, {
+            type: InteractionResponseTypes.DeferredChannelMessageWithSource,
+            data: { flags: MessageFlags.Ephemeral },
+          });
+          privateAcknowledgements += 1;
+        });
 
-        yield* install(bot, config).pipe(
+        yield* install(bot, config, acknowledgePrivate).pipe(
           Effect.provideService(Application, application),
           Effect.provide(BunCrypto.layer),
         );
@@ -1343,10 +1376,6 @@ describe("discord interactions", () => {
               interaction({
                 channelId,
                 data: options === undefined ? { name: "shake" } : { name: "shake", options },
-                defer: async (isPrivate) => {
-                  assert.isTrue(isPrivate);
-                  privateDefers += 1;
-                },
                 edit: async (response) => {
                   assert.deepStrictEqual(response.allowedMentions, {
                     parse: [],
@@ -1400,7 +1429,7 @@ describe("discord interactions", () => {
           yield* Effect.promise(() => invoke(22n)),
           "pico could not shake this chat.",
         );
-        assert.strictEqual(privateDefers, 8);
+        assert.strictEqual(privateAcknowledgements, 8);
         assert.deepStrictEqual(shakes, [
           [chatId, "elide"],
           [chatId, "images"],
@@ -1416,7 +1445,7 @@ describe("discord interactions", () => {
       Effect.gen(function* () {
         const unavailableChatId = Chat.ChatId.make("018f47a0-0000-7000-8000-000000000004");
         const contextReads: Array<Chat.ChatId> = [];
-        let privateDefers = 0;
+        let privateAcknowledgements = 0;
         const bot = {
           id: 999n,
           events: {},
@@ -1518,8 +1547,15 @@ describe("discord interactions", () => {
           shake: () => Effect.die("unexpected chat shake"),
           closeChat: () => Effect.die("unexpected chat close"),
         });
+        const acknowledgePrivate = DiscordAcknowledgement.make(async (_id, _token, response) => {
+          assert.deepStrictEqual(response, {
+            type: InteractionResponseTypes.DeferredChannelMessageWithSource,
+            data: { flags: MessageFlags.Ephemeral },
+          });
+          privateAcknowledgements += 1;
+        });
 
-        yield* install(bot, config).pipe(
+        yield* install(bot, config, acknowledgePrivate).pipe(
           Effect.provideService(Application, application),
           Effect.provide(BunCrypto.layer),
         );
@@ -1531,10 +1567,6 @@ describe("discord interactions", () => {
                 guildId,
                 channelId,
                 data: { name: "context" },
-                defer: async (isPrivate) => {
-                  assert.isTrue(isPrivate);
-                  privateDefers += 1;
-                },
                 edit: async (response) => {
                   assert.deepStrictEqual(response.allowedMentions, {
                     parse: [],
@@ -1572,7 +1604,7 @@ describe("discord interactions", () => {
           "pico could not read this chat's context.",
         );
         assert.deepStrictEqual(contextReads, [chatId, chatId, unavailableChatId, failingChatId]);
-        assert.strictEqual(privateDefers, 9);
+        assert.strictEqual(privateAcknowledgements, 9);
       }),
     ),
   );
@@ -1661,7 +1693,7 @@ describe("discord interactions", () => {
           shake: () => Effect.die("unexpected chat shake"),
           closeChat: () => Effect.die("unexpected chat close"),
         });
-        yield* install(bot, config).pipe(
+        yield* install(bot, config, acknowledgeInteraction).pipe(
           Effect.provideService(Application, application),
           Effect.provide(BunCrypto.layer),
           Effect.provide(Logger.layer([logger])),
@@ -1674,9 +1706,6 @@ describe("discord interactions", () => {
                 channelId,
                 guildId,
                 data: { name: "abort" },
-                defer: async (isPrivate) => {
-                  assert.isTrue(isPrivate);
-                },
                 edit: async (response) => {
                   assert.deepStrictEqual(response.allowedMentions, {
                     parse: [],
@@ -1812,8 +1841,21 @@ describe("discord interactions", () => {
           contextUsage: () => Effect.die("unexpected context read"),
           shake: () => Effect.die("unexpected chat shake"),
         });
+        const acknowledgeClose = DiscordAcknowledgement.make(async (_id, _token, response) => {
+          if (response.type === InteractionResponseTypes.DeferredUpdateMessage) {
+            assert.deepStrictEqual(response, {
+              type: InteractionResponseTypes.DeferredUpdateMessage,
+            });
+            componentDeferrals += 1;
+            return;
+          }
+          assert.deepStrictEqual(response, {
+            type: InteractionResponseTypes.DeferredChannelMessageWithSource,
+            data: { flags: MessageFlags.Ephemeral },
+          });
+        });
 
-        yield* install(bot, config, () =>
+        yield* install(bot, config, acknowledgeClose, () =>
           Effect.gen(function* () {
             order.push("drain-start");
             yield* Deferred.succeed(drainStarted, undefined);
@@ -1832,9 +1874,6 @@ describe("discord interactions", () => {
               interaction({
                 channelId: 20n,
                 data: { name: "close" },
-                deferEdit: async () => {
-                  componentDeferrals += 1;
-                },
                 edit: async (options) => {
                   order.push("reply");
                   resolve(options);
