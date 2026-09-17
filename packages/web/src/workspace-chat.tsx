@@ -39,7 +39,7 @@ import { Button } from "./components/ui/button.tsx";
 import { type ConversationPage, type Page, pageFromMatches } from "./routes.tsx";
 import { formatScheduleTime, presentSchedule } from "./schedule-presentation.ts";
 import { applyThemePreference, readBootstrappedTheme, type Theme } from "./theme.ts";
-import { errorMessage, presentTranscript } from "./transcript-presentation.ts";
+import { errorMessage, presentTodo, presentTranscript } from "./transcript-presentation.ts";
 
 type State = ReturnType<typeof FrontendState.make>;
 interface DraftValue {
@@ -584,6 +584,7 @@ export function WorkspaceChat({
               snapshot: get(state.transcript(chatId)),
               live: get(state.live(chatId)),
               contextUsage: get(state.contextUsage(chatId)),
+              todo: get(state.todo(chatId)),
               sending: get(state.send(chatId)),
               stopping: get(state.abort(chatId)),
             }
@@ -1578,6 +1579,11 @@ export function WorkspaceChat({
           canSubmit: available && !!selected && !creating && selected.value.text.trim().length > 0,
           statusLabel,
         };
+  const todo = conversation
+    ? Option.getOrElse(AsyncResult.value(conversation.todo), () => ({
+        kind: "unavailable" as const,
+      }))
+    : { kind: "unavailable" as const };
   const transcript: TranscriptPresentation =
     content.kind === "error"
       ? {
@@ -1605,6 +1611,7 @@ export function WorkspaceChat({
                 conversation.live,
                 conversationEntry.disclosures,
                 connection,
+                todo,
               )
             : conversationEntry
               ? {
@@ -1744,6 +1751,7 @@ export function WorkspaceChat({
           onCloseChatDismiss={dismissCloseChat}
           onCloseChatRetry={retryCloseChat}
           composer={composer}
+          todo={presentTodo(todo, conversationEntry?.disclosures.get("todo-dock") ?? false)}
           shakeEnabled={available && page.kind === "chat" && selected?.target.kind === "chat"}
           onShake={shake}
           shakeFeedback={

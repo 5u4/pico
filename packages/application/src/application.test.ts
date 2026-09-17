@@ -57,6 +57,7 @@ const runtimeTranscript: TranscriptSnapshot = {
     },
   ],
   contextUsage: { kind: "unavailable" },
+  todo: { kind: "ready", phases: [] },
 };
 
 const assertApplicationError = (

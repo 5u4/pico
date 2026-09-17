@@ -199,6 +199,26 @@ export type TranscriptPresentation =
       readonly liveLabel: string;
     };
 
+export interface TodoTaskPresentation {
+  readonly content: string;
+  readonly status: {
+    readonly kind: "pending" | "in_progress" | "completed" | "abandoned" | "blocked";
+    readonly label: string;
+  };
+  readonly blocker: string | null;
+}
+
+export interface TodoPresentation {
+  readonly completed: number;
+  readonly total: number;
+  readonly summary: string;
+  readonly open: boolean;
+  readonly phases: readonly {
+    readonly name: string;
+    readonly tasks: readonly TodoTaskPresentation[];
+  }[];
+}
+
 export type ComposerPresentation =
   | {
       readonly mode: "send";

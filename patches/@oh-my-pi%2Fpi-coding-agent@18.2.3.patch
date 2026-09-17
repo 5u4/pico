@@ -1,3 +1,9 @@
+diff --git a/node_modules/@oh-my-pi/pi-coding-agent/.bun-tag-69b1cfa72a307e7a b/.bun-tag-69b1cfa72a307e7a
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/@oh-my-pi/pi-coding-agent/.bun-tag-f109258744839fd1 b/.bun-tag-f109258744839fd1
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
 diff --git a/dist/types/internal-urls/memory-protocol.d.ts b/dist/types/internal-urls/memory-protocol.d.ts
 index b5a4db84f23f88ccfad24c0bb96d07de7efe77b2..178a90dcb2933075053242cdba00bde6b8e4064c 100644
 --- a/dist/types/internal-urls/memory-protocol.d.ts
@@ -196,6 +202,51 @@ index 8decbb96f2ff02feb7e5f0a96498e8274f697a56..bb5988f8ed678c90e667ef36b5fc5c4d
      /**
       * Check if an artifact exists.
       * @param id Artifact ID (numeric string)
+diff --git a/dist/types/session/session-context.d.ts b/dist/types/session/session-context.d.ts
+index 719d6112e7639460efe4c6b2e24ec2e97f2625c4..ab764275558ffc8717e48e44de045919bfc4a61b 100644
+--- a/dist/types/session/session-context.d.ts
++++ b/dist/types/session/session-context.d.ts
+@@ -1,10 +1,12 @@
+ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+ import { type OpenAIResponsesHistoryPayload, type ServiceTierByFamily } from "@oh-my-pi/pi-ai";
+ import * as snapcompact from "@oh-my-pi/snapcompact";
++import type { TodoPhase } from "../tools/todo.js";
+ import { type CustomMessage } from "./messages.js";
+ import { type CompactionEntry, type CustomMessageEntry, type SessionEntry, type SessionMessageEntry } from "./session-entries.js";
+ export interface SessionContext {
+     messages: AgentMessage[];
++    todoPhases?: TodoPhase[] | null;
+     thinkingLevel?: string;
+     /** Configured thinking selector (`"auto"` or a concrete level) from the latest change. */
+     configuredThinkingLevel?: string;
+@@ -36,6 +38,8 @@ export interface BuildSessionContextOptions {
+      * latest compacted tail.
+      */
+     transcript?: boolean;
++    /** Read-only snapshot loaders request canonical todos before history compaction. */
++    includeTodoPhases?: boolean;
+     /** In transcript mode, elide entries replaced by the latest compaction. */
+     collapseCompactedHistory?: boolean;
+     /**
+diff --git a/dist/types/session/session-loader.d.ts b/dist/types/session/session-loader.d.ts
+index f9ef063e38a735e149ad6a174f39df36d55f9f68..e7770380b0ac8a66a016272a2e29486edee225e0 100644
+--- a/dist/types/session/session-loader.d.ts
++++ b/dist/types/session/session-loader.d.ts
+@@ -1,4 +1,5 @@
+ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
++import type { TodoPhase } from "../tools/todo.js";
+ import { BlobStore } from "./blob-store.js";
+ import type { FileEntry } from "./session-entries.js";
+ import { type SessionStorage } from "./session-storage.js";
+@@ -68,3 +69,8 @@ export declare function resolveBlobRefsInEntries(entries: FileEntry[], blobStore
+  * the session lock — safe to call against a file another session is writing.
+  */
+ export declare function loadSessionMessagesReadOnly(filePath: string): Promise<AgentMessage[]>;
++/** Transcript consumers call this to read messages and canonical todos from one journal version. */
++export declare function loadSessionSnapshotReadOnly(filePath: string): Promise<{
++    messages: AgentMessage[];
++    todoPhases: TodoPhase[] | null;
++}>;
 diff --git a/dist/types/session/session-manager.d.ts b/dist/types/session/session-manager.d.ts
 index 7229fb73560793a0364550aa1cff831b2255f7a7..06c40406507b26fb9e389b5817b4e33f4b59e466 100644
 --- a/dist/types/session/session-manager.d.ts
@@ -1519,18 +1570,127 @@ index 35c0a35b1d19ec438d8cea17c9f957caa13efbb2..462fc3a06c4b8ca7d9d6d78fd7929629
  		}
  	}
  
+diff --git a/src/session/session-context.ts b/src/session/session-context.ts
+index 777d8c093350f38b70c21f6eef4db266e8f0eb84..ec14f258a6a747f193154fb2af7482bd90865059 100644
+--- a/src/session/session-context.ts
++++ b/src/session/session-context.ts
+@@ -7,6 +7,7 @@ import {
+ } from "@oh-my-pi/pi-ai";
+ import * as snapcompact from "@oh-my-pi/snapcompact";
+ import { isRecord } from "@oh-my-pi/pi-utils";
++import { getLatestTodoPhasesFromEntries, type TodoPhase } from "../tools/todo";
+ import {
+ 	type CustomMessage,
+ 	createBranchSummaryMessage,
+@@ -100,6 +101,7 @@ function snapcompactHistoryBlockOptions(
+ 
+ export interface SessionContext {
+ 	messages: AgentMessage[];
++	todoPhases?: TodoPhase[] | null;
+ 	thinkingLevel?: string;
+ 	/** Configured thinking selector (`"auto"` or a concrete level) from the latest change. */
+ 	configuredThinkingLevel?: string;
+@@ -158,6 +160,8 @@ export interface BuildSessionContextOptions {
+ 	 * latest compacted tail.
+ 	 */
+ 	transcript?: boolean;
++	/** Read-only snapshot loaders request canonical todos before history compaction. */
++	includeTodoPhases?: boolean;
+ 	/** In transcript mode, elide entries replaced by the latest compaction. */
+ 	collapseCompactedHistory?: boolean;
+ 	/**
+@@ -302,6 +306,7 @@ export function buildSessionContext(
+ 		// Explicitly null - return no messages (navigated to before first entry)
+ 		return {
+ 			messages: [],
++			todoPhases: options?.includeTodoPhases ? [] : undefined,
+ 			thinkingLevel: "off",
+ 			serviceTier: undefined,
+ 			models: {},
+@@ -320,6 +325,7 @@ export function buildSessionContext(
+ 	if (!leaf) {
+ 		return {
+ 			messages: [],
++			todoPhases: options?.includeTodoPhases ? [] : undefined,
+ 			thinkingLevel: "off",
+ 			serviceTier: undefined,
+ 			models: {},
+@@ -339,6 +345,14 @@ export function buildSessionContext(
+ 		current = current.parentId ? byId.get(current.parentId) : undefined;
+ 	}
+ 	path.reverse();
++	let todoPhases: TodoPhase[] | null | undefined;
++	if (options?.includeTodoPhases) {
++		try {
++			todoPhases = getLatestTodoPhasesFromEntries(path);
++		} catch {
++			todoPhases = null;
++		}
++	}
+ 
+ 	// Extract settings and find compaction
+ 	let thinkingLevel: string | undefined = "off";
+@@ -781,6 +795,7 @@ export function buildSessionContext(
+ 
+ 	return {
+ 		messages,
++		todoPhases,
+ 		cacheMissExplainedAt: options?.transcript ? cacheMissExplainedAt : undefined,
+ 		thinkingLevel,
+ 		configuredThinkingLevel,
 diff --git a/src/session/session-loader.ts b/src/session/session-loader.ts
-index 732fc693457fc464ad5b4d4b6f620d96aa6177ce..2d4781be2e78053dc1ea82e550d15d295932be53 100644
+index 732fc693457fc464ad5b4d4b6f620d96aa6177ce..594d424218b7a65cf0a39a5fdf914494b1b8b33e 100644
 --- a/src/session/session-loader.ts
 +++ b/src/session/session-loader.ts
-@@ -538,6 +538,7 @@ export async function loadSessionMessagesReadOnly(filePath: string): Promise<Age
- 	const { messages } = buildSessionContext(sessionEntries, undefined, undefined, {
+@@ -2,6 +2,7 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+ import { ConcatSink, getBlobsDir, isEnoent, isEnotdir, parseJsonlLenient } from "@oh-my-pi/pi-utils";
+ import * as snapcompact from "@oh-my-pi/snapcompact";
+ import { Semaphore } from "../task/parallel";
++import type { TodoPhase } from "../tools/todo";
+ import { BlobStore, isBlobRef, lazyImageDataSync, resolveImageData, resolveImageDataUrl } from "./blob-store";
+ import { buildSessionContext } from "./session-context";
+ import type { FileEntry, RawFileEntry, SessionEntry, SessionHeader } from "./session-entries";
+@@ -529,15 +530,31 @@ export async function resolveBlobRefsInEntries(entries: FileEntry[], blobStore:
+  * the session lock — safe to call against a file another session is writing.
+  */
+ export async function loadSessionMessagesReadOnly(filePath: string): Promise<AgentMessage[]> {
++	return (await loadSessionReadOnly(filePath, false)).messages;
++}
++
++/** Transcript consumers call this to read messages and canonical todos from one journal version. */
++export function loadSessionSnapshotReadOnly(
++	filePath: string,
++): Promise<{ messages: AgentMessage[]; todoPhases: TodoPhase[] | null }> {
++	return loadSessionReadOnly(filePath, true);
++}
++
++async function loadSessionReadOnly(
++	filePath: string,
++	includeTodoPhases: boolean,
++): Promise<{ messages: AgentMessage[]; todoPhases: TodoPhase[] | null }> {
+ 	const entries = await loadEntriesFromFile(filePath);
+-	if (entries.length === 0) return [];
++	if (entries.length === 0) return { messages: [], todoPhases: [] };
+ 	migrateToCurrentVersion(entries);
+ 	for (const entry of entries) repairTruncatedSnapcompactFrames(entry);
+ 	const blobs = new BlobStore(getBlobsDir());
+ 	const sessionEntries = entries.filter((e): e is SessionEntry => e.type !== "session");
+-	const { messages } = buildSessionContext(sessionEntries, undefined, undefined, {
++	const { messages, todoPhases } = buildSessionContext(sessionEntries, undefined, undefined, {
  		transcript: true,
++		includeTodoPhases,
  		collapseCompactedHistory: true,
 +		keepDanglingToolCalls: true,
  		resolveFrameData: data => lazyImageDataSync(blobs, data),
  	});
  	// A collapsed summary carries the remote-compaction replacement history for
+@@ -550,5 +567,5 @@ export async function loadSessionMessagesReadOnly(filePath: string): Promise<Age
+ 			: message,
+ 	);
+ 	await resolveBlobRefs(displayMessages, blobs);
+-	return displayMessages;
++	return { messages: displayMessages, todoPhases: todoPhases ?? null };
+ }
 diff --git a/src/session/session-maintenance.ts b/src/session/session-maintenance.ts
 index 4fdf8acf498e12b1f2589b8bdddd626e031b58a7..ae7db616b8e84533feade35799e146acdeef1173 100644
 --- a/src/session/session-maintenance.ts

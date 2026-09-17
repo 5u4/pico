@@ -180,7 +180,7 @@ interface MakeOptions {
   readonly factory: SessionFactory;
   readonly loadTranscript: (
     chatId: Chat.ChatId,
-  ) => Effect.Effect<AgentMessage.AgentTranscript, AgentError>;
+  ) => Effect.Effect<Pick<TranscriptSnapshot, "messages" | "todo">, AgentError>;
 }
 
 type OutputItem =
@@ -553,7 +553,7 @@ export const makeSessionPool = Effect.fn("SessionPool.make")(function* (
         const entry = yield* retainOption(sessions, chatId);
         if (Option.isNone(entry)) {
           return {
-            messages: yield* options.loadTranscript(chatId),
+            ...(yield* options.loadTranscript(chatId)),
             contextUsage: { kind: "unavailable" },
           } satisfies TranscriptSnapshot;
         }
@@ -565,9 +565,9 @@ export const makeSessionPool = Effect.fn("SessionPool.make")(function* (
                 entry.value.session.settleInFlightMessagePersistence(),
               );
             }
-            const messages = yield* options.loadTranscript(chatId);
+            const snapshot = yield* options.loadTranscript(chatId);
             return {
-              messages,
+              ...snapshot,
               contextUsage: open
                 ? yield* Effect.sync((): TranscriptSnapshot["contextUsage"] => {
                     try {

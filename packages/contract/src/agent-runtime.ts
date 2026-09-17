@@ -62,8 +62,27 @@ export const ContextUsage = Schema.Union([
 ]);
 export type ContextUsage = typeof ContextUsage.Type;
 
+export const TodoTask = Schema.Struct({
+  content: Schema.String,
+  status: Schema.Literals(["pending", "in_progress", "completed", "abandoned", "blocked"]),
+  blocker: Schema.optional(Schema.String),
+});
+export type TodoTask = typeof TodoTask.Type;
+
+export const TodoPhases = Schema.Array(
+  Schema.Struct({ name: Schema.String, tasks: Schema.Array(TodoTask) }),
+);
+export type TodoPhases = typeof TodoPhases.Type;
+
+export const TodoState = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("ready"), phases: TodoPhases }),
+  Schema.Struct({ kind: Schema.Literal("unavailable") }),
+]);
+export type TodoState = typeof TodoState.Type;
+
 export const TranscriptSnapshot = Schema.Struct({
   messages: AgentTranscript,
+  todo: TodoState,
   contextUsage: Schema.Union([ContextUsage, Schema.Struct({ kind: Schema.Literal("error") })]),
 });
 export type TranscriptSnapshot = typeof TranscriptSnapshot.Type;
@@ -90,7 +109,7 @@ export class AgentRuntime extends Context.Service<
     readonly events: Stream.Stream<AgentEventEnvelope>;
     readonly drain: () => Effect.Effect<void>;
 
-    /** Application reads history and context without initializing an absent session. */
+    /** Application reads persisted chat snapshots without initializing an absent session. */
     readonly transcript: (chatId: ChatId) => Effect.Effect<TranscriptSnapshot, AgentError>;
 
     readonly send: (

@@ -58,6 +58,7 @@ const runtimeTranscript: TranscriptSnapshot = {
     },
   ],
   contextUsage: { kind: "unavailable" },
+  todo: { kind: "ready", phases: [] },
 };
 
 const assertApplicationError = (
@@ -708,7 +709,12 @@ describe("Chat close", () => {
           askBtw: () => Effect.die("unexpected side question"),
           events: Stream.empty,
           drain: () => Effect.void,
-          transcript: () => Effect.succeed({ messages: [], contextUsage: { kind: "unavailable" } }),
+          transcript: () =>
+            Effect.succeed({
+              messages: [],
+              contextUsage: { kind: "unavailable" },
+              todo: { kind: "ready", phases: [] },
+            }),
           send: () => Effect.die("unexpected ordinary send"),
           sendCaptured: (_chatId, runId) =>
             Deferred.succeed(started, undefined).pipe(
@@ -846,7 +852,11 @@ describe("Chat close", () => {
             events: Stream.empty,
             drain: () => Effect.void,
             transcript: () =>
-              Effect.succeed({ messages: [], contextUsage: { kind: "unavailable" } }),
+              Effect.succeed({
+                messages: [],
+                contextUsage: { kind: "unavailable" },
+                todo: { kind: "ready", phases: [] },
+              }),
             send: () => Effect.die("unexpected send"),
             sendCaptured: () => Effect.die("unexpected captured runtime send"),
             deliver: () => Effect.die("unexpected scheduled delivery"),

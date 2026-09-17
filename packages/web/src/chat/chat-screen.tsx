@@ -21,6 +21,7 @@ import type {
   DeleteWorkspacePresentation,
   PromptSuggestion,
   ShakeFeedback,
+  TodoPresentation,
   ToolCallPresentation,
   TranscriptPresentation,
 } from "./chat-model.ts";
@@ -31,6 +32,7 @@ import { DeleteWorkspaceDialog } from "./delete-workspace-dialog.tsx";
 import { MobileSidebar } from "./mobile-sidebar.tsx";
 import { SchedulePage, type SchedulePageProps } from "./schedule-page.tsx";
 import { ShakeMenu, type ShakeMenuProps } from "./shake-menu.tsx";
+import { TodoDock } from "./todo-dock.tsx";
 import { ToolDetailPane } from "./tool-detail-pane.tsx";
 import { Transcript } from "./transcript.tsx";
 import { WorkspaceDialog, type WorkspaceFormProps } from "./workspace-dialog.tsx";
@@ -60,6 +62,7 @@ export interface ChatScreenProps
   readonly toolPane: ToolCallPresentation | null;
   readonly transcript: TranscriptPresentation;
   readonly composer: ComposerPresentation;
+  readonly todo: TodoPresentation | null;
   readonly contextUsage: ContextUsagePresentation;
   readonly contextDetailsOpen: boolean;
   readonly onContextDetailsOpenChange: (open: boolean) => void;
@@ -109,6 +112,7 @@ export function ChatScreen({
   toolPane,
   transcript,
   composer,
+  todo,
   contextUsage,
   contextDetailsOpen,
   onContextDetailsOpenChange,
@@ -200,7 +204,7 @@ export function ChatScreen({
     ].find((element) => element?.isConnected && element.getClientRects().length > 0);
     target?.focus({ preventScroll: true });
   }, [chatVisible, conversationKey, tabButtons]);
-  const welcome = transcript.state === "empty";
+  const welcome = transcript.state === "empty" && todo === null;
   const showSuggestions =
     welcome && conversationKey !== null && composer.editable && suggestions.length > 0;
   const onboarding =
@@ -667,7 +671,7 @@ export function ChatScreen({
                       : "mx-auto max-w-[720px]"
                   }
                 >
-                  {transcript.state === "empty" && (
+                  {welcome && transcript.state === "empty" && (
                     <h1 className="text-[26px] font-normal tracking-[-0.02em]">
                       <span className="home-reveal home-reveal-hello block text-subtle">Hello</span>
                       <span className="home-reveal home-reveal-question block">
@@ -680,6 +684,12 @@ export function ChatScreen({
                       welcome ? "home-reveal home-reveal-prompt relative mt-7" : "relative"
                     }
                   >
+                    {todo && (
+                      <TodoDock
+                        onOpenChange={(open) => onDisclosuresChange(["todo-dock"], open)}
+                        presentation={todo}
+                      />
+                    )}
                     <Composer
                       contextLabel={contextLabel}
                       onStop={onStop}
@@ -700,7 +710,7 @@ export function ChatScreen({
                       />
                     </div>
                   </div>
-                  {transcript.state === "empty" && (
+                  {welcome && transcript.state === "empty" && (
                     <div className="home-reveal home-reveal-recommendations mt-6 flex flex-col text-subtle">
                       <p className={showSuggestions ? "sr-only" : "text-[13px]"}>
                         {transcript.description}

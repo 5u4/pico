@@ -127,7 +127,7 @@ export class Application extends Context.Service<
       chatId: ChatId,
     ) => Effect.Effect<Option.Option<ChatPlatformBinding>, ApplicationError>;
 
-    /** Platform adapters read history and the retained session's context estimate. */
+    /** Platform adapters read persisted chat snapshots and the retained session's context estimate. */
     readonly transcript: (chatId: ChatId) => Effect.Effect<TranscriptSnapshot, ApplicationError>;
 
     readonly closeChat: (

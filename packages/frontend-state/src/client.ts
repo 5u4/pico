@@ -334,6 +334,12 @@ export const make = ({ url }: { readonly url: string }) => {
       (refresh) => refresh(snapshot(chatId)),
     ).pipe(Atom.keepAlive),
   );
+  const todo = Atom.family((chatId: ChatId) =>
+    Atom.readable(
+      (get) => AsyncResult.map(get(snapshot(chatId)), (value) => value.todo),
+      (refresh) => refresh(snapshot(chatId)),
+    ).pipe(Atom.keepAlive),
+  );
   const contextUsage = Atom.family((chatId: ChatId) =>
     Atom.readable(
       (get) => AsyncResult.map(get(snapshot(chatId)), (value) => value.contextUsage),
@@ -456,6 +462,7 @@ export const make = ({ url }: { readonly url: string }) => {
     createChat,
     closeChat,
     transcript,
+    todo,
     contextUsage,
     live,
     send,

@@ -5,6 +5,7 @@ import {
   type AgentToolResultMessage,
   type AgentTranscript,
 } from "@pico/contract/agent-message";
+import type { TodoState } from "@pico/contract/agent-runtime";
 import * as Cause from "effect/Cause";
 import * as AsyncResult from "effect/unstable/reactivity/AsyncResult";
 import {
@@ -13,7 +14,8 @@ import {
   type LiveChat,
   reduceLiveChat,
 } from "../../frontend-state/src/chat-state.ts";
-import { presentTranscript } from "./transcript-presentation.ts";
+import { normalizeTranscript } from "../../omp/src/agent-event.ts";
+import { presentTodo, presentTranscript } from "./transcript-presentation.ts";
 
 const firstId = AgentMessageId.make("first");
 const secondId = AgentMessageId.make("second");
@@ -59,9 +61,15 @@ const items = (
   live: LiveChat,
   disclosures: ReadonlyMap<string, boolean> = new Map(),
 ) => {
-  const presentation = presentTranscript(AsyncResult.success(transcript), live, disclosures, {
-    kind: "active",
-  });
+  const presentation = presentTranscript(
+    AsyncResult.success(transcript),
+    live,
+    disclosures,
+    {
+      kind: "active",
+    },
+    { kind: "unavailable" },
+  );
   return presentation.state === "ready" ? presentation.items : [];
 };
 
@@ -375,10 +383,16 @@ describe("disclosure lifecycle", () => {
       label: "Thinking",
       open: false,
     });
-    const disconnected = presentTranscript(AsyncResult.success([]), draft, new Map(), {
-      kind: "unavailable",
-      cause: Cause.empty,
-    });
+    const disconnected = presentTranscript(
+      AsyncResult.success([]),
+      draft,
+      new Map(),
+      {
+        kind: "unavailable",
+        cause: Cause.empty,
+      },
+      { kind: "unavailable" },
+    );
     assert.strictEqual(disconnected.state, "ready");
     if (disconnected.state !== "ready") return;
     assert.deepStrictEqual(
@@ -482,9 +496,15 @@ describe("disclosure lifecycle", () => {
 describe("response activity", () => {
   it("shows waiting from an active run before history or a first delta and removes it when activity ends", () => {
     const running = reduceLiveChat(emptyLiveChat(), { type: "run-started" });
-    const waiting = presentTranscript(AsyncResult.initial(), running, new Map(), {
-      kind: "active",
-    });
+    const waiting = presentTranscript(
+      AsyncResult.initial(),
+      running,
+      new Map(),
+      {
+        kind: "active",
+      },
+      { kind: "unavailable" },
+    );
     assert.strictEqual(waiting.state, "ready");
     if (waiting.state !== "ready") return;
     assert.deepStrictEqual(
@@ -492,14 +512,26 @@ describe("response activity", () => {
       ["waiting"],
     );
 
-    const disconnected = presentTranscript(AsyncResult.success([]), running, new Map(), {
-      kind: "unavailable",
-      cause: Cause.empty,
-    });
+    const disconnected = presentTranscript(
+      AsyncResult.success([]),
+      running,
+      new Map(),
+      {
+        kind: "unavailable",
+        cause: Cause.empty,
+      },
+      { kind: "unavailable" },
+    );
     assert.strictEqual(disconnected.state, "empty");
-    const reconnecting = presentTranscript(AsyncResult.success([]), running, new Map(), {
-      kind: "opening",
-    });
+    const reconnecting = presentTranscript(
+      AsyncResult.success([]),
+      running,
+      new Map(),
+      {
+        kind: "opening",
+      },
+      { kind: "unavailable" },
+    );
     assert.strictEqual(reconnecting.state, "empty");
     const completed = reduceLiveChat(running, { type: "run-finished", outcome: "completed" });
     assert.deepStrictEqual(items([], completed), []);
@@ -567,10 +599,16 @@ describe("response activity", () => {
       active.map((item) => (item.kind === "assistant" ? item.state.kind : item.kind)),
       ["streaming"],
     );
-    const disconnected = presentTranscript(AsyncResult.success([]), draft, new Map(), {
-      kind: "unavailable",
-      cause: Cause.empty,
-    });
+    const disconnected = presentTranscript(
+      AsyncResult.success([]),
+      draft,
+      new Map(),
+      {
+        kind: "unavailable",
+        cause: Cause.empty,
+      },
+      { kind: "unavailable" },
+    );
     assert.strictEqual(disconnected.state, "ready");
     if (disconnected.state !== "ready") return;
     const aborted = reduceLiveChat(draft, { type: "run-finished", outcome: "aborted" });
@@ -815,9 +853,15 @@ describe("tool trace content", () => {
     for (const state of ["failed", "running", "unknown", "complete"]) {
       assert.include(group?.title ?? "", state);
     }
-    const reconnecting = presentTranscript(AsyncResult.success(transcript), live, new Map(), {
-      kind: "opening",
-    });
+    const reconnecting = presentTranscript(
+      AsyncResult.success(transcript),
+      live,
+      new Map(),
+      {
+        kind: "opening",
+      },
+      { kind: "unavailable" },
+    );
     const reconnectingCalls =
       reconnecting.state === "ready"
         ? reconnecting.items.flatMap((item) => (item.kind === "tool-group" ? item.calls : []))
@@ -869,5 +913,159 @@ describe("tool trace content", () => {
       retained.map((call) => call.arguments),
       [undefined, liveArguments],
     );
+  });
+});
+
+describe("canonical todo presentation", () => {
+  const ready: TodoState = {
+    kind: "ready",
+    phases: [{ name: "Build", tasks: [{ content: "Ship", status: "in_progress" }] }],
+  };
+  type NativeResult = Extract<
+    Parameters<typeof normalizeTranscript>[0][number],
+    { readonly role: "toolResult" }
+  >;
+  const result = (id: string, overrides: Partial<NativeResult> = {}): AgentTranscript =>
+    normalizeTranscript([
+      {
+        role: "toolResult",
+        toolCallId: id,
+        toolName: "todo",
+        content: [{ type: "text", text: `Output for ${id}` }],
+        details: { op: "done", phases: [], storage: "session" },
+        isError: false,
+        timestamp: 2,
+        ...overrides,
+      },
+    ]);
+  const render = (messages: AgentTranscript, todo: TodoState, live = emptyLiveChat()) => {
+    const presentation = presentTranscript(
+      AsyncResult.success(messages),
+      live,
+      new Map(),
+      { kind: "active" },
+      todo,
+    );
+    return presentation.state === "ready" ? presentation.items : [];
+  };
+
+  it("suppresses successful direct snapshots before grouping and keeps adjacent prose together", () => {
+    const messages: AgentTranscript = [
+      {
+        ...toolMessage,
+        content: [
+          { type: "text", text: "Before" },
+          { ...toolCall("direct"), name: "todo" },
+          { type: "text", text: "After" },
+          toolCall("read-a"),
+          { ...toolCall("legacy"), name: "todo" },
+          toolCall("read-b"),
+        ],
+      },
+      ...result("direct"),
+      ...result("legacy", { details: { phases: [], storage: "session" } }),
+    ];
+    const shown = render(messages, ready);
+    assert.deepStrictEqual(
+      shown.map((item) =>
+        item.kind === "tool-group"
+          ? item.calls.map((call) => call.id)
+          : item.kind === "assistant"
+            ? item.blocks.map((block) => block.kind === "text" && block.text)
+            : item.kind,
+      ),
+      [
+        ["Before", "After"],
+        ["tool-read-a", "tool-read-b"],
+      ],
+    );
+    assert.deepStrictEqual(render(messages, { kind: "ready", phases: [] }), shown);
+    assert.deepStrictEqual(
+      render(messages, { kind: "unavailable" }).flatMap((item) =>
+        item.kind === "tool-group" ? item.calls.map((call) => call.id) : [],
+      ),
+      ["tool-direct", "tool-read-a", "tool-legacy", "tool-read-b"],
+    );
+  });
+
+  it("keeps errors, unsupported results, views, eval and unsettled calls inspectable", () => {
+    const messages: AgentTranscript = [
+      ...result("hidden"),
+      ...result("failure", { isError: true }),
+      ...result("view", { details: { op: "view", phases: [], storage: "session" } }),
+      ...result("unknown-op", { details: { op: "future", phases: [], storage: "session" } }),
+      ...result("unknown-status", {
+        details: {
+          op: "done",
+          phases: [{ name: "Build", tasks: [{ content: "Ship", status: "future" }] }],
+          storage: "session",
+        },
+      }),
+      ...result("mixed-image", {
+        content: [
+          { type: "text", text: "Keep mixed output" },
+          { type: "image", data: "", mimeType: "image/png" },
+        ],
+      }),
+      ...result("multiple", { isError: true }),
+      ...result("multiple"),
+      ...result("eval", { toolName: "eval" }),
+    ];
+    let live = reduceLiveChat(emptyLiveChat(), {
+      type: "tool-started",
+      toolCallId: "unsettled",
+      toolName: "todo",
+      argumentsJson: "{}",
+    });
+    live = reduceLiveChat(live, {
+      type: "tool-finished",
+      toolCallId: "unsettled",
+      toolName: "todo",
+      status: "succeeded",
+    });
+    const calls = render(messages, ready, live).flatMap((item) =>
+      item.kind === "tool-group" ? item.calls : [],
+    );
+    assert.deepStrictEqual(
+      calls.map((call) => call.id),
+      [
+        "tool-failure",
+        "tool-view",
+        "tool-unknown-op",
+        "tool-unknown-status",
+        "tool-mixed-image",
+        "tool-multiple",
+        "tool-eval",
+        "tool-unsettled",
+      ],
+    );
+    assert.strictEqual(calls.find((call) => call.id === "tool-failure")?.state.kind, "failed");
+    assert.strictEqual(
+      calls.find((call) => call.id === "tool-multiple")?.output,
+      "Output for multiple\nOutput for multiple",
+    );
+    assert.strictEqual(calls.find((call) => call.id === "tool-unsettled")?.output, undefined);
+  });
+
+  it("retains finished checklists without counting skipped tasks as completed and hides clear", () => {
+    const finished: TodoState = {
+      kind: "ready",
+      phases: [
+        {
+          name: "Build",
+          tasks: [
+            { content: "Ship", status: "completed" },
+            { content: "Optional", status: "abandoned" },
+          ],
+        },
+      ],
+    };
+    const checklist = presentTodo(finished, false);
+    assert.isNotNull(checklist);
+    assert.strictEqual(checklist?.completed, 1);
+    assert.strictEqual(checklist?.total, 2);
+    assert.isNull(presentTodo({ kind: "ready", phases: [] }, true));
+    assert.isNull(presentTodo({ kind: "ready", phases: [{ name: "Build", tasks: [] }] }, true));
+    assert.isNull(presentTodo({ kind: "unavailable" }, true));
   });
 });

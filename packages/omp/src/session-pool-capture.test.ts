@@ -102,7 +102,8 @@ describe("session pool capture", () => {
                   unsubscribe: () => {},
                 }),
             },
-            loadTranscript: () => Effect.succeed([]),
+            loadTranscript: () =>
+              Effect.succeed({ messages: [], todo: { kind: "ready", phases: [] } }),
           });
           yield* pool.send(chatId, prompt("ordinary"));
           assert.instanceOf(
@@ -184,7 +185,8 @@ describe("session pool capture", () => {
                 unsubscribe: () => {},
               }),
           },
-          loadTranscript: () => Effect.succeed([]),
+          loadTranscript: () =>
+            Effect.succeed({ messages: [], todo: { kind: "ready", phases: [] } }),
         });
         yield* Effect.gen(function* () {
           const first = yield* pool.send(chatId, prompt("ordinary"));
@@ -259,7 +261,8 @@ describe("session pool capture", () => {
                 unsubscribe: () => {},
               }),
           },
-          loadTranscript: () => Effect.succeed([]),
+          loadTranscript: () =>
+            Effect.succeed({ messages: [], todo: { kind: "ready", phases: [] } }),
         });
         const observed: Array<string> = [];
         const runId = Schedule.ScheduleRunId.make(
@@ -338,7 +341,8 @@ describe("session pool capture", () => {
               });
             },
           },
-          loadTranscript: () => Effect.succeed([]),
+          loadTranscript: () =>
+            Effect.succeed({ messages: [], todo: { kind: "ready", phases: [] } }),
         });
         const forwarded = yield* pool.events.pipe(
           Stream.take(1),
@@ -433,7 +437,8 @@ describe("session pool capture", () => {
                 unsubscribe: () => {},
               }),
           },
-          loadTranscript: () => Effect.succeed([]),
+          loadTranscript: () =>
+            Effect.succeed({ messages: [], todo: { kind: "ready", phases: [] } }),
         });
         const forwarded: Array<string> = [];
         yield* pool.events.pipe(
@@ -534,7 +539,8 @@ describe("session pool capture", () => {
                 unsubscribe: () => {},
               }),
           },
-          loadTranscript: () => Effect.succeed([]),
+          loadTranscript: () =>
+            Effect.succeed({ messages: [], todo: { kind: "ready", phases: [] } }),
         });
         const forwarded: Array<string> = [];
         yield* pool.events.pipe(
@@ -641,7 +647,8 @@ describe("session pool capture", () => {
                   unsubscribe: () => {},
                 }),
             },
-            loadTranscript: () => Effect.succeed([]),
+            loadTranscript: () =>
+              Effect.succeed({ messages: [], todo: { kind: "ready", phases: [] } }),
           });
           const resolved = yield* pool.send(chatId, prompt("resolved"));
           if (resolved.kind !== "handled") yield* resolved.completed;

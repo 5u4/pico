@@ -52,7 +52,7 @@ const fixture = Effect.fn("SessionPoolOperationsTest.fixture")(function* (
           } satisfies OpenedSession;
         }),
     },
-    loadTranscript: () => Effect.succeed([]),
+    loadTranscript: () => Effect.succeed({ messages: [], todo: { kind: "ready", phases: [] } }),
   });
   return { pool };
 });

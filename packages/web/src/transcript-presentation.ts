@@ -4,6 +4,7 @@ import type {
   AgentToolResultMessage,
   AgentTranscript,
 } from "@pico/contract/agent-message";
+import type { TodoState } from "@pico/contract/agent-runtime";
 import { ApplicationError, ChatClosed } from "@pico/contract/errors";
 import { ScheduleError } from "@pico/contract/schedule";
 import type * as FrontendState from "@pico/frontend-state/client";
@@ -14,6 +15,8 @@ import * as AsyncResult from "effect/unstable/reactivity/AsyncResult";
 import type {
   AssistantBlock,
   AssistantState,
+  TodoPresentation,
+  TodoTaskPresentation,
   ToolCallPresentation,
   ToolState,
   TranscriptItem,
@@ -37,6 +40,7 @@ export function presentTranscript(
   live: FrontendState.LiveChat,
   disclosures: ReadonlyMap<string, boolean>,
   connection: FrontendState.Connection,
+  todo: TodoState,
 ): TranscriptPresentation {
   const messages = Option.getOrElse(AsyncResult.value(snapshot), () => []);
   const activeRun = live.run.kind === "running" && connection.kind === "active";
@@ -59,6 +63,21 @@ export function presentTranscript(
     if (assistant.kind === "settled") indexAnchors(assistant.message);
   }
   const emittedTools = new Set<string>();
+  const hiddenTools = new Set<string>();
+  if (todo.kind === "ready") {
+    for (const [id, output] of results) {
+      if (
+        output.every(
+          (message) =>
+            message.toolName === "todo" &&
+            message.status === "succeeded" &&
+            message.todoSnapshot === true,
+        )
+      ) {
+        hiddenTools.add(id);
+      }
+    }
+  }
   const items: TranscriptItem[] = [];
   let tools: [ToolCallPresentation, ...ToolCallPresentation[]] | undefined;
   const flushTools = () => {
@@ -73,6 +92,7 @@ export function presentTranscript(
     tools = undefined;
   };
   const tool = (id: string, name: string, argumentsJson?: string) => {
+    if (name === "todo" && hiddenTools.has(id)) return;
     if (emittedTools.has(id)) return;
     emittedTools.add(id);
     const key = `tool-${id}`;
@@ -163,6 +183,7 @@ export function presentTranscript(
           blocks.push({ kind: "text", id, text: "[Image response]" });
           break;
         case "tool-call":
+          if (content.name === "todo" && hiddenTools.has(content.id)) break;
           flush();
           tool(content.id, content.name, content.argumentsJson);
           break;
@@ -260,6 +281,70 @@ export function presentTranscript(
     state: "empty",
     title: "Start a conversation",
     description: "Ask pico to help with the code in this workspace.",
+  };
+}
+
+const todoStatusLabels = {
+  pending: "Pending",
+  in_progress: "In progress",
+  completed: "Completed",
+  abandoned: "Skipped",
+  blocked: "Blocked",
+} satisfies Record<TodoTaskPresentation["status"]["kind"], string>;
+
+export function presentTodo(todo: TodoState, open: boolean): TodoPresentation | null {
+  if (todo.kind !== "ready") return null;
+  let completed = 0;
+  let total = 0;
+  let blocked = 0;
+  let skipped = 0;
+  let current: string | undefined;
+  let next: string | undefined;
+  const phases = todo.phases.map((phase) => ({
+    name: phase.name,
+    tasks: phase.tasks.map((task): TodoTaskPresentation => {
+      total++;
+      switch (task.status) {
+        case "completed":
+          completed++;
+          break;
+        case "abandoned":
+          skipped++;
+          break;
+        case "blocked":
+          blocked++;
+          break;
+        case "in_progress":
+          current ??= task.content;
+          break;
+        case "pending":
+          next ??= task.content;
+          break;
+      }
+      return {
+        content: task.content,
+        status: { kind: task.status, label: todoStatusLabels[task.status] },
+        blocker: task.status === "blocked" ? (task.blocker ?? null) : null,
+      };
+    }),
+  }));
+  if (total === 0) return null;
+  return {
+    completed,
+    total,
+    phases,
+    open,
+    summary:
+      current ??
+      (next !== undefined
+        ? `Next · ${next}`
+        : blocked > 0
+          ? `${blocked} blocked`
+          : skipped === total
+            ? "All tasks skipped"
+            : skipped > 0
+              ? `Finished · ${skipped} skipped`
+              : "All tasks completed"),
   };
 }
 
