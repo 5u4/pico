@@ -910,13 +910,23 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
   });
 
   const shake = Effect.fn("Application.shake")(function* (chatId: Chat.ChatId, mode: ShakeMode) {
-    return yield* serialized(
-      chatId,
+    return yield* Effect.scoped(
       Effect.gen(function* () {
-        yield* ensureChatOpen(chatId, "Failed to shake chat");
-        return yield* runtime
-          .shake(chatId, mode)
-          .pipe(Effect.mapError(failure("Failed to shake chat")));
+        const operationScope = yield* Effect.scope;
+        const operation = yield* serialized(
+          chatId,
+          Effect.gen(function* () {
+            yield* ensureChatOpen(chatId, "Failed to shake chat");
+            return yield* Effect.uninterruptible(
+              trackOperation(
+                chatId,
+                { kind: "ordinary" },
+                runtime.shake(chatId, mode).pipe(Effect.mapError(failure("Failed to shake chat"))),
+              ).pipe(Effect.forkIn(operationScope)),
+            );
+          }),
+        );
+        return yield* Fiber.join(operation);
       }),
     );
   });

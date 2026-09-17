@@ -13,9 +13,11 @@ import * as Schedule from "@pico/contract/schedule";
 import { WorkspaceRepository } from "@pico/contract/workspace-repository";
 import type { GitWorktree } from "@pico/contract/worktree";
 import * as Persistence from "@pico/persistence/layer";
+import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -328,6 +330,48 @@ describe("Workspace deletion", () => {
         "invalid",
       );
     }).pipe(Effect.provide(platformLayer), Effect.scoped),
+  );
+
+  it.effect(
+    "retains Shake tracking through caller interruption and releases it after cleanup",
+    () =>
+      Effect.gen(function* () {
+        const started = yield* Deferred.make<void>();
+        const cleaning = yield* Deferred.make<void>();
+        const releaseCleanup = yield* Deferred.make<void>();
+        const test = yield* fixture({
+          runtime: {
+            shake: () =>
+              Deferred.succeed(started, undefined).pipe(
+                Effect.andThen(Effect.never),
+                Effect.ensuring(
+                  Deferred.succeed(cleaning, undefined).pipe(
+                    Effect.andThen(Deferred.await(releaseCleanup)),
+                  ),
+                ),
+              ),
+          },
+        });
+        const chat = yield* test.application.createChat({
+          workspaceId: test.workspace.id,
+          externalId: null,
+        });
+        const shaking = yield* test.application.shake(chat.id, "elide").pipe(Effect.forkScoped);
+        yield* Effect.addFinalizer(() => Deferred.succeed(releaseCleanup, undefined));
+        yield* Deferred.await(started);
+        const interrupting = yield* Fiber.interrupt(shaking).pipe(Effect.forkChild);
+        yield* Deferred.await(cleaning);
+        assert.strictEqual(
+          (yield* test.application.deleteWorkspace(test.workspace.id).pipe(Effect.flip)).reason,
+          "conflict",
+        );
+        yield* Deferred.succeed(releaseCleanup, undefined);
+        yield* Fiber.join(interrupting);
+        const result = yield* Fiber.await(shaking);
+        assert.isTrue(Exit.isFailure(result) && Cause.hasInterruptsOnly(result.cause));
+        yield* test.application.deleteWorkspace(test.workspace.id);
+        assert.isTrue(Option.isNone(yield* test.workspaces.findById(test.workspace.id)));
+      }).pipe(Effect.provide(platformLayer), Effect.scoped),
   );
 
   it.effect("rejects busy admissions and active ordinary and script work without waiting", () =>

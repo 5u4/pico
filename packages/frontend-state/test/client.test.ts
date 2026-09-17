@@ -11,7 +11,12 @@ import {
   AgentPrompt,
   type AgentTranscript,
 } from "@pico/contract/agent-message";
-import type { ContextUsage, TranscriptSnapshot } from "@pico/contract/agent-runtime";
+import type {
+  ContextUsage,
+  ShakeMode,
+  ShakeResult,
+  TranscriptSnapshot,
+} from "@pico/contract/agent-runtime";
 import { Application } from "@pico/contract/application";
 import { ChatId, type ChatListEntry } from "@pico/contract/chat-model";
 import { ChatRepository } from "@pico/contract/chat-repository";
@@ -26,6 +31,7 @@ import type {} from "bun";
 import * as Cause from "effect/Cause";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -99,6 +105,7 @@ const fixture = Effect.fnUntraced(function* (
         | "deleteWorkspace"
         | "createChat"
         | "closeChat"
+        | "shake"
       >
     >,
 ) {
@@ -1228,6 +1235,120 @@ describe("frontend state over WebSocket", () => {
         assert.strictEqual(registry.get(state.connection).kind, "active");
         registry.dispose();
         yield* Deferred.await(route.closed);
+      }).pipe(Effect.scoped, Effect.provide(server.layer));
+    }),
+  );
+
+  it.live("settles overlapping Shake calls independently while a send remains pending", () =>
+    Effect.gen(function* () {
+      const sent = yield* Deferred.make<void>();
+      const releaseSend = yield* Deferred.make<void>();
+      const shaking = yield* Queue.unbounded<ShakeMode>();
+      const releaseElide = yield* Deferred.make<ShakeResult>();
+      const releaseImages = yield* Deferred.make<ShakeResult>();
+      const releaseThinking = yield* Deferred.make<ShakeResult>();
+      const images: ShakeResult = { mode: "images", imagesDropped: 2, tokensFreed: 0 };
+      const elide: ShakeResult = {
+        mode: "elide",
+        toolResultsDropped: 3,
+        blocksDropped: 1,
+        tokensFreed: 400,
+      };
+      const thinking: ShakeResult = {
+        mode: "thinking",
+        thinkingBlocksDropped: 0,
+        tokensFreed: 0,
+      };
+      const server = yield* fixture({
+        transcript: () => Effect.succeed(snapshot()),
+        sendMessage: () =>
+          Effect.gen(function* () {
+            yield* Deferred.succeed(sent, undefined);
+            yield* Deferred.await(releaseSend);
+            return { kind: "handled" } as const;
+          }),
+        abort: () => Effect.void,
+        shake: (_chatId, mode) =>
+          Effect.gen(function* () {
+            yield* Queue.offer(shaking, mode);
+            return yield* Deferred.await(
+              mode === "elide" ? releaseElide : mode === "images" ? releaseImages : releaseThinking,
+            );
+          }),
+      });
+      yield* Effect.gen(function* () {
+        const state = make({ url: yield* endpoint });
+        const registry = yield* registryInScope;
+        registry.set(state.send(firstChat), prompt("keep working"));
+        yield* Deferred.await(sent);
+        const elideInvocation = yield* Effect.forkScoped(state.shake(registry, firstChat, "elide"));
+        yield* Queue.take(shaking);
+        const imagesInvocation = yield* Effect.forkScoped(
+          state.shake(registry, firstChat, "images"),
+        );
+        yield* Queue.take(shaking);
+        yield* Deferred.succeed(releaseImages, images);
+        assert.deepStrictEqual(yield* Fiber.join(imagesInvocation), images);
+        assert.isTrue(registry.get(state.send(firstChat)).waiting);
+        const thinkingInvocation = yield* Effect.forkScoped(
+          state.shake(registry, firstChat, "thinking"),
+        );
+        yield* Queue.take(shaking);
+        yield* Deferred.succeed(releaseThinking, thinking);
+        assert.deepStrictEqual(yield* Fiber.join(thinkingInvocation), thinking);
+        yield* Deferred.succeed(releaseElide, elide);
+        assert.deepStrictEqual(yield* Fiber.join(elideInvocation), elide);
+        assert.isTrue(registry.get(state.send(firstChat)).waiting);
+        yield* Deferred.succeed(releaseSend, undefined);
+        yield* waitFor(
+          registry,
+          state.send(firstChat),
+          (value) => AsyncResult.isSuccess(value) && !value.waiting,
+        );
+      }).pipe(Effect.scoped, Effect.provide(server.layer));
+    }),
+  );
+
+  it.live("does not transfer an older Shake failure to a newer invocation", () =>
+    Effect.gen(function* () {
+      const shaking = yield* Queue.unbounded<ShakeMode>();
+      const releaseElide = yield* Deferred.make<ShakeResult, ApplicationError>();
+      const releaseThinking = yield* Deferred.make<ShakeResult>();
+      const rejection = new ApplicationError({
+        reason: "operation",
+        message: "Elide failed",
+      });
+      const thinking: ShakeResult = {
+        mode: "thinking",
+        thinkingBlocksDropped: 4,
+        tokensFreed: 90,
+      };
+      const server = yield* fixture({
+        transcript: () => Effect.succeed(snapshot()),
+        sendMessage: () => Effect.succeed({ kind: "handled" }),
+        abort: () => Effect.void,
+        shake: (_chatId, mode) =>
+          Effect.gen(function* () {
+            yield* Queue.offer(shaking, mode);
+            if (mode === "elide") return yield* Deferred.await(releaseElide);
+            return yield* Deferred.await(releaseThinking);
+          }),
+      });
+      yield* Effect.gen(function* () {
+        const state = make({ url: yield* endpoint });
+        const registry = yield* registryInScope;
+        const elideInvocation = yield* Effect.forkScoped(state.shake(registry, firstChat, "elide"));
+        yield* Queue.take(shaking);
+        const thinkingInvocation = yield* Effect.forkScoped(
+          state.shake(registry, firstChat, "thinking"),
+        );
+        yield* Queue.take(shaking);
+        yield* Deferred.fail(releaseElide, rejection);
+        const failed = yield* Fiber.await(elideInvocation);
+        if (failed._tag !== "Failure") return yield* Effect.die("Expected Shake rejection");
+        assert.deepStrictEqual(Option.getOrNull(Cause.findErrorOption(failed.cause)), rejection);
+        yield* Deferred.succeed(releaseThinking, thinking);
+        assert.deepStrictEqual(yield* Fiber.join(thinkingInvocation), thinking);
       }).pipe(Effect.scoped, Effect.provide(server.layer));
     }),
   );

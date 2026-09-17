@@ -173,6 +173,17 @@ const handlers = PicoRpcs.toLayer(
             requestId: String(requestId),
           }),
         ),
+      Shake: ({ chatId, mode }, { requestId }) =>
+        requireWebChat(workspaces, chats, chatId).pipe(
+          Effect.andThen(() => application.shake(chatId, mode)),
+          Effect.tapCause(reportFailure),
+          Effect.annotateLogs({
+            component: "rpc",
+            procedure: "Shake",
+            chatId,
+            requestId: String(requestId),
+          }),
+        ),
       Events: (_, { requestId }) =>
         Stream.unwrap(openWebEvents(eventRouter, workspaces, chats)).pipe(
           Stream.tapCause((cause) =>

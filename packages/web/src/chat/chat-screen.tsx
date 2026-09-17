@@ -20,6 +20,7 @@ import type {
   ContextUsagePresentation,
   DeleteWorkspacePresentation,
   PromptSuggestion,
+  ShakeFeedback,
   TodoPresentation,
   ToolCallPresentation,
   TranscriptPresentation,
@@ -30,6 +31,7 @@ import { ContextUsage } from "./context-usage.tsx";
 import { DeleteWorkspaceDialog } from "./delete-workspace-dialog.tsx";
 import { MobileSidebar } from "./mobile-sidebar.tsx";
 import { SchedulePage, type SchedulePageProps } from "./schedule-page.tsx";
+import { ShakeMenu, type ShakeMenuProps } from "./shake-menu.tsx";
 import { TodoDock } from "./todo-dock.tsx";
 import { ToolDetailPane } from "./tool-detail-pane.tsx";
 import { Transcript } from "./transcript.tsx";
@@ -64,6 +66,9 @@ export interface ChatScreenProps
   readonly contextUsage: ContextUsagePresentation;
   readonly contextDetailsOpen: boolean;
   readonly onContextDetailsOpenChange: (open: boolean) => void;
+  readonly shakeEnabled: boolean;
+  readonly onShake: ShakeMenuProps["onSelect"];
+  readonly shakeFeedback: ShakeFeedback;
   readonly sidebarOpen: boolean;
   readonly theme: Theme;
   readonly workspaceForm: WorkspaceFormProps | null;
@@ -111,6 +116,9 @@ export function ChatScreen({
   contextUsage,
   contextDetailsOpen,
   onContextDetailsOpenChange,
+  shakeEnabled,
+  onShake,
+  shakeFeedback,
   sidebarOpen,
   theme,
   workspaceForm,
@@ -573,6 +581,26 @@ export function ChatScreen({
                 </Button>
               </div>
             )}
+            <p
+              className={
+                shakeFeedback.kind === "status"
+                  ? "shrink-0 break-words border-b border-border bg-panel px-4 py-3 text-label text-muted"
+                  : "sr-only"
+              }
+              role="status"
+            >
+              {shakeFeedback.kind === "status" ? shakeFeedback.message : ""}
+            </p>
+            <p
+              className={
+                shakeFeedback.kind === "error"
+                  ? "shrink-0 break-words border-b border-border bg-panel px-4 py-3 text-label text-danger"
+                  : "sr-only"
+              }
+              role="alert"
+            >
+              {shakeFeedback.kind === "error" ? shakeFeedback.message : ""}
+            </p>
             <div className="relative min-h-0 flex-1">
               <div
                 aria-label="Conversation history"
@@ -669,11 +697,18 @@ export function ChatScreen({
                       onValueChange={onComposerValueChange}
                       presentation={composer}
                     />
-                    <ContextUsage
-                      onOpenChange={onContextDetailsOpenChange}
-                      open={chatVisible && contextDetailsOpen}
-                      presentation={contextUsage}
-                    />
+                    <div className="mt-1 flex items-center justify-end">
+                      <ShakeMenu
+                        enabled={shakeEnabled}
+                        key={`${conversationKey}:${chatVisible}:${shakeEnabled}`}
+                        onSelect={onShake}
+                      />
+                      <ContextUsage
+                        onOpenChange={onContextDetailsOpenChange}
+                        open={chatVisible && contextDetailsOpen}
+                        presentation={contextUsage}
+                      />
+                    </div>
                   </div>
                   {welcome && transcript.state === "empty" && (
                     <div className="home-reveal home-reveal-recommendations mt-6 flex flex-col text-subtle">

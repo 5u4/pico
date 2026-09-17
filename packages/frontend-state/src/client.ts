@@ -1,5 +1,5 @@
 import { AgentPrompt } from "@pico/contract/agent-message";
-import type { TranscriptSnapshot } from "@pico/contract/agent-runtime";
+import type { ShakeMode, TranscriptSnapshot } from "@pico/contract/agent-runtime";
 import type {
   CloseChatOptions,
   CreateChat,
@@ -20,6 +20,7 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as AsyncResult from "effect/unstable/reactivity/AsyncResult";
 import * as Atom from "effect/unstable/reactivity/Atom";
+import * as AtomRegistry from "effect/unstable/reactivity/AtomRegistry";
 import type { RpcClientError } from "effect/unstable/rpc/RpcClientError";
 import {
   acknowledgeTranscript,
@@ -434,6 +435,20 @@ export const make = ({ url }: { readonly url: string }) => {
       }),
     ),
   );
+  const shake = Effect.fn("FrontendState.shake")(function* (
+    registry: AtomRegistry.AtomRegistry,
+    chatId: ChatId,
+    mode: ShakeMode,
+  ) {
+    const lifecycle = registry.get(lifetime);
+    return yield* Effect.gen(function* () {
+      const session = yield* AtomRegistry.getResult(registry, owner, { suspendOnWaiting: true });
+      yield* session.available;
+      const result = yield* session.client.Shake({ chatId, mode });
+      session.recordResponse();
+      return result;
+    }).pipe(Effect.onExit(() => Effect.sync(() => lifecycle.refresh(chatId))));
+  });
 
   return {
     connection,
@@ -452,5 +467,6 @@ export const make = ({ url }: { readonly url: string }) => {
     live,
     send,
     abort,
+    shake,
   } as const;
 };

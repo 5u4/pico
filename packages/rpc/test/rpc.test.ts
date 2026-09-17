@@ -6,7 +6,7 @@ import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import { assert, describe, it } from "@effect/vitest";
 import type * as AgentEvent from "@pico/contract/agent-event";
 import * as AgentMessage from "@pico/contract/agent-message";
-import type { TranscriptSnapshot } from "@pico/contract/agent-runtime";
+import type { ShakeResult, TranscriptSnapshot } from "@pico/contract/agent-runtime";
 import { Application } from "@pico/contract/application";
 import * as Chat from "@pico/contract/chat-model";
 import { ChatRepository } from "@pico/contract/chat-repository";
@@ -436,6 +436,17 @@ describe("RPC", () => {
                 abortInputs.push(chatId);
                 yield* Deferred.succeed(aborted, undefined);
               }),
+        shake: (chatId, mode) =>
+          Effect.gen(function* () {
+            if (chatId === secondChatId) return yield* new ChatClosed();
+            if (mode !== "images") {
+              return yield* new ApplicationError({
+                reason: "operation",
+                message: "Shake storage unavailable",
+              });
+            }
+            return { mode, imagesDropped: 2, tokensFreed: 0 } satisfies ShakeResult;
+          }),
       });
       const eventRouter = EventRouter.of({
         drain: () => Effect.void,
@@ -528,6 +539,7 @@ describe("RPC", () => {
             }),
             client.Abort({ chatId }),
             client.CloseChat({ chatId, allowDirtyWorktree: true }).pipe(Effect.asVoid),
+            client.Shake({ chatId, mode: "images" }).pipe(Effect.asVoid),
           ]) {
             const rejected = yield* request.pipe(Effect.flip);
             assert.instanceOf(rejected, ApplicationError);
@@ -581,6 +593,11 @@ describe("RPC", () => {
           Effect.forkChild,
         );
         yield* Deferred.await(sent);
+        assert.deepStrictEqual(yield* client.Shake({ chatId: firstChatId, mode: "images" }), {
+          mode: "images",
+          imagesDropped: 2,
+          tokensFreed: 0,
+        });
         yield* Effect.yieldNow;
         assert.isFalse(yield* Deferred.isDone(sendReturned));
         yield* Deferred.succeed(releaseSend, undefined);
@@ -595,6 +612,22 @@ describe("RPC", () => {
             .pipe(Effect.flip),
           ChatClosed,
         );
+        assert.instanceOf(
+          yield* client.Shake({ chatId: secondChatId, mode: "images" }).pipe(Effect.flip),
+          ChatClosed,
+        );
+        const shakeFailure = yield* client
+          .Shake({ chatId: firstChatId, mode: "elide" })
+          .pipe(Effect.flip);
+        assert.instanceOf(shakeFailure, ApplicationError);
+        assert.strictEqual(shakeFailure.reason, "operation");
+        assert.strictEqual(failures().length, 2);
+        assert.deepInclude(failures()[1]?.annotations, {
+          component: "rpc",
+          procedure: "Shake",
+          chatId: firstChatId,
+        });
+        assert.isString(failures()[1]?.annotations.requestId);
 
         yield* client.Abort({ chatId: secondChatId });
         yield* Deferred.await(aborted);
@@ -633,7 +666,7 @@ describe("RPC", () => {
 
         yield* Scope.close(clientScope, Exit.void);
         yield* Deferred.await(routeFinalized);
-        assert.strictEqual(failures().length, 1);
+        assert.strictEqual(failures().length, 2);
       }).pipe(
         Effect.scoped,
         Effect.provide(HttpRouter.serve(RpcServer.routes)),
@@ -688,6 +721,11 @@ describe("RPC", () => {
         const chatRead = yield* client.Transcript({ chatId: firstChatId }).pipe(Effect.flip);
         assert.instanceOf(chatRead, ApplicationError);
         assert.strictEqual(chatRead.reason, "operation");
+        const shake = yield* client
+          .Shake({ chatId: firstChatId, mode: "images" })
+          .pipe(Effect.flip);
+        assert.instanceOf(shake, ApplicationError);
+        assert.strictEqual(shake.reason, "operation");
         yield* Queue.offer(queue, firstEvent);
         const exit = yield* Fiber.join(subscription);
         if (Exit.isSuccess(exit)) return yield* Effect.die("Expected ownership failure");
