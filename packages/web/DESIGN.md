@@ -19,6 +19,8 @@ Schedules is a read-only main-content page above the retained chat state. It sho
 
 Rows keep definition state separate from the last recorded run. Disabled does not mean manually paused or successfully completed. Persisted execution phases do not prove current liveness. A previous definition revision's outcome stays labeled as a previous revision. The daemon calculates the next future calendar trigger using the stored cron timezone, not an execution-start promise.
 
+Deleting a schedule retains its run history for recovery, but the overview reads history only for current definitions. A damaged record from a deleted schedule cannot block the current list. Corrupt history for a current definition still fails the snapshot and produces a redacted RPC diagnostic.
+
 Creation and management remain LLM-only through the existing schedule tools. The page has no authoring handoff, metadata editor, or mutation controls. Read-only details show identity, targets, source paths, timeouts, and compact run status. Prompts, successful output, and execution working directories are not part of the overview response.
 
 One global schedule atom uses the existing registry connection. Entry, browser focus or visibility return, and explicit refresh request a snapshot without polling. A timestamp identifies the snapshot, and failed or disconnected reads retain a labeled previous result. Mobile closes its navigation dialog before entering the page. Entry focuses the page heading. Back to chats restores the visible opener or a persistent navigation control without opening the mobile keyboard.

@@ -268,29 +268,27 @@ const capture = Effect.fn("Schedules.capture")(function* (
       Effect.gen(function* () {
         const observedAt = yield* Clock.currentTimeMillis;
         const loaded = yield* scanSchedules(storage);
-        const lastRuns = new Map<Schedule.ScheduleId, Schedule.ScheduleRunSummary>();
-        for (const run of yield* readRuns(storage)) {
-          const previous = lastRuns.get(run.scheduleId);
-          if (
-            previous === undefined ||
-            run.claimedAt > previous.claimedAt ||
-            (run.claimedAt === previous.claimedAt && run.id > previous.id)
-          ) {
-            lastRuns.set(run.scheduleId, summarizeRun(run));
+        const entries: Array<Schedule.ScheduleOverviewEntry> = [];
+        for (const schedule of loaded) {
+          const view = invalidExternalView(schedule);
+          let lastRun: Schedule.ScheduleRunLifecycle | undefined;
+          for (const run of yield* readRuns(storage, view.id)) {
+            if (
+              lastRun === undefined ||
+              run.claimedAt > lastRun.claimedAt ||
+              (run.claimedAt === lastRun.claimedAt && run.id > lastRun.id)
+            ) {
+              lastRun = run;
+            }
           }
+          entries.push({
+            view,
+            ownerWorkspaceId: Option.getOrNull(decodeOwnerWorkspaceId(schedule.ownerWorkspaceId)),
+            nextTrigger: nextTrigger(view, observedAt),
+            lastRun: lastRun === undefined ? null : summarizeRun(lastRun),
+          });
         }
-        return {
-          observedAt,
-          entries: loaded.map((schedule): Schedule.ScheduleOverviewEntry => {
-            const view = invalidExternalView(schedule);
-            return {
-              view,
-              ownerWorkspaceId: Option.getOrNull(decodeOwnerWorkspaceId(schedule.ownerWorkspaceId)),
-              nextTrigger: nextTrigger(view, observedAt),
-              lastRun: lastRuns.get(view.id) ?? null,
-            };
-          }),
-        };
+        return { observedAt, entries };
       }),
     );
   });

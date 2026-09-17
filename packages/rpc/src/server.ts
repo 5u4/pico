@@ -261,7 +261,7 @@ const reportFailure = (cause: Cause.Cause<unknown>) => {
     if (reason._tag === "Die") return true;
     const error = reason.error;
     if (error instanceof ApplicationError) return error.reason === "operation";
-    if (error instanceof ScheduleError) return error.kind === "io";
+    if (error instanceof ScheduleError) return error.kind === "io" || error.kind === "corrupt";
     return !(error instanceof ChatClosed || error instanceof WorkspaceBindingInvalid);
   });
   if (!operational) return Effect.void;

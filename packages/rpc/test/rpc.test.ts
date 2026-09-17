@@ -256,6 +256,71 @@ describe("RPC", () => {
       );
     }).pipe(Effect.scoped),
   );
+  it.live("reports corrupt schedule history once without logging persisted payloads", () =>
+    Effect.gen(function* () {
+      const ownership = yield* ownershipFixture();
+      const sourceDirectory = AbsolutePath.make(`${ownership.directory}/source`);
+      yield* ownership.fileSystem.makeDirectory(sourceDirectory);
+      yield* ownership.fileSystem.writeFileString(`${sourceDirectory}/prompt.md`, "Run the check.");
+      const created = yield* ownership.schedules.create(
+        { workspaceId: webWorkspace.id, chatId: firstChatId },
+        {
+          name: "Corrupt history",
+          enabled: false,
+          sourceDirectory,
+          target: { kind: "chat", chatId: firstChatId },
+          trigger: { kind: "once", at: 1_000 },
+        },
+      );
+      if (created.kind !== "ready") return yield* Effect.die("Expected valid definition");
+      const runDirectory = `${ownership.directory}/schedules/runs/${created.id}/scheduled-1000-${created.definition.revision}`;
+      yield* ownership.fileSystem.makeDirectory(runDirectory, { recursive: true });
+      yield* ownership.fileSystem.writeFileString(
+        `${runDirectory}/run.json`,
+        JSON.stringify({ private: "private-schedule-output" }),
+      );
+      const logs: Array<ReturnType<typeof Logger.formatStructured.log>> = [];
+      const logger = Logger.layer([
+        Logger.make((options) => {
+          logs.push(Logger.formatStructured.log(options));
+        }),
+      ]);
+      const router = EventRouter.of({
+        drain: () => Effect.void,
+        open: () => Effect.die("unexpected events"),
+      });
+      yield* Effect.gen(function* () {
+        const server = yield* HttpServer.HttpServer;
+        if (server.address._tag === "UnixAddress") return yield* Effect.die("Expected TCP server");
+        const host = server.address.hostname === "0.0.0.0" ? "127.0.0.1" : server.address.hostname;
+        const client = yield* RpcClient.make(`ws://${host}:${server.address.port}/rpc`);
+        const error = yield* client.ListSchedules().pipe(Effect.flip);
+        assert.instanceOf(error, Schedule.ScheduleError);
+        assert.strictEqual(error.kind, "corrupt");
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(HttpRouter.serve(RpcServer.routes)),
+        Effect.provide(
+          Layer.mergeAll(
+            Layer.succeed(Application, unusedApplication),
+            Layer.succeed(EventRouter, router),
+            ownership.layer,
+          ),
+        ),
+        Effect.provide(NodeHttpServer.layerTest),
+        Effect.provide(logger),
+      );
+      const failures = logs.filter((entry) => entry.level === "ERROR");
+      assert.strictEqual(failures.length, 1);
+      assert.deepInclude(failures[0]?.annotations, {
+        component: "rpc",
+        procedure: "ListSchedules",
+      });
+      assert.isString(failures[0]?.annotations.requestId);
+      assert.notInclude(JSON.stringify(failures), "private-schedule-output");
+    }).pipe(Effect.scoped),
+  );
+
   it.live("isolates web reads, mutations and live events through one scoped client", () =>
     Effect.gen(function* () {
       const ownership = yield* ownershipFixture();

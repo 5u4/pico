@@ -138,6 +138,49 @@ describe("schedule management", () => {
     }).pipe(Effect.provide(platformLayer), Effect.scoped),
   );
 
+  it.effect("isolates current schedules from corrupt retained history after deletion", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-retained-runs-" });
+      const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
+      const schedules = yield* open(schedulesDir, resolveTarget);
+      const input: Schedule.CreateSchedule = {
+        name: "Retained history",
+        enabled: false,
+        target: { kind: "chat", chatId },
+        trigger: { kind: "once", at: 1_000 },
+        sourceDirectory: yield* prepareSource({ "prompt.md": "Run the check." }),
+      };
+      const removed = yield* schedules.create(caller, input);
+      if (removed.kind !== "ready") return yield* Effect.die("Expected valid definition");
+      const runDirectory = path.join(
+        schedulesDir,
+        "runs",
+        removed.id,
+        `scheduled-1000-${removed.definition.revision}`,
+      );
+      yield* fileSystem.makeDirectory(runDirectory, { recursive: true });
+      const runFile = path.join(runDirectory, "run.json");
+      yield* fileSystem.writeFileString(runFile, "{}");
+      const corrupt = yield* schedules.overview().pipe(Effect.flip);
+      assert.strictEqual(corrupt.kind, "corrupt");
+
+      yield* schedules.remove(caller, removed.id);
+      const current = yield* schedules.create(caller, { ...input, name: "Current schedule" });
+      const snapshot = yield* schedules.overview();
+      assert.deepStrictEqual(
+        snapshot.entries.map((entry) => entry.view.id),
+        [current.id],
+      );
+      assert.isNull(snapshot.entries[0]?.lastRun);
+      assert.strictEqual(yield* fileSystem.readFileString(runFile), "{}");
+
+      yield* schedules.remove(caller, current.id);
+      assert.deepStrictEqual((yield* schedules.overview()).entries, []);
+    }).pipe(Effect.provide(platformLayer), Effect.scoped),
+  );
+
   it.effect(
     "calculates timezone-aware future triggers and distinguishes impossible cron dates",
     () =>
