@@ -24,25 +24,28 @@ export interface ModelSwitchResult {
   readonly model: ModelInfo;
 }
 
-export type ShakeMode = "elide" | "images" | "thinking";
+export const ShakeMode = Schema.Literals(["elide", "images", "thinking"]);
+export type ShakeMode = typeof ShakeMode.Type;
 
-export type ShakeResult =
-  | {
-      readonly mode: "elide";
-      readonly toolResultsDropped: number;
-      readonly blocksDropped: number;
-      readonly tokensFreed: number;
-    }
-  | {
-      readonly mode: "images";
-      readonly imagesDropped: number;
-      readonly tokensFreed: number;
-    }
-  | {
-      readonly mode: "thinking";
-      readonly thinkingBlocksDropped: number;
-      readonly tokensFreed: number;
-    };
+export const ShakeResult = Schema.Union([
+  Schema.Struct({
+    mode: Schema.Literal("elide"),
+    toolResultsDropped: Schema.Number,
+    blocksDropped: Schema.Number,
+    tokensFreed: Schema.Number,
+  }),
+  Schema.Struct({
+    mode: Schema.Literal("images"),
+    imagesDropped: Schema.Number,
+    tokensFreed: Schema.Number,
+  }),
+  Schema.Struct({
+    mode: Schema.Literal("thinking"),
+    thinkingBlocksDropped: Schema.Number,
+    tokensFreed: Schema.Number,
+  }),
+]);
+export type ShakeResult = typeof ShakeResult.Type;
 
 export const ContextUsage = Schema.Union([
   Schema.Struct({ kind: Schema.Literal("unavailable") }),

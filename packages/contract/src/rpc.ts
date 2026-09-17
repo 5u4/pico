@@ -3,7 +3,7 @@ import * as Rpc from "effect/unstable/rpc/Rpc";
 import * as RpcGroup from "effect/unstable/rpc/RpcGroup";
 import * as AgentEvent from "./agent-event.ts";
 import * as AgentMessage from "./agent-message.ts";
-import { TranscriptSnapshot } from "./agent-runtime.ts";
+import { ShakeMode, ShakeResult, TranscriptSnapshot } from "./agent-runtime.ts";
 import * as Application from "./application.ts";
 import * as Chat from "./chat-model.ts";
 import * as Errors from "./errors.ts";
@@ -82,6 +82,11 @@ export const PicoRpcs = RpcGroup.make(
     payload: { chatId: Chat.ChatId },
     success: Schema.Void,
     error: Errors.ApplicationError,
+  }),
+  Rpc.make("Shake", {
+    payload: { chatId: Chat.ChatId, mode: ShakeMode },
+    success: ShakeResult,
+    error: Schema.Union([Errors.ApplicationError, Errors.ChatClosed]),
   }),
   Rpc.make("Events", {
     payload: Schema.Void,

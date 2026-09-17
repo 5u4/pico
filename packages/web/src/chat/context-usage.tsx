@@ -54,7 +54,7 @@ export function ContextUsage({ presentation, open, onOpenChange }: ContextUsageP
   }, [open]);
 
   return (
-    <div className="mt-1 flex justify-end">
+    <>
       <button
         aria-controls={id}
         aria-expanded={open}
@@ -137,6 +137,6 @@ export function ContextUsage({ presentation, open, onOpenChange }: ContextUsageP
         )}
         <p className="mt-3 text-caption leading-relaxed text-muted">{presentation.description}</p>
       </div>
-    </div>
+    </>
   );
 }
