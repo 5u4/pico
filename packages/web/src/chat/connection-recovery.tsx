@@ -4,7 +4,7 @@ interface ConnectionRecoveryProps {
   readonly connection: "opening" | "active" | "unavailable";
   readonly recovery:
     | readonly {
-        readonly key: number;
+        readonly key: string;
         readonly label: string;
         readonly text: string;
       }[]

@@ -15,6 +15,14 @@ When sources disagree, follow them in this order:
 
 The application uses one registry-owned connection. `App` owns registry lifetime. TanStack Router owns the current page and conversation selection. `WorkspaceChat` retains conversation entries, drafts, and commands. `transcript-presentation.ts` maps transcript records into display values. Presentation components remain controlled and domain-free.
 
+New tabs have independent UUIDs in the workspace route's `tab` search parameter. This keeps browser history tied to one retained entry when a workspace has several drafts. New chat reuses a retained New only when it belongs to the target workspace, has no text, and is idle. Otherwise it creates another entry. Whitespace is retained text, not an empty draft. Closing a tab hides its entry without discarding its draft. Creating a chat keeps the entry's identity and position. Drafts remain in page memory only; the URL does not restore their text after a reload.
+
+New tab labels use the draft's first line, trimmed, or `New chat` when that line is blank. Long labels truncate visually and expose the full first line in the tab tooltip. The label does not determine whether a draft is empty: a blank first line can still precede retained text.
+
+While a chat is being created, other New tabs in that workspace remain editable but cannot send or select a suggestion until creation completes. Their status identifies the shared wait instead of implying that a message was submitted.
+
+The last-workspace preference is written only when the selected workspace changes. Typing and switching tabs within that workspace do not write it. If browser storage is blocked, the in-memory preference still changes without retrying on each keystroke.
+
 Schedules at `/schedules` is a read-only main-content page above the retained chat state. Direct links and reloads do not require a selected workspace. It shows all current definitions across every platform, including invalid definitions with unknown owners. Chat tabs, drafts, disclosure choices, and scroll positions remain mounted. Hidden chat content is inert, and its measurement, focus, and native-overlay behavior is suspended.
 
 Rows keep definition state separate from the last recorded run. Disabled does not mean manually paused or successfully completed. Persisted execution phases do not prove current liveness. A previous definition revision's outcome stays labeled as a previous revision. The daemon calculates the next future calendar trigger using the stored cron timezone, not an execution-start promise.
