@@ -35,6 +35,7 @@ const emptyTranscript: TranscriptSnapshot = {
   contextUsage: { kind: "unavailable" },
   todo: { kind: "ready", phases: [] },
   runtime: { publication: Publication.make(0), run: { kind: "idle" }, assistant: [], tools: [] },
+  currentModel: null,
 };
 const populatedTranscript: TranscriptSnapshot = {
   ...emptyTranscript,

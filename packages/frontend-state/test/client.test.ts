@@ -75,6 +75,7 @@ const snapshot = (
 ): TranscriptSnapshot => ({
   messages,
   contextUsage,
+  currentModel: null,
   todo: { kind: "ready", phases: [] },
   runtime,
 });
@@ -117,6 +118,8 @@ const fixture = Effect.fnUntraced(function* (
         | "createChat"
         | "closeChat"
         | "shake"
+        | "availableModels"
+        | "switchModel"
       >
     >,
   beforeReady: Effect.Effect<void> = Effect.void,
@@ -505,6 +508,97 @@ describe("frontend state over WebSocket", () => {
           "keep this draft",
         );
         assert.strictEqual(registry.get(state.live(firstChat)).run.kind, "idle");
+      }).pipe(Effect.scoped, Effect.provide(server.layer));
+    }),
+  );
+
+  it.live("shows a confirmed model switch while the initial snapshot is still pending", () =>
+    Effect.gen(function* () {
+      const model = { provider: "fixture", id: "selected", name: "Selected" };
+      const snapshotGate = yield* Deferred.make<TranscriptSnapshot, ApplicationError>();
+      const server = yield* fixture({
+        transcript: () => Deferred.await(snapshotGate),
+        sendMessage: () => Effect.succeed({ kind: "handled" }),
+        abort: () => Effect.void,
+        availableModels: () => Effect.succeed([model]),
+        switchModel: () => Effect.succeed({ kind: "persistence-unconfirmed", model }),
+      });
+      yield* Effect.gen(function* () {
+        const state = make({ url: yield* endpoint });
+        const registry = yield* registryInScope;
+        registry.mount(state.availableModels(firstChat));
+        yield* waitFor(registry, state.availableModels(firstChat), AsyncResult.isSuccess);
+        registry.mount(state.currentModel(firstChat));
+        yield* waitFor(registry, state.currentModel(firstChat), (result) => result.waiting);
+        registry.set(state.switchModel(firstChat), model);
+        yield* waitFor(
+          registry,
+          state.switchModel(firstChat),
+          (result) => AsyncResult.isSuccess(result) && !result.waiting,
+        );
+        const current = registry.get(state.currentModel(firstChat));
+        assert.isTrue(AsyncResult.isSuccess(current));
+        assert.isTrue(current.waiting);
+        assert.deepStrictEqual(AsyncResult.getOrThrow(current), model);
+        assert.strictEqual(
+          AsyncResult.getOrThrow(registry.get(state.switchModel(firstChat))).kind,
+          "persistence-unconfirmed",
+        );
+      }).pipe(Effect.scoped, Effect.provide(server.layer));
+    }),
+  );
+
+  it.live("retains a confirmed model switch when snapshots fail without a previous value", () =>
+    Effect.gen(function* () {
+      const model = { provider: "fixture", id: "selected", name: "Selected" };
+      let readable = false;
+      const server = yield* fixture({
+        transcript: () =>
+          readable
+            ? Effect.succeed(snapshot())
+            : Effect.fail(
+                new ApplicationError({ reason: "operation", message: "Snapshot unavailable" }),
+              ),
+        sendMessage: () => Effect.succeed({ kind: "handled" }),
+        abort: () => Effect.void,
+        availableModels: () => Effect.succeed([model]),
+        switchModel: () => Effect.succeed({ kind: "persistence-unconfirmed", model }),
+      });
+      yield* Effect.gen(function* () {
+        const state = make({ url: yield* endpoint });
+        const registry = yield* registryInScope;
+        registry.mount(state.currentModel(firstChat));
+        registry.mount(state.availableModels(firstChat));
+        yield* waitFor(registry, state.currentModel(firstChat), AsyncResult.isFailure);
+        yield* waitFor(registry, state.availableModels(firstChat), AsyncResult.isSuccess);
+        registry.set(state.switchModel(firstChat), model);
+        yield* waitFor(
+          registry,
+          state.switchModel(firstChat),
+          (result) => AsyncResult.isSuccess(result) && !result.waiting,
+        );
+        yield* waitFor(
+          registry,
+          state.currentModel(firstChat),
+          (result) => AsyncResult.isFailure(result) && !result.waiting,
+        );
+        assert.deepStrictEqual(
+          Option.getOrNull(AsyncResult.value(registry.get(state.currentModel(firstChat)))),
+          model,
+        );
+        assert.strictEqual(
+          AsyncResult.getOrThrow(registry.get(state.switchModel(firstChat))).kind,
+          "persistence-unconfirmed",
+        );
+        assert.isTrue(AsyncResult.isFailure(registry.get(state.transcript(firstChat))));
+        readable = true;
+        registry.refresh(state.currentModel(firstChat));
+        yield* waitFor(
+          registry,
+          state.currentModel(firstChat),
+          (result) => AsyncResult.isSuccess(result) && !result.waiting,
+        );
+        assert.isNull(AsyncResult.getOrThrow(registry.get(state.currentModel(firstChat))));
       }).pipe(Effect.scoped, Effect.provide(server.layer));
     }),
   );

@@ -40,7 +40,11 @@ import {
   type SessionFactory,
   type SessionHandle,
 } from "./session-pool.ts";
-import { loadAvailableModels, prepareSessionSettings } from "./session-settings.ts";
+import {
+  loadAvailableModels,
+  loadCurrentModel,
+  prepareSessionSettings,
+} from "./session-settings.ts";
 
 interface RuntimeOptions {
   readonly paths: Pick<PicoPaths, "root" | "sessionsDir">;
@@ -126,6 +130,14 @@ export const make = Effect.fn("AgentRuntime.make")(function* ({
       browsers,
     ),
     loadTranscript,
+    loadCurrentModel: Effect.fn("OmpSession.readCurrentModel")(function* (chatId) {
+      const { chat } = yield* chatSessionContext.resolve(chatId);
+      return yield* loadCurrentModel(
+        modelRegistry,
+        chat.cwd,
+        path.join(sessionsDir, `${chatId}.jsonl`),
+      );
+    }),
   });
 
   return AgentRuntime.of({
@@ -437,7 +449,8 @@ const makeFactory = (
       const latest = branch.findLast((entry) => entry.type === "model_change");
       if (
         selected?.type === "model_change" &&
-        (latest?.role !== "temporary" || latest.resolvedModelIsFallback)
+        latest?.role === "temporary" &&
+        latest.resolvedModelIsFallback
       ) {
         manager.appendModelChange(selected.model, "temporary");
         await manager.ensureOnDisk();
@@ -585,6 +598,10 @@ const makeFactory = (
       askBtw: makeBtw(created.session),
       shake: makeShake(created.session),
       switchModel: makeSwitchModel(created.session),
+      currentModel: () => {
+        const model = created.session.model;
+        return model ? { provider: model.provider, id: model.id, name: model.name } : null;
+      },
       flush: async () => {
         await manager.ensureOnDisk();
         await manager.flush();

@@ -16,14 +16,17 @@ export const ModelRef = Schema.Struct({
 });
 export type ModelRef = typeof ModelRef.Type;
 
-export interface ModelInfo extends ModelRef {
-  readonly name: string;
-}
+export const ModelInfo = Schema.Struct({
+  ...ModelRef.fields,
+  name: Schema.String,
+});
+export type ModelInfo = typeof ModelInfo.Type;
 
-export interface ModelSwitchResult {
-  readonly kind: "persisted" | "persistence-unconfirmed";
-  readonly model: ModelInfo;
-}
+export const ModelSwitchResult = Schema.Struct({
+  kind: Schema.Literals(["persisted", "persistence-unconfirmed"]),
+  model: ModelInfo,
+});
+export type ModelSwitchResult = typeof ModelSwitchResult.Type;
 
 export const ShakeMode = Schema.Literals(["elide", "images", "thinking"]);
 export type ShakeMode = typeof ShakeMode.Type;

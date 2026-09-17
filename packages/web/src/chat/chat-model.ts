@@ -237,6 +237,27 @@ export type ComposerPresentation =
       readonly statusLabel: string;
     };
 
+export interface ModelPickerPresentation {
+  readonly label: string;
+  readonly control:
+    | { readonly kind: "draft" }
+    | { readonly kind: "disabled"; readonly reason: string }
+    | {
+        readonly kind: "select";
+        readonly value: string;
+        readonly options: readonly { readonly value: string; readonly label: string }[];
+      };
+  readonly feedback:
+    | { readonly kind: "none" }
+    | {
+        readonly kind: "error";
+        readonly message: string;
+        readonly warning: string | null;
+        readonly retry: "enabled" | "disabled";
+      }
+    | { readonly kind: "warning"; readonly message: string };
+}
+
 export type ContextUsagePresentation =
   | {
       readonly kind: "loading" | "unavailable" | "error";

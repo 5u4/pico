@@ -19,6 +19,7 @@ import type {
   ComposerPresentation,
   ContextUsagePresentation,
   DeleteWorkspacePresentation,
+  ModelPickerPresentation,
   PromptSuggestion,
   ShakeFeedback,
   TodoPresentation,
@@ -30,6 +31,7 @@ import { Composer } from "./composer.tsx";
 import { ContextUsage } from "./context-usage.tsx";
 import { DeleteWorkspaceDialog } from "./delete-workspace-dialog.tsx";
 import { MobileSidebar } from "./mobile-sidebar.tsx";
+import { ModelPicker } from "./model-picker.tsx";
 import { SchedulePage, type SchedulePageProps } from "./schedule-page.tsx";
 import { ShakeMenu, type ShakeMenuProps } from "./shake-menu.tsx";
 import { TodoDock } from "./todo-dock.tsx";
@@ -63,6 +65,10 @@ export interface ChatScreenProps
   readonly transcript: TranscriptPresentation;
   readonly composer: ComposerPresentation;
   readonly todo: TodoPresentation | null;
+  readonly modelPicker: ModelPickerPresentation;
+  readonly onModelPickerOpen: () => void;
+  readonly onModelSelect: (value: string) => void;
+  readonly onModelRetry: () => void;
   readonly contextUsage: ContextUsagePresentation;
   readonly contextDetailsOpen: boolean;
   readonly onContextDetailsOpenChange: (open: boolean) => void;
@@ -113,6 +119,10 @@ export function ChatScreen({
   transcript,
   composer,
   todo,
+  modelPicker,
+  onModelPickerOpen,
+  onModelSelect,
+  onModelRetry,
   contextUsage,
   contextDetailsOpen,
   onContextDetailsOpenChange,
@@ -697,17 +707,26 @@ export function ChatScreen({
                       onValueChange={onComposerValueChange}
                       presentation={composer}
                     />
-                    <div className="mt-1 flex items-center justify-end">
-                      <ShakeMenu
-                        enabled={shakeEnabled}
-                        key={`${conversationKey}:${chatVisible}:${shakeEnabled}`}
-                        onSelect={onShake}
+                    <div className="mt-1 flex items-start justify-between gap-2">
+                      <ModelPicker
+                        key={conversationKey}
+                        onOpen={onModelPickerOpen}
+                        onRetry={onModelRetry}
+                        onSelect={onModelSelect}
+                        presentation={modelPicker}
                       />
-                      <ContextUsage
-                        onOpenChange={onContextDetailsOpenChange}
-                        open={chatVisible && contextDetailsOpen}
-                        presentation={contextUsage}
-                      />
+                      <div className="flex shrink-0 items-center">
+                        <ShakeMenu
+                          enabled={shakeEnabled}
+                          key={`${conversationKey}:${chatVisible}:${shakeEnabled}`}
+                          onSelect={onShake}
+                        />
+                        <ContextUsage
+                          onOpenChange={onContextDetailsOpenChange}
+                          open={chatVisible && contextDetailsOpen}
+                          presentation={contextUsage}
+                        />
+                      </div>
                     </div>
                   </div>
                   {welcome && transcript.state === "empty" && (

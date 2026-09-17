@@ -8,7 +8,7 @@ import {
   Publication,
 } from "./agent-event.ts";
 import { AgentAssistantMessage, AgentMessageId, AgentTranscript } from "./agent-message.ts";
-import { ContextUsage, TodoState } from "./agent-runtime.ts";
+import { ContextUsage, ModelInfo, TodoState } from "./agent-runtime.ts";
 
 const ObservedRun = Schema.Union([
   Schema.Struct({ kind: Schema.Literal("idle") }),
@@ -46,6 +46,7 @@ export const TranscriptSnapshot = Schema.Struct({
   messages: AgentTranscript,
   todo: TodoState,
   contextUsage: Schema.Union([ContextUsage, Schema.Struct({ kind: Schema.Literal("error") })]),
+  currentModel: Schema.NullOr(ModelInfo),
   runtime: RuntimeSnapshot,
 });
 export type TranscriptSnapshot = typeof TranscriptSnapshot.Type;

@@ -149,6 +149,28 @@ const handlers = PicoRpcs.toLayer(
             requestId: String(requestId),
           }),
         ),
+      AvailableModels: ({ chatId }, { requestId }) =>
+        requireWebChat(workspaces, chats, chatId).pipe(
+          Effect.andThen(() => application.availableModels(chatId)),
+          Effect.tapCause(reportFailure),
+          Effect.annotateLogs({
+            component: "rpc",
+            procedure: "AvailableModels",
+            chatId,
+            requestId: String(requestId),
+          }),
+        ),
+      SwitchModel: ({ chatId, model }, { requestId }) =>
+        requireWebChat(workspaces, chats, chatId).pipe(
+          Effect.andThen(() => application.switchModel(chatId, model)),
+          Effect.tapCause(reportFailure),
+          Effect.annotateLogs({
+            component: "rpc",
+            procedure: "SwitchModel",
+            chatId,
+            requestId: String(requestId),
+          }),
+        ),
       SendMessage: ({ chatId, prompt }, { requestId }) =>
         requireWebChat(workspaces, chats, chatId).pipe(
           Effect.andThen(() => application.sendMessage(chatId, prompt)),

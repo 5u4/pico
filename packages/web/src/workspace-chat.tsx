@@ -1,6 +1,6 @@
 import { useAtomValue } from "@effect/atom-react/Hooks";
 import { RegistryContext } from "@effect/atom-react/RegistryContext";
-import type { ShakeMode, ShakeResult } from "@pico/contract/agent-runtime";
+import type { ModelInfo, ModelRef, ShakeMode, ShakeResult } from "@pico/contract/agent-runtime";
 import type { TranscriptSnapshot } from "@pico/contract/agent-snapshot";
 import { CreateWorkspace } from "@pico/contract/application";
 import type { Chat, ChatId } from "@pico/contract/chat-model";
@@ -24,6 +24,7 @@ import type {
   CloseChatPresentation,
   ComposerPresentation,
   ContextUsagePresentation,
+  ModelPickerPresentation,
   NavigationPresentation,
   PromptSuggestion,
   ScheduleListPresentation,
@@ -113,6 +114,9 @@ const openingConnection = Atom.make<FrontendState.Connection>({ kind: "opening" 
 const decodeWorkspace = Schema.decodeUnknownOption(CreateWorkspace);
 const tokenFormat = new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 });
 const percentageFormat = new Intl.NumberFormat("en-US", { maximumFractionDigits: 1 });
+
+const modelValue = (model: ModelRef) => JSON.stringify([model.provider, model.id]);
+const modelLabel = (model: ModelInfo) => `${model.name || model.id} · ${model.provider}`;
 
 function presentContextUsage(
   result: AsyncResult.AsyncResult<TranscriptSnapshot["contextUsage"], unknown> | undefined,
@@ -582,6 +586,9 @@ export function WorkspaceChat({
               live: get(state.live(chatId)),
               contextUsage: get(state.contextUsage(chatId)),
               todo: get(state.todo(chatId)),
+              currentModel: get(state.currentModel(chatId)),
+              models: get(state.availableModels(chatId)),
+              switching: get(state.switchModel(chatId)),
               sending: get(state.send(chatId)),
               stopping: get(state.abort(chatId)),
             }
@@ -1268,6 +1275,85 @@ export function WorkspaceChat({
     }
     setSearch(next);
   };
+  const ensureChat = async (entry: DraftEntry): Promise<Chat | undefined> => {
+    if (!state) return;
+    if (entry.target.kind === "chat") return entry.target.chat;
+    if (creatingChats.current.has(entry.workspace.id)) return;
+    creatingChats.current.add(entry.workspace.id);
+    updateEntry(entry.key, (value) => ({ ...value, submission: { kind: "creating" } }));
+    const exit = await runCommand(registry, state.createChat(entry.workspace.id), {
+      externalId: null,
+    });
+    creatingChats.current.delete(entry.workspace.id);
+    if (Exit.isFailure(exit)) {
+      updateEntry(entry.key, (value) => ({
+        ...value,
+        submission: {
+          kind: "error",
+          message: `${errorMessage(exit.cause)} Your draft is kept. Try again.`,
+        },
+      }));
+      return;
+    }
+    const chat = exit.value;
+    updateEntry(entry.key, (value) => ({
+      ...value,
+      target: { kind: "chat", chat },
+      submission: { kind: "idle" },
+    }));
+    if (ownsVisit() && navigationRef.current.openKeys.includes(entry.key)) {
+      navigatePage({ kind: "chat", workspaceId: entry.workspace.id, chatId: chat.id }, true);
+    }
+    return chat;
+  };
+  const modelEntry = () => {
+    if (!state || !ownsVisit() || registry.get(state.connection).kind !== "active") return;
+    const entry = findPageEntry(page, navigationRef.current.entries);
+    if (!entry || entry.key !== selected?.key || entry.submission.kind === "creating") return;
+    if (entry.target.kind === "chat") {
+      const id = entry.target.chat.id;
+      if (
+        registry.get(state.switchModel(id)).waiting ||
+        registry.get(state.availableModels(id)).waiting ||
+        registry.get(state.currentModel(id)).waiting
+      )
+        return;
+    }
+    return entry;
+  };
+  const openModelPicker = async () => {
+    const entry = modelEntry();
+    if (entry) await ensureChat(entry);
+  };
+  const switchModel = async (model: ModelRef) => {
+    const entry = modelEntry();
+    if (!state || entry?.target.kind !== "chat") return;
+    await runCommand(registry, state.switchModel(entry.target.chat.id), model);
+  };
+  const selectModel = (value: string) => {
+    const entry = modelEntry();
+    if (!state || entry?.target.kind !== "chat") return;
+    const models = AsyncResult.value(registry.get(state.availableModels(entry.target.chat.id)));
+    if (Option.isNone(models)) return;
+    const model = models.value.find((model) => modelValue(model) === value);
+    if (model) void switchModel(model);
+  };
+  const retryModel = () => {
+    const entry = modelEntry();
+    if (!state || !entry) return;
+    if (entry.target.kind === "new") {
+      void openModelPicker();
+      return;
+    }
+    const id = entry.target.chat.id;
+    const request = registry.get(state.modelSwitchRequest(id));
+    if (registry.get(state.switchModel(id))._tag === "Failure" && request) {
+      void switchModel(request);
+    } else {
+      registry.refresh(state.availableModels(id));
+      registry.refresh(state.currentModel(id));
+    }
+  };
   const submitDraft = async () => {
     if (
       !state ||
@@ -1287,41 +1373,17 @@ export function WorkspaceChat({
       return;
     const key = entry.key;
     const sentValue = entry.value;
-    let chat: Chat;
-    if (entry.target.kind === "new") {
-      if (creatingChats.current.has(entry.workspace.id)) return;
-      creatingChats.current.add(entry.workspace.id);
-      updateEntry(key, (value) => ({ ...value, submission: { kind: "creating" } }));
-      const exit = await runCommand(registry, state.createChat(entry.workspace.id), {
-        externalId: null,
-      });
-      creatingChats.current.delete(entry.workspace.id);
-      if (Exit.isFailure(exit)) {
-        updateEntry(key, (value) => ({
-          ...value,
-          submission: {
-            kind: "error",
-            message: `${errorMessage(exit.cause)} Your draft is kept. Check the chat list before creating another chat.`,
-          },
-        }));
-        return;
-      }
-      chat = exit.value;
-      updateEntry(key, (value) => ({
-        ...value,
-        target: { kind: "chat", chat },
-      }));
-      if (ownsVisit() && navigationRef.current.openKeys.includes(key)) {
-        navigatePage({ kind: "chat", workspaceId: entry.workspace.id, chatId: chat.id }, true);
-      }
-    } else {
-      chat = entry.target.chat;
+    if (entry.target.kind === "chat") {
+      const id = entry.target.chat.id;
       if (
-        registry.get(state.send(chat.id)).waiting ||
-        registry.get(state.live(chat.id)).run.kind === "running"
+        registry.get(state.send(id)).waiting ||
+        registry.get(state.switchModel(id)).waiting ||
+        registry.get(state.live(id)).run.kind === "running"
       )
         return;
     }
+    const chat = entry.target.kind === "chat" ? entry.target.chat : await ensureChat(entry);
+    if (!chat) return;
     updateEntry(key, (value) => ({
       ...value,
       value: value.value === sentValue ? emptyDraft : value.value,
@@ -1356,6 +1418,7 @@ export function WorkspaceChat({
       if (creatingChats.current.has(entry.workspace.id)) return;
     } else if (
       registry.get(state.send(entry.target.chat.id)).waiting ||
+      registry.get(state.switchModel(entry.target.chat.id)).waiting ||
       registry.get(state.live(entry.target.chat.id)).run.kind === "running"
     ) {
       return;
@@ -1515,6 +1578,7 @@ export function WorkspaceChat({
       creatingChats.current.has(conversationEntry.workspace.id));
   const sending = conversationEntry?.submission.kind === "sending" || conversation?.sending.waiting;
   const running = conversation?.live.run.kind === "running";
+  const switching = conversation?.switching.waiting === true;
   const statusLabel = !conversationEntry
     ? groups.length > 0
       ? "Choose a chat or start a new one"
@@ -1527,21 +1591,23 @@ export function WorkspaceChat({
           ? conversationEntry.submission.kind === "creating"
             ? "Creating chat. Draft kept."
             : "Another chat is being created. Draft kept."
-          : conversation?.stopping.waiting
-            ? "Stop requested..."
-            : running
-              ? "Pico is working"
-              : sending
-                ? "Waiting for response completion..."
-                : conversation?.live.run.kind === "unknown"
-                  ? "Run status unknown. You can send or request Stop."
-                  : conversation?.live.run.kind === "finished" &&
-                      conversation.live.run.outcome === "aborted"
-                    ? "Response stopped"
+          : switching
+            ? "Switching model. Draft kept."
+            : conversation?.stopping.waiting
+              ? "Stop requested..."
+              : running
+                ? "Pico is working"
+                : sending
+                  ? "Waiting for response completion..."
+                  : conversation?.live.run.kind === "unknown"
+                    ? "Run status unknown. You can send or request Stop."
                     : conversation?.live.run.kind === "finished" &&
-                        conversation.live.run.outcome === "failed"
-                      ? "Response failed. Review the error before sending again."
-                      : "Enter to send · Shift+Enter for a new line";
+                        conversation.live.run.outcome === "aborted"
+                      ? "Response stopped"
+                      : conversation?.live.run.kind === "finished" &&
+                          conversation.live.run.outcome === "failed"
+                        ? "Response failed. Review the error before sending again."
+                        : "Enter to send · Shift+Enter for a new line";
   const composer: ComposerPresentation =
     running || sending
       ? {
@@ -1561,7 +1627,12 @@ export function WorkspaceChat({
               ? "Choose a chat or start a new one"
               : "Add a workspace to start",
           editable: !!conversationEntry,
-          canSubmit: available && !!selected && !creating && selected.value.text.trim().length > 0,
+          canSubmit:
+            available &&
+            !!selected &&
+            !creating &&
+            !switching &&
+            selected.value.text.trim().length > 0,
           statusLabel,
         };
   const todo = conversation
@@ -1569,6 +1640,94 @@ export function WorkspaceChat({
         kind: "unavailable" as const,
       }))
     : { kind: "unavailable" as const };
+  const modelPicker = ((): ModelPickerPresentation => {
+    const current = conversation
+      ? Option.getOrUndefined(AsyncResult.value(conversation.currentModel))
+      : undefined;
+    const label = current ? modelLabel(current) : "Choose model";
+    const busy = creating || switching;
+    const retry =
+      available && !busy && !conversation?.models.waiting && !conversation?.currentModel.waiting
+        ? "enabled"
+        : "disabled";
+    const switched = conversation
+      ? Option.getOrUndefined(AsyncResult.value(conversation.switching))
+      : undefined;
+    const warning =
+      switched?.kind === "persistence-unconfirmed" &&
+      current &&
+      modelValue(current) === modelValue(switched.model)
+        ? "Model changed for this chat. Saving was not confirmed; it may revert after restart."
+        : null;
+    const feedback: ModelPickerPresentation["feedback"] =
+      conversation?.switching._tag === "Failure"
+        ? { kind: "error", message: errorMessage(conversation.switching.cause), retry, warning }
+        : conversation?.models._tag === "Failure"
+          ? { kind: "error", message: errorMessage(conversation.models.cause), retry, warning }
+          : conversation?.currentModel._tag === "Failure"
+            ? {
+                kind: "error",
+                message: errorMessage(conversation.currentModel.cause),
+                retry,
+                warning,
+              }
+            : conversationEntry?.target.kind === "new" &&
+                conversationEntry.submission.kind === "error"
+              ? { kind: "error", message: conversationEntry.submission.message, retry, warning }
+              : warning !== null
+                ? { kind: "warning", message: warning }
+                : { kind: "none" };
+    if (!conversationEntry) {
+      return { label, control: { kind: "disabled", reason: "Choose a chat first." }, feedback };
+    }
+    if (!available || busy) {
+      const reason = !available
+        ? current
+          ? "Disconnected. Showing the last known model."
+          : "Connect to choose a model."
+        : creating
+          ? "Creating chat..."
+          : "Switching model...";
+      return { label, control: { kind: "disabled", reason }, feedback };
+    }
+    if (conversationEntry.target.kind === "new") {
+      return { label, control: { kind: "draft" }, feedback };
+    }
+    if (
+      !conversation ||
+      conversation.models._tag === "Initial" ||
+      conversation.currentModel._tag === "Initial"
+    ) {
+      return { label, control: { kind: "disabled", reason: "Loading models..." }, feedback };
+    }
+    const models = Option.getOrElse(AsyncResult.value(conversation.models), () => []);
+    if (conversation.models.waiting || conversation.currentModel.waiting) {
+      return { label, control: { kind: "disabled", reason: "Loading models..." }, feedback };
+    }
+    if (models.length === 0) {
+      return {
+        label,
+        control: {
+          kind: "disabled",
+          reason:
+            conversation.models._tag === "Failure" ? "Models unavailable." : "No models available.",
+        },
+        feedback,
+      };
+    }
+    return {
+      label,
+      control: {
+        kind: "select",
+        value: current ? modelValue(current) : "",
+        options: models.map((model) => ({
+          value: modelValue(model),
+          label: `${modelLabel(model)} · ${model.id}`,
+        })),
+      },
+      feedback,
+    };
+  })();
   const transcript: TranscriptPresentation =
     content.kind === "error"
       ? {
@@ -1738,6 +1897,10 @@ export function WorkspaceChat({
               ? shakeFeedback.value
               : { kind: "idle" }
           }
+          modelPicker={modelPicker}
+          onModelPickerOpen={openModelPicker}
+          onModelSelect={selectModel}
+          onModelRetry={retryModel}
           contextUsage={presentContextUsage(conversation?.contextUsage, connection)}
           contextDetailsOpen={
             contextDetailsKey !== undefined && contextDetailsKey === (selected?.key ?? null)

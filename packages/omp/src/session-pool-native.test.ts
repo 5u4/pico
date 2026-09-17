@@ -5,7 +5,7 @@ import * as BunCrypto from "@effect/platform-bun/BunCrypto";
 import * as BunFileSystem from "@effect/platform-bun/BunFileSystem";
 import * as BunPath from "@effect/platform-bun/BunPath";
 import type { StreamFn } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, Context } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, Context, ToolCall } from "@oh-my-pi/pi-ai";
 import type { ExtensionFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type * as AgentEvent from "@pico/contract/agent-event";
@@ -130,6 +130,7 @@ const providerTurn = (
     readonly messageId?: string;
     readonly timestamp?: number;
     readonly thinking?: string;
+    readonly toolCall?: ToolCall;
   } = {},
 ) => ({
   text,
@@ -178,13 +179,14 @@ const withSession = async (
     const turn = turns[nextTurn++];
     if (!turn) throw new Error("Unexpected native provider turn");
     const stream = new native.AssistantMessageEventStream();
+    const stopReason = turn.toolCall === undefined ? "stop" : "toolUse";
     const response: AssistantMessage = {
       role: "assistant",
       content: [{ type: "text", text: turn.text }],
       api: requestedModel.api,
       provider: requestedModel.provider,
       model: requestedModel.id,
-      stopReason: "stop",
+      stopReason,
       usage: {
         input: 1,
         output: 1,
@@ -199,6 +201,7 @@ const withSession = async (
     if (turn.thinking !== undefined) {
       response.content.unshift({ type: "thinking", thinking: turn.thinking });
     }
+    if (turn.toolCall !== undefined) response.content.push(turn.toolCall);
     const textIndex = turn.thinking === undefined ? 0 : 1;
     if (turn.streaming) {
       stream.push({ type: "start", partial: response });
@@ -240,7 +243,7 @@ const withSession = async (
             partial: response,
           });
         }
-        stream.push({ type: "done", reason: "stop", message: response });
+        stream.push({ type: "done", reason: stopReason, message: response });
       }
       stream.end();
       turn.settled.resolve();
@@ -371,12 +374,14 @@ const makePool = Effect.fn("NativePoolTest.make")(function* (
             ...native.makeSessionObservation(currentSession, emit, (cause) => {
               throw cause;
             }),
+            currentModel: () => currentSession.model ?? null,
             contextUsage: () => ({ kind: "unavailable" }),
             appendAssistantMessage: () =>
               Promise.reject(new Error("Publication is not part of ownership tests")),
           };
         }),
     },
+    loadCurrentModel: () => Effect.succeed(session.model ?? null),
     loadTranscript: () =>
       Effect.succeed({
         messages: native.normalizeTranscript(session.messages),
@@ -659,9 +664,8 @@ describe("native SessionPool ownership", () => {
     },
   );
 
-  it("rejects busy and stale model choices without changing the running model", async () => {
-    const turn = providerTurn("Complete with the original model");
-    await withSession([turn], (session) =>
+  it("rejects stale model choices without changing the current model", async () => {
+    await withSession([], (session) =>
       Effect.runPromise(
         Effect.scoped(
           Effect.gen(function* () {
@@ -675,16 +679,153 @@ describe("native SessionPool ownership", () => {
             ).toBeInstanceOf(AgentError);
             expect(session.model).toBe(original);
             session.settings.clearOverride("enabledModels");
-            const delivery = yield* pool.send(chatId, prompt("stay on this model"));
-            yield* Effect.promise(() => turn.entered.promise);
+          }).pipe(Effect.provide(platform)),
+        ),
+      ),
+    );
+  });
+
+  it("switches a running session for its next provider call without restarting the run", async () => {
+    const first = providerTurn("Complete with the original model", "aborted", { streaming: true });
+    const next = providerTurn("Continue with the selected model");
+    const followUp = "Continue in the same run";
+    await withSession([first, next], (session) =>
+      Effect.runPromise(
+        Effect.scoped(
+          Effect.gen(function* () {
+            const pool = yield* makePool(session);
+            const lifecycle: Array<"agent_start" | "agent_end"> = [];
+            const unsubscribe = session.subscribe((event) => {
+              if (event.type === "agent_start" || event.type === "agent_end") {
+                lifecycle.push(event.type);
+              }
+            });
+            yield* Effect.addFinalizer(() => Effect.sync(unsubscribe));
+            const delivery = yield* pool.send(chatId, prompt("Start with the original model"));
+            if (delivery.kind !== "started") throw new Error("Expected native run admission");
+            yield* Effect.promise(() => first.entered.promise);
+            expect(session.isStreaming).toBe(true);
+            const chosen = { provider: "openai", id: "gpt-4.1-mini" };
+            expect(yield* pool.switchModel(chatId, chosen)).toMatchObject({
+              kind: "persisted",
+              model: chosen,
+            });
+            expect(session.model?.id).toBe(chosen.id);
+            expect(lifecycle).toEqual(["agent_start"]);
+            yield* Effect.promise(() => session.followUp(followUp));
+            first.release.resolve();
+            const context = yield* Effect.promise(() => next.entered.promise);
             expect(
-              yield* pool
-                .switchModel(chatId, { provider: "openai", id: "gpt-4.1-mini" })
-                .pipe(Effect.flip),
-            ).toBeInstanceOf(AgentError);
-            expect(session.model).toBe(original);
-            turn.release.resolve();
-            if (delivery.kind !== "handled") yield* delivery.completed;
+              context.messages.findLast((message) => message.role === "assistant"),
+            ).toMatchObject({
+              model: "gpt-4.1",
+              stopReason: "stop",
+              content: [{ type: "text", text: first.text }],
+            });
+            expect(context.messages.findLast((message) => message.role === "user")).toMatchObject({
+              content: [{ type: "text", text: followUp }],
+            });
+            expect(session.isStreaming).toBe(true);
+            expect(lifecycle).toEqual(["agent_start"]);
+            next.release.resolve();
+            yield* delivery.completed;
+            expect(
+              session.messages.filter((message) => message.role === "assistant"),
+            ).toMatchObject([
+              {
+                model: "gpt-4.1",
+                stopReason: "stop",
+                content: [{ type: "text", text: first.text }],
+              },
+              {
+                model: chosen.id,
+                stopReason: "stop",
+                content: [{ type: "text", text: next.text }],
+              },
+            ]);
+            expect(lifecycle).toEqual(["agent_start", "agent_end"]);
+          }).pipe(Effect.provide(platform)),
+        ),
+      ),
+    );
+  });
+
+  it("switches while a native tool runs without cancelling its result or restarting the run", async () => {
+    const first = providerTurn("Call the held tool", "aborted", {
+      toolCall: { type: "toolCall", id: "held-call", name: "held_tool", arguments: {} },
+    });
+    const next = providerTurn("Use the completed tool result");
+    const toolEntered = Promise.withResolvers<AbortSignal | undefined>();
+    const releaseTool = Promise.withResolvers<void>();
+    await withSession([first, next], (session) =>
+      Effect.runPromise(
+        Effect.scoped(
+          Effect.gen(function* () {
+            const pool = yield* makePool(session);
+            const lifecycle: Array<"agent_start" | "agent_end"> = [];
+            const unsubscribe = session.subscribe((event) => {
+              if (event.type === "agent_start" || event.type === "agent_end") {
+                lifecycle.push(event.type);
+              }
+            });
+            yield* Effect.addFinalizer(() =>
+              Effect.sync(() => {
+                releaseTool.resolve();
+                unsubscribe();
+              }),
+            );
+            session.agent.setTools([
+              {
+                name: "held_tool",
+                label: "Held tool",
+                description: "Wait until the test releases the tool result",
+                parameters: { type: "object", properties: {}, additionalProperties: false },
+                execute: async (_id, _args, signal) => {
+                  toolEntered.resolve(signal);
+                  await releaseTool.promise;
+                  signal?.throwIfAborted();
+                  return { content: [{ type: "text", text: "Held tool completed" }], details: {} };
+                },
+              },
+            ]);
+            const delivery = yield* pool.send(chatId, prompt("Run the held tool"));
+            if (delivery.kind !== "started") throw new Error("Expected native run admission");
+            yield* Effect.promise(() => first.entered.promise);
+            first.release.resolve();
+            const signal = yield* Effect.promise(() => toolEntered.promise);
+            if (signal === undefined) throw new Error("Expected native tool cancellation signal");
+            expect(session.isStreaming).toBe(true);
+            const chosen = { provider: "openai", id: "gpt-4.1-mini" };
+            expect(yield* pool.switchModel(chatId, chosen)).toMatchObject({
+              kind: "persisted",
+              model: chosen,
+            });
+            expect(signal.aborted).toBe(false);
+            expect(lifecycle).toEqual(["agent_start"]);
+            releaseTool.resolve();
+            const context = yield* Effect.promise(() => next.entered.promise);
+            expect(
+              context.messages.findLast((message) => message.role === "toolResult"),
+            ).toMatchObject({
+              toolCallId: "held-call",
+              toolName: "held_tool",
+              isError: false,
+              content: [{ type: "text", text: "Held tool completed" }],
+            });
+            expect(lifecycle).toEqual(["agent_start"]);
+            next.release.resolve();
+            yield* delivery.completed;
+            expect(
+              session.messages.filter((message) => message.role === "assistant"),
+            ).toMatchObject([
+              { model: "gpt-4.1", stopReason: "toolUse" },
+              {
+                model: chosen.id,
+                stopReason: "stop",
+                content: [{ type: "text", text: next.text }],
+              },
+            ]);
+            expect(lifecycle).toEqual(["agent_start", "agent_end"]);
           }).pipe(Effect.provide(platform)),
         ),
       ),

@@ -49,12 +49,14 @@ const fixture = Effect.fn("SessionPoolOperationsTest.fixture")(function* (
             flush: async () => {},
             historyBoundary: () => "stable",
             settleHistory: async () => {},
+            currentModel: () => null,
             contextUsage: () => ({ kind: "unavailable" }),
             appendAssistantMessage: options.appendAssistantMessage ?? (async () => {}),
             unsubscribe: () => {},
           } satisfies OpenedSession;
         }),
     },
+    loadCurrentModel: () => Effect.succeed(null),
     loadTranscript: () => Effect.succeed({ messages: [], todo: { kind: "ready", phases: [] } }),
   });
   return { pool };

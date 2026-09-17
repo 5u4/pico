@@ -1,6 +1,6 @@
 import type { AgentEventEnvelope } from "@pico/contract/agent-event";
 import { AgentPrompt } from "@pico/contract/agent-message";
-import type { ShakeMode } from "@pico/contract/agent-runtime";
+import type { ModelInfo, ModelRef, ShakeMode } from "@pico/contract/agent-runtime";
 import type { TranscriptSnapshot } from "@pico/contract/agent-snapshot";
 import type {
   CloseChatOptions,
@@ -9,7 +9,7 @@ import type {
   UpdateWorkspace,
 } from "@pico/contract/application";
 import type { ChatId, ChatListEntry } from "@pico/contract/chat-model";
-import { ApplicationError } from "@pico/contract/errors";
+import { ApplicationError, type ChatClosed } from "@pico/contract/errors";
 import type { ScheduleOverviewResponse } from "@pico/contract/rpc";
 import type { ScheduleError } from "@pico/contract/schedule";
 import type { Workspace, WorkspaceId } from "@pico/contract/workspace-model";
@@ -508,6 +508,9 @@ export const make = ({ url }: { readonly url: string }) => {
       };
     }).pipe(Atom.keepAlive),
   );
+  const availableModels = Atom.family((chatId: ChatId) =>
+    list<readonly ModelInfo[], ChatClosed>((client) => client.AvailableModels({ chatId })),
+  );
   const transcriptRead = Atom.family((chatId: ChatId) =>
     Atom.make((get) =>
       Effect.gen(function* () {
@@ -543,6 +546,55 @@ export const make = ({ url }: { readonly url: string }) => {
   const contextUsage = Atom.family((chatId: ChatId) =>
     Atom.readable(
       (get) => AsyncResult.map(get(snapshot(chatId)), (value) => value.contextUsage),
+      (refresh) => refresh(snapshot(chatId)),
+    ).pipe(Atom.keepAlive),
+  );
+  const modelSwitchRequest = Atom.family((_chatId: ChatId) =>
+    Atom.make<ModelRef | null>(null).pipe(Atom.keepAlive),
+  );
+  const switchModel = Atom.family((chatId: ChatId) =>
+    Atom.fn<ModelRef>()((model, get) =>
+      Effect.gen(function* () {
+        get.set(modelSwitchRequest(chatId), model);
+        const manager = yield* get.result(owner);
+        return yield* manager.write(
+          (client) => client.SwitchModel({ chatId, model }),
+          (result) =>
+            get.registry.update(chatCell(chatId), (current) => ({
+              ...current,
+              transcriptResult: AsyncResult.map(current.transcriptResult, (snapshot) => ({
+                ...snapshot,
+                currentModel: result.model,
+              })),
+            })),
+          () => get.registry.refresh(transcriptRead(chatId)),
+        );
+      }),
+    ).pipe(Atom.keepAlive, Atom.setLazy(false)),
+  );
+  const currentModel = Atom.family((chatId: ChatId) =>
+    Atom.readable(
+      (get) => {
+        const result = AsyncResult.map(get(snapshot(chatId)), (value) => value.currentModel);
+        const current = AsyncResult.value(result);
+        if (Option.isSome(current) && current.value !== null) return result;
+        const switched = Option.map(
+          AsyncResult.value(get(switchModel(chatId))),
+          (selection) => selection.model,
+        );
+        if (Option.isNone(switched)) return result;
+        switch (result._tag) {
+          case "Initial":
+            return AsyncResult.success(switched.value, { waiting: result.waiting });
+          case "Failure":
+            return AsyncResult.failure(result.cause, {
+              waiting: result.waiting,
+              previousSuccess: Option.some(AsyncResult.success(switched.value)),
+            });
+          case "Success":
+            return AsyncResult.success(switched.value, result);
+        }
+      },
       (refresh) => refresh(snapshot(chatId)),
     ).pipe(Atom.keepAlive),
   );
@@ -711,6 +763,10 @@ export const make = ({ url }: { readonly url: string }) => {
     transcript,
     todo,
     contextUsage,
+    availableModels,
+    currentModel,
+    switchModel,
+    modelSwitchRequest,
     live,
     send,
     abort,

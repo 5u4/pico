@@ -112,6 +112,7 @@ const transcript: TranscriptSnapshot = {
   contextUsage: { kind: "unavailable" },
   todo: { kind: "ready", phases: [] },
   runtime: { publication: Publication.make(0), run: { kind: "idle" }, assistant: [], tools: [] },
+  currentModel: null,
 };
 const firstEvent: AgentEvent.AgentEventEnvelope = {
   chatId: firstChatId,
@@ -542,6 +543,13 @@ describe("RPC", () => {
         for (const chatId of [foreignChatId, missingChatId]) {
           for (const request of [
             client.Transcript({ chatId }).pipe(Effect.asVoid),
+            client.AvailableModels({ chatId }).pipe(Effect.asVoid),
+            client
+              .SwitchModel({
+                chatId,
+                model: { provider: "pico-fixture", id: "private" },
+              })
+              .pipe(Effect.asVoid),
             client.SendMessage({
               chatId,
               prompt: AgentMessage.AgentPrompt.make({ text: "foreign", attachments: [] }),
