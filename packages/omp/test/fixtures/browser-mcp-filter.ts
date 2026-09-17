@@ -109,6 +109,7 @@ try {
   });
   const unusedSchedule = () => Effect.die("Unexpected schedule operation");
   const schedules = Schedules.of({
+    withCurrentTargets: () => Effect.die("unexpected schedule target scan"),
     create: unusedSchedule,
     list: unusedSchedule,
     overview: unusedSchedule,

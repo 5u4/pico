@@ -24,6 +24,7 @@ import * as Path from "effect/Path";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 import { afterAll, vi } from "vitest";
+import { unusedSchedulesLayer } from "../../application/src/test-schedules.ts";
 import { layer } from "./agent-session-store.ts";
 
 const sdkRoot = await vi.hoisted(async () => {
@@ -86,15 +87,17 @@ describe("AgentSessionStore", () => {
           inspectChat: unused,
           renameChatBranch: unused,
           removeChat: unused,
-        }).pipe(
-          Layer.provide(
-            Layer.mergeAll(
-              Persistence.layer(AbsolutePath.make(path.join(directory, "store.db"))),
-              layer(sessionsDir),
-              Layer.succeed(AgentRuntime, runtime),
+        })
+          .pipe(Layer.provide(unusedSchedulesLayer))
+          .pipe(
+            Layer.provide(
+              Layer.mergeAll(
+                Persistence.layer(AbsolutePath.make(path.join(directory, "store.db"))),
+                layer(sessionsDir),
+                Layer.succeed(AgentRuntime, runtime),
+              ),
             ),
-          ),
-        );
+          );
         const saved = yield* Effect.gen(function* () {
           const application = yield* Application;
           const workspace = yield* application.createWorkspace({
@@ -258,7 +261,9 @@ describe("AgentSessionStore", () => {
         inspectChat: unused,
         renameChatBranch: unused,
         removeChat: unused,
-      }).pipe(Layer.provide(dependencies));
+      })
+        .pipe(Layer.provide(unusedSchedulesLayer))
+        .pipe(Layer.provide(dependencies));
       const journalFile = (id: Chat.ChatId) => path.join(sessionsDir, `${id}.jsonl`);
       const restoredModels = Effect.fn("test.restoredModels")(function* (id: Chat.ChatId) {
         return yield* Effect.acquireUseRelease(

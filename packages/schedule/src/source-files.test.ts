@@ -72,6 +72,7 @@ describe("source files", () => {
         const requests = yield* Queue.unbounded<Agent.AgentPrompt>();
         yield* TestClock.setTime(1_000);
         yield* schedules.start({
+          withScriptActivity: (_chatId, script) => script,
           resolveTarget,
           materialize: () => Effect.void,
           prepare: () => Effect.succeed({ chatId, workspaceId, cwd: AbsolutePath.make(root) }),
@@ -139,6 +140,7 @@ describe("source files", () => {
       const runId = `scheduled-1000-${created.definition.revision}`;
       const directory = path.join(schedulesDir, "runs", created.id, runId);
       const host: Schedule.ScheduleRunHost = {
+        withScriptActivity: (_chatId, script) => script,
         resolveTarget,
         prepare: () => Effect.succeed({ chatId, workspaceId, cwd: AbsolutePath.make(root) }),
         materialize: () => Effect.die("Unexpected materialization"),
@@ -412,6 +414,7 @@ describe("source files", () => {
       const requests = yield* Queue.unbounded<Agent.AgentPrompt>();
       yield* TestClock.setTime(1_000);
       yield* schedules.start({
+        withScriptActivity: (_chatId, script) => script,
         resolveTarget,
         materialize: () => Effect.void,
         prepare: () => Effect.succeed({ chatId, workspaceId, cwd: AbsolutePath.make(root) }),
@@ -558,6 +561,7 @@ describe("source files", () => {
       assert.sameDeepMembers([...(yield* schedules.list(caller))], created);
       yield* TestClock.setTime(1_000);
       yield* schedules.start({
+        withScriptActivity: (_chatId, script) => script,
         resolveTarget,
         materialize: () => Effect.void,
         prepare: () => Effect.die("Disabled and non-due schedules must not execute"),
@@ -929,6 +933,7 @@ describe("source files", () => {
         let prepared = 0;
         let prompts = 0;
         const host: Schedule.ScheduleRunHost = {
+          withScriptActivity: (_chatId, script) => script,
           resolveTarget,
           materialize: () => Effect.void,
           prepare: () =>

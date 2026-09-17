@@ -2,7 +2,9 @@ import { assert, describe, it } from "@effect/vitest";
 import { AbsolutePath } from "@pico/contract/path";
 import * as Schedule from "@pico/contract/schedule";
 import * as Workspace from "@pico/contract/workspace-model";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
@@ -24,6 +26,159 @@ import {
 const otherWorkspaceId = Workspace.WorkspaceId.make("018f47a0-0000-7000-8000-000000000099");
 
 describe("schedule management", () => {
+  it.effect(
+    "does not execute a claimed script when its prepared target is no longer admitted",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "pico-script-admission-",
+        });
+        const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
+        const schedules = yield* open(schedulesDir, resolveTarget);
+        const marker = path.join(root, "script-executed");
+        yield* TestClock.setTime(1_000);
+        const created = yield* schedules.create(caller, {
+          name: "Deleted destination",
+          enabled: true,
+          target: { kind: "chat", chatId },
+          trigger: { kind: "once", at: 1_000 },
+          sourceDirectory: yield* prepareSource({
+            "script.js": `await Bun.write(${JSON.stringify(marker)}, "executed");process.stdout.write(JSON.stringify({agent:false}));`,
+          }),
+        });
+        if (created.kind !== "ready") return yield* Effect.die("Expected a valid schedule");
+        yield* schedules.start({
+          resolveTarget,
+          withScriptActivity: () =>
+            Effect.fail(new Schedule.ScheduleHostError({ message: "Workspace not found" })),
+          prepare: () => Effect.succeed({ chatId, workspaceId, cwd: AbsolutePath.make(root) }),
+          materialize: () => Effect.die("Rejected script must not materialize"),
+          publish: () => Effect.die("Rejected script must not publish"),
+          deliver: () => Effect.die("Rejected script must not deliver"),
+          runPrompt: () => Effect.die("Rejected script must not start a model"),
+        });
+        const runId = Schedule.ScheduleRunId.make(`scheduled-1000-${created.definition.revision}`);
+        const run = yield* awaitFinished(
+          fileSystem,
+          path.join(schedulesDir, "runs", created.id, runId, "run.json"),
+        );
+        assert.deepStrictEqual(run.state.kind === "finished" && run.state.outcome, {
+          kind: "failed",
+          stage: "target",
+          message: "Workspace not found",
+        });
+        assert.isFalse(yield* fileSystem.exists(marker));
+      }).pipe(Effect.provide(platformLayer), Effect.scoped),
+  );
+
+  it.effect(
+    "reads both conflicted targets independently of invalid sources and fails on unknown metadata",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "pico-schedule-targets-",
+        });
+        const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
+        const schedules = yield* open(schedulesDir, resolveTarget);
+        const created = yield* schedules.create(caller, {
+          name: "Broken source",
+          enabled: true,
+          target: { kind: "chat", chatId },
+          trigger: { kind: "once", at: 1_000 },
+          sourceDirectory: yield* prepareSource({ "prompt.md": "retained prompt" }),
+        });
+        yield* fileSystem.remove(path.join(schedulesDir, "enabled", created.id, "prompt.md"));
+        assert.deepStrictEqual(yield* schedules.withCurrentTargets(Effect.succeed), [
+          { kind: "chat", chatId },
+        ]);
+        const disabled = path.join(schedulesDir, "disabled", created.id);
+        yield* fileSystem.makeDirectory(disabled);
+        const metadata = path.join(disabled, "meta.json");
+        yield* fileSystem.writeFileString(
+          metadata,
+          JSON.stringify({
+            target: { kind: "workspace", workspaceId: otherWorkspaceId },
+            trigger: "invalid",
+          }),
+        );
+        assert.deepStrictEqual(yield* schedules.withCurrentTargets(Effect.succeed), [
+          { kind: "chat", chatId },
+          { kind: "workspace", workspaceId: otherWorkspaceId },
+        ]);
+        yield* fileSystem.writeFileString(metadata, "{}");
+        assert.strictEqual(
+          (yield* schedules.withCurrentTargets(Effect.succeed).pipe(Effect.flip)).kind,
+          "invalid",
+        );
+        yield* fileSystem.remove(metadata);
+        assert.strictEqual(
+          (yield* schedules.withCurrentTargets(Effect.succeed).pipe(Effect.flip)).kind,
+          "io",
+        );
+      }).pipe(Effect.provide(platformLayer), Effect.scoped),
+  );
+
+  it.effect("serializes retargeting and creation with a workspace deletion decision", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "pico-schedule-delete-race-",
+      });
+      let deleted = false;
+      const schedules = yield* open(AbsolutePath.make(path.join(root, "schedules")), (target) =>
+        target.kind === "workspace" && target.workspaceId === otherWorkspaceId && deleted
+          ? Effect.fail(new Schedule.ScheduleHostError({ message: "Workspace not found" }))
+          : resolveTarget(target),
+      );
+      const sourceDirectory = yield* prepareSource({ "prompt.md": "check" });
+      const created = yield* schedules.create(caller, {
+        name: "Original",
+        enabled: false,
+        target: { kind: "workspace", workspaceId },
+        trigger: { kind: "once", at: 1_000 },
+        sourceDirectory,
+      });
+      const scanning = yield* Deferred.make<void>();
+      const commit = yield* Deferred.make<void>();
+      const deleting = yield* schedules
+        .withCurrentTargets(() =>
+          Effect.gen(function* () {
+            yield* Deferred.succeed(scanning, undefined);
+            yield* Deferred.await(commit);
+            deleted = true;
+          }),
+        )
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(scanning);
+      const retargeting = yield* schedules
+        .update(caller, created.id, {
+          target: { kind: "workspace", workspaceId: otherWorkspaceId },
+        })
+        .pipe(Effect.result, Effect.forkChild);
+      const creating = yield* schedules
+        .create(caller, {
+          name: "Late",
+          enabled: false,
+          target: { kind: "workspace", workspaceId: otherWorkspaceId },
+          trigger: { kind: "once", at: 1_000 },
+          sourceDirectory,
+        })
+        .pipe(Effect.result, Effect.forkChild);
+      yield* Deferred.succeed(commit, undefined);
+      yield* Fiber.join(deleting);
+      for (const result of [yield* Fiber.join(retargeting), yield* Fiber.join(creating)]) {
+        assert.strictEqual(result._tag, "Failure");
+        if (result._tag === "Failure") assert.strictEqual(result.failure.kind, "invalid");
+      }
+      assert.deepStrictEqual(yield* schedules.list(caller), [created]);
+    }).pipe(Effect.provide(platformLayer), Effect.scoped),
+  );
+
   it.effect("opens usable schedule storage before the runner starts", () =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -415,6 +570,7 @@ describe("schedule management", () => {
       yield* TestClock.setTime(1_000);
       const published = yield* Queue.unbounded<string>();
       yield* schedules.start({
+        withScriptActivity: (_chatId, script) => script,
         resolveTarget,
         materialize: () => Effect.void,
         prepare: () => Effect.succeed({ chatId, workspaceId, cwd: AbsolutePath.make(root) }),

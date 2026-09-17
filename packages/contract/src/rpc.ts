@@ -53,6 +53,11 @@ export const PicoRpcs = RpcGroup.make(
     success: Workspace.Workspace,
     error: Schema.Union([Errors.ApplicationError, Errors.GitError, Errors.WorkspaceBindingInvalid]),
   }),
+  Rpc.make("DeleteWorkspace", {
+    payload: { workspaceId: Workspace.WorkspaceId },
+    success: Schema.Void,
+    error: Errors.ApplicationError,
+  }),
   Rpc.make("CreateChat", {
     payload: Application.CreateChat,
     success: Chat.Chat,

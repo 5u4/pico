@@ -25,6 +25,7 @@ import {
   loadSchedule,
   moveDefinition,
   publishDefinition,
+  readCurrentTargets,
   reconcileUpdates,
   removeDefinition,
   scanSchedules,
@@ -323,6 +324,11 @@ const capture = Effect.fn("Schedules.capture")(function* (
           if (input.enabled === true && invalidExternalView(loaded).kind !== "ready") {
             return yield* scheduleError("invalid", "Fix invalid schedule files before enabling it");
           }
+          if (input.enabled === true && loaded.view.kind === "ready") {
+            yield* resolveTarget(loaded.view.definition.target).pipe(
+              Effect.mapError((error) => scheduleError("invalid", error.message)),
+            );
+          }
           if (input.enabled !== undefined) {
             yield* moveDefinition(storage, loaded, input.enabled ? "enabled" : "disabled");
           }
@@ -332,12 +338,9 @@ const capture = Effect.fn("Schedules.capture")(function* (
           }
           const definition = {
             ...loaded.view.definition,
-            target:
-              input.target === undefined
-                ? loaded.view.definition.target
-                : yield* resolveTarget(input.target).pipe(
-                    Effect.mapError((error) => scheduleError("invalid", error.message)),
-                  ),
+            target: yield* resolveTarget(input.target ?? loaded.view.definition.target).pipe(
+              Effect.mapError((error) => scheduleError("invalid", error.message)),
+            ),
             revision: Schedule.ScheduleRevision.make(yield* transactionId()),
             ...(input.name === undefined ? {} : { name: input.name }),
             ...(input.trigger === undefined ? {} : { trigger: input.trigger }),
@@ -383,6 +386,14 @@ const capture = Effect.fn("Schedules.capture")(function* (
       }),
     );
   });
+
+  const withCurrentTargets: Schedule.Schedules["Service"]["withCurrentTargets"] = (use) =>
+    mutation.withPermit(
+      Effect.gen(function* () {
+        yield* reconcileUpdates(storage);
+        return yield* use(yield* readCurrentTargets(storage));
+      }),
+    );
 
   const disableDefinition = Effect.fn("Schedules.disableDefinition")(function* (
     id: Schedule.ScheduleId,
@@ -500,16 +511,25 @@ const capture = Effect.fn("Schedules.capture")(function* (
             state: { kind: "running-script", target, startedAt: yield* Clock.currentTimeMillis },
           };
           yield* writeRun(storage, current, yield* transactionId());
-          const script = yield* runScript(
-            storage,
-            executable,
-            current,
-            target,
-            definition.scriptTimeoutMs ?? Schedule.DEFAULT_SCRIPT_TIMEOUT_MS,
-          ).pipe(Effect.result);
+          const script = yield* host
+            .withScriptActivity(
+              target.chatId,
+              runScript(
+                storage,
+                executable,
+                current,
+                target,
+                definition.scriptTimeoutMs ?? Schedule.DEFAULT_SCRIPT_TIMEOUT_MS,
+              ),
+            )
+            .pipe(Effect.result);
           if (Result.isFailure(script)) {
             const stage =
-              script.failure._tag === "ScriptRunError" ? script.failure.stage : "script";
+              script.failure._tag === "ScriptRunError"
+                ? script.failure.stage
+                : script.failure._tag === "ScheduleHostError"
+                  ? "target"
+                  : "script";
             yield* fail(stage, script.failure.message);
             return;
           }
@@ -1002,7 +1022,16 @@ const capture = Effect.fn("Schedules.capture")(function* (
   });
 
   return {
-    service: Schedule.Schedules.of({ create, list, overview, get, update, remove, start }),
+    service: Schedule.Schedules.of({
+      create,
+      list,
+      overview,
+      get,
+      update,
+      remove,
+      withCurrentTargets,
+      start,
+    }),
     initialize,
   };
 });

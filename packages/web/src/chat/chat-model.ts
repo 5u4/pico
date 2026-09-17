@@ -38,6 +38,13 @@ export type CloseChatPresentation =
       readonly retry: { readonly enabled: boolean } | null;
     };
 
+export interface DeleteWorkspacePresentation {
+  readonly workspaceName: string;
+  readonly pending: boolean;
+  readonly error: string | null;
+  readonly canConfirm: boolean;
+}
+
 export interface PromptSuggestion {
   readonly label: string;
   readonly text: string;

@@ -96,6 +96,7 @@ const fixture = Effect.fnUntraced(function* (
         | "listChats"
         | "createWorkspace"
         | "updateWorkspace"
+        | "deleteWorkspace"
         | "createChat"
         | "closeChat"
       >
@@ -130,6 +131,7 @@ const fixture = Effect.fnUntraced(function* (
     }),
   ).pipe(Layer.provideMerge(persistence));
   const application = Application.of({
+    deleteWorkspace: () => Effect.die("unexpected workspace deletion"),
     listWorkspaces: () => Effect.die("unexpected workspace list"),
     listChats: () => Effect.die("unexpected chat list"),
     askBtw: () => Effect.die("unexpected side question"),
@@ -255,6 +257,73 @@ const snapshotFixture = Effect.fnUntraced(function* () {
 });
 
 describe("frontend state over WebSocket", () => {
+  it.live(
+    "keeps a rejected workspace and removes a confirmed deletion even when refresh fails",
+    () =>
+      Effect.gen(function* () {
+        let rejectDeletion = true;
+        let refreshFails = false;
+        const server = yield* fixture({
+          transcript: () => Effect.succeed(snapshot()),
+          sendMessage: () => Effect.succeed({ kind: "handled" }),
+          abort: () => Effect.void,
+          listWorkspaces: () =>
+            refreshFails
+              ? Effect.fail(
+                  new ApplicationError({ reason: "operation", message: "Refresh unavailable" }),
+                )
+              : Effect.succeed([webWorkspace]),
+          deleteWorkspace: () =>
+            rejectDeletion
+              ? Effect.fail(
+                  new ApplicationError({
+                    reason: "conflict",
+                    message: "Archive the existing conversation first",
+                  }),
+                )
+              : Effect.sync(() => {
+                  refreshFails = true;
+                }),
+        });
+        yield* Effect.gen(function* () {
+          const state = make({ url: yield* endpoint });
+          const registry = yield* registryInScope;
+          registry.mount(state.workspaces);
+          yield* AtomRegistry.getResult(registry, state.workspaces);
+          registry.set(state.deleteWorkspace, { workspaceId: webWorkspace.id });
+          const rejected = yield* AtomRegistry.getResult(registry, state.deleteWorkspace, {
+            suspendOnWaiting: true,
+          }).pipe(Effect.flip);
+          assert.instanceOf(rejected, ApplicationError);
+          if (rejected instanceof ApplicationError) {
+            assert.strictEqual(rejected.reason, "conflict");
+            assert.strictEqual(rejected.message, "Archive the existing conversation first");
+          }
+          yield* AtomRegistry.getResult(registry, state.workspaces, { suspendOnWaiting: true });
+          assert.deepStrictEqual(
+            Option.getOrThrow(AsyncResult.value(registry.get(state.workspaces))),
+            [webWorkspace],
+          );
+          assert.strictEqual(registry.get(state.connection).kind, "active");
+          rejectDeletion = false;
+          registry.set(state.deleteWorkspace, { workspaceId: webWorkspace.id });
+          yield* AtomRegistry.getResult(registry, state.deleteWorkspace, {
+            suspendOnWaiting: true,
+          });
+          yield* waitFor(
+            registry,
+            state.workspaces,
+            (value) => value._tag === "Failure" && !value.waiting,
+          );
+          assert.deepStrictEqual(
+            Option.getOrThrow(AsyncResult.value(registry.get(state.workspaces))),
+            [],
+          );
+          assert.strictEqual(registry.get(state.connection).kind, "active");
+        }).pipe(Effect.scoped, Effect.provide(server.layer));
+      }),
+  );
+
   it.live("retains the global schedule snapshot after ScheduleError and recovers on refresh", () =>
     Effect.gen(function* () {
       const server = yield* fixture({

@@ -119,6 +119,7 @@ const secondEvent: AgentEvent.AgentEventEnvelope = {
 };
 
 const unusedApplication = Application.of({
+  deleteWorkspace: () => Effect.die("unexpected workspace deletion"),
   updateWorkspace: () => Effect.die("unexpected workspace update"),
   listWorkspaces: () => Effect.die("unexpected workspace list"),
   askBtw: () => Effect.die("unexpected side question"),
@@ -495,6 +496,7 @@ describe("RPC", () => {
           for (const request of [
             client.ListChats({ workspaceId: id }).pipe(Effect.asVoid),
             client.CreateChat({ workspaceId: id, externalId: null }).pipe(Effect.asVoid),
+            client.DeleteWorkspace({ workspaceId: id }),
             client
               .UpdateWorkspace({
                 workspaceId: id,

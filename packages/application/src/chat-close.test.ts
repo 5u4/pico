@@ -27,6 +27,7 @@ import * as Scheduler from "effect/Scheduler";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 import * as ApplicationLayer from "./application.ts";
+import { unusedSchedulesLayer } from "./test-schedules.ts";
 
 const platformLayer = Layer.merge(BunFileSystem.layer, BunPath.layer);
 
@@ -132,12 +133,14 @@ const makeScheduledDeliveryFixture = Effect.fn("makeScheduledDeliveryFixture")(f
     removeChat: () => Effect.die("unexpected worktree removal"),
   };
   const services = yield* Layer.build(
-    ApplicationLayer.layer(git).pipe(
-      Layer.provideMerge(persistence),
-      Layer.provide(runtime),
-      Layer.provide(sessions),
-      Layer.provide(BunCrypto.layer),
-    ),
+    ApplicationLayer.layer(git)
+      .pipe(Layer.provide(unusedSchedulesLayer))
+      .pipe(
+        Layer.provideMerge(persistence),
+        Layer.provide(runtime),
+        Layer.provide(sessions),
+        Layer.provide(BunCrypto.layer),
+      ),
   );
   yield* Effect.addFinalizer(() => Deferred.succeed(releaseSend, undefined));
   const application = Context.get(services, Application);
@@ -396,7 +399,7 @@ describe("Chat close", () => {
           );
         }).pipe(
           Effect.ensuring(Deferred.succeed(releaseCleanup, undefined)),
-          Effect.provide(ApplicationLayer.layer(git)),
+          Effect.provide(ApplicationLayer.layer(git).pipe(Layer.provide(unusedSchedulesLayer))),
           Effect.provide(persistence),
           Effect.provide(runtime),
           Effect.provide(
@@ -611,7 +614,9 @@ describe("Chat close", () => {
         );
         assert.strictEqual(Option.getOrThrow(yield* chats.findById(chat.id)).archivedAt, 3_000);
       }).pipe(
-        Effect.provide(ApplicationLayer.layer(gitWorktree)),
+        Effect.provide(
+          ApplicationLayer.layer(gitWorktree).pipe(Layer.provide(unusedSchedulesLayer)),
+        ),
         Effect.provide(persistenceLayer),
         Effect.provide(runtimeLayer),
         Effect.provide(sessionsLayer),
@@ -743,7 +748,9 @@ describe("Chat close", () => {
           ),
         );
       }).pipe(
-        Effect.provide(ApplicationLayer.layer(gitWorktree)),
+        Effect.provide(
+          ApplicationLayer.layer(gitWorktree).pipe(Layer.provide(unusedSchedulesLayer)),
+        ),
         Effect.provide(persistenceLayer),
         Effect.provide(runtimeLayer),
         Effect.provide(sessionsLayer),
@@ -888,7 +895,9 @@ describe("Chat close", () => {
           removalsBeforeFailure,
         );
       }).pipe(
-        Effect.provide(ApplicationLayer.layer(gitWorktree)),
+        Effect.provide(
+          ApplicationLayer.layer(gitWorktree).pipe(Layer.provide(unusedSchedulesLayer)),
+        ),
         Effect.provide(persistenceLayer),
         Effect.provide(runtimeLayer),
         Effect.provide(sessionsLayer),

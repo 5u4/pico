@@ -84,6 +84,14 @@ export function MobileSidebar({
                 }
               : undefined
           }
+          onDeleteWorkspace={
+            sidebar.onDeleteWorkspace
+              ? (workspaceId, origin) =>
+                  afterClose(() =>
+                    sidebar.onDeleteWorkspace?.(workspaceId, returnFocus.current ?? origin),
+                  )
+              : undefined
+          }
           onNewChat={(workspaceId) => afterClose(() => sidebar.onNewChat(workspaceId))}
           onOpenSchedules={(origin) =>
             afterClose(() => sidebar.onOpenSchedules(returnFocus.current ?? origin))

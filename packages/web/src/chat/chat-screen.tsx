@@ -18,6 +18,7 @@ import type {
   CloseChatPresentation,
   ComposerPresentation,
   ContextUsagePresentation,
+  DeleteWorkspacePresentation,
   PromptSuggestion,
   ToolCallPresentation,
   TranscriptPresentation,
@@ -25,6 +26,7 @@ import type {
 import { CloseChatDialog } from "./close-chat-dialog.tsx";
 import { Composer } from "./composer.tsx";
 import { ContextUsage } from "./context-usage.tsx";
+import { DeleteWorkspaceDialog } from "./delete-workspace-dialog.tsx";
 import { MobileSidebar } from "./mobile-sidebar.tsx";
 import { SchedulePage, type SchedulePageProps } from "./schedule-page.tsx";
 import { ToolDetailPane } from "./tool-detail-pane.tsx";
@@ -73,6 +75,9 @@ export interface ChatScreenProps
   readonly onCloseChatConfirm: () => void;
   readonly onCloseChatDismiss: () => void;
   readonly onCloseChatRetry: () => void;
+  readonly deleteWorkspace: DeleteWorkspacePresentation | null;
+  readonly onDeleteWorkspaceConfirm: () => void;
+  readonly onDeleteWorkspaceDismiss: () => void;
   readonly onSidebarOpenChange: (open: boolean) => void;
   readonly onTabSelect: (id: string) => void;
   readonly onTabClose: (id: string) => void;
@@ -112,6 +117,11 @@ export function ChatScreen({
   returnToChatHref,
   onEditWorkspace,
   workspaceEditPending,
+  onDeleteWorkspace,
+  workspaceDeleteDisabled,
+  deleteWorkspace,
+  onDeleteWorkspaceConfirm,
+  onDeleteWorkspaceDismiss,
   closeChat,
   chatCloseDisabled,
   onChatClose,
@@ -147,6 +157,7 @@ export function ChatScreen({
   const [composerHeight, setComposerHeight] = useState(150);
   const sidebarOpener = useRef<HTMLButtonElement>(null);
   const toolOpener = useRef<HTMLElement | null>(null);
+  const workspaceDeleteOrigin = useRef<HTMLElement | null>(null);
   const [tabButtons] = useState(() => new Map<string, HTMLButtonElement>());
   const newTabButton = useRef<HTMLButtonElement>(null);
   const restoreTabFocus = useRef(false);
@@ -331,6 +342,13 @@ export function ChatScreen({
     onChatsRetry,
     onEditWorkspace,
     workspaceEditPending,
+    onDeleteWorkspace: onDeleteWorkspace
+      ? (workspaceId, origin) => {
+          workspaceDeleteOrigin.current = origin;
+          onDeleteWorkspace(workspaceId, origin);
+        }
+      : undefined,
+    workspaceDeleteDisabled,
     chatCloseDisabled,
     onChatClose: (workspaceId, chatId, origin) => {
       if (chatCloseDisabled) return;
@@ -726,6 +744,20 @@ export function ChatScreen({
             }}
           />
         )}
+      {deleteWorkspace && !sidebarOpen && !mobileSidebarOpen && (
+        <DeleteWorkspaceDialog
+          confirmation={deleteWorkspace}
+          origin={workspaceDeleteOrigin.current}
+          onClose={onDeleteWorkspaceDismiss}
+          onConfirm={onDeleteWorkspaceConfirm}
+          onFocusFallback={() => {
+            const active = conversationKey ? tabButtons.get(conversationKey) : undefined;
+            (active ?? newTabButton.current ?? sidebarOpener.current)?.focus({
+              preventScroll: true,
+            });
+          }}
+        />
+      )}
       {workspaceForm && <WorkspaceDialog {...workspaceForm} key={workspaceForm.session} />}
       {workspaceSettings && (
         <WorkspaceSettingsDialog {...workspaceSettings} key={workspaceSettings.editor.session} />

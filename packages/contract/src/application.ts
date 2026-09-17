@@ -81,6 +81,9 @@ export class Application extends Context.Service<
       input: UpdateWorkspace,
     ) => Effect.Effect<Workspace, ApplicationError | GitError | WorkspaceBindingInvalid>;
 
+    /** Web clients call this after confirming workspace deletion. */
+    readonly deleteWorkspace: (workspaceId: WorkspaceId) => Effect.Effect<void, ApplicationError>;
+
     /** Platform adapters call this when first resolving a channel's workspace. */
     readonly getOrCreateWorkspaceByBinding: (
       input: Extract<CreateWorkspace, { readonly externalId: string }>,

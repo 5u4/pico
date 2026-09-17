@@ -112,6 +112,7 @@ await Effect.runPromise(
           sessionsDir: AbsolutePath.make(join(root, "sessions")),
         },
         schedules: Schedules.of({
+          withCurrentTargets: () => Effect.die("unexpected schedule target scan"),
           create: unusedSchedule,
           list: unusedSchedule,
           overview: unusedSchedule,

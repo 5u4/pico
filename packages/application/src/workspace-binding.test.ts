@@ -22,6 +22,7 @@ import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
 import * as Stream from "effect/Stream";
 import * as ApplicationLayer from "./application.ts";
+import { unusedSchedulesLayer } from "./test-schedules.ts";
 
 const platformLayer = Layer.merge(BunFileSystem.layer, BunPath.layer);
 
@@ -305,7 +306,9 @@ describe("Workspace binding", () => {
           Option.isNone(yield* application.findWorkspaceByPlatformId("discord", "1.45")),
         );
       }).pipe(
-        Effect.provide(ApplicationLayer.layer(gitWorktree)),
+        Effect.provide(
+          ApplicationLayer.layer(gitWorktree).pipe(Layer.provide(unusedSchedulesLayer)),
+        ),
         Effect.provide(applicationFileSystemLayer),
         Effect.provide(persistenceLayer),
         Effect.provide(sessionsLayer),
@@ -446,7 +449,9 @@ describe("Workspace binding", () => {
             initialChat.cwd,
           );
         }).pipe(
-          Effect.provide(ApplicationLayer.layer(gitWorktree)),
+          Effect.provide(
+            ApplicationLayer.layer(gitWorktree).pipe(Layer.provide(unusedSchedulesLayer)),
+          ),
           Effect.provide(Layer.merge(persistenceLayer, gatedWorkspaces)),
           Effect.provide(sessionsLayer),
           Effect.provide(runtimeLayer),

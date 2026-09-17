@@ -150,6 +150,7 @@ describe("run storage", () => {
         const schedules = yield* make(AbsolutePath.make(storage.schedulesDir), resolveTarget);
         const error = yield* schedules
           .start({
+            withScriptActivity: (_chatId, script) => script,
             resolveTarget,
             materialize: () => Effect.die("Unexpected materialization"),
             prepare: () => Effect.die("Unexpected target preparation"),
@@ -373,6 +374,7 @@ describe("run storage", () => {
       let scheduleId: Schedule.ScheduleId | undefined;
       const schedules = yield* make(schedulesDir, resolveTarget);
       const host: Schedule.ScheduleRunHost = {
+        withScriptActivity: (_chatId, script) => script,
         resolveTarget,
         materialize: () => Effect.void,
         prepare: () => Effect.succeed({ chatId, workspaceId, cwd }),

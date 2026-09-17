@@ -83,6 +83,9 @@ export const decodeDefinition = (source: string) =>
   decodeStoredDefinition(source).pipe(Effect.map(currentDefinition));
 
 const decodeOwner = Schema.decodeUnknownOption(ownerSchema);
+const decodeTarget = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(Schema.Struct({ target: Schedule.ScheduleTarget })),
+);
 
 export const decodeScheduleId = Schema.decodeUnknownOption(Schedule.ScheduleId);
 
@@ -406,6 +409,36 @@ export const scanSchedules = Effect.fn("Schedules.scanSchedules")(function* (sto
     if (schedule !== undefined) loaded.push(schedule);
   }
   return loaded;
+});
+
+export const readCurrentTargets = Effect.fn("Schedules.readCurrentTargets")(function* (
+  storage: Storage,
+) {
+  const value = roots(storage);
+  const targets: Schedule.ScheduleTarget[] = [];
+  for (const stateDirectory of [value.enabled, value.disabled]) {
+    yield* ensureDirectPath(storage, stateDirectory, "schedule state directory");
+    const entries = yield* storage.fileSystem
+      .readDirectory(stateDirectory)
+      .pipe(mapIo("Failed to inspect schedule targets"));
+    for (const name of entries.sort()) {
+      if (decodeScheduleId(name)._tag === "None") continue;
+      const directory = storage.path.join(stateDirectory, name);
+      yield* ensureDirectPath(storage, directory, "schedule directory");
+      const source = yield* readDirectFileString(
+        storage,
+        storage.path.join(directory, "meta.json"),
+        "schedule target metadata",
+      );
+      const metadata = yield* decodeTarget(source).pipe(
+        Effect.mapError(() =>
+          invalid("Cannot verify schedule target metadata. Remove or repair the schedule first."),
+        ),
+      );
+      targets.push(metadata.target);
+    }
+  }
+  return targets;
 });
 
 export const publishDefinition = Effect.fn("Schedules.publishDefinition")(function* (

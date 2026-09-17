@@ -324,6 +324,11 @@ export class SchedulePlatformService extends Context.Service<
 >()("@pico/contract/schedule/SchedulePlatform") {}
 
 export interface ScheduleRunHost {
+  /** The scheduler uses this while a script runs against a prepared chat. */
+  readonly withScriptActivity: <A, E, R>(
+    chatId: typeof ChatId.Type,
+    script: Effect.Effect<A, E, R>,
+  ) => Effect.Effect<A, E | ScheduleHostError, R>;
   readonly resolveTarget: (
     input: ScheduleTargetInput,
   ) => Effect.Effect<ScheduleTarget, ScheduleHostError>;
@@ -382,6 +387,10 @@ export class Schedules extends Context.Service<
     ) => Effect.Effect<ScheduleView, ScheduleError>;
     /** OMP removes the live definition, retaining run history. */
     readonly remove: (caller: ScheduleCaller, id: ScheduleId) => Effect.Effect<void, ScheduleError>;
+    /** Application holds this scope while checking references and deleting a workspace. */
+    readonly withCurrentTargets: <A, E, R>(
+      use: (targets: readonly ScheduleTarget[]) => Effect.Effect<A, E, R>,
+    ) => Effect.Effect<A, E | ScheduleError, R>;
     readonly start: (host: ScheduleRunHost) => Effect.Effect<void, ScheduleError, Scope.Scope>;
   }
 >()("@pico/contract/schedule/Schedules") {}

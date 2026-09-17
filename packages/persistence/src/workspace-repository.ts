@@ -93,6 +93,7 @@ const make = Effect.fn("WorkspaceRepository.make")(function* () {
         model_id AS "modelId",
         created_at AS "createdAt"
       FROM workspaces
+      WHERE deleted_at IS NULL
       ORDER BY created_at DESC, id DESC
     `,
   });
@@ -184,7 +185,7 @@ const make = Effect.fn("WorkspaceRepository.make")(function* () {
         model_id AS "modelId",
         created_at AS "createdAt"
       FROM workspaces
-      WHERE id = ${id}
+      WHERE id = ${id} AND deleted_at IS NULL
     `,
   });
 
@@ -204,11 +205,10 @@ const make = Effect.fn("WorkspaceRepository.make")(function* () {
         model_id AS "modelId",
         created_at AS "createdAt"
       FROM workspaces
-      WHERE platform = ${platform} AND external_id = ${externalId}
+      WHERE platform = ${platform} AND external_id = ${externalId} AND deleted_at IS NULL
     `,
   };
   const selectByBinding = SqlSchema.findOneOption(bindingQuery);
-  const requireByBinding = SqlSchema.findOne(bindingQuery);
 
   const replaceStoredConfiguration = SqlSchema.findOne({
     Request: ReplaceConfiguration,
@@ -219,7 +219,7 @@ const make = Effect.fn("WorkspaceRepository.make")(function* () {
         default_cwd = ${configuration.defaultCwd},
         worktree_branch = ${configuration.worktree?.branch ?? null},
         worktree_prefix = ${configuration.worktree?.prefix ?? null}
-      WHERE id = ${id}
+      WHERE id = ${id} AND deleted_at IS NULL
       RETURNING
         id,
         name,
@@ -240,7 +240,7 @@ const make = Effect.fn("WorkspaceRepository.make")(function* () {
     execute: ({ id, model }) => sql`
       UPDATE workspaces
       SET model_provider = ${model?.provider ?? null}, model_id = ${model?.id ?? null}
-      WHERE id = ${id}
+      WHERE id = ${id} AND deleted_at IS NULL
       RETURNING
         id,
         name,
@@ -273,7 +273,9 @@ const make = Effect.fn("WorkspaceRepository.make")(function* () {
   const getOrCreateByBinding = Effect.fn("WorkspaceRepository.getOrCreateByBinding")(
     function* (workspace: typeof BoundWorkspace.Type) {
       yield* insertByBinding(workspace);
-      return yield* decodeWorkspace(yield* requireByBinding(workspace));
+      const row = yield* selectByBinding(workspace);
+      if (Option.isNone(row)) return Option.none<Workspace.Workspace>();
+      return Option.some(yield* decodeWorkspace(row.value));
     },
     sql.withTransaction,
     Effect.mapError(failure("Failed to get or create workspace")),
@@ -315,6 +317,29 @@ const make = Effect.fn("WorkspaceRepository.make")(function* () {
     Effect.mapError(failure("workspace.setModelOverride")),
   );
 
+  const softDelete = Effect.fn("WorkspaceRepository.softDelete")(
+    function* (input: Parameters<WorkspaceRepository["Service"]["softDelete"]>[0]) {
+      const updated = yield* sql`
+        UPDATE workspaces SET deleted_at = ${input.deletedAt}
+        WHERE id = ${input.id} AND deleted_at IS NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM chats
+            WHERE workspace_id = ${input.id} AND archived_at IS NULL
+              AND id NOT IN (
+                SELECT value FROM json_each(${JSON.stringify(input.checkedChatIds)})
+              )
+          )
+        RETURNING id
+      `;
+      if (updated.length > 0) return "deleted" as const;
+      return Option.isNone(yield* selectById(input.id))
+        ? ("not-found" as const)
+        : ("conflict" as const);
+    },
+    sql.withTransaction,
+    Effect.mapError(failure("workspace.softDelete")),
+  );
+
   return WorkspaceRepository.of({
     list,
     create,
@@ -323,6 +348,7 @@ const make = Effect.fn("WorkspaceRepository.make")(function* () {
     findByBinding,
     replaceConfiguration,
     setModelOverride,
+    softDelete,
   });
 });
 

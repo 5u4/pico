@@ -50,13 +50,13 @@ const make = Effect.fn("ChatRepository.make")(function* () {
     Result: Chat.Chat,
     execute: (chat) => sql`
       INSERT INTO chats (id, workspace_id, cwd, external_id, created_at)
-      VALUES (
+      SELECT
         ${chat.id},
         ${chat.workspaceId},
         ${chat.cwd},
         ${chat.externalId},
         ${chat.createdAt}
-      )
+      FROM workspaces WHERE id = ${chat.workspaceId} AND deleted_at IS NULL
       RETURNING
         id,
         workspace_id AS "workspaceId",
