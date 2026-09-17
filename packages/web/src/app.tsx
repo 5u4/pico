@@ -2,6 +2,7 @@ import { RegistryContext, scheduleTask } from "@effect/atom-react/RegistryContex
 import * as FrontendState from "@pico/frontend-state/client";
 import * as AtomRegistry from "effect/unstable/reactivity/AtomRegistry";
 import { useContext, useEffect, useState } from "react";
+import { usePage } from "./routes.tsx";
 import { WorkspaceChat } from "./workspace-chat.tsx";
 
 interface Session {
@@ -10,6 +11,7 @@ interface Session {
 }
 
 export function App() {
+  const page = usePage();
   const bootRegistry = useContext(RegistryContext);
   const [session, setSession] = useState<Session | null>(null);
   useEffect(() => {
@@ -21,7 +23,7 @@ export function App() {
   }, []);
   return (
     <RegistryContext.Provider value={session?.registry ?? bootRegistry}>
-      <WorkspaceChat state={session?.state ?? null} />
+      <WorkspaceChat page={page} state={session?.state ?? null} />
     </RegistryContext.Provider>
   );
 }

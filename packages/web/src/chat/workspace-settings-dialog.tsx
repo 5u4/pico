@@ -5,24 +5,20 @@ import type { Workspace } from "@pico/contract/workspace-model";
 import { useEffect, useId, useRef } from "react";
 import { Button } from "../components/ui/button.tsx";
 
-export type WorkspaceSettingsEditor =
-  | { readonly kind: "closed" }
-  | { readonly kind: "dismissed"; readonly session: number }
-  | {
-      readonly kind: "open";
-      readonly session: number;
-      readonly workspace: Workspace;
-      readonly configuration: WorkspaceBindingConfiguration;
-      readonly origin: HTMLElement;
-      readonly submission:
-        | { readonly kind: "ready" }
-        | { readonly kind: "pending" }
-        | {
-            readonly kind: "error";
-            readonly message: string;
-            readonly issue: WorkspaceBindingInvalidIssue | null;
-          };
-    };
+export interface WorkspaceSettingsEditor {
+  readonly session: number;
+  readonly workspace: Workspace;
+  readonly configuration: WorkspaceBindingConfiguration;
+  readonly origin: HTMLElement | null;
+  readonly submission:
+    | { readonly kind: "ready" }
+    | { readonly kind: "pending" }
+    | {
+        readonly kind: "error";
+        readonly message: string;
+        readonly issue: WorkspaceBindingInvalidIssue | null;
+      };
+}
 
 export interface WorkspaceSettingsProps {
   readonly editor: WorkspaceSettingsEditor;
@@ -38,9 +34,7 @@ export function WorkspaceSettingsDialog({
   onChange,
   onClose,
   onSubmit,
-}: Omit<WorkspaceSettingsProps, "editor"> & {
-  readonly editor: Extract<WorkspaceSettingsEditor, { readonly kind: "open" }>;
-}) {
+}: WorkspaceSettingsProps) {
   const id = useId();
   const dialogRef = useRef<HTMLDialogElement>(null);
   const directoryRef = useRef<HTMLInputElement>(null);
@@ -66,7 +60,7 @@ export function WorkspaceSettingsDialog({
     return () => {
       dialog.close();
       const target = origin.current;
-      if (target.isConnected && target.getClientRects().length > 0) {
+      if (target?.isConnected && target.getClientRects().length > 0) {
         target.focus({ preventScroll: true });
       } else {
         document.getElementById("conversation-history")?.focus({ preventScroll: true });
