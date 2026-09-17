@@ -18,11 +18,11 @@ export const open = Effect.fn("Daemon.Web.open")(function* (port: number) {
   if (server.address._tag !== "TcpAddress") {
     return yield* Effect.die(new Error("Web listener did not acquire a TCP address"));
   }
-  const host = `127.0.0.1:${server.address.port}`;
-  const webUrl = `http://${host}`;
+  const url = new URL(`http://127.0.0.1:${server.address.port}`);
+  const webUrl = url.origin;
   yield* Layer.build(
     HttpRouter.serve(
-      Layer.mergeAll(RpcServer.routes, assetRoutes(assets), boundary(host, webUrl, assets)),
+      Layer.mergeAll(RpcServer.routes, assetRoutes(assets), boundary(url.host, webUrl, assets)),
       { disableLogger: true, disableListenLog: true },
     ).pipe(Layer.provide(Layer.succeed(HttpServer.HttpServer)(server))),
   );
