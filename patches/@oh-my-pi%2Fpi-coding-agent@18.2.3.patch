@@ -67,18 +67,18 @@ index 4ae91925cbcd33bb348cc1793f4ca1a0e37280e1..a1fedd8109c84f132bd1f1d8386cf988
   * Suggestions for the internal-url token ending at the cursor, or `null` when
   * the text is not such a token or no candidate matches the typed query.
 diff --git a/dist/types/modes/rpc/rpc-mode.d.ts b/dist/types/modes/rpc/rpc-mode.d.ts
-index d2c6e672d3c088aa917c8c0f8deb6fc38c5f8792..70f7b393faa2f3d5faa642f5b48a2678ed031db6 100644
+index 225e26b763a2a6467d0bad103fd1bd45f51e0237..23a9a85e8d6bd6ad6fbf31fad050ab592b0e160d 100644
 --- a/dist/types/modes/rpc/rpc-mode.d.ts
 +++ b/dist/types/modes/rpc/rpc-mode.d.ts
 @@ -1,6 +1,7 @@
  import { type ExtensionUIContext, type ExtensionUIDialogOptions, type ExtensionUISelectItem } from "../../extensibility/extensions/index.js";
- import { type BuiltSkillPromptMessage, type Skill } from "../../extensibility/skills.js";
+ import { type BuiltSkillPromptMessage, type Skill, type SkillPromptInput } from "../../extensibility/skills.js";
  import type { AgentSession } from "../../session/agent-session.js";
 +import type { PromptDeliveryObserver } from "../../session/agent-session-types.js";
  import type { EventBus } from "../../utils/event-bus.js";
  import { RpcSubagentRegistry } from "./rpc-subagents.js";
  import type { RpcCommand, RpcExtensionUIRequest, RpcExtensionUIResponse, RpcHostToolCallRequest, RpcHostToolCancelRequest, RpcHostToolResult, RpcHostToolUpdate, RpcHostUriCancelRequest, RpcHostUriRequest, RpcHostUriResult, RpcResponse } from "./rpc-types.js";
-@@ -63,7 +64,7 @@ export declare function resolveRpcSkillInvocation(session: RpcSkillCommandSessio
+@@ -69,7 +70,7 @@ export declare function resolveRpcSkillInvocation(session: RpcSkillCommandSessio
   * Must not run on the RPC serial queue's response path — register it with
   * watchAndReportLocalOnlyPromptResult and answer the command first.
   */
@@ -87,7 +87,7 @@ index d2c6e672d3c088aa917c8c0f8deb6fc38c5f8792..70f7b393faa2f3d5faa642f5b48a2678
  /**
   * Skill branch of the `prompt` command: resolves the invocation cheaply, then
   * registers the slow dispatch with watchAndReportLocalOnlyPromptResult and
-@@ -81,7 +82,7 @@ export declare function dispatchRpcSkillPrompt(input: {
+@@ -87,7 +88,7 @@ export declare function dispatchRpcSkillPrompt(input: {
      onError: (error: Error) => void;
      extensionUserMessageTracker: RpcExtensionUserMessageTracker;
  }): Promise<RpcSkillCommandResult | null>;
@@ -97,7 +97,7 @@ index d2c6e672d3c088aa917c8c0f8deb6fc38c5f8792..70f7b393faa2f3d5faa642f5b48a2678
      id: string | undefined;
      prompt: Promise<boolean>;
 diff --git a/dist/types/sdk.d.ts b/dist/types/sdk.d.ts
-index e3b75c288b6c8ded7d709832d65a2cf993461374..9f7cedc1f7eaf2262386264ad13accbda065c8d3 100644
+index 2aace694efb08d3ddc84ff9f1b708bcd754f18f4..0eb171ff99921d25c3627b5b21c347881a838b82 100644
 --- a/dist/types/sdk.d.ts
 +++ b/dist/types/sdk.d.ts
 @@ -16,6 +16,7 @@ import { type FileSlashCommand } from "./extensibility/slash-commands.js";
@@ -108,7 +108,7 @@ index e3b75c288b6c8ded7d709832d65a2cf993461374..9f7cedc1f7eaf2262386264ad13accbd
  import type { MnemopiSessionState } from "./mnemopi/state.js";
  import { type AgentRef, AgentRegistry } from "./registry/agent-registry.js";
  import { AgentSession, type PlanYolo, type Prewalk } from "./session/agent-session.js";
-@@ -193,6 +194,7 @@ export interface CreateAgentSessionOptions {
+@@ -210,6 +211,7 @@ export interface CreateAgentSessionOptions {
      enableMCP?: boolean;
      /** Existing MCP manager to reuse when MCP is enabled (skips discovery, propagates to toolSession). */
      mcpManager?: MCPManager;
@@ -117,10 +117,10 @@ index e3b75c288b6c8ded7d709832d65a2cf993461374..9f7cedc1f7eaf2262386264ad13accbd
      enableLsp?: boolean;
      /** Restrict LSP to navigation and diagnostics even when enabled. Defaults to true for restricted sessions. */
 diff --git a/dist/types/session/agent-session-types.d.ts b/dist/types/session/agent-session-types.d.ts
-index abf74e5efad48f840d09492eb6a453a0f10eb656..18e1f0a262d090909f3abfebe706bafbc818d530 100644
+index a2580e04885bfe092596e7610417793672338bb5..5977f5e87e0767573c4176ba54de21d35fcbf655 100644
 --- a/dist/types/session/agent-session-types.d.ts
 +++ b/dist/types/session/agent-session-types.d.ts
-@@ -308,8 +308,15 @@ export interface AgentSessionConfig {
+@@ -315,8 +315,15 @@ export interface AgentSessionConfig {
      /** System prompt used by automatic session-title generation. */
      titleSystemPrompt?: string;
  }
@@ -136,28 +136,27 @@ index abf74e5efad48f840d09492eb6a453a0f10eb656..18e1f0a262d090909f3abfebe706bafb
      /** Whether to expand file-based prompt templates (default: true). */
      expandPromptTemplates?: boolean;
      /** Image attachments. */
+@@ -361,6 +368,7 @@ export interface SteerOptions {
+ }
+ /** Options for AgentSession.sendUserMessage(). */
+ export interface SendUserMessageOptions {
++    deliveryObserver?: PromptDeliveryObserver;
+     /** Queue behavior; omitted starts a turn when idle and steers while streaming. */
+     deliverAs?: "steer" | "followUp" | "aside";
+     /** Explicit billing/initiator attribution. */
 diff --git a/dist/types/session/agent-session.d.ts b/dist/types/session/agent-session.d.ts
-index e9c8ade46a1ad9521d3ad3bf47ca82315212c54c..1dc8db1f94cc2f932a03aa89b62cae67c294e260 100644
+index dfc41754a4753f597660aa719e2bf05ea78f00f3..21c7036ef512bad8b3f1770b6cfb2cd5ecc5cd0f 100644
 --- a/dist/types/session/agent-session.d.ts
 +++ b/dist/types/session/agent-session.d.ts
-@@ -53,7 +53,7 @@ import type { TodoPhase } from "../tools/todo.js";
- import type { WorkPoolYieldItem } from "../task/workpool-yield.js";
- import type { VibeModeState } from "../vibe/state.js";
- import type { AgentSessionEvent, AgentSessionEventListener } from "./agent-session-events.js";
--import type { AgentSessionConfig, AgentSessionDisposeOptions, AsyncJobSnapshot, CommandMetadataChangedListener, ContextUsageBreakdown, DroppedPrompt, FollowUpOptions, FreshSessionResult, HandoffResult, ModelCycleResult, Prewalk, PromptOptions, ResetSessionContextResult, ResolvedRoleModel, RestoredQueuedMessage, RoleModelCycle, RoleModelCycleResult, SessionHandoffOptions, SessionOAuthAccountList, SessionStats, UsageFallbackConfirmer } from "./agent-session-types.js";
-+import type { AgentSessionConfig, AgentSessionDisposeOptions, AsyncJobSnapshot, CommandMetadataChangedListener, ContextUsageBreakdown, DroppedPrompt, FollowUpOptions, FreshSessionResult, HandoffResult, ModelCycleResult, Prewalk, PromptDeliveryObserver, PromptOptions, ResetSessionContextResult, ResolvedRoleModel, RestoredQueuedMessage, RoleModelCycle, RoleModelCycleResult, SessionHandoffOptions, SessionOAuthAccountList, SessionStats, UsageFallbackConfirmer } from "./agent-session-types.js";
- import type { ClientBridge } from "./client-bridge.js";
- import { type CustomMessage, type CustomMessagePayload } from "./messages.js";
- import type { ServingModel } from "./retry-fallback-chains.js";
-@@ -78,6 +78,7 @@ export declare class AgentSession {
+@@ -81,6 +81,7 @@ export declare class AgentSession {
      readonly agent: Agent;
      readonly sessionManager: SessionManager;
      readonly settings: Settings;
 +    readonly agentDir: string;
+     /** Session-start policy, independent of the selected project memory backend. */
+     readonly memoryEnabled: boolean;
      /** Entries of tools mounted under `xd://`; empty when virtual devices are unmounted. */
-     getXdevToolEntries: () => Array<{
-         name: string;
-@@ -235,7 +236,7 @@ export declare class AgentSession {
+@@ -250,7 +251,7 @@ export declare class AgentSession {
      markMovedFromEmptySessionFile(sessionFile: string): void;
      /**
       * Synchronously mark the session as disposing so new work is rejected
@@ -166,7 +165,7 @@ index e9c8ade46a1ad9521d3ad3bf47ca82315212c54c..1dc8db1f94cc2f932a03aa89b62cae67
       * aside provider is detached. Idempotent; `dispose()` runs it first.
       *
       * Wrappers that await other teardown before delegating to `dispose()` MUST
-@@ -554,7 +555,7 @@ export declare class AgentSession {
+@@ -573,7 +574,7 @@ export declare class AgentSession {
       * won the generation race), so hosts waiting on a terminal `agent_end` can
       * stop instead of hanging.
       */
@@ -175,14 +174,6 @@ index e9c8ade46a1ad9521d3ad3bf47ca82315212c54c..1dc8db1f94cc2f932a03aa89b62cae67
          queueChipText?: string;
          queueOnly?: boolean;
      }): Promise<boolean>;
-@@ -616,6 +617,7 @@ export declare class AgentSession {
-      */
-     sendUserMessage(content: string | (TextContent | ImageContent)[], options?: {
-         deliverAs?: "steer" | "followUp" | "aside";
-+        deliveryObserver?: PromptDeliveryObserver;
-     }): Promise<void>;
-     /** Clear queued messages and return the user-restorable ones (text plus any attached images).
-      *  Only user-authored messages (plain user turns, `attribution:"user"` custom like `/skill`) are
 diff --git a/dist/types/session/artifacts.d.ts b/dist/types/session/artifacts.d.ts
 index 8decbb96f2ff02feb7e5f0a96498e8274f697a56..bb5988f8ed678c90e667ef36b5fc5c4d4a0229b0 100644
 --- a/dist/types/session/artifacts.d.ts
@@ -206,10 +197,10 @@ index 8decbb96f2ff02feb7e5f0a96498e8274f697a56..bb5988f8ed678c90e667ef36b5fc5c4d
       * Check if an artifact exists.
       * @param id Artifact ID (numeric string)
 diff --git a/dist/types/session/session-manager.d.ts b/dist/types/session/session-manager.d.ts
-index cf482c060295395d698c7bd152979a95b45148e2..1f495272fdf849444629a09cc80a179a20b4722f 100644
+index 7229fb73560793a0364550aa1cff831b2255f7a7..06c40406507b26fb9e389b5817b4e33f4b59e466 100644
 --- a/dist/types/session/session-manager.d.ts
 +++ b/dist/types/session/session-manager.d.ts
-@@ -240,7 +240,7 @@ export declare class SessionManager {
+@@ -249,7 +249,7 @@ export declare class SessionManager {
          id?: string;
          path?: string;
      }>;
@@ -271,10 +262,10 @@ index f072e666eba8f2af3a425b6e52929c28a7ad4a42..2228c0c066d2b8ca599c8b482738bf0b
   *   per execution; toolName guards against synthetic reuse).
   * - `user` / `developer` — timestamp + attribution (attribution distinguishes
 diff --git a/dist/types/task/executor.d.ts b/dist/types/task/executor.d.ts
-index aec2ce132254e1ba7eb03f59e8fefe494bf40a52..602f7932c6bdf6c91fe449ad5cae87b3f2427aef 100644
+index efb19716faa9a2717f3ab3093d7ca5f9248a34bf..67185c3e464021f930cca4fc02d353e0f91220e6 100644
 --- a/dist/types/task/executor.d.ts
 +++ b/dist/types/task/executor.d.ts
-@@ -75,6 +75,7 @@ export declare function collectIrcPeerRoster(registry: AgentRegistry, selfId: st
+@@ -76,6 +76,7 @@ export declare function collectIrcPeerRoster(registry: AgentRegistry, selfId: st
  /** Options for subagent execution */
  export interface ExecutorOptions {
      cwd: string;
@@ -283,10 +274,10 @@ index aec2ce132254e1ba7eb03f59e8fefe494bf40a52..602f7932c6bdf6c91fe449ad5cae87b3
      additionalDirectories?: string[];
      /** Exact provider credential resolver inherited from the parent session. */
 diff --git a/dist/types/tools/bash-skill-urls.d.ts b/dist/types/tools/bash-skill-urls.d.ts
-index 3b2082b47aedce441d203e34e8b947bb8f80f383..9817b085c51df99663511c80286a05293e8ce10a 100644
+index c29cb5c0f12562a70dbdf9e818233d49360e0562..0f2e26f25b24bf9771305f5f6aa2a6ed3db305e1 100644
 --- a/dist/types/tools/bash-skill-urls.d.ts
 +++ b/dist/types/tools/bash-skill-urls.d.ts
-@@ -14,6 +14,7 @@ export interface InternalUrlExpansionOptions {
+@@ -24,6 +24,7 @@ export interface InternalUrlExpansionOptions {
      internalRouter?: InternalUrlResolver;
      localOptions?: LocalProtocolOptions;
      cwd?: string;
@@ -295,7 +286,7 @@ index 3b2082b47aedce441d203e34e8b947bb8f80f383..9817b085c51df99663511c80286a0529
      sessionId?: string;
      agentRegistry?: ResolveContext["agentRegistry"];
 diff --git a/dist/types/tools/index.d.ts b/dist/types/tools/index.d.ts
-index 494649a89af723df86edc202ebc8ec1f23c7abf0..cadcaf6ddbb4612f096fd67d7e84489206137bf8 100644
+index 6313b96febc07fcdd8984697ba51869b2c4229fb..0a97b6d8cbf8b2a133166063dfb7d8c66c88770a 100644
 --- a/dist/types/tools/index.d.ts
 +++ b/dist/types/tools/index.d.ts
 @@ -119,6 +119,8 @@ export interface DeferredDiagnosticsEntry {
@@ -308,10 +299,10 @@ index 494649a89af723df86edc202ebc8ec1f23c7abf0..cadcaf6ddbb4612f096fd67d7e844892
      additionalDirectories?: string[];
      /** Whether UI is available */
 diff --git a/dist/types/tools/path-utils.d.ts b/dist/types/tools/path-utils.d.ts
-index 59bf87045e41157def1b78a751aa899cec558d3c..cea71dea7d7dcf69e31356bc0cf376a2ce779bc0 100644
+index 6e56c1c2af70e74460cc97818787f0d43f1f57c8..2bf4649bd6d99bfee02eb950b686e8e98d0461ba 100644
 --- a/dist/types/tools/path-utils.d.ts
 +++ b/dist/types/tools/path-utils.d.ts
-@@ -352,6 +352,7 @@ export interface ResolvedExternalSearchUrl {
+@@ -348,6 +348,7 @@ export interface ResolvedExternalSearchUrl {
  export interface ToolScopeOptions {
      rawPaths: string[];
      cwd: string;
@@ -320,10 +311,10 @@ index 59bf87045e41157def1b78a751aa899cec558d3c..cea71dea7d7dcf69e31356bc0cf376a2
      internalUrlAction: string;
      /** Collect absolute paths flagged immutable by their internal-URL handler. */
 diff --git a/src/eval/js/context-manager.ts b/src/eval/js/context-manager.ts
-index 233b6c514af8be2f5399d04a829be8894eff66d6..c4d99347ca76f77099bc34e51b5a06fb735af0b5 100644
+index 12c74702a8cc2f04ea6eb09fef20efcf269fe4ef..340d547137f22cb804b024e67dbfb9c4e2ade740 100644
 --- a/src/eval/js/context-manager.ts
 +++ b/src/eval/js/context-manager.ts
-@@ -70,13 +70,6 @@ interface PendingRun {
+@@ -81,13 +81,6 @@ interface PendingRun {
  	deferDrained?: PromiseWithResolvers<void>;
  	/** Set once the turn was cancelled; blocks new bridge calls during the drain. */
  	aborted: boolean;
@@ -337,7 +328,7 @@ index 233b6c514af8be2f5399d04a829be8894eff66d6..c4d99347ca76f77099bc34e51b5a06fb
  	heldResult?: Extract<WorkerOutbound, { type: "result" }>;
  	settled: boolean;
  }
-@@ -683,11 +676,6 @@ function settlePending(session: JsSession, msg: Extract<WorkerOutbound, { type:
+@@ -823,11 +816,6 @@ function settlePending(session: JsSession, msg: Extract<WorkerOutbound, { type:
  	// Once the turn is cancelled the scheduled kill is the sole settler, so a
  	// late worker result can't cut the abort drain short.
  	if (pending.aborted) return;
@@ -350,7 +341,7 @@ index 233b6c514af8be2f5399d04a829be8894eff66d6..c4d99347ca76f77099bc34e51b5a06fb
  		pending.heldResult = msg;
  		return;
 diff --git a/src/eval/js/worker-core.ts b/src/eval/js/worker-core.ts
-index 30528423386976590fdf3bf7c3115fbabf0ce4f9..a3022fe6ad8cc40bb1e27570d2eb16404119b06c 100644
+index 3ff78b62a3aa4b81ad98e3b329bbedfa9ddc73ba..36a1556b082d32ab59a14e6b21157672629604a9 100644
 --- a/src/eval/js/worker-core.ts
 +++ b/src/eval/js/worker-core.ts
 @@ -19,6 +19,7 @@ interface ActiveRun {
@@ -385,7 +376,7 @@ index 30528423386976590fdf3bf7c3115fbabf0ce4f9..a3022fe6ad8cc40bb1e27570d2eb1640
  		switch (msg.type) {
  			case "init":
  				try {
-@@ -298,7 +302,13 @@ export class WorkerCore {
+@@ -350,7 +354,13 @@ export class WorkerCore {
  	}
  
  	async #runOne(runId: string, code: string, filename: string, snapshot: SessionSnapshot): Promise<void> {
@@ -400,7 +391,7 @@ index 30528423386976590fdf3bf7c3115fbabf0ce4f9..a3022fe6ad8cc40bb1e27570d2eb1640
  		this.#runs.set(runId, active);
  		const hooks: RuntimeHooks = {
  			onText: chunk => this.#transport.send({ type: "text", runId, chunk }),
-@@ -316,17 +326,7 @@ export class WorkerCore {
+@@ -368,17 +378,7 @@ export class WorkerCore {
  		} catch (error) {
  			result = { type: "result", runId, ok: false, error: errorPayload(error) };
  		}
@@ -419,7 +410,7 @@ index 30528423386976590fdf3bf7c3115fbabf0ce4f9..a3022fe6ad8cc40bb1e27570d2eb1640
  	}
  
  	async #invokeTool(msg: Extract<WorkerInbound, { type: "tool" }>): Promise<void> {
-@@ -334,6 +334,7 @@ export class WorkerCore {
+@@ -386,6 +386,7 @@ export class WorkerCore {
  			runId: msg.runId,
  			filename: `tool-${msg.runId}`,
  			pendingTools: new Map(),
@@ -427,7 +418,7 @@ index 30528423386976590fdf3bf7c3115fbabf0ce4f9..a3022fe6ad8cc40bb1e27570d2eb1640
  			floatingRejections: [],
  		};
  		this.#runs.set(msg.runId, active);
-@@ -343,6 +344,8 @@ export class WorkerCore {
+@@ -395,6 +396,8 @@ export class WorkerCore {
  			callTool: (name, args) => this.#callTool(active, name, args),
  		};
  
@@ -436,7 +427,7 @@ index 30528423386976590fdf3bf7c3115fbabf0ce4f9..a3022fe6ad8cc40bb1e27570d2eb1640
  		try {
  			const runtime = this.#runtime;
  			if (!runtime) throw new ToolError("JavaScript kernel is not running");
-@@ -354,7 +357,6 @@ export class WorkerCore {
+@@ -406,7 +409,6 @@ export class WorkerCore {
  				}
  			}
  
@@ -444,7 +435,7 @@ index 30528423386976590fdf3bf7c3115fbabf0ce4f9..a3022fe6ad8cc40bb1e27570d2eb1640
  			if (msg.op === "describe") {
  				const names = msg.names.length > 0 ? msg.names : [...tools.keys()];
  				envelope = {
-@@ -377,13 +379,42 @@ export class WorkerCore {
+@@ -429,13 +431,42 @@ export class WorkerCore {
  				}
  				envelope = { ok: true, value: cloneable };
  			}
@@ -491,16 +482,16 @@ index 30528423386976590fdf3bf7c3115fbabf0ce4f9..a3022fe6ad8cc40bb1e27570d2eb1640
  		}
  	}
  
-@@ -397,6 +428,8 @@ export class WorkerCore {
+@@ -449,6 +480,8 @@ export class WorkerCore {
  	}
  
- 	async #callTool(active: ActiveRun, name: string, args: unknown): Promise<unknown> {
+ 	async #callTool(active: ActiveRun, name: string, args: unknown, identity?: RuntimeCallIdentity): Promise<unknown> {
 +		if (this.#closedError) throw this.#closedError;
 +		if (this.#runs.get(active.runId) !== active) throw new ToolError("JS run no longer active");
  		const id = `tc-${active.runId}-${crypto.randomUUID()}`;
  		const { promise, resolve, reject } = Promise.withResolvers<unknown>();
  		active.pendingTools.set(id, { runId: active.runId, resolve, reject });
-@@ -406,55 +439,60 @@ export class WorkerCore {
+@@ -458,55 +491,60 @@ export class WorkerCore {
  			// Non-serializable args (DataCloneError from postMessage / IPC send).
  			// No reply will ever arrive; fail this call instead of stranding a
  			// pending entry until close.
@@ -588,7 +579,7 @@ index 30528423386976590fdf3bf7c3115fbabf0ce4f9..a3022fe6ad8cc40bb1e27570d2eb1640
  	}
  }
 diff --git a/src/internal-urls/memory-protocol.ts b/src/internal-urls/memory-protocol.ts
-index 6fff4150972c3a93d485e69a16f2b4b25104b416..16f8351587b08762a3ad66f40c0cb27fe8f947ee 100644
+index 2b228efb41b55434f7780b960bf1de2b1c1604d2..034ca3494141dc2ae9977478d7a112ef87bf0b1d 100644
 --- a/src/internal-urls/memory-protocol.ts
 +++ b/src/internal-urls/memory-protocol.ts
 @@ -1,6 +1,6 @@
@@ -646,7 +637,7 @@ index 6fff4150972c3a93d485e69a16f2b4b25104b416..16f8351587b08762a3ad66f40c0cb27f
  }
  
  function ensureWithinRoot(targetPath: string, rootPath: string): void {
-@@ -272,7 +271,10 @@ interface MemoryCallerBinding {
+@@ -274,7 +273,10 @@ interface MemoryCallerBinding {
   * sits in it, so two sessions in one worktree never impersonate each other.
   */
  function findCallerSession(context: ResolveContext): AgentSession | undefined {
@@ -658,7 +649,7 @@ index 6fff4150972c3a93d485e69a16f2b4b25104b416..16f8351587b08762a3ad66f40c0cb27f
  	if (context.sessionFile !== undefined) {
  		const byFile = refs.find(ref => ref.session?.sessionFile === context.sessionFile)?.session;
  		if (byFile) return byFile;
-@@ -301,7 +303,11 @@ function resolveMemoryCaller(context?: ResolveContext): MemoryCallerBinding {
+@@ -303,7 +305,11 @@ function resolveMemoryCaller(context?: ResolveContext): MemoryCallerBinding {
  	}
  	// A cwd that names no single live session still scopes the file-backed root,
  	// but it identifies no bank: peer memory ids stay unreachable.
@@ -725,10 +716,10 @@ index 135a0c5dda889be04742636c4fbb6460780caa7e..28083486859fedc687a1fc0d65eca008
  	} catch (error) {
  		// If discovery fails entirely, return empty result
 diff --git a/src/modes/controllers/command-controller.ts b/src/modes/controllers/command-controller.ts
-index c70f2a471fa69518c823a11457098acb49a253c5..b8769a0778471c03a88dbbd4f50ba7be3876cd2e 100644
+index 0c72d5194db9458f4cd9e528c661fcc827d84699..e5ce7e98d297025203dfebe1ec45bfece73bcdf8 100644
 --- a/src/modes/controllers/command-controller.ts
 +++ b/src/modes/controllers/command-controller.ts
-@@ -689,7 +689,7 @@ export class CommandController {
+@@ -691,7 +691,7 @@ export class CommandController {
  	async handleMemoryCommand(text: string): Promise<void> {
  		const argumentText = text.slice(7).trim();
  		const action = argumentText.split(/\s+/, 1)[0]?.toLowerCase() || "view";
@@ -738,10 +729,10 @@ index c70f2a471fa69518c823a11457098acb49a253c5..b8769a0778471c03a88dbbd4f50ba7be
  
  		if (action === "view") {
 diff --git a/src/modes/controllers/input-controller.ts b/src/modes/controllers/input-controller.ts
-index addee4e7677f5cf8fc73160c66b478d3963271c6..a3eedc9efa6f5ae60655b9223378aabdac5b4b8e 100644
+index c47691bf0b0efc0310a65b51b442160daa83725b..f5f0729d134c5302ccba5585a2a3fd05c161b3ef 100644
 --- a/src/modes/controllers/input-controller.ts
 +++ b/src/modes/controllers/input-controller.ts
-@@ -2057,6 +2057,7 @@ export class InputController {
+@@ -2242,6 +2242,7 @@ export class InputController {
  				const manager = this.ctx.viewSession.sessionManager;
  				return {
  					cwd: manager.getCwd(),
@@ -763,7 +754,7 @@ index b16fe83bd3c9571bbfad41cd14a2f6400963877f..b3dc73f96f8565da3a61a27fcc69e7f9
  /**
   * Suggestions for the internal-url token ending at the cursor, or `null` when
 diff --git a/src/modes/rpc/rpc-mode.ts b/src/modes/rpc/rpc-mode.ts
-index 45d59e034199245a591df37abe13eef9e43804f3..507eab85c7f691da0c961c4d2b7531085a881c77 100644
+index 2dd4420ab44d5557e6f96e23a845a3f16ce09a19..0ba76ac1ef5cfb1e3c7aa05e9c34795ee51fb23f 100644
 --- a/src/modes/rpc/rpc-mode.ts
 +++ b/src/modes/rpc/rpc-mode.ts
 @@ -32,6 +32,7 @@ import {
@@ -774,15 +765,15 @@ index 45d59e034199245a591df37abe13eef9e43804f3..507eab85c7f691da0c961c4d2b753108
  import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../session/messages";
  import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins";
  import { buildAvailableSlashCommands } from "../../slash-commands/available-commands";
-@@ -151,6 +152,7 @@ export async function runRpcSkillCommand(
+@@ -157,6 +158,7 @@ export async function runRpcSkillCommand(
  	invocation: RpcSkillInvocation,
  	streamingBehavior: "steer" | "followUp" = "steer",
  	prebuilt?: BuiltSkillPromptMessage,
 +	deliveryObserver?: PromptDeliveryObserver,
  ): Promise<boolean> {
- 	const built = prebuilt ?? (await buildSkillPromptMessage(invocation.skill, invocation.args, "user"));
+ 	const built = prebuilt ?? (await buildSkillPromptMessage(invocation.skill, invocation, "user"));
  	return session.promptCustomMessage(
-@@ -161,7 +163,7 @@ export async function runRpcSkillCommand(
+@@ -167,7 +169,7 @@ export async function runRpcSkillCommand(
  			details: built.details,
  			attribution: "user",
  		},
@@ -791,7 +782,7 @@ index 45d59e034199245a591df37abe13eef9e43804f3..507eab85c7f691da0c961c4d2b753108
  	);
  }
  
-@@ -204,10 +206,11 @@ export async function tryRunRpcSkillCommand(
+@@ -210,10 +212,11 @@ export async function tryRunRpcSkillCommand(
  	session: RpcSkillCommandSession,
  	text: string,
  	streamingBehavior: "steer" | "followUp" = "steer",
@@ -805,7 +796,7 @@ index 45d59e034199245a591df37abe13eef9e43804f3..507eab85c7f691da0c961c4d2b753108
  }
  
 diff --git a/src/modes/utils/interactive-context-helpers.ts b/src/modes/utils/interactive-context-helpers.ts
-index 13dfe99d03580734d07af6240d0d218a4c6be9b8..3f828ef59b70ab0d88db57bad08cd0a9b16b99ec 100644
+index c834e91ae9e890c3817c684575b017b8aeced5c0..2643d31083a770e861187da12861c9443828486a 100644
 --- a/src/modes/utils/interactive-context-helpers.ts
 +++ b/src/modes/utils/interactive-context-helpers.ts
 @@ -46,6 +46,7 @@ export async function refreshAssistantMessageLinkTargets(
@@ -817,18 +808,18 @@ index 13dfe99d03580734d07af6240d0d218a4c6be9b8..3f828ef59b70ab0d88db57bad08cd0a9
  		settings: session.settings,
  		localProtocolOptions: {
 diff --git a/src/sdk.ts b/src/sdk.ts
-index 4353d352dff8ffa52ce14dc3fafe350d2611d963..243ae7471f48954d7f57a2f29c06ad999750955f 100644
+index 4b8eaa1219fcb1dd84dbdb423a497be7497cc1a1..93e8af5111b3d55e9f30e54903f2c5c204c9ca32 100644
 --- a/src/sdk.ts
 +++ b/src/sdk.ts
-@@ -140,6 +140,7 @@ import {
+@@ -142,6 +142,7 @@ import {
  	parseMCPToolName,
  	shouldFilterBrowserMCPForPrelude,
  } from "./mcp";
 +import type { MCPConfigLoader } from "./mcp/manager";
  import { MCP_CONNECTION_STATUS_EVENT_CHANNEL, type McpConnectionStatusEvent } from "./mcp/startup-events";
+ import { resolveMCPToolAlias } from "./mcp/tool-bridge";
  import { createSessionMemoryRuntimeContext, resolveMemoryBackend } from "./memory-backend";
- import { MEMORY_BACKEND_TOOL_NAMES } from "./memory-backend/tool-names";
-@@ -542,6 +543,7 @@ export interface CreateAgentSessionOptions {
+@@ -564,6 +565,7 @@ export interface CreateAgentSessionOptions {
  	enableMCP?: boolean;
  	/** Existing MCP manager to reuse when MCP is enabled (skips discovery, propagates to toolSession). */
  	mcpManager?: MCPManager;
@@ -836,7 +827,7 @@ index 4353d352dff8ffa52ce14dc3fafe350d2611d963..243ae7471f48954d7f57a2f29c06ad99
  
  	/** Enable LSP integration (tool, formatting, diagnostics, warmup). Default: true */
  	enableLsp?: boolean;
-@@ -1788,6 +1790,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+@@ -1826,6 +1828,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
  			get cwd() {
  				return sessionManager.getCwd();
  			},
@@ -844,7 +835,7 @@ index 4353d352dff8ffa52ce14dc3fafe350d2611d963..243ae7471f48954d7f57a2f29c06ad99
  			isToolActive: name => activeToolNames.has(name),
  			setActiveToolNames,
  			toolRegistry,
-@@ -2016,7 +2019,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+@@ -2060,7 +2063,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
  		if (enableMCP && !mcpManager) {
  			if (deferMCPDiscoveryForUI) {
  				const cacheStorage = settings.getStorage();
@@ -853,7 +844,7 @@ index 4353d352dff8ffa52ce14dc3fafe350d2611d963..243ae7471f48954d7f57a2f29c06ad99
  				mcpManager.setAuthStorage(authStorage);
  				toolSession.mcpManager = mcpManager;
  
-@@ -2055,6 +2058,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+@@ -2099,6 +2102,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
  					...mcpDiscoverOptions,
  					cacheStorage: settings.getStorage(),
  					authStorage,
@@ -861,7 +852,7 @@ index 4353d352dff8ffa52ce14dc3fafe350d2611d963..243ae7471f48954d7f57a2f29c06ad99
  				});
  				mcpManager = mcpResult.manager;
  				toolSession.mcpManager = mcpManager;
-@@ -2805,7 +2809,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+@@ -2858,7 +2862,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
  			cwd,
  			sessionManager,
  			modelRegistry,
@@ -871,10 +862,10 @@ index 4353d352dff8ffa52ce14dc3fafe350d2611d963..243ae7471f48954d7f57a2f29c06ad99
  			localProtocolOptions,
  			() => (hasSession ? session.getAsyncJobSnapshot() : null),
 diff --git a/src/session/agent-session-types.ts b/src/session/agent-session-types.ts
-index dc7f27445225bb9ecc263cd7310ef384f84c0049..4481a4ed7a316820a1fd54655de3a5048bd71f1d 100644
+index 9237d9a59a5a225853258c20c4972cbd1a51f37b..58b03f25027623db725a0461e549a9b2d979a6f8 100644
 --- a/src/session/agent-session-types.ts
 +++ b/src/session/agent-session-types.ts
-@@ -327,8 +327,16 @@ export interface AgentSessionConfig {
+@@ -334,8 +334,16 @@ export interface AgentSessionConfig {
  	titleSystemPrompt?: string;
  }
  
@@ -891,8 +882,16 @@ index dc7f27445225bb9ecc263cd7310ef384f84c0049..4481a4ed7a316820a1fd54655de3a504
  	/** Whether to expand file-based prompt templates (default: true). */
  	expandPromptTemplates?: boolean;
  	/** Image attachments. */
+@@ -384,6 +392,7 @@ export interface SteerOptions {
+ 
+ /** Options for AgentSession.sendUserMessage(). */
+ export interface SendUserMessageOptions {
++	deliveryObserver?: PromptDeliveryObserver;
+ 	/** Queue behavior; omitted starts a turn when idle and steers while streaming. */
+ 	deliverAs?: "steer" | "followUp" | "aside";
+ 	/** Explicit billing/initiator attribution. */
 diff --git a/src/session/agent-session.ts b/src/session/agent-session.ts
-index e8d114fd9f65a64e64f9642f44b9abd85db87798..caa0f0eebae96b071c48e0a46f00e62aa958a400 100644
+index 6c2b0bb9d23e9c6e6f3e81f38f7aecd46a80708b..f15c3dcb786c44ef96ad252f8cc029f4a581314f 100644
 --- a/src/session/agent-session.ts
 +++ b/src/session/agent-session.ts
 @@ -33,9 +33,12 @@ import {
@@ -906,9 +905,9 @@ index e8d114fd9f65a64e64f9642f44b9abd85db87798..caa0f0eebae96b071c48e0a46f00e62a
  	type BeforeToolCallResult,
 +	type CommittableAsideMessage,
  	EventLoopKeepalive,
+ 	type QueuedMessagePreparation,
  	resolveTelemetry,
- 	type StreamFn,
-@@ -247,6 +250,7 @@ import type {
+@@ -254,6 +257,7 @@ import type {
  	HandoffResult,
  	ModelCycleResult,
  	Prewalk,
@@ -916,15 +915,15 @@ index e8d114fd9f65a64e64f9642f44b9abd85db87798..caa0f0eebae96b071c48e0a46f00e62a
  	PromptOptions,
  	ResetSessionContextResult,
  	ResolvedRoleModel,
-@@ -532,6 +536,7 @@ export class AgentSession {
+@@ -572,6 +576,7 @@ export class AgentSession {
  	readonly agent: Agent;
  	readonly sessionManager: SessionManager;
  	readonly settings: Settings;
 +	readonly agentDir: string;
+ 	/** Session-start policy, independent of the selected project memory backend. */
+ 	readonly memoryEnabled: boolean;
  	/** Entries of tools mounted under `xd://`; empty when virtual devices are unmounted. */
- 	getXdevToolEntries: () => Array<{ name: string; summary: string }>;
- 	readonly yieldQueue: YieldQueue;
-@@ -656,6 +661,7 @@ export class AgentSession {
+@@ -699,6 +704,7 @@ export class AgentSession {
  	/** Host hook invoked when a typed user prompt is dropped before dispatch;
  	 *  see {@link setPromptDropped}. */
  	#promptDropped: ((prompt: DroppedPrompt) => void) | undefined;
@@ -932,7 +931,7 @@ index e8d114fd9f65a64e64f9642f44b9abd85db87798..caa0f0eebae96b071c48e0a46f00e62a
  	#titleGenerationAbortController = new AbortController();
  	#toolChoiceQueue = new ToolChoiceQueue();
  
-@@ -716,6 +722,7 @@ export class AgentSession {
+@@ -759,6 +765,7 @@ export class AgentSession {
  	#messageEndPersistenceTail: Promise<void> = Promise.resolve();
  	#pendingMessageEndPersistence = new Map<string, Promise<void>>();
  	#persistedMessageKeys: { anchor: string; keys: Set<string> } | undefined;
@@ -940,7 +939,7 @@ index e8d114fd9f65a64e64f9642f44b9abd85db87798..caa0f0eebae96b071c48e0a46f00e62a
  
  	// Custom commands (TypeScript slash commands)
  	#customCommands: LoadedCustomCommand[] = [];
-@@ -979,6 +986,8 @@ export class AgentSession {
+@@ -1041,6 +1048,8 @@ export class AgentSession {
  		for (const record of records) {
  			this.agent.emitExternalEvent({ type: "message_start", message: record });
  			this.agent.emitExternalEvent({ type: "message_end", message: record });
@@ -949,15 +948,15 @@ index e8d114fd9f65a64e64f9642f44b9abd85db87798..caa0f0eebae96b071c48e0a46f00e62a
  		}
  	}
  
-@@ -1225,6 +1234,7 @@ export class AgentSession {
- 		this.#codeModeState = config.codeModeState ?? {};
+@@ -1298,6 +1307,7 @@ export class AgentSession {
  		this.sessionManager = config.sessionManager;
  		this.settings = config.settings;
+ 		this.memoryEnabled = config.memoryEnabled ?? true;
 +		this.agentDir = config.memoryAgentDir ?? config.settings.getAgentDir();
  		this.#modelRegistry = config.modelRegistry;
  		this.#extensionRoots =
  			config.extensionRoots ??
-@@ -2543,6 +2553,40 @@ export class AgentSession {
+@@ -2661,6 +2671,40 @@ export class AgentSession {
  	 * event/persistence pipeline during teardown.
  	 */
  	#handleAgentEvent = (event: AgentEvent): Promise<void> => {
@@ -998,7 +997,7 @@ index e8d114fd9f65a64e64f9642f44b9abd85db87798..caa0f0eebae96b071c48e0a46f00e62a
  		const processing = this.#dispatchAgentEvent(event);
  		this.#inFlightEventHandlers.add(processing);
  		void processing.finally(() => this.#inFlightEventHandlers.delete(processing)).catch(() => {});
-@@ -2699,17 +2743,17 @@ export class AgentSession {
+@@ -2817,27 +2861,17 @@ export class AgentSession {
  		return keys;
  	}
  
@@ -1007,6 +1006,16 @@ index e8d114fd9f65a64e64f9642f44b9abd85db87798..caa0f0eebae96b071c48e0a46f00e62a
 -	 * appended to the current branch. Uses the current branch's memoized
 -	 * persistence-key cache for the common missing-key case, and only walks the
 -	 * branch to verify content when a key hit could be a rare collision.
+-	 *
+-	 * Error turns need one extra discriminator. An empty error turn carries no
+-	 * content at all, so every failed attempt of one retry saga serializes to the
+-	 * same `[]` — and when two attempts land in the same wall-clock millisecond
+-	 * (mocked/zero retry delay, or a fast provider failure) they also share a
+-	 * persistence key of `assistant:<ts>:<provider>:<model>::error`. Content
+-	 * equality alone then reports the aggregated terminal turn ("Retry budget
+-	 * exhausted after N retries: …") as a duplicate of the attempt error it
+-	 * supersedes, and the session journal silently loses the record of why the
+-	 * run stopped. The failure text is the only thing that distinguishes them.
 -	 */
  	#sessionMessageAlreadyPersisted(message: AgentMessage): boolean {
  		const key = sessionMessagePersistenceKey(message);
@@ -1022,7 +1031,7 @@ index e8d114fd9f65a64e64f9642f44b9abd85db87798..caa0f0eebae96b071c48e0a46f00e62a
  		const branch = this.sessionManager.getBranch();
  		for (let index = branch.length - 1; index >= 0; index--) {
  			const entry = branch[index];
-@@ -4497,7 +4541,7 @@ export class AgentSession {
+@@ -4675,7 +4709,7 @@ export class AgentSession {
  
  	/**
  	 * Synchronously mark the session as disposing so new work is rejected
@@ -1031,7 +1040,7 @@ index e8d114fd9f65a64e64f9642f44b9abd85db87798..caa0f0eebae96b071c48e0a46f00e62a
  	 * aside provider is detached. Idempotent; `dispose()` runs it first.
  	 *
  	 * Wrappers that await other teardown before delegating to `dispose()` MUST
-@@ -4505,6 +4549,7 @@ export class AgentSession {
+@@ -4683,6 +4717,7 @@ export class AgentSession {
  	 * gap slips past the disposal guards.
  	 */
  	beginDispose(): void {
@@ -1039,7 +1048,7 @@ index e8d114fd9f65a64e64f9642f44b9abd85db87798..caa0f0eebae96b071c48e0a46f00e62a
  		this.#isDisposed = true;
  		this.#modelDiscoveryAbortController.abort();
  		this.#queuedMessageDrainBlocked = false;
-@@ -4517,6 +4562,7 @@ export class AgentSession {
+@@ -4698,6 +4733,7 @@ export class AgentSession {
  		this.#titleGenerationAbortController.abort();
  		this.#abortAutolearnCapture();
  		this.#irc.flushPending();
@@ -1047,7 +1056,7 @@ index e8d114fd9f65a64e64f9642f44b9abd85db87798..caa0f0eebae96b071c48e0a46f00e62a
  		this.yieldQueue.clear();
  		this.agent.setAsideMessageProvider(undefined);
  		this.agent.hasIrcInterrupts = undefined;
-@@ -4536,7 +4582,11 @@ export class AgentSession {
+@@ -4717,7 +4753,11 @@ export class AgentSession {
  	 */
  	#disposeCall?: Promise<void>;
  	dispose(options: AgentSessionDisposeOptions = {}): Promise<void> {
@@ -1060,16 +1069,16 @@ index e8d114fd9f65a64e64f9642f44b9abd85db87798..caa0f0eebae96b071c48e0a46f00e62a
  		return this.#disposeCall;
  	}
  
-@@ -4911,6 +4961,8 @@ export class AgentSession {
- 
+@@ -5108,6 +5148,8 @@ export class AgentSession {
  		// Drop the conversation: messages, queued steers/follow-ups, pending tool
  		// calls, and error state. agent.reset() keeps the model and system prompt.
+ 		this.#releaseQueuedTtsrReservations();
 +		this.#discardPromptDeliveries(this.agent.peekSteeringQueue());
 +		this.#discardPromptDeliveries(this.agent.peekFollowUpQueue());
  		this.agent.reset();
  		this.#pendingNextTurnMessages = [];
  		this.#experimentalContextNotesReminder = undefined;
-@@ -5631,6 +5683,10 @@ export class AgentSession {
+@@ -5834,6 +5876,10 @@ export class AgentSession {
  		const filteredFollowUp = followUp.filter(message => !isVibeContext(message));
  		if (filteredSteering.length !== steering.length || filteredFollowUp.length !== followUp.length) {
  			this.agent.replaceQueues(filteredSteering, filteredFollowUp);
@@ -1080,34 +1089,23 @@ index e8d114fd9f65a64e64f9642f44b9abd85db87798..caa0f0eebae96b071c48e0a46f00e62a
  			this.#reconcileQueuedMessageDrain();
  		}
  		this.#pendingNextTurnMessages = this.#pendingNextTurnMessages.filter(message => !isVibeContext(message));
-@@ -6176,7 +6232,9 @@ export class AgentSession {
- 			for (const notice of keywordNotices) {
- 				await this.#queueCustomMessage(notice, streamingBehavior);
- 			}
--			await this.#queueUserMessage(expandedText, options?.images, streamingBehavior, submittedAt);
-+			await this.#queueUserMessage(
-+				expandedText, options?.images, streamingBehavior, submittedAt, undefined, options?.deliveryObserver,
-+			);
+@@ -6414,6 +6460,7 @@ export class AgentSession {
+ 			await this.#queueUserMessage(expandedText, options?.images, streamingBehavior, {
+ 				timestamp: submittedAt,
+ 				attribution: promptAttribution,
++				deliveryObserver: options?.deliveryObserver,
+ 			});
+ 			outcome.sessionClaimed = true;
  			return true;
- 		}
- 
-@@ -6222,10 +6280,11 @@ export class AgentSession {
- 			for (const notice of keywordNotices) {
- 				await this.#queueCustomMessage(notice, streamingBehavior);
- 			}
--			await this.#queueUserMessage(expandedText, options?.images, streamingBehavior, submittedAt, {
--				images: normalizedImages,
--				descriptionNotice: imageDescriptionNotice,
--			});
-+			await this.#queueUserMessage(
-+				expandedText, options?.images, streamingBehavior, submittedAt,
-+				{ images: normalizedImages, descriptionNotice: imageDescriptionNotice },
-+				options?.deliveryObserver,
-+			);
+@@ -6471,6 +6518,7 @@ export class AgentSession {
+ 					images: normalizedImages,
+ 					descriptionNotice: imageDescriptionNotice,
+ 				},
++				deliveryObserver: options?.deliveryObserver,
+ 			});
+ 			outcome.sessionClaimed = true;
  			return true;
- 		}
- 
-@@ -6303,7 +6362,7 @@ export class AgentSession {
+@@ -6555,7 +6603,7 @@ export class AgentSession {
  	 */
  	async promptCustomMessage<T = unknown>(
  		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">,
@@ -1116,25 +1114,43 @@ index e8d114fd9f65a64e64f9642f44b9abd85db87798..caa0f0eebae96b071c48e0a46f00e62a
  			queueChipText?: string;
  			queueOnly?: boolean;
  		},
-@@ -6342,7 +6401,7 @@ export class AgentSession {
+@@ -6565,7 +6613,7 @@ export class AgentSession {
+ 
+ 	async #promptCustomMessage<T = unknown>(
+ 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">,
+-		options?: Pick<PromptOptions, "streamingBehavior" | "toolChoice"> & {
++		options?: Pick<PromptOptions, "streamingBehavior" | "toolChoice" | "deliveryObserver"> & {
+ 			queueChipText?: string;
+ 			queueOnly?: boolean;
+ 		},
+@@ -6587,7 +6635,7 @@ export class AgentSession {
+ 	async #dispatchCustomPrompt<T = unknown>(
+ 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">,
+ 		options:
+-			| (Pick<PromptOptions, "streamingBehavior" | "toolChoice"> & {
++			| (Pick<PromptOptions, "streamingBehavior" | "toolChoice" | "deliveryObserver"> & {
+ 					queueChipText?: string;
+ 					queueOnly?: boolean;
+ 			  })
+@@ -6628,7 +6676,7 @@ export class AgentSession {
  			for (const notice of keywordNotices) {
  				await this.#queueCustomMessage(notice, streamingBehavior);
  			}
 -			await this.#queueCustomMessage(message, streamingBehavior, options.queueChipText);
 +			await this.#queueCustomMessage(message, streamingBehavior, options.queueChipText, options.deliveryObserver);
+ 			outcome.sessionClaimed = true;
  			return true;
  		}
- 		if (this.isStreaming) {
-@@ -6352,7 +6411,7 @@ export class AgentSession {
+@@ -6644,7 +6692,7 @@ export class AgentSession {
  			for (const notice of keywordNotices) {
  				await this.#queueCustomMessage(notice, streamingBehavior);
  			}
 -			await this.#queueCustomMessage(message, streamingBehavior, options?.queueChipText);
 +			await this.#queueCustomMessage(message, streamingBehavior, options?.queueChipText, options?.deliveryObserver);
+ 			outcome.sessionClaimed = true;
  			return true;
  		}
- 
-@@ -6375,7 +6434,7 @@ export class AgentSession {
+@@ -6790,7 +6838,7 @@ export class AgentSession {
  	async #promptWithMessage(
  		message: AgentMessage,
  		expandedText: string,
@@ -1143,7 +1159,7 @@ index e8d114fd9f65a64e64f9642f44b9abd85db87798..caa0f0eebae96b071c48e0a46f00e62a
  			prependMessages?: AgentMessage[];
  			skipPostPromptRecoveryWait?: boolean;
  			acceptTerminalEmptyStop?: boolean;
-@@ -6385,6 +6444,13 @@ export class AgentSession {
+@@ -6800,6 +6848,13 @@ export class AgentSession {
  		// every pre-dispatch bail (generation bump from abort, disposal, usage
  		// preflight denial) exits silently, and prompt() uses the outcome to hand
  		// the typed text back to the host instead of losing it.
@@ -1157,7 +1173,7 @@ index e8d114fd9f65a64e64f9642f44b9abd85db87798..caa0f0eebae96b071c48e0a46f00e62a
  		this.#beginInFlight();
  		const generation = this.#promptGeneration;
  		this.#promptSequence++;
-@@ -6614,6 +6680,9 @@ export class AgentSession {
+@@ -7001,6 +7056,9 @@ export class AgentSession {
  			}
  			return true;
  		} finally {
@@ -1167,7 +1183,7 @@ index e8d114fd9f65a64e64f9642f44b9abd85db87798..caa0f0eebae96b071c48e0a46f00e62a
  			// The per-turn before_agent_start override lives only for this turn.
  			this.#tools.clearTurnSystemPromptOverride();
  			this.#usagePreflightReadyForNextModelCall = false;
-@@ -6866,12 +6935,68 @@ export class AgentSession {
+@@ -7259,6 +7317,61 @@ export class AgentSession {
  		}
  	}
  
@@ -1229,14 +1245,21 @@ index e8d114fd9f65a64e64f9642f44b9abd85db87798..caa0f0eebae96b071c48e0a46f00e62a
  	async #queueUserMessage(
  		text: string,
  		images: ImageContent[] | undefined,
- 		mode: "steer" | "followUp" | "aside",
- 		timestamp?: number,
- 		preprocessed?: { images: ImageContent[] | undefined; descriptionNotice: CustomMessage | undefined },
-+		deliveryObserver?: PromptDeliveryObserver,
+@@ -7267,11 +7380,13 @@ export class AgentSession {
+ 			timestamp?: number;
+ 			attribution?: MessageAttribution;
+ 			preprocessed?: { images: ImageContent[] | undefined; descriptionNotice: CustomMessage | undefined };
++			deliveryObserver?: PromptDeliveryObserver;
+ 		},
  	): Promise<void> {
+ 		const attribution = options?.attribution ?? "user";
+ 		const timestamp = options?.timestamp;
+ 		const preprocessed = options?.preprocessed;
++		const deliveryObserver = options?.deliveryObserver;
  		// Captured before any await below so the aside branch can detect a
  		// newSession()/switchSession() that completed while normalization/vision
-@@ -6902,12 +7027,25 @@ export class AgentSession {
+ 		// description was in flight and drop a record that would otherwise land in a
+@@ -7301,12 +7416,25 @@ export class AgentSession {
  			: normalizedImages?.length
  				? await this.#buildImageDescriptionNotice(normalizedImages)
  				: undefined;
@@ -1249,7 +1272,7 @@ index e8d114fd9f65a64e64f9642f44b9abd85db87798..caa0f0eebae96b071c48e0a46f00e62a
 +			return;
 +		}
 +		const message: CommittableAsideMessage = {
-+			role: "user", content, attribution: "user", timestamp: timestamp ?? Date.now(),
++			role: "user", content, attribution, timestamp: timestamp ?? Date.now(),
 +		};
 +		if (mode === "steer") message.steering = true;
 +		if (deliveryObserver) this.#observePromptDelivery(message, deliveryObserver, mode);
@@ -1257,21 +1280,21 @@ index e8d114fd9f65a64e64f9642f44b9abd85db87798..caa0f0eebae96b071c48e0a46f00e62a
 -			if (await this.#sessionGenerationChanged(sessionGeneration)) return;
  			const records: AgentMessage[] = [];
  			if (imageDescriptionNotice) records.push(imageDescriptionNotice);
--			records.push({ role: "user", content, attribution: "user", timestamp: timestamp ?? Date.now() });
+-			records.push({ role: "user", content, attribution, timestamp: timestamp ?? Date.now() });
 +			records.push(message);
  			this.#irc.queueAside(records);
 +			if (deliveryObserver) this.#notifyPromptDelivery(deliveryObserver, "aside");
  			// The awaits above (image normalization / vision description) can span the run's
  			// settle, so the run may already be idle by the time the record lands in the aside
  			// queue with no loop left to drain it. Resuming here is a no-op while streaming and
-@@ -6919,23 +7057,13 @@ export class AgentSession {
+@@ -7318,23 +7446,13 @@ export class AgentSession {
  		if (mode === "followUp") {
  			for (const notice of videoAttachmentNotices) this.agent.followUp(notice);
  			if (imageDescriptionNotice) this.agent.followUp(imageDescriptionNotice);
 -			this.agent.followUp({
 -				role: "user",
 -				content,
--				attribution: "user",
+-				attribution,
 -				timestamp: timestamp ?? Date.now(),
 -			});
 +			this.agent.followUp(message);
@@ -1282,7 +1305,7 @@ index e8d114fd9f65a64e64f9642f44b9abd85db87798..caa0f0eebae96b071c48e0a46f00e62a
 -				role: "user",
 -				content,
 -				steering: true,
--				attribution: "user",
+-				attribution,
 -				timestamp: timestamp ?? Date.now(),
 -			});
 +			this.agent.steer(message);
@@ -1291,7 +1314,7 @@ index e8d114fd9f65a64e64f9642f44b9abd85db87798..caa0f0eebae96b071c48e0a46f00e62a
  		this.#scheduleIdleQueueDrain();
  	}
  
-@@ -7131,6 +7259,7 @@ export class AgentSession {
+@@ -7530,6 +7648,7 @@ export class AgentSession {
  		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">,
  		deliverAs: "steer" | "followUp" | "aside",
  		queueChipText?: string,
@@ -1299,7 +1322,7 @@ index e8d114fd9f65a64e64f9642f44b9abd85db87798..caa0f0eebae96b071c48e0a46f00e62a
  	): Promise<void> {
  		// Captured before the normalization await below — see #sessionGeneration's doc comment.
  		const sessionGeneration = this.#sessionGeneration;
-@@ -7154,12 +7283,21 @@ export class AgentSession {
+@@ -7553,12 +7672,21 @@ export class AgentSession {
  			timestamp: Date.now(),
  		};
  		const normalizedAppMessage = await this.#normalizeAgentMessageImages(appMessage);
@@ -1322,7 +1345,7 @@ index e8d114fd9f65a64e64f9642f44b9abd85db87798..caa0f0eebae96b071c48e0a46f00e62a
  			// The image-normalization await above can span the run's settle, so the run may
  			// already be idle by the time the record lands in the aside queue with no loop
  			// left to drain it. Resuming here is a no-op while streaming and wakes/folds
-@@ -7173,6 +7311,7 @@ export class AgentSession {
+@@ -7572,6 +7700,7 @@ export class AgentSession {
  		} else {
  			this.agent.steer(normalizedAppMessage);
  		}
@@ -1330,37 +1353,28 @@ index e8d114fd9f65a64e64f9642f44b9abd85db87798..caa0f0eebae96b071c48e0a46f00e62a
  		this.#scheduleIdleQueueDrain();
  	}
  
-@@ -7325,7 +7464,7 @@ export class AgentSession {
- 	 */
- 	async sendUserMessage(
- 		content: string | (TextContent | ImageContent)[],
--		options?: { deliverAs?: "steer" | "followUp" | "aside" },
-+		options?: { deliverAs?: "steer" | "followUp" | "aside"; deliveryObserver?: PromptDeliveryObserver },
- 	): Promise<void> {
- 		// Normalize content to text string + optional images
- 		let text: string;
-@@ -7350,17 +7489,17 @@ export class AgentSession {
+@@ -7795,17 +7924,17 @@ export class AgentSession {
  		let deliveredAsAside = false;
  		if (options?.deliverAs === "aside") {
  			if (this.isStreaming) {
--				await this.#queueUserMessage(text, images, "aside");
-+				await this.#queueUserMessage(text, images, "aside", undefined, undefined, options.deliveryObserver);
+-				await this.#queueUserMessage(text, images, "aside", { attribution: options.attribution });
++				await this.#queueUserMessage(text, images, "aside", options);
  				return;
  			}
  			// Idle: fall through to the prompt flow below (starts a turn, like an omitted
  			// deliverAs) — there is no live run to inject an aside into.
  			deliveredAsAside = true;
  		} else if (options?.deliverAs === "followUp") {
--			await this.#queueUserMessage(text, images, "followUp");
-+			await this.#queueUserMessage(text, images, "followUp", undefined, undefined, options.deliveryObserver);
+-			await this.#queueUserMessage(text, images, "followUp", { attribution: options.attribution });
++			await this.#queueUserMessage(text, images, "followUp", options);
  			return;
  		} else if (options?.deliverAs === "steer") {
--			await this.#queueUserMessage(text, images, "steer");
-+			await this.#queueUserMessage(text, images, "steer", undefined, undefined, options.deliveryObserver);
+-			await this.#queueUserMessage(text, images, "steer", { attribution: options.attribution });
++			await this.#queueUserMessage(text, images, "steer", options);
  			return;
  		}
  
-@@ -7375,6 +7514,7 @@ export class AgentSession {
+@@ -7821,6 +7950,7 @@ export class AgentSession {
  			expandPromptTemplates: false,
  			images,
  			streamingBehavior: deliveredAsAside ? "aside" : "steer",
@@ -1368,9 +1382,9 @@ index e8d114fd9f65a64e64f9642f44b9abd85db87798..caa0f0eebae96b071c48e0a46f00e62a
  		});
  	}
  
-@@ -7398,6 +7538,10 @@ export class AgentSession {
- 			? isAdvisorCard
- 			: m => !isUserQueuedMessage(m) && !isHiddenUserCompanion(m);
+@@ -7849,6 +7979,10 @@ export class AgentSession {
+ 			}
+ 		}
  		this.agent.replaceQueues(steeringAll.filter(keep), followUpAll.filter(keep));
 +		if (this.#promptDeliveries) {
 +			this.#discardPromptDeliveries(steeringAll.filter(message => !keep(message)));
@@ -1379,7 +1393,7 @@ index e8d114fd9f65a64e64f9642f44b9abd85db87798..caa0f0eebae96b071c48e0a46f00e62a
  		this.#reconcileQueuedMessageDrain();
  		return { steering, followUp };
  	}
-@@ -7448,6 +7592,7 @@ export class AgentSession {
+@@ -7899,6 +8033,7 @@ export class AgentSession {
  		if (fromSteer >= 0) {
  			const removed = steering[fromSteer];
  			this.agent.replaceQueues(removeWithCompanions(steering, fromSteer), followUp.slice());
@@ -1387,7 +1401,7 @@ index e8d114fd9f65a64e64f9642f44b9abd85db87798..caa0f0eebae96b071c48e0a46f00e62a
  			this.#reconcileQueuedMessageDrain();
  			return toRestoredQueuedMessage(removed);
  		}
-@@ -7455,6 +7600,7 @@ export class AgentSession {
+@@ -7906,6 +8041,7 @@ export class AgentSession {
  		if (fromFollowUp >= 0) {
  			const removed = followUp[fromFollowUp];
  			this.agent.replaceQueues(steering.slice(), removeWithCompanions(followUp, fromFollowUp));
@@ -1395,15 +1409,15 @@ index e8d114fd9f65a64e64f9642f44b9abd85db87798..caa0f0eebae96b071c48e0a46f00e62a
  			this.#reconcileQueuedMessageDrain();
  			return toRestoredQueuedMessage(removed);
  		}
-@@ -7866,6 +8012,7 @@ export class AgentSession {
- 			advisorRecordersDetached = true;
+@@ -8334,6 +8470,7 @@ export class AgentSession {
  			await this.#advisors.drainAndDetachRecorders();
  			try {
+ 				this.#releaseQueuedTtsrReservations();
 +				this.#discardPromptDeliveries();
  				this.agent.reset();
  				if (options?.drop && previousSessionFile) {
  					try {
-@@ -8884,6 +9031,9 @@ export class AgentSession {
+@@ -9376,6 +9513,9 @@ export class AgentSession {
  				break;
  			}
  			if (event.type === "error") {
@@ -1413,10 +1427,10 @@ index e8d114fd9f65a64e64f9642f44b9abd85db87798..caa0f0eebae96b071c48e0a46f00e62a
  				throw new Error(event.error.errorMessage || "Ephemeral turn failed");
  			}
  		}
-@@ -9249,6 +9399,11 @@ export class AgentSession {
+@@ -9751,6 +9891,11 @@ export class AgentSession {
  			}
- 			transitionSettled.resolve();
- 			this.#sessionTransitionSettled = previousSessionTransitionSettled;
+ 			generationSettled.resolve();
+ 			this.#sessionGenerationSettled = previousSessionGenerationSettled;
 +			this.#discardPromptDeliveries(previousSteeringMessages);
 +			this.#discardPromptDeliveries(previousFollowUpMessages);
 +			this.#discardPromptDeliveries(previousIrcPending.interrupts);
@@ -1425,10 +1439,10 @@ index e8d114fd9f65a64e64f9642f44b9abd85db87798..caa0f0eebae96b071c48e0a46f00e62a
  			return true;
  		} catch (error) {
  			this.sessionManager.restoreState(previousSessionState);
-@@ -9505,6 +9660,8 @@ export class AgentSession {
- 
+@@ -10014,6 +10159,8 @@ export class AgentSession {
  		this.#pendingNextTurnMessages = [];
  		this.#scheduledHiddenNextTurnGeneration = undefined;
+ 		this.#releaseQueuedTtsrReservations();
 +		this.#discardPromptDeliveries(this.agent.peekSteeringQueue());
 +		this.#discardPromptDeliveries(this.agent.peekFollowUpQueue());
  		this.agent.replaceQueues([], []);
@@ -1506,21 +1520,22 @@ index 35c0a35b1d19ec438d8cea17c9f957caa13efbb2..462fc3a06c4b8ca7d9d6d78fd7929629
  	}
  
 diff --git a/src/session/session-loader.ts b/src/session/session-loader.ts
-index d755ce53bd46b5d3affcadf937c93e8692c1c72c..88fad33ad36a003d6a43ab491b75d9e2c3d12633 100644
+index 732fc693457fc464ad5b4d4b6f620d96aa6177ce..2d4781be2e78053dc1ea82e550d15d295932be53 100644
 --- a/src/session/session-loader.ts
 +++ b/src/session/session-loader.ts
-@@ -435,5 +435,6 @@ export async function loadSessionMessagesReadOnly(filePath: string): Promise<Age
- 	return buildSessionContext(sessionEntries, undefined, undefined, {
+@@ -538,6 +538,7 @@ export async function loadSessionMessagesReadOnly(filePath: string): Promise<Age
+ 	const { messages } = buildSessionContext(sessionEntries, undefined, undefined, {
  		transcript: true,
  		collapseCompactedHistory: true,
 +		keepDanglingToolCalls: true,
- 	}).messages;
- }
+ 		resolveFrameData: data => lazyImageDataSync(blobs, data),
+ 	});
+ 	// A collapsed summary carries the remote-compaction replacement history for
 diff --git a/src/session/session-maintenance.ts b/src/session/session-maintenance.ts
-index 83abd92d8d0b40abc52131953d48c160bafa82a5..90f2c822f62bc9e2c093f3200e6ac9cb081959a3 100644
+index 4fdf8acf498e12b1f2589b8bdddd626e031b58a7..ae7db616b8e84533feade35799e146acdeef1173 100644
 --- a/src/session/session-maintenance.ts
 +++ b/src/session/session-maintenance.ts
-@@ -634,12 +634,16 @@ export class SessionMaintenance {
+@@ -753,6 +753,8 @@ export class SessionMaintenance {
  	 * Mutates the branch in place, persists via `rewriteEntries`, replays the
  	 * rebuilt context through the agent, and tears down provider sessions that
  	 * cache message identity — same rewrite contract as {@link dropImages}.
@@ -1529,7 +1544,10 @@ index 83abd92d8d0b40abc52131953d48c160bafa82a5..90f2c822f62bc9e2c093f3200e6ac9cb
  	 *
  	 * No-op (zero counts) when nothing is eligible.
  	 */
- 	async shake(mode: ShakeMode, opts: { config?: ShakeConfig; signal?: AbortSignal } = {}): Promise<ShakeResult> {
+@@ -766,8 +768,10 @@ export class SessionMaintenance {
+ 			toolResultsOnly?: boolean;
+ 		} = {},
+ 	): Promise<ShakeResult> {
 +		opts.signal?.throwIfAborted();
  		if (mode === "images") {
  			const { removed } = await this.#host.dropImages();
@@ -1537,7 +1555,7 @@ index 83abd92d8d0b40abc52131953d48c160bafa82a5..90f2c822f62bc9e2c093f3200e6ac9cb
  			return { mode, toolResultsDropped: 0, blocksDropped: 0, imagesDropped: removed, tokensFreed: 0 };
  		}
  
-@@ -667,6 +671,7 @@ export class SessionMaintenance {
+@@ -795,11 +799,13 @@ export class SessionMaintenance {
  			this.#host.agent.replaceMessages(sessionContext.messages);
  			this.#host.resetAdvisorRuntimes("shake");
  			this.#host.closeCodexProviderSessionsForHistoryRewrite();
@@ -1545,17 +1563,46 @@ index 83abd92d8d0b40abc52131953d48c160bafa82a5..90f2c822f62bc9e2c093f3200e6ac9cb
  			return { mode, toolResultsDropped: 0, blocksDropped: 0, thinkingBlocksDropped: removed, tokensFreed: 0 };
  		}
  
-@@ -685,7 +690,8 @@ export class SessionMaintenance {
+ 		const assertCurrent = () => {
+-			if (opts.signal?.aborted || opts.isCurrent?.() === false) throw new CompactionCancelledError();
++			opts.signal?.throwIfAborted();
++			if (opts.isCurrent?.() === false) throw new CompactionCancelledError();
+ 		};
+ 		assertCurrent();
+ 		const branchEntries = this.#host.sessionManager.getBranch();
+@@ -818,12 +824,7 @@ export class SessionMaintenance {
  			return { mode, toolResultsDropped: 0, blocksDropped: 0, tokensFreed: 0 };
  		}
  
--		const artifactId = await this.#saveShakeArtifact(regions);
-+		const artifactId = await this.#saveShakeArtifact(regions, opts.signal);
-+		opts.signal?.throwIfAborted();
- 		const replacements = regions.map((region, index) => this.#shakeElidePlaceholder(region, index, artifactId));
- 
- 		const hasRemoteReplacementHistory = getOpenAiRemoteCompactionPayload(latestCompaction) !== undefined;
-@@ -730,6 +736,7 @@ export class SessionMaintenance {
+-		let reservedArtifact: { id?: string; path?: string } = {};
+-		try {
+-			reservedArtifact = await this.#host.sessionManager.allocateArtifactPath("shake");
+-		} catch {
+-			if (opts.requireArtifact) throw new Error("shake could not save a recovery artifact");
+-		}
++		const reservedArtifact = await this.#host.sessionManager.allocateArtifactPath("shake");
+ 		assertCurrent();
+ 		let artifactId = reservedArtifact.id;
+ 		const calculateReplacementState = (id: string | undefined) => {
+@@ -842,15 +843,9 @@ export class SessionMaintenance {
+ 			return { mode, toolResultsDropped: 0, blocksDropped: 0, tokensFreed: 0 };
+ 		}
+ 		if (reservedArtifact.path && reservedArtifact.id) {
+-			try {
+-				await writeArtifact(reservedArtifact.path, this.#shakeArtifactText(regions));
+-			} catch {
+-				if (opts.requireArtifact) throw new Error("shake could not save a recovery artifact");
+-				artifactId = undefined;
+-				({ replacements, replacementTokenCounts, savings } = calculateReplacementState(artifactId));
+-			}
++			await writeArtifact(reservedArtifact.path, this.#shakeArtifactText(regions), opts.signal);
+ 		} else {
+-			artifactId = await this.#saveShakeArtifact(regions);
++			artifactId = await this.#saveShakeArtifact(regions, opts.signal);
+ 			assertCurrent();
+ 			if (opts.requireArtifact && !artifactId) {
+ 				throw new Error("shake could not save a recovery artifact");
+@@ -917,6 +912,7 @@ export class SessionMaintenance {
  		this.#host.agent.replaceMessages(sessionContext.messages);
  		this.#host.resetAdvisorRuntimes("shake");
  		this.#host.closeCodexProviderSessionsForHistoryRewrite();
@@ -1563,38 +1610,26 @@ index 83abd92d8d0b40abc52131953d48c160bafa82a5..90f2c822f62bc9e2c093f3200e6ac9cb
  
  		return {
  			mode,
-@@ -747,23 +754,14 @@ export class SessionMaintenance {
- 		return `[shaken ~${region.tokens} tokens]`;
+@@ -966,12 +962,8 @@ export class SessionMaintenance {
  	}
  
--	/**
--	 * Concatenate the original region contents into one session artifact so the
--	 * agent can read them back via `artifact://<id>`. Returns `undefined` when
--	 * the session is not persisted or the write fails — callers degrade to a
--	 * bare placeholder.
--	 */
+ 	/** Persist the shake artifact, using the session manager's in-memory fallback when needed. */
 -	async #saveShakeArtifact(regions: ShakeRegion[]): Promise<string | undefined> {
-+	/** Save the original regions before replacing any journal content. */
-+	async #saveShakeArtifact(regions: ShakeRegion[], signal?: AbortSignal): Promise<string | undefined> {
- 		const parts: string[] = [];
- 		for (let i = 0; i < regions.length; i++) {
- 			const region = regions[i];
- 			parts.push(`### region ${i + 1} (${region.label}, ~${region.tokens} tok)`, "", region.originalText, "");
- 		}
 -		try {
--			return await this.#host.sessionManager.saveArtifact(parts.join("\n"), "shake");
+-			return await this.#host.sessionManager.saveArtifact(this.#shakeArtifactText(regions), "shake");
 -		} catch {
 -			return undefined;
 -		}
-+		return this.#host.sessionManager.saveArtifact(parts.join("\n"), "shake", signal);
++	async #saveShakeArtifact(regions: ShakeRegion[], signal?: AbortSignal): Promise<string | undefined> {
++		return this.#host.sessionManager.saveArtifact(this.#shakeArtifactText(regions), "shake", signal);
  	}
  
  	/**
 diff --git a/src/session/session-manager.ts b/src/session/session-manager.ts
-index 7fea74fe47fdf047a5d8b67c19b3b407edd5333b..a49b5da953e3fb454d71f44ddeb3f6bb1683380d 100644
+index 650628e4949b60d88f4861e0101eb9bc87347768..74b827332064c73dea235a94837caf7c2b434421 100644
 --- a/src/session/session-manager.ts
 +++ b/src/session/session-manager.ts
-@@ -2125,9 +2125,10 @@ export class SessionManager {
+@@ -2503,9 +2503,10 @@ export class SessionManager {
  		return (await this.#artifactManagerForSession()?.allocatePath(toolType)) ?? {};
  	}
  
@@ -1684,10 +1719,10 @@ index 60992f7152e0abeaa8fe923889fb726ba9cb2e3e..758985bdf9a19aa1981b6a620719fbf1
  				"assistant",
  				message.timestamp,
 diff --git a/src/slash-commands/builtin-lifecycle.ts b/src/slash-commands/builtin-lifecycle.ts
-index 34d3c8dc97b0e7dfe0b9f9f1f800aff72c992e58..6fdd3c8fd35c4da60192605a503419d387624975 100644
+index 8277fb228d3a49e49ae0ab9c8be53be8a57ad454..875d0faf906e6d608ff935290943d459ecaed920 100644
 --- a/src/slash-commands/builtin-lifecycle.ts
 +++ b/src/slash-commands/builtin-lifecycle.ts
-@@ -592,7 +592,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
+@@ -593,7 +593,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
  			switch (verb) {
  				case "view": {
  					const payload = await backend.buildDeveloperInstructions(
@@ -1696,7 +1731,7 @@ index 34d3c8dc97b0e7dfe0b9f9f1f800aff72c992e58..6fdd3c8fd35c4da60192605a503419d3
  						runtime.settings,
  						runtime.session,
  					);
-@@ -601,20 +601,20 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
+@@ -602,20 +602,20 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
  				}
  				case "clear":
  				case "reset": {
@@ -1720,7 +1755,7 @@ index 34d3c8dc97b0e7dfe0b9f9f1f800aff72c992e58..6fdd3c8fd35c4da60192605a503419d3
  						cwd: runtime.cwd,
  						session: runtime.session,
  					});
-@@ -622,14 +622,14 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
+@@ -623,14 +623,14 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
  					return commandConsumed();
  				}
  				case "sync": {
@@ -1738,10 +1773,10 @@ index 34d3c8dc97b0e7dfe0b9f9f1f800aff72c992e58..6fdd3c8fd35c4da60192605a503419d3
  					return commandConsumed();
  				}
 diff --git a/src/task/executor.ts b/src/task/executor.ts
-index cac1a75d60cbfff5ab4f0331667eafd38082e82b..c50be1a55a19b5a8e7403d96086d1d3c534f3b8f 100644
+index e93287f2095b76beab5a62de9f0efd0de620463f..04ecb90c130a0dfc7a835dd187d2887fde51e92b 100644
 --- a/src/task/executor.ts
 +++ b/src/task/executor.ts
-@@ -388,6 +388,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
+@@ -394,6 +394,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  /** Options for subagent execution */
  export interface ExecutorOptions {
  	cwd: string;
@@ -1749,7 +1784,7 @@ index cac1a75d60cbfff5ab4f0331667eafd38082e82b..c50be1a55a19b5a8e7403d96086d1d3c
  	/** Additional workspace directories to seed on the subagent session (multi-root). */
  	additionalDirectories?: string[];
  	/** Exact provider credential resolver inherited from the parent session. */
-@@ -3434,6 +3435,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
+@@ -3650,6 +3651,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
  				forRevive = false,
  			): CreateAgentSessionOptions => ({
  				cwd: worktree ?? cwd,
@@ -1758,10 +1793,10 @@ index cac1a75d60cbfff5ab4f0331667eafd38082e82b..c50be1a55a19b5a8e7403d96086d1d3c
  				authStorage,
  				modelRegistry,
 diff --git a/src/task/persisted-revive.ts b/src/task/persisted-revive.ts
-index 5a56eb7024472518d641f0a6ebc1493161db0f89..1beb46885cd6ceee831bd0f4974c60e1fa943767 100644
+index 134f38175bfce9a904fd3edc85f8dd474bd79f06..06c74b9597c3e77d4c8b15ebf14a92fdbdad280f 100644
 --- a/src/task/persisted-revive.ts
 +++ b/src/task/persisted-revive.ts
-@@ -125,6 +125,7 @@ export function createPersistedSubagentReviverFactory(
+@@ -147,6 +147,7 @@ export function createPersistedSubagentReviverFactory(
  			const mcpProxyTools = mcpManager ? createMCPProxyTools(mcpManager) : [];
  			const { session } = await createAgentSession({
  				cwd: ctx.session.sessionManager.getCwd(),
@@ -1770,17 +1805,17 @@ index 5a56eb7024472518d641f0a6ebc1493161db0f89..1beb46885cd6ceee831bd0f4974c60e1
  				// Revived agents join the root session tree, so their observability
  				// frames ride the same bus the RPC/collab surfaces subscribed to.
 diff --git a/src/task/structured-subagent.ts b/src/task/structured-subagent.ts
-index f5ae96904baff7d8a15b8604e327d67953f32471..2169f3a992ccda2ecdd547d4c02c641b8f20b411 100644
+index 1ad7cf53d9f50e6dff3cf8af97dfb06f6e4632eb..46e7cd2aeede7f68fbfb053f876a21a44366f8b8 100644
 --- a/src/task/structured-subagent.ts
 +++ b/src/task/structured-subagent.ts
-@@ -404,6 +404,7 @@ function buildExecutorOptions(
+@@ -418,6 +418,7 @@ function buildExecutorOptions(
  	const enableMCP = !restrictToolNames && (session.enableMCP ?? true);
  	return {
  		cwd: session.cwd,
 +		agentDir: session.agentDir ?? session.settings.getAgentDir(),
  		additionalDirectories: session.additionalDirectories,
  		getApiKey: session.getApiKey,
- 		agent: policy.effectiveAgent,
+ 		credentialSourceSessionId: session.getCredentialSourceSessionId?.(),
 diff --git a/src/tools/ast-edit.ts b/src/tools/ast-edit.ts
 index 620a18ea401954bf09e974233922ec553f99f6aa..674a70883f2b32622567744e353c937714d0bcce 100644
 --- a/src/tools/ast-edit.ts
@@ -1806,10 +1841,10 @@ index d655948db560fb5b849fe9a0bc3c27f05ba73bce..969adad8525f14a6f210d8fd0888b0c0
  				settings: this.session.settings,
  				signal,
 diff --git a/src/tools/bash-skill-urls.ts b/src/tools/bash-skill-urls.ts
-index d3303a5bd173e12e736c968a5aae074c7cba23bc..9b18cb35f5de4fc172211b496c17d05a667ea96d 100644
+index a0107da2f550a5b91e41ef9bbd4afc1533718ac2..4013bfae3d4ae9863907a46fbe85f13d43e3c25a 100644
 --- a/src/tools/bash-skill-urls.ts
 +++ b/src/tools/bash-skill-urls.ts
-@@ -43,6 +43,7 @@ export interface InternalUrlExpansionOptions {
+@@ -53,6 +53,7 @@ export interface InternalUrlExpansionOptions {
  	internalRouter?: InternalUrlResolver;
  	localOptions?: LocalProtocolOptions;
  	cwd?: string;
@@ -1817,15 +1852,15 @@ index d3303a5bd173e12e736c968a5aae074c7cba23bc..9b18cb35f5de4fc172211b496c17d05a
  	sessionFile?: string;
  	sessionId?: string;
  	agentRegistry?: ResolveContext["agentRegistry"];
-@@ -268,6 +269,7 @@ async function resolveInternalUrlToPath(
- 	sessionId?: string,
+@@ -299,6 +300,7 @@ async function resolveInternalUrlToPath(
  	agentRegistry?: ResolveContext["agentRegistry"],
  	rules?: readonly Rule[],
+ 	skillUrlForDirectory?: boolean,
 +	agentDir?: string,
  ): Promise<string> {
  	const url = normalizeLocalScheme(rawUrl);
  	const scheme = extractScheme(url);
-@@ -311,6 +313,7 @@ async function resolveInternalUrlToPath(
+@@ -342,6 +344,7 @@ async function resolveInternalUrlToPath(
  	try {
  		resource = await internalRouter.resolve(url, {
  			cwd,
@@ -1833,19 +1868,19 @@ index d3303a5bd173e12e736c968a5aae074c7cba23bc..9b18cb35f5de4fc172211b496c17d05a
  			pathOnly: true,
  			sessionFile,
  			sessionId,
-@@ -382,6 +385,7 @@ export async function expandInternalUrls(command: string, options: InternalUrlEx
- 				options.sessionId,
+@@ -397,6 +400,7 @@ export async function expandInternalUrls(command: string, options: InternalUrlEx
  				options.agentRegistry,
  				options.rules,
+ 				options.skillUrlForDirectory,
 +				options.agentDir,
  			);
- 		} catch {
- 			continue;
+ 		} catch (error) {
+ 			// Containment violations fail closed: never hand the raw token to the
 diff --git a/src/tools/bash.ts b/src/tools/bash.ts
-index 164862c96d532bb80831b484af5a074ea7145ab2..454832e5736b721e4c8484bc94dc839e970e6aea 100644
+index 3ed8130c2652099f28e6510c63295ada7e93807d..9f763da5542c6f7fe0da4454f1c3d1bac6285707 100644
 --- a/src/tools/bash.ts
 +++ b/src/tools/bash.ts
-@@ -1058,6 +1058,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
+@@ -1071,6 +1071,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
  			attachments: this.session.getImageAttachments?.() ?? [],
  			internalRouter: InternalUrlRouter.instance(),
  			cwd: this.session.cwd,
@@ -1874,10 +1909,10 @@ index c8e62cb63c1029ff25d7c3f7b5032d50e9c7048b..d9e7d95de5fed9c843fee4ed9f790f5a
  					signal,
  					sessionFile: this.session.getSessionFile() ?? undefined,
 diff --git a/src/tools/grep.ts b/src/tools/grep.ts
-index e45558f80f7b09fb3ddde53779b127a7976d369b..edb47daf2ef367b96b4f9fe8d1cf5707fef30e35 100644
+index a872036ad4da7cafe332023553d3c60db8788719..2f46c6f16982444181e1bf602056e8cec6d73725 100644
 --- a/src/tools/grep.ts
 +++ b/src/tools/grep.ts
-@@ -775,6 +775,7 @@ async function resolveInternalSearchInputs(opts: {
+@@ -781,6 +781,7 @@ async function resolveInternalSearchInputs(opts: {
  	pathSpecs: readonly GrepPathSpec[];
  	resolvedPaths: string[];
  	cwd: string;
@@ -1885,7 +1920,7 @@ index e45558f80f7b09fb3ddde53779b127a7976d369b..edb47daf2ef367b96b4f9fe8d1cf5707
  	settings: unknown;
  	signal?: AbortSignal;
  	archiveDisplayMap: ReadonlyMap<string, string>;
-@@ -796,6 +797,7 @@ async function resolveInternalSearchInputs(opts: {
+@@ -802,6 +803,7 @@ async function resolveInternalSearchInputs(opts: {
  	let virtualScopePath: string | undefined;
  	const context: ResolveContext = {
  		cwd: opts.cwd,
@@ -1893,7 +1928,7 @@ index e45558f80f7b09fb3ddde53779b127a7976d369b..edb47daf2ef367b96b4f9fe8d1cf5707
  		settings: opts.settings,
  		signal: opts.signal,
  		sessionFile: opts.sessionFile,
-@@ -1011,6 +1013,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
+@@ -1017,6 +1019,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
  					pathSpecs,
  					resolvedPaths,
  					cwd: this.session.cwd,
@@ -1901,7 +1936,7 @@ index e45558f80f7b09fb3ddde53779b127a7976d369b..edb47daf2ef367b96b4f9fe8d1cf5707
  					archiveDisplayMap,
  					settings: this.session.settings,
  					signal,
-@@ -1060,6 +1063,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
+@@ -1066,6 +1069,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
  					const scope = await resolveToolSearchScope({
  						rawPaths: searchablePaths,
  						cwd: this.session.cwd,
@@ -1910,7 +1945,7 @@ index e45558f80f7b09fb3ddde53779b127a7976d369b..edb47daf2ef367b96b4f9fe8d1cf5707
  						settings: this.session.settings,
  						localProtocolOptions: this.session.localProtocolOptions,
 diff --git a/src/tools/index.ts b/src/tools/index.ts
-index d52292e668abe128fada59a77f9aea9336030dcf..74f93317890831aed705617b57ca1855ba122fde 100644
+index f02502d471e5ae454243f96008dea8bee41742c2..ba777ed3adc50e232d03263aecd04ee46a536cae 100644
 --- a/src/tools/index.ts
 +++ b/src/tools/index.ts
 @@ -156,6 +156,8 @@ export interface DeferredDiagnosticsEntry {
@@ -1923,10 +1958,10 @@ index d52292e668abe128fada59a77f9aea9336030dcf..74f93317890831aed705617b57ca1855
  	additionalDirectories?: string[];
  	/** Whether UI is available */
 diff --git a/src/tools/learn.ts b/src/tools/learn.ts
-index 74704a2b4e5e09d274e4693597b9ab5a7de4b149..3baffc9ce6eff0f491603afe4569d0cd3661b2e8 100644
+index 461c6abf4f7e375a3b9134d80f2803c31028f1ad..79435fbd22e97e6ebfc902fb6b90ea0bc5e03fef 100644
 --- a/src/tools/learn.ts
 +++ b/src/tools/learn.ts
-@@ -80,7 +80,7 @@ export class LearnTool implements AgentTool<typeof learnSchema> {
+@@ -82,7 +82,7 @@ export class LearnTool implements AgentTool<typeof learnSchema> {
  			}
  		} else if (backend === "local") {
  			const result = await localBackend.save?.(
@@ -1936,10 +1971,10 @@ index 74704a2b4e5e09d274e4693597b9ab5a7de4b149..3baffc9ce6eff0f491603afe4569d0cd
  			);
  			if (!result || result.stored === 0) {
 diff --git a/src/tools/path-utils.ts b/src/tools/path-utils.ts
-index 9dfba14dc673cc173b59d1002d205a96c94b5665..46650aa0efad8d24525a6077024c9d8015592de8 100644
+index 2a589d63f76f74a5d946e5249db4d4294c2af396..de107f9f04dae8a652b8067ccc0d21e918ec79f2 100644
 --- a/src/tools/path-utils.ts
 +++ b/src/tools/path-utils.ts
-@@ -1487,6 +1487,7 @@ export interface ResolvedExternalSearchUrl {
+@@ -1508,6 +1508,7 @@ export interface ResolvedExternalSearchUrl {
  export interface ToolScopeOptions {
  	rawPaths: string[];
  	cwd: string;
@@ -1947,7 +1982,7 @@ index 9dfba14dc673cc173b59d1002d205a96c94b5665..46650aa0efad8d24525a6077024c9d80
  	/** Verb used in the "Cannot {action} internal URL without a backing file: …" message. */
  	internalUrlAction: string;
  	/** Collect absolute paths flagged immutable by their internal-URL handler. */
-@@ -1599,6 +1600,7 @@ export async function resolveToolSearchScope(opts: ToolScopeOptions): Promise<To
+@@ -1620,6 +1621,7 @@ export async function resolveToolSearchScope(opts: ToolScopeOptions): Promise<To
  		}
  		const resource = await internalRouter.resolve(rawPath, {
  			cwd,
@@ -1956,10 +1991,10 @@ index 9dfba14dc673cc173b59d1002d205a96c94b5665..46650aa0efad8d24525a6077024c9d80
  			signal: opts.signal,
  			sessionFile: opts.sessionFile,
 diff --git a/src/tools/read.ts b/src/tools/read.ts
-index 3d323041c05b774377124205afea54a6bc4b59d6..04e41a91f4ae00bb98acf1fa4304c046c0776394 100644
+index 3308f974f132d3577f045f635efaf19c0eb53f48..45efd4e43ad38e6b607cb41b994806144f7f095d 100644
 --- a/src/tools/read.ts
 +++ b/src/tools/read.ts
-@@ -2447,6 +2447,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
+@@ -2803,6 +2803,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
  		// Resolve the internal URL
  		const resource = await internalRouter.resolve(url, {
  			cwd: this.session.cwd,

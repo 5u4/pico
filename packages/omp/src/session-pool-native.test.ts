@@ -810,9 +810,14 @@ describe("native SessionPool ownership", () => {
       const { file } = await seedShake(session);
       const before = await NodeFileSystem.readFile(file, "utf8");
       const failure = new Error("Artifact disk is unavailable");
+      const writeFile = NodeFileSystem.writeFile;
       const artifact = vi
-        .spyOn(session.sessionManager, "saveArtifact")
-        .mockRejectedValueOnce(failure);
+        .spyOn(NodeFileSystem, "writeFile")
+        .mockImplementation((path, content, options) =>
+          typeof path === "string" && path.includes(".shake.log.tmp-")
+            ? Promise.reject(failure)
+            : writeFile(path, content, options),
+        );
       try {
         await expect(session.shake("elide")).rejects.toBe(failure);
         expect(await NodeFileSystem.readFile(file, "utf8")).toBe(before);
