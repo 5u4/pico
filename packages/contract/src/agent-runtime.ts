@@ -81,12 +81,6 @@ export const TodoState = Schema.Union([
 ]);
 export type TodoState = typeof TodoState.Type;
 
-export const TranscriptSnapshot = Schema.Struct({
-  messages: AgentTranscript,
-  todo: TodoState,
-  contextUsage: Schema.Union([ContextUsage, Schema.Struct({ kind: Schema.Literal("error") })]),
-});
-export type TranscriptSnapshot = typeof TranscriptSnapshot.Type;
 export interface CapturedAgentRun {
   readonly runId: ScheduleRunId;
   readonly outcome: "completed" | "failed" | "aborted";

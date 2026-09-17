@@ -87,7 +87,7 @@ describe("session pool publication", () => {
                   yield* Deferred.succeed(observing, undefined);
                   yield* Deferred.await(finishRead);
                 }
-                return current;
+                return { messages: current, todo: { kind: "ready", phases: [] } };
               }),
           });
           const envelopes: AgentEvent.AgentEventEnvelope[] = [];

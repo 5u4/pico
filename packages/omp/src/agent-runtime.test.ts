@@ -1106,7 +1106,7 @@ describe("AgentRuntime", () => {
                   yield* Deferred.succeed(reading, undefined);
                   yield* Deferred.await(release);
                 }
-                return [];
+                return { messages: [], todo: { kind: "ready", phases: [] } };
               }),
           });
           yield* pool.contextUsage(chatId);
