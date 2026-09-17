@@ -62,7 +62,7 @@ export function TodoDock({
         tabIndex={0}
       >
         {presentation.phases.map((phase, phaseIndex) => (
-          <div className="py-2 first:pt-0 last:pb-0" key={phase.name}>
+          <div className="py-2 first:pt-0 last:pb-0" key={`${phaseIndex}:${phase.name}`}>
             <h3
               className="mb-1 break-words text-label font-medium"
               id={`${id}-phase-${phaseIndex}`}
@@ -73,10 +73,13 @@ export function TodoDock({
               aria-labelledby={`${id}-phase-${phaseIndex}`}
               className="divide-y divide-border-soft"
             >
-              {phase.tasks.map((task) => {
+              {phase.tasks.map((task, taskIndex) => {
                 const Icon = statusIcons[task.status.kind];
                 return (
-                  <li className="flex items-start gap-2.5 py-2" key={task.content}>
+                  <li
+                    className="flex items-start gap-2.5 py-2"
+                    key={`${taskIndex}:${task.content}`}
+                  >
                     <Icon aria-hidden="true" className="mt-0.5 shrink-0 text-muted" size={16} />
                     <div className="min-w-0 flex-1">
                       <div className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5">
