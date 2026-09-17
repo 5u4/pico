@@ -598,7 +598,10 @@ describe("frontend state over WebSocket", () => {
           state.currentModel(firstChat),
           (result) => AsyncResult.isSuccess(result) && !result.waiting,
         );
-        assert.isNull(AsyncResult.getOrThrow(registry.get(state.currentModel(firstChat))));
+        assert.deepStrictEqual(
+          AsyncResult.getOrThrow(registry.get(state.currentModel(firstChat))),
+          model,
+        );
       }).pipe(Effect.scoped, Effect.provide(server.layer));
     }),
   );
