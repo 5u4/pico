@@ -7,7 +7,13 @@ import {
 } from "discordeno";
 import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
-import { type DiscordError, discordError } from "./discord-error.ts";
+import {
+  acknowledgementLogAnnotations,
+  type DiscordAcknowledgementAttemptEvidence,
+  type DiscordAcknowledgementEvidence,
+  DiscordError,
+  discordError,
+} from "./discord-error.ts";
 
 export type AcknowledgementIntent =
   | {
@@ -98,42 +104,6 @@ type AcknowledgementDecision =
       readonly kind: "rejected";
       readonly error: DiscordError;
     };
-
-type SafeAttemptEvidence =
-  | {
-      readonly attempt: AttemptNumber;
-      readonly outcome: "not-started";
-    }
-  | {
-      readonly attempt: AttemptNumber;
-      readonly outcome: "pending";
-      readonly startedAfterAcknowledgementMs: number;
-    }
-  | {
-      readonly attempt: AttemptNumber;
-      readonly outcome: "fulfilled";
-      readonly startedAfterAcknowledgementMs: number;
-      readonly elapsedMs: number;
-    }
-  | {
-      readonly attempt: AttemptNumber;
-      readonly outcome: "rejected";
-      readonly startedAfterAcknowledgementMs: number;
-      readonly elapsedMs: number;
-      readonly status?: number;
-      readonly discordCode?: number;
-    };
-
-interface SafeAcknowledgementEvidence {
-  readonly mode: "defer" | "defer-edit";
-  readonly decision: AcknowledgementDecision["kind"];
-  readonly winningAttempt?: AttemptNumber;
-  readonly deliveryAgeAtAcknowledgementMs: number;
-  readonly firstStartedAfterAcknowledgementMs?: number;
-  readonly hedgeDueAfterFirstStartMs?: number;
-  readonly decisionAfterAcknowledgementMs: number;
-  readonly attempts: readonly [SafeAttemptEvidence, SafeAttemptEvidence];
-}
 
 const HEDGE_AFTER_FIRST_START_MS = 500;
 const HEDGE_AT_INTERACTION_AGE_MS = 2_500;
@@ -310,7 +280,7 @@ const attemptEvidence = (
   attempt: AttemptNumber,
   handle: AttemptHandle | undefined,
   acknowledgementStartedAtNanos: bigint,
-): SafeAttemptEvidence => {
+): DiscordAcknowledgementAttemptEvidence => {
   if (handle === undefined) return { attempt, outcome: "not-started" };
   if (handle.state.kind === "pending") {
     return {
@@ -344,7 +314,7 @@ const attemptEvidence = (
 };
 
 const finish = Effect.fn("DiscordAcknowledgement.finish")(function* (options: {
-  readonly mode: SafeAcknowledgementEvidence["mode"];
+  readonly mode: DiscordAcknowledgementEvidence["mode"];
   readonly deliveryAgeAtAcknowledgementMs: number;
   readonly acknowledgementStartedAtNanos: bigint;
   readonly hedgeDueAfterFirstStartMs?: number;
@@ -353,7 +323,7 @@ const finish = Effect.fn("DiscordAcknowledgement.finish")(function* (options: {
   readonly decision: AcknowledgementDecision;
 }) {
   const decidedAtNanos = yield* Clock.monotonicTimeNanos;
-  const evidence: SafeAcknowledgementEvidence = {
+  const evidence: DiscordAcknowledgementEvidence = {
     mode: options.mode,
     decision: options.decision.kind,
     ...(options.decision.kind === "rejected"
@@ -382,34 +352,19 @@ const finish = Effect.fn("DiscordAcknowledgement.finish")(function* (options: {
       attemptEvidence(2, options.second, options.acknowledgementStartedAtNanos),
     ],
   };
-  if (options.second !== undefined || options.decision.kind === "rejected") {
-    const log =
-      options.decision.kind === "rejected"
-        ? Effect.logWarning("Discord interaction acknowledgement failed")
-        : Effect.logInfo("Discord interaction acknowledgement hedged");
-    yield* log.pipe(
-      Effect.annotateLogs({
-        acknowledgementMode: evidence.mode,
-        acknowledgementDecision: evidence.decision,
-        ...(evidence.winningAttempt === undefined
-          ? {}
-          : { acknowledgementWinningAttempt: evidence.winningAttempt }),
-        deliveryAgeAtAcknowledgementMs: evidence.deliveryAgeAtAcknowledgementMs,
-        ...(evidence.firstStartedAfterAcknowledgementMs === undefined
-          ? {}
-          : {
-              firstStartedAfterAcknowledgementMs: evidence.firstStartedAfterAcknowledgementMs,
-            }),
-        ...(evidence.hedgeDueAfterFirstStartMs === undefined
-          ? {}
-          : { hedgeDueAfterFirstStartMs: evidence.hedgeDueAfterFirstStartMs }),
-        acknowledgementDecisionAfterMs: evidence.decisionAfterAcknowledgementMs,
-        acknowledgementAttempts: evidence.attempts,
+  if (options.decision.kind === "rejected") {
+    return yield* Effect.fail(
+      new DiscordError({
+        ...options.decision.error,
+        message: options.decision.error.message,
+        acknowledgement: evidence,
       }),
     );
   }
-  if (options.decision.kind === "rejected") {
-    return yield* Effect.fail(options.decision.error);
+  if (options.second !== undefined) {
+    yield* Effect.logInfo("Discord interaction acknowledgement hedged").pipe(
+      Effect.annotateLogs(acknowledgementLogAnnotations(evidence)),
+    );
   }
 });
 

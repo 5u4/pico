@@ -1,5 +1,6 @@
 import { assert, describe, it } from "@effect/vitest";
 import { InteractionResponseTypes, InteractionTypes } from "discordeno";
+import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -10,6 +11,7 @@ import {
   make,
   type SendInteractionResponse,
 } from "./discord-acknowledgement.ts";
+import { reportFailure } from "./discord-error.ts";
 
 const DISCORD_EPOCH_MS = 1_420_070_400_000;
 
@@ -87,6 +89,7 @@ describe("Discord interaction acknowledgement", () => {
       yield* Fiber.join(fiber);
       assert.isTrue(continued);
       assert.strictEqual(logs.length, 1);
+      assert.strictEqual(logs[0]?.level, "INFO");
       assert.strictEqual(logs[0]?.annotations.acknowledgementDecision, "fulfilled");
       assert.strictEqual(logs[0]?.annotations.acknowledgementWinningAttempt, 2);
       assert.strictEqual(logs[0]?.annotations.deliveryAgeAtAcknowledgementMs, 2_400);
@@ -99,7 +102,7 @@ describe("Discord interaction acknowledgement", () => {
     }),
   );
 
-  it.effect("accepts attempt-2 40060 only while attempt 1 remains pending", () =>
+  it.effect("accepts attempt-2 40060 while attempt 1 remains pending", () =>
     Effect.gen(function* () {
       yield* TestClock.setTime(DISCORD_EPOCH_MS);
       const first = Promise.withResolvers<void>();
@@ -130,40 +133,80 @@ describe("Discord interaction acknowledgement", () => {
       });
       assert.strictEqual(calls[1]?.[2], calls[0]?.[2]);
       assert.strictEqual(logs.length, 1);
+      assert.strictEqual(logs[0]?.level, "INFO");
       assert.strictEqual(logs[0]?.annotations.acknowledgementDecision, "qualified-40060");
       assert.notInclude(JSON.stringify(logs), "private-");
       first.reject(new Error("private-late-rejection"));
       yield* Effect.yieldNow;
       assert.strictEqual(logs.length, 1);
+    }),
+  );
 
-      const firstRejected = Promise.withResolvers<void>();
-      const secondDuplicate = Promise.withResolvers<void>();
-      let attempts = 0;
-      const rejectAfterFirst = make(() => {
-        attempts += 1;
-        return attempts === 1 ? firstRejected.promise : secondDuplicate.promise;
+  it.effect("reports rejected acknowledgement evidence once at the terminal boundary", () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(DISCORD_EPOCH_MS);
+      const first = Promise.withResolvers<void>();
+      const second = Promise.withResolvers<void>();
+      let sends = 0;
+      const acknowledge = make(() => {
+        sends += 1;
+        return sends === 1 ? first.promise : second.promise;
       });
-      const failureFiber = yield* rejectAfterFirst(
-        interaction(InteractionTypes.ApplicationCommand),
-        { kind: "reply", visibility: "private" },
-      ).pipe(
-        Effect.flip,
-        Effect.provide(
-          Logger.layer([Logger.make((options) => logs.push(Logger.formatStructured.log(options)))]),
-        ),
-        Effect.forkChild,
-      );
+      const logs: Array<ReturnType<typeof Logger.formatStructured.log>> = [];
+      const logger = Logger.make((options) => logs.push(Logger.formatStructured.log(options)));
+      const failureFiber = yield* acknowledge(interaction(InteractionTypes.ApplicationCommand), {
+        kind: "reply",
+        visibility: "private",
+      }).pipe(Effect.flip, Effect.provide(Logger.layer([logger])), Effect.forkChild);
+
       yield* Effect.yieldNow;
       yield* TestClock.adjust("500 millis");
-      assert.strictEqual(attempts, 2);
-      firstRejected.reject({ status: 503, body: '{"code":50013,"message":"private-first"}' });
+      assert.strictEqual(sends, 2);
+      first.reject({ status: 503, body: '{"code":50013,"message":"private-first"}' });
       yield* Effect.yieldNow;
-      secondDuplicate.reject(duplicate);
+      second.reject({
+        status: 400,
+        body: '{"code":40060,"message":"private-duplicate-response"}',
+      });
       const failure = yield* Fiber.join(failureFiber);
+      assert.deepStrictEqual(logs, []);
+      yield* reportFailure("interaction-request", Cause.fail(failure)).pipe(
+        Effect.provide(Logger.layer([logger])),
+      );
+
+      assert.strictEqual(failure.operation, "defer-interaction");
       assert.strictEqual(failure.status, 503);
       assert.strictEqual(failure.discordCode, 50_013);
-      assert.strictEqual(logs.length, 2);
-      assert.strictEqual(logs[1]?.annotations.acknowledgementDecision, "rejected");
+      assert.strictEqual(logs.length, 1);
+      assert.strictEqual(logs[0]?.level, "ERROR");
+      assert.strictEqual(logs[0]?.annotations.operation, "interaction-request");
+      assert.strictEqual(logs[0]?.annotations.discordOperation, "defer-interaction");
+      assert.strictEqual(logs[0]?.annotations.status, 503);
+      assert.strictEqual(logs[0]?.annotations.discordCode, 50_013);
+      assert.strictEqual(logs[0]?.annotations.acknowledgementMode, "defer");
+      assert.strictEqual(logs[0]?.annotations.acknowledgementDecision, "rejected");
+      assert.strictEqual(logs[0]?.annotations.deliveryAgeAtAcknowledgementMs, 0);
+      assert.strictEqual(logs[0]?.annotations.firstStartedAfterAcknowledgementMs, 0);
+      assert.strictEqual(logs[0]?.annotations.hedgeDueAfterFirstStartMs, 500);
+      assert.strictEqual(logs[0]?.annotations.acknowledgementDecisionAfterMs, 500);
+      assert.deepStrictEqual(logs[0]?.annotations.acknowledgementAttempts, [
+        {
+          attempt: 1,
+          outcome: "rejected",
+          startedAfterAcknowledgementMs: 0,
+          elapsedMs: 500,
+          status: 503,
+          discordCode: 50_013,
+        },
+        {
+          attempt: 2,
+          outcome: "rejected",
+          startedAfterAcknowledgementMs: 500,
+          elapsedMs: 0,
+          status: 400,
+          discordCode: 40_060,
+        },
+      ]);
       assert.notInclude(JSON.stringify(logs), "private-");
     }),
   );

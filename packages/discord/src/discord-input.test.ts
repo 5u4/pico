@@ -1699,7 +1699,7 @@ describe("discord input", () => {
     Effect.scoped(
       Effect.gen(function* () {
         const logs: Array<ReturnType<typeof Logger.formatStructured.log>> = [];
-        let expectedLogCount = 2;
+        let expectedLogCount = 1;
         let logged = Promise.withResolvers<void>();
         const logger = Logger.make((options) => {
           logs.push(Logger.formatStructured.log(options));
@@ -1780,15 +1780,14 @@ describe("discord input", () => {
         invoke(rejected);
         assert.isTrue(rejected.acknowledged);
         yield* Effect.promise(() => logged.promise);
-        assert.strictEqual(logs.length, 2);
-        assert.strictEqual(logs[0]?.level, "WARN");
+        assert.strictEqual(logs.length, 1);
+        assert.strictEqual(logs[0]?.level, "ERROR");
+        assert.strictEqual(logs[0]?.annotations.phase, "defer");
+        assert.strictEqual(logs[0]?.annotations.interactionId, "51");
+        assert.strictEqual(logs[0]?.annotations.status, 403);
+        assert.strictEqual(logs[0]?.annotations.discordCode, 50_013);
         assert.strictEqual(logs[0]?.annotations.acknowledgementDecision, "rejected");
-        assert.strictEqual(logs[1]?.level, "ERROR");
-        assert.strictEqual(logs[1]?.annotations.phase, "defer");
-        assert.strictEqual(logs[1]?.annotations.interactionId, "51");
-        assert.strictEqual(logs[1]?.annotations.status, 403);
-        assert.strictEqual(logs[1]?.annotations.discordCode, 50_013);
-        expectedLogCount = 4;
+        expectedLogCount = 2;
         logged = Promise.withResolvers<void>();
         invoke(
           interaction({
@@ -1799,8 +1798,8 @@ describe("discord input", () => {
           }),
         );
         yield* Effect.promise(() => logged.promise);
-        assert.strictEqual(logs.length, 4);
-        expectedLogCount = 5;
+        assert.strictEqual(logs.length, 2);
+        expectedLogCount = 3;
         logged = Promise.withResolvers<void>();
         invoke(
           interaction({
@@ -1816,8 +1815,8 @@ describe("discord input", () => {
           }),
         );
         yield* Effect.promise(() => logged.promise);
-        assert.strictEqual(logs.length, 5);
-        assert.strictEqual(logs[4]?.annotations.phase, "request");
+        assert.strictEqual(logs.length, 3);
+        assert.strictEqual(logs[2]?.annotations.phase, "request");
         assert.strictEqual(edited, 0);
         assert.notInclude(JSON.stringify(logs), "private-");
 
@@ -1836,7 +1835,7 @@ describe("discord input", () => {
         );
         pending.resolve(undefined);
         yield* Effect.yieldNow;
-        assert.strictEqual(logs.length, 5);
+        assert.strictEqual(logs.length, 3);
         assert.strictEqual(edited, 0);
       }),
     ),
