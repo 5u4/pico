@@ -81,15 +81,13 @@ export function SelectItem({
   return (
     <SelectPrimitive.Item
       className={[
-        "relative flex min-h-10 cursor-default select-none items-center gap-2 rounded-control px-3 py-2 pr-8 text-label leading-relaxed data-[highlighted]:bg-surface-hover data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
+        "relative flex min-h-10 cursor-default select-none items-center gap-2 rounded-control px-3 py-2 pr-8 text-label leading-relaxed whitespace-normal [overflow-wrap:anywhere] data-[highlighted]:bg-surface-hover data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
         className,
       ].join(" ")}
       data-slot="select-item"
       {...props}
     >
-      <SelectPrimitive.ItemText className="whitespace-normal [overflow-wrap:anywhere]">
-        {children}
-      </SelectPrimitive.ItemText>
+      <SelectPrimitive.ItemText>{children}</SelectPrimitive.ItemText>
       <SelectPrimitive.ItemIndicator
         className="absolute right-2 inline-flex size-4 items-center justify-center"
         data-slot="select-item-indicator"
