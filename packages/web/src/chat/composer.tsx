@@ -39,9 +39,12 @@ export function Composer({
   const textarea = useRef<HTMLTextAreaElement>(null);
   const appliedCaretRequest = useRef<number>(-1);
   const completionOpen = completion.kind !== "closed";
-  const statusLabel = completionOpen
-    ? "Enter to complete · Esc to close"
-    : presentation.statusLabel;
+  const statusLabel =
+    completion.kind === "ready"
+      ? "Enter to complete · Esc to close"
+      : completionOpen
+        ? "Esc to close"
+        : presentation.statusLabel;
 
   useLayoutEffect(() => {
     if (caretRequest === null || appliedCaretRequest.current === caretRequest.revision) return;
@@ -62,7 +65,7 @@ export function Composer({
 
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (presentation.mode === "send" && presentation.canSubmit) {
+    if (!completionOpen && presentation.mode === "send" && presentation.canSubmit) {
       onSubmit();
     }
   };
@@ -164,7 +167,7 @@ export function Composer({
           <Button
             aria-label="Send message"
             className="prompt-control prompt-send"
-            disabled={!presentation.canSubmit}
+            disabled={completionOpen || !presentation.canSubmit}
             size="icon"
             tone="primary"
             type="submit"

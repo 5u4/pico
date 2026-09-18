@@ -133,7 +133,7 @@ export function SkillCompletionMenu({ presentation, onSelect, onRetry }: SkillCo
             aria-hidden="true"
             className="shrink-0 border-t border-border px-3 py-1.5 text-meta text-muted"
           >
-            ↑↓ Choose · Enter Complete · Esc Close
+            {presentation.kind === "ready" ? "↑↓ Choose · Enter Complete · Esc Close" : "Esc Close"}
           </p>
         </div>
       )}
