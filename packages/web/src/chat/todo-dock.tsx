@@ -8,6 +8,7 @@ import {
 } from "@phosphor-icons/react";
 import { useId } from "react";
 import type { TodoPresentation, TodoTaskPresentation } from "./chat-model.ts";
+import { Markdown, MarkdownLabel } from "./markdown.tsx";
 
 const statusIcons = {
   pending: CircleIcon,
@@ -45,7 +46,7 @@ export function TodoDock({
           <span className="sr-only"> completed</span>
         </span>
         <span className="col-span-3 row-start-2 min-w-0 break-words text-muted sm:col-span-1 sm:col-start-3 sm:row-start-1">
-          <span className="line-clamp-2">{presentation.summary}</span>
+          <MarkdownLabel className="line-clamp-2" text={presentation.summary} />
         </span>
         <CaretDownIcon
           aria-hidden="true"
@@ -67,7 +68,7 @@ export function TodoDock({
               className="mb-1 break-words text-label font-medium"
               id={`${id}-phase-${phaseIndex}`}
             >
-              {phase.name}
+              <MarkdownLabel text={phase.name} />
             </h3>
             <ul
               aria-labelledby={`${id}-phase-${phaseIndex}`}
@@ -83,15 +84,17 @@ export function TodoDock({
                     <Icon aria-hidden="true" className="mt-0.5 shrink-0 text-muted" size={16} />
                     <div className="min-w-0 flex-1">
                       <div className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5">
-                        <span className="min-w-0 flex-1 basis-40 whitespace-pre-wrap break-words text-label">
-                          {task.content}
-                        </span>
+                        <Markdown
+                          className="min-w-0 flex-1 basis-40 break-words text-label"
+                          text={task.content}
+                        />
                         <span className="text-meta text-muted">{task.status.label}</span>
                       </div>
                       {task.blocker !== null && (
-                        <p className="mt-1 whitespace-pre-wrap break-words text-label text-muted">
-                          {task.blocker}
-                        </p>
+                        <Markdown
+                          className="mt-1 break-words text-label text-muted"
+                          text={task.blocker}
+                        />
                       )}
                     </div>
                   </li>
