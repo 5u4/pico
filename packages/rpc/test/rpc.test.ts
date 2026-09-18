@@ -112,6 +112,7 @@ const transcript: TranscriptSnapshot = {
   contextUsage: { kind: "unavailable" },
   todo: { kind: "ready", phases: [] },
   runtime: { publication: Publication.make(0), run: { kind: "idle" }, assistant: [], tools: [] },
+  currentModel: null,
 };
 const firstEvent: AgentEvent.AgentEventEnvelope = {
   chatId: firstChatId,
@@ -330,6 +331,58 @@ describe("RPC", () => {
     }).pipe(Effect.scoped),
   );
 
+  it.live("reports unconfirmed model persistence while returning the selected model", () =>
+    Effect.gen(function* () {
+      const ownership = yield* ownershipFixture();
+      const model = { provider: "pico-fixture", id: "selected", name: "Selected" };
+      const logs: Array<ReturnType<typeof Logger.formatStructured.log>> = [];
+      const logger = Logger.layer([
+        Logger.make((options) => {
+          logs.push(Logger.formatStructured.log(options));
+        }),
+      ]);
+      const router = EventRouter.of({
+        drain: () => Effect.void,
+        open: () => Effect.die("unexpected events"),
+      });
+      const application = Application.of({
+        ...unusedApplication,
+        switchModel: () => Effect.succeed({ kind: "persistence-unconfirmed", model }),
+      });
+      yield* Effect.gen(function* () {
+        const server = yield* HttpServer.HttpServer;
+        if (server.address._tag === "UnixAddress") return yield* Effect.die("Expected TCP server");
+        const host = server.address.hostname === "0.0.0.0" ? "127.0.0.1" : server.address.hostname;
+        const client = yield* RpcClient.make(`ws://${host}:${server.address.port}/rpc`);
+        assert.deepStrictEqual(yield* client.SwitchModel({ chatId: firstChatId, model }), {
+          kind: "persistence-unconfirmed",
+          model,
+        });
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(HttpRouter.serve(RpcServer.routes)),
+        Effect.provide(
+          Layer.mergeAll(
+            Layer.succeed(Application, application),
+            Layer.succeed(EventRouter, router),
+            ownership.layer,
+          ),
+        ),
+        Effect.provide(NodeHttpServer.layerTest),
+        Effect.provide(logger),
+      );
+      const warnings = logs.filter((entry) => entry.level === "WARN");
+      assert.strictEqual(warnings.length, 1);
+      assert.deepInclude(warnings[0]?.annotations, {
+        component: "rpc",
+        procedure: "SwitchModel",
+        operation: "persist-model-selection",
+        outcome: "failure",
+      });
+      assert.isString(warnings[0]?.annotations.requestId);
+    }).pipe(Effect.scoped),
+  );
+
   it.live("isolates web reads, mutations and live events through one scoped client", () =>
     Effect.gen(function* () {
       const ownership = yield* ownershipFixture();
@@ -542,6 +595,13 @@ describe("RPC", () => {
         for (const chatId of [foreignChatId, missingChatId]) {
           for (const request of [
             client.Transcript({ chatId }).pipe(Effect.asVoid),
+            client.AvailableModels({ chatId }).pipe(Effect.asVoid),
+            client
+              .SwitchModel({
+                chatId,
+                model: { provider: "pico-fixture", id: "private" },
+              })
+              .pipe(Effect.asVoid),
             client.SendMessage({
               chatId,
               prompt: AgentMessage.AgentPrompt.make({ text: "foreign", attachments: [] }),

@@ -84,11 +84,13 @@ describe("AgentRuntime", () => {
                 completed: Effect.never,
               }),
               shake: async (mode) => shakeResult(mode),
+              currentModel: () => null,
               contextUsage: () => ({ kind: "unavailable" }),
               appendAssistantMessage: async () => {},
               unsubscribe: () => {},
             }),
         },
+        loadCurrentModel: () => Effect.succeed(null),
         loadTranscript: () => Effect.succeed({ messages: [], todo: { kind: "ready", phases: [] } }),
       }).pipe(Scope.provide(owner));
       const delivery = yield* pool.send(chatId, prompt("queued"));
@@ -155,11 +157,13 @@ describe("AgentRuntime", () => {
                     };
                   },
                   shake: async (mode) => shakeResult(mode),
+                  currentModel: () => null,
                   contextUsage: () => ({ kind: "unavailable" }),
                   appendAssistantMessage: async () => {},
                   unsubscribe: () => {},
                 }),
             },
+            loadCurrentModel: () => Effect.succeed(null),
             loadTranscript: () =>
               Effect.succeed({ messages: [], todo: { kind: "ready", phases: [] } }),
           });
@@ -526,6 +530,7 @@ describe("AgentRuntime", () => {
               },
               shake: async (mode) => shakeResult(mode),
               appendAssistantMessage: () => Promise.resolve(),
+              currentModel: () => null,
               contextUsage: () => ({ kind: "unavailable" }),
               unsubscribe: () => {
                 lifecycle.push("unsubscribe");
@@ -538,6 +543,7 @@ describe("AgentRuntime", () => {
         Effect.gen(function* () {
           const pool = yield* makeSessionPool({
             factory,
+            loadCurrentModel: () => Effect.succeed(null),
             loadTranscript: () =>
               Effect.succeed({ messages: [], todo: { kind: "ready", phases: [] } }),
           });
@@ -666,6 +672,7 @@ describe("AgentRuntime", () => {
                   : Promise.resolve(shakeResult(mode));
               },
               appendAssistantMessage: () => Promise.resolve(),
+              currentModel: () => null,
               contextUsage: () => {
                 contextReads += 1;
                 if (throwContext) throw new Error("context failed");
@@ -677,6 +684,7 @@ describe("AgentRuntime", () => {
         };
         const pool = yield* makeSessionPool({
           factory,
+          loadCurrentModel: () => Effect.succeed(null),
           loadTranscript: () =>
             transcriptFailure === undefined
               ? Effect.succeed({ messages, todo: { kind: "ready", phases: [] } })
@@ -686,6 +694,7 @@ describe("AgentRuntime", () => {
         assert.deepStrictEqual(yield* pool.transcript(chatId), {
           messages,
           todo: { kind: "ready", phases: [] },
+          currentModel: null,
           contextUsage: { kind: "unavailable" },
           runtime: {
             publication: Publication.make(0),
@@ -746,6 +755,7 @@ describe("AgentRuntime", () => {
         assert.deepStrictEqual(yield* pool.transcript(chatId), {
           messages,
           todo: { kind: "ready", phases: [] },
+          currentModel: null,
           contextUsage: { kind: "error" },
           runtime: {
             publication: Publication.make(1),
@@ -807,6 +817,7 @@ describe("AgentRuntime", () => {
               sendPrompt: () => Promise.resolve(admitted),
               shake: async (mode) => shakeResult(mode),
               appendAssistantMessage: () => Promise.resolve(),
+              currentModel: () => null,
               contextUsage: () => ({ kind: "unavailable" }),
               unsubscribe: () => {
                 lifecycle.push("unsubscribe");
@@ -816,6 +827,7 @@ describe("AgentRuntime", () => {
         };
         const pool = yield* makeSessionPool({
           factory,
+          loadCurrentModel: () => Effect.succeed(null),
           loadTranscript: () =>
             Effect.succeed({ messages: [], todo: { kind: "ready", phases: [] } }),
         });
@@ -839,6 +851,7 @@ describe("AgentRuntime", () => {
             assistant: [],
             tools: [],
           },
+          currentModel: null,
         });
         assert.strictEqual(acquisitions, 1);
       }),
@@ -884,6 +897,7 @@ describe("AgentRuntime", () => {
                     sendPrompt: () => Promise.resolve(admitted),
                     shake: async (mode) => shakeResult(mode),
                     appendAssistantMessage: () => Promise.resolve(),
+                    currentModel: () => null,
                     contextUsage: () => ({ kind: "unavailable" }),
                     unsubscribe: () => {
                       lifecycle.push("unsubscribe");
@@ -891,6 +905,7 @@ describe("AgentRuntime", () => {
                     },
                   }),
               },
+              loadCurrentModel: () => Effect.succeed(null),
               loadTranscript: () =>
                 Effect.succeed({ messages: [], todo: { kind: "ready", phases: [] } }),
             });
@@ -926,6 +941,7 @@ describe("AgentRuntime", () => {
         factory: {
           open: () => Effect.die("unexpected session open"),
         },
+        loadCurrentModel: () => Effect.succeed(null),
         loadTranscript: () => Effect.succeed({ messages: [], todo: { kind: "ready", phases: [] } }),
       }).pipe(Scope.provide(scope));
 
@@ -963,10 +979,12 @@ describe("AgentRuntime", () => {
                 },
                 shake: async (mode) => shakeResult(mode),
                 appendAssistantMessage: () => Promise.resolve(),
+                currentModel: () => null,
                 contextUsage: () => ({ kind: "unavailable" }),
                 unsubscribe: () => {},
               }),
           },
+          loadCurrentModel: () => Effect.succeed(null),
           loadTranscript: () =>
             Effect.succeed({ messages: [], todo: { kind: "ready", phases: [] } }),
         });
@@ -1020,10 +1038,12 @@ describe("AgentRuntime", () => {
                 },
                 shake: async (mode) => shakeResult(mode),
                 appendAssistantMessage: () => Promise.resolve(),
+                currentModel: () => null,
                 contextUsage: () => ({ kind: "unavailable" }),
                 unsubscribe: () => {},
               }),
           },
+          loadCurrentModel: () => Effect.succeed(null),
           loadTranscript: () =>
             Effect.succeed({ messages: [], todo: { kind: "ready", phases: [] } }),
         });
@@ -1094,11 +1114,13 @@ describe("AgentRuntime", () => {
                     historyBoundary: () => "stable",
                     settleHistory: async () => {},
                     contextUsage: () => ({ kind: "unavailable" }),
+                    currentModel: () => null,
                     appendAssistantMessage: async () => {},
                     unsubscribe: () => {},
                   };
                 }),
             },
+            loadCurrentModel: () => Effect.succeed(null),
             loadTranscript: () =>
               Effect.gen(function* () {
                 historyReads++;

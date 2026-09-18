@@ -19,7 +19,7 @@ New tabs have independent UUIDs in the workspace route's `tab` search parameter.
 
 New tab labels use the draft's first line, trimmed, or `New chat` when that line is blank. Long labels truncate visually and expose the full first line in the tab tooltip. The label does not determine whether a draft is empty: a blank first line can still precede retained text.
 
-While a chat is being created, other New tabs in that workspace remain editable but cannot send or select a suggestion until creation completes. Their status identifies the shared wait instead of implying that a message was submitted.
+While a chat is being created, other New tabs in that workspace remain editable but cannot send or select a suggestion until creation completes. Their status identifies the shared wait instead of implying that a message was submitted. If creation returns without confirmation, the draft remains editable and copyable, but every action that could create the chat stays disabled. The user must check the chat list and close that tab before starting another chat. Starter suggestions remain available for both empty and nonempty drafts when the selected chat is idle and connected. They stay hidden during creation, unconfirmed creation, model switching, sending, or an active response. Send also requires non-whitespace text.
 
 The last-workspace preference is written only when the selected workspace changes. Typing and switching tabs within that workspace do not write it. If browser storage is blocked, the in-memory preference still changes without retrying on each keystroke.
 
@@ -59,8 +59,14 @@ Assistant prose adapts [Beautiful UI's streaming text](https://www.beautifului.d
 
 The trace uses actual execution states, not demo timers or invented elapsed time. The web event stream has no thinking-end event, so thinking remains active until a later content block, message settlement, run completion, or connection loss. Live tool events lack positions within assistant content, so live calls retain their trailing position until settlement. Interaction transitions stop after feedback and respect reduced motion.
 
-The quiet ring below the composer opens current context estimates, not cumulative billed usage. History and context share one snapshot request. Reading an absent or archived session never initializes OMP, so unavailable is not 0%. Compaction and model changes invalidate the snapshot without polling. Percentages may exceed 100%; only the ring is clamped.
+The quiet ring at the composer's lower right opens current context estimates, not cumulative billed usage. History, context, and the current model share one snapshot request. Reading an absent or archived session never initializes OMP, so unavailable is not 0%. Compaction and model changes invalidate the snapshot without polling. Percentages may exceed 100%; only the ring is clamped.
 
 Context-estimate failures leave loaded history readable and show an error in the details. Disconnected selection and disclosure keep the cached estimate without attempting a refresh.
 
 Context details use a controlled native popover above the footer, outside the composer's clipping form. The card stays mounted through refreshes and closes on chat selection. Disconnected values are labeled as the last snapshot. Category estimates may not add up exactly to the provider-derived total.
+
+The native model select at the lower left changes only the current chat through the same application operation as Discord `/switch`. It does not update the workspace default. Opening the picker on a new draft creates the chat and its configured worktree without sending the draft. This gives selection a durable chat identity before the first message.
+
+Cold reads and session opening respect the latest intentional model change. A trailing temporary retry fallback does not become durable; Pico restores the latest non-fallback role selection.
+
+The picker stays available during an active response, including tool execution. The native model switch takes effect at the next provider call, which may occur in the same run. Pico does not abort or restart the run to switch models. Provider-specific connection resets and recovery remain OMP's responsibility. Another switch blocks selection until it finishes. A successful switch supplies the displayed model even if no history snapshot has loaded. If that switch dirties an in-flight snapshot, the snapshot still updates history and runtime state but preserves the cached model until the follow-up read returns. A later clean snapshot can supersede it. An unconfirmed journal save shows the active selection with a warning instead of reporting the switch as failed.

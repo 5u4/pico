@@ -57,6 +57,7 @@ export interface OpenedSession {
   readonly askBtw: (question: string, signal: AbortSignal) => Promise<string>;
   readonly shake: (mode: ShakeMode, signal: AbortSignal) => Promise<ShakeResult>;
   readonly switchModel: (model: ModelRef) => Promise<ModelInfo>;
+  readonly currentModel: () => ModelInfo | null;
   readonly flush: () => Promise<void>;
   readonly contextUsage: () => ContextUsage;
   readonly historyBoundary: () => string;
@@ -166,6 +167,7 @@ interface LiveEntry {
   readonly askBtw: (question: string, signal: AbortSignal) => Promise<string>;
   readonly shake: OpenedSession["shake"];
   readonly switchModel: OpenedSession["switchModel"];
+  readonly currentModel: OpenedSession["currentModel"];
   readonly flush: OpenedSession["flush"];
   readonly contextUsage: () => ContextUsage;
   readonly historyBoundary: OpenedSession["historyBoundary"];
@@ -296,6 +298,7 @@ interface MakeOptions {
   readonly loadTranscript: (
     chatId: Chat.ChatId,
   ) => Effect.Effect<Pick<TranscriptSnapshot, "messages" | "todo">, AgentError>;
+  readonly loadCurrentModel: (chatId: Chat.ChatId) => Effect.Effect<ModelInfo | null, AgentError>;
 }
 
 type OutputItem =
@@ -617,6 +620,7 @@ const acquireEntry = Effect.fn("SessionPool.acquireEntry")(function* (
     askBtw: opened.askBtw,
     shake: opened.shake,
     switchModel: opened.switchModel,
+    currentModel: opened.currentModel,
     flush: opened.flush,
     appendAssistantMessage: opened.appendAssistantMessage,
     contextUsage: opened.contextUsage,
@@ -711,9 +715,11 @@ export const makeSessionPool = Effect.fn("SessionPool.make")(function* (
           const retained = yield* retainOption(sessions, chatId);
           if (Option.isNone(retained)) {
             const snapshot = yield* options.loadTranscript(chatId);
+            const currentModel = yield* options.loadCurrentModel(chatId);
             if (keys.get(chatId) !== selected) continue;
             return {
               ...snapshot,
+              currentModel,
               contextUsage: { kind: "unavailable" },
               runtime: runtimeSnapshot(makePublicRuntime(), publication),
             } satisfies TranscriptSnapshot;
@@ -758,6 +764,7 @@ export const makeSessionPool = Effect.fn("SessionPool.make")(function* (
                   }
                   return {
                     ...snapshot,
+                    currentModel: entry.currentModel(),
                     contextUsage,
                     runtime: runtimeSnapshot(runtime, publication),
                   };
@@ -1249,14 +1256,6 @@ export const makeSessionPool = Effect.fn("SessionPool.make")(function* (
           Effect.gen(function* () {
             if (MutableRef.get(entry.lifecycle).type !== "open") {
               return yield* new AgentError({ message: "OMP session is closing" });
-            }
-            if (
-              MutableRef.get(entry.capture) !== null ||
-              MutableRef.get(entry.run) !== null ||
-              entry.operations.size !== 0 ||
-              entry.session.isStreaming
-            ) {
-              return yield* new AgentError({ message: "OMP session is busy" });
             }
             const selected = yield* boundary("Failed to switch OMP model", () =>
               entry.switchModel(model),

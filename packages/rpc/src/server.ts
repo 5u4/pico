@@ -149,6 +149,38 @@ const handlers = PicoRpcs.toLayer(
             requestId: String(requestId),
           }),
         ),
+      AvailableModels: ({ chatId }, { requestId }) =>
+        requireWebChat(workspaces, chats, chatId).pipe(
+          Effect.andThen(() => application.availableModels(chatId)),
+          Effect.tapCause(reportFailure),
+          Effect.annotateLogs({
+            component: "rpc",
+            procedure: "AvailableModels",
+            chatId,
+            requestId: String(requestId),
+          }),
+        ),
+      SwitchModel: ({ chatId, model }, { requestId }) =>
+        requireWebChat(workspaces, chats, chatId).pipe(
+          Effect.andThen(() => application.switchModel(chatId, model)),
+          Effect.tap((result) =>
+            result.kind === "persistence-unconfirmed"
+              ? Effect.logWarning("pico.rpc.model-selection-persistence-unconfirmed").pipe(
+                  Effect.annotateLogs({
+                    operation: "persist-model-selection",
+                    outcome: "failure",
+                  }),
+                )
+              : Effect.void,
+          ),
+          Effect.tapCause(reportFailure),
+          Effect.annotateLogs({
+            component: "rpc",
+            procedure: "SwitchModel",
+            chatId,
+            requestId: String(requestId),
+          }),
+        ),
       SendMessage: ({ chatId, prompt }, { requestId }) =>
         requireWebChat(workspaces, chats, chatId).pipe(
           Effect.andThen(() => application.sendMessage(chatId, prompt)),

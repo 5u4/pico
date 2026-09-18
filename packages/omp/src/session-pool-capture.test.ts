@@ -99,11 +99,13 @@ describe("session pool capture", () => {
                     };
                   },
                   shake: async (mode) => shakeResult(mode),
+                  currentModel: () => null,
                   contextUsage: () => ({ kind: "unavailable" }),
                   appendAssistantMessage: async () => {},
                   unsubscribe: () => {},
                 }),
             },
+            loadCurrentModel: () => Effect.succeed(null),
             loadTranscript: () =>
               Effect.succeed({ messages: [], todo: { kind: "ready", phases: [] } }),
           });
@@ -184,11 +186,13 @@ describe("session pool capture", () => {
                   };
                 },
                 shake: async (mode) => shakeResult(mode),
+                currentModel: () => null,
                 contextUsage: () => ({ kind: "unavailable" }),
                 appendAssistantMessage: async () => {},
                 unsubscribe: () => {},
               }),
           },
+          loadCurrentModel: () => Effect.succeed(null),
           loadTranscript: () =>
             Effect.succeed({ messages: [], todo: { kind: "ready", phases: [] } }),
         });
@@ -263,10 +267,12 @@ describe("session pool capture", () => {
                 },
                 shake: async (mode) => shakeResult(mode),
                 appendAssistantMessage: () => Promise.resolve(),
+                currentModel: () => null,
                 contextUsage: () => ({ kind: "unavailable" }),
                 unsubscribe: () => {},
               }),
           },
+          loadCurrentModel: () => Effect.succeed(null),
           loadTranscript: () =>
             Effect.succeed({ messages: [], todo: { kind: "ready", phases: [] } }),
         });
@@ -344,11 +350,13 @@ describe("session pool capture", () => {
                 },
                 shake: async (mode) => shakeResult(mode),
                 appendAssistantMessage: () => Promise.resolve(),
+                currentModel: () => null,
                 contextUsage: () => ({ kind: "unavailable" }),
                 unsubscribe: () => {},
               });
             },
           },
+          loadCurrentModel: () => Effect.succeed(null),
           loadTranscript: () =>
             Effect.succeed({ messages: [], todo: { kind: "ready", phases: [] } }),
         });
@@ -444,10 +452,12 @@ describe("session pool capture", () => {
                 },
                 shake: async (mode) => shakeResult(mode),
                 appendAssistantMessage: () => Promise.resolve(),
+                currentModel: () => null,
                 contextUsage: () => ({ kind: "unavailable" }),
                 unsubscribe: () => {},
               }),
           },
+          loadCurrentModel: () => Effect.succeed(null),
           loadTranscript: () =>
             Effect.succeed({ messages: [], todo: { kind: "ready", phases: [] } }),
         });
@@ -548,10 +558,12 @@ describe("session pool capture", () => {
                 },
                 shake: async (mode) => shakeResult(mode),
                 appendAssistantMessage: () => Promise.resolve(),
+                currentModel: () => null,
                 contextUsage: () => ({ kind: "unavailable" }),
                 unsubscribe: () => {},
               }),
           },
+          loadCurrentModel: () => Effect.succeed(null),
           loadTranscript: () =>
             Effect.succeed({ messages: [], todo: { kind: "ready", phases: [] } }),
         });
@@ -658,10 +670,12 @@ describe("session pool capture", () => {
                   },
                   shake: async (mode) => shakeResult(mode),
                   appendAssistantMessage: () => Promise.resolve(),
+                  currentModel: () => null,
                   contextUsage: () => ({ kind: "unavailable" }),
                   unsubscribe: () => {},
                 }),
             },
+            loadCurrentModel: () => Effect.succeed(null),
             loadTranscript: () =>
               Effect.succeed({ messages: [], todo: { kind: "ready", phases: [] } }),
           });

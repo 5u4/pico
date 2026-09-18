@@ -58,6 +58,7 @@ const runtimeTranscript: TranscriptSnapshot = {
   contextUsage: { kind: "unavailable" },
   todo: { kind: "ready", phases: [] },
   runtime: { publication: Publication.make(0), run: { kind: "idle" }, assistant: [], tools: [] },
+  currentModel: null,
 };
 
 const assertApplicationError = (
@@ -719,6 +720,7 @@ describe("Chat close", () => {
                 assistant: [],
                 tools: [],
               },
+              currentModel: null,
             }),
           send: () => Effect.die("unexpected ordinary send"),
           sendCaptured: (_chatId, runId) =>
@@ -867,6 +869,7 @@ describe("Chat close", () => {
                   assistant: [],
                   tools: [],
                 },
+                currentModel: null,
               }),
             send: () => Effect.die("unexpected send"),
             sendCaptured: () => Effect.die("unexpected captured runtime send"),

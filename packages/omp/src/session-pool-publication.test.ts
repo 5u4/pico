@@ -76,10 +76,12 @@ describe("session pool publication", () => {
                     historyBoundary: () => JSON.stringify(messages),
                     settleHistory: async () => {},
                     contextUsage: () => ({ kind: "unavailable" }),
+                    currentModel: () => null,
                     unsubscribe: () => {},
                   } satisfies OpenedSession;
                 }),
             },
+            loadCurrentModel: () => Effect.succeed(null),
             loadTranscript: () =>
               Effect.gen(function* () {
                 const current = messages;
@@ -209,6 +211,7 @@ describe("session pool publication", () => {
                     await manager.flush();
                     publicationOrder.push("persisted");
                   },
+                  currentModel: () => null,
                   contextUsage: () => ({ kind: "unavailable" }),
                   unsubscribe: () => {},
                 } satisfies OpenedSession;
@@ -216,6 +219,7 @@ describe("session pool publication", () => {
           };
           const pool = yield* makeSessionPool({
             factory,
+            loadCurrentModel: () => Effect.succeed(null),
             loadTranscript: () =>
               Effect.promise(() => OmpSessionLoader.loadSessionSnapshotReadOnly(sessionFile)).pipe(
                 Effect.map((snapshot) => ({
@@ -440,11 +444,13 @@ describe("session pool publication", () => {
                   },
                   shake: async (mode) => shakeResult(mode),
                   appendAssistantMessage: () => Promise.resolve(),
+                  currentModel: () => null,
                   contextUsage: () => ({ kind: "unavailable" }),
                   unsubscribe: () => {},
                 } satisfies OpenedSession;
               }),
           },
+          loadCurrentModel: () => Effect.succeed(null),
           loadTranscript: () =>
             Effect.promise(() => OmpSessionLoader.loadSessionSnapshotReadOnly(sessionFile)).pipe(
               Effect.map((snapshot) => ({

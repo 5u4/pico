@@ -13,7 +13,7 @@ export interface ResolvedChatSessionContext {
 export class ChatSessionContext extends Context.Service<
   ChatSessionContext,
   {
-    // OMP calls this once when opening a live chat session.
+    // OMP resolves context when opening sessions or reading cold-chat model settings.
     readonly resolve: (chatId: ChatId) => Effect.Effect<ResolvedChatSessionContext, AgentError>;
   }
 >()("@pico/contract/chat-session-context/ChatSessionContext") {}
