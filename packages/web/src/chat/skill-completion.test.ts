@@ -28,6 +28,29 @@ describe("skill completion", () => {
     });
   });
 
+  it("keeps skills discoverable while typing their command prefix", () => {
+    let draft = "/";
+    for (const character of "skill:") {
+      draft += character;
+      const token = findSkillToken(draft, draft.length, draft.length);
+      if (token === null) throw new Error("Expected a skill prefix token");
+      assert.deepStrictEqual(filterSkills(catalog, token.query), [
+        { name: "review", description: "Review the selected change" },
+        { name: "refactor", description: "Refactor the selected module" },
+      ]);
+    }
+    draft += "ref";
+    const token = findSkillToken(draft, draft.length, draft.length);
+    if (token === null) throw new Error("Expected a skill command token");
+    assert.deepStrictEqual(filterSkills(catalog, token.query), [
+      { name: "refactor", description: "Refactor the selected module" },
+    ]);
+    assert.deepStrictEqual(applySkill(draft, token, "refactor"), {
+      text: "/skill:refactor ",
+      caret: 16,
+    });
+  });
+
   it("rejects url and path-like tokens", () => {
     const url = "Use https://example.com";
     assert.isNull(findSkillToken(url, url.length, url.length));

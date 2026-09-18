@@ -52,6 +52,7 @@ export const findSkillToken = (
   if (!raw.startsWith("/")) return null;
   if (isPathLikeToken(raw)) return null;
   const typed = draft.slice(start, selectionStart);
+  if (skillPrefix.startsWith(typed.toLowerCase())) return { start, end, raw, query: "" };
   return typed.toLowerCase().startsWith(skillPrefix)
     ? { start, end, raw, query: typed.slice(skillPrefix.length) }
     : { start, end, raw, query: typed.slice(1) };

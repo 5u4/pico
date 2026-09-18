@@ -32,12 +32,14 @@ export function SkillCompletionMenu({ presentation, onSelect, onRetry }: SkillCo
     window.addEventListener("scroll", measure, true);
     window.addEventListener("animationend", measure, true);
     window.visualViewport?.addEventListener("resize", measure);
+    window.visualViewport?.addEventListener("scroll", measure);
     return () => {
       observer.disconnect();
       window.removeEventListener("resize", measure);
       window.removeEventListener("scroll", measure, true);
       window.removeEventListener("animationend", measure, true);
       window.visualViewport?.removeEventListener("resize", measure);
+      window.visualViewport?.removeEventListener("scroll", measure);
     };
   }, [open, presentation]);
   useLayoutEffect(() => {
@@ -90,11 +92,11 @@ export function SkillCompletionMenu({ presentation, onSelect, onRetry }: SkillCo
                     onClick={() => onSelect(option.name)}
                     onMouseDown={(event) => event.preventDefault()}
                     tabIndex={-1}
-                    title={`/${option.name}\n${option.description}`}
+                    title={`/skill:${option.name}\n${option.description}`}
                     type="button"
                   >
                     <span className="block break-words font-mono text-[12px] text-foreground">
-                      /{option.name}
+                      /skill:{option.name}
                     </span>
                     <span className="mt-0.5 block break-words text-[12px] text-muted">
                       {option.description}
