@@ -417,6 +417,7 @@ textarea:disabled {
 .chat-mermaid-source pre {
   margin: 0;
   border: 0;
+  overflow: visible;
 }
 
 .chat-mermaid-preview {
