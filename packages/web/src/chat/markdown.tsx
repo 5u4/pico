@@ -49,6 +49,45 @@ const components = {
   },
 } satisfies Components;
 
+const labelComponents = {
+  p: MarkdownLabelBoundary,
+  h1: MarkdownLabelBoundary,
+  h2: MarkdownLabelBoundary,
+  h3: MarkdownLabelBoundary,
+  h4: MarkdownLabelBoundary,
+  h5: MarkdownLabelBoundary,
+  h6: MarkdownLabelBoundary,
+  blockquote: MarkdownLabelBoundary,
+  pre: MarkdownLabelBoundary,
+  br: MarkdownLabelBoundary,
+  hr: MarkdownLabelBoundary,
+  li({ children }) {
+    return <span>• {children} </span>;
+  },
+  td: MarkdownLabelCell,
+  th: MarkdownLabelCell,
+  tr({ children }) {
+    return <span>{children}; </span>;
+  },
+  img({ alt }) {
+    return <MarkdownImage alt={alt} />;
+  },
+  input({ checked }) {
+    return <span>{checked ? "[x] " : "[ ] "}</span>;
+  },
+  section() {
+    return null;
+  },
+} satisfies Components;
+const labelAllowedElements = [
+  "strong",
+  "em",
+  "del",
+  "code",
+  "sup",
+  ...Object.keys(labelComponents),
+];
+
 export const Markdown = memo(function Markdown({
   text,
   className,
@@ -69,6 +108,35 @@ export const Markdown = memo(function Markdown({
     </div>
   );
 });
+
+export const MarkdownLabel = memo(function MarkdownLabel({
+  text,
+  className,
+}: {
+  readonly text: string;
+  readonly className?: string;
+}) {
+  return (
+    <span className={className ? `chat-markdown ${className}` : "chat-markdown"}>
+      <ReactMarkdown
+        allowedElements={labelAllowedElements}
+        components={labelComponents}
+        remarkPlugins={remarkPlugins}
+        unwrapDisallowed
+      >
+        {text}
+      </ReactMarkdown>
+    </span>
+  );
+});
+
+function MarkdownLabelBoundary({ children }: ComponentProps<"span">) {
+  return <span>{children} </span>;
+}
+
+function MarkdownLabelCell({ children }: ComponentProps<"span">) {
+  return <span>{children} | </span>;
+}
 
 function MarkdownImage({ alt, src, title }: ComponentProps<"img">) {
   const insideLink = useContext(LinkContext);
