@@ -55,6 +55,7 @@ const fixture = Effect.fn("SessionPoolOperationsTest.fixture")(function* (
             contextUsage: () => ({ kind: "unavailable" }),
             appendAssistantMessage: options.appendAssistantMessage ?? (async () => {}),
             unsubscribe: () => {},
+            availableSkills: () => [],
           } satisfies OpenedSession;
         }),
     },

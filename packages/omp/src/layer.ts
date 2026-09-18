@@ -1,4 +1,5 @@
 import * as OmpModelRegistry from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { getSkillSlashCommandName } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { loadAllMCPConfigs } from "@oh-my-pi/pi-coding-agent/mcp/config";
 import * as OmpRuntimeInit from "@oh-my-pi/pi-coding-agent/modes/runtime-init";
 import * as OmpAgentRegistry from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
@@ -231,6 +232,7 @@ export const make = Effect.fn("AgentRuntime.make")(function* ({
     abort: pool.abort,
     contextUsage: pool.contextUsage,
     availableModels,
+    availableSkills: pool.availableSkills,
     switchModel: pool.switchModel,
     shake: pool.shake,
   });
@@ -699,6 +701,13 @@ const makeFactory = (
         await manager.flush();
       },
       contextUsage: () => normalizeContextUsage(created.session.getContextBreakdown()),
+      availableSkills: () => {
+        if (!created.session.skillsSettings?.enableSkillCommands) return [];
+        return created.session.skills.map((skill) => ({
+          name: getSkillSlashCommandName(skill).slice("skill:".length),
+          description: skill.description || `Run ${skill.name} skill`,
+        }));
+      },
       ...observation,
       appendAssistantMessage: async (message) => {
         created.session.sessionManager.appendMessage(message);
@@ -755,13 +764,12 @@ export const normalizeHistory = (
           .map((block) => {
             switch (block.type) {
               case "text":
+              case "thinking":
                 return block.text;
               case "image":
                 return "[Image]";
               case "tool-call":
                 return block.name;
-              case "thinking":
-                return "";
               default: {
                 const exhaustive: never = block;
                 return exhaustive;

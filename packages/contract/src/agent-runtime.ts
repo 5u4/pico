@@ -29,6 +29,12 @@ export const ModelInfo = Schema.Struct({
 });
 export type ModelInfo = typeof ModelInfo.Type;
 
+export const SkillCommand = Schema.Struct({
+  name: Schema.NonEmptyString,
+  description: Schema.String,
+});
+export type SkillCommand = typeof SkillCommand.Type;
+
 export const ModelSwitchResult = Schema.Struct({
   kind: Schema.Literals(["persisted", "persistence-unconfirmed"]),
   model: ModelInfo,
@@ -153,6 +159,11 @@ export class AgentRuntime extends Context.Service<
     readonly abort: (chatId: ChatId) => Effect.Effect<void, AgentError>;
 
     readonly contextUsage: (chatId: ChatId) => Effect.Effect<ContextUsage, AgentError>;
+
+    /** Application reads skill command discovery for one open chat session. */
+    readonly availableSkills: (
+      chatId: ChatId,
+    ) => Effect.Effect<readonly SkillCommand[], AgentError>;
 
     /** Application calls this for model discovery without opening a session. */
     readonly availableModels: (

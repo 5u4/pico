@@ -124,6 +124,7 @@ const makeScheduledDeliveryFixture = Effect.fn("makeScheduledDeliveryFixture")(f
         abort: () => Effect.die("unexpected abort"),
         contextUsage: () => Effect.die("unexpected context read"),
         shake: () => Effect.die("unexpected shake"),
+        availableSkills: () => Effect.die("unexpected skill command discovery"),
       });
     }),
   ).pipe(Layer.provide(persistence));
@@ -382,6 +383,7 @@ describe("Chat close", () => {
                   }),
                 ),
               ),
+            availableSkills: () => Effect.die("unexpected skill command discovery"),
           }),
         );
         const git: GitWorktree = {
@@ -560,6 +562,7 @@ describe("Chat close", () => {
                 blocksDropped: 0,
                 tokensFreed: 0,
               }),
+            availableSkills: () => Effect.die("unexpected skill command discovery"),
           });
         }),
       ).pipe(Layer.provide(persistenceLayer));
@@ -759,6 +762,7 @@ describe("Chat close", () => {
           abort: () => Deferred.succeed(stopped, undefined).pipe(Effect.asVoid),
           contextUsage: () => Effect.die("unexpected context read"),
           shake: () => Effect.die("unexpected shake"),
+          availableSkills: () => Effect.die("unexpected skill command discovery"),
         }),
       );
       const sessionsLayer = Layer.succeed(
@@ -905,6 +909,7 @@ describe("Chat close", () => {
             abort: () => Effect.die("unexpected abort"),
             contextUsage: () => Effect.die("unexpected context read"),
             shake: () => Effect.die("unexpected shake"),
+            availableSkills: () => Effect.die("unexpected skill command discovery"),
           });
         }),
       ).pipe(Layer.provide(persistenceLayer));

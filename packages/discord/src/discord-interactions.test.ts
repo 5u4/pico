@@ -149,6 +149,7 @@ const installThreadInput = Effect.fn("test.installThreadInput")(function* (optio
     abort: () => Effect.die("btw must not abort the main request"),
     contextUsage: () => Effect.die("unexpected context read"),
     shake: () => Effect.die("unexpected shake"),
+    availableSkills: () => Effect.die("unexpected skill command discovery"),
   });
   yield* install(bot, config, options.acknowledger, options.drainOutput).pipe(
     Effect.provideService(Application, application),
@@ -1149,6 +1150,7 @@ describe("discord interactions", () => {
           contextUsage: () => Effect.die("unexpected context read"),
           shake: () => Effect.die("unexpected chat shake"),
           closeChat: () => Effect.die("unexpected chat close"),
+          availableSkills: () => Effect.die("unexpected skill command discovery"),
         });
         let acknowledgements = 0;
         const acknowledgeBind = DiscordAcknowledgement.make(async (_id, _token, response) => {
@@ -1362,6 +1364,7 @@ describe("discord interactions", () => {
             }
           },
           closeChat: () => Effect.die("unexpected chat close"),
+          availableSkills: () => Effect.die("unexpected skill command discovery"),
         });
         const acknowledgePrivate = DiscordAcknowledgement.make(async (_id, _token, response) => {
           assert.deepStrictEqual(response, {
@@ -1558,6 +1561,7 @@ describe("discord interactions", () => {
           },
           shake: () => Effect.die("unexpected chat shake"),
           closeChat: () => Effect.die("unexpected chat close"),
+          availableSkills: () => Effect.die("unexpected skill command discovery"),
         });
         const acknowledgePrivate = DiscordAcknowledgement.make(async (_id, _token, response) => {
           assert.deepStrictEqual(response, {
@@ -1707,6 +1711,7 @@ describe("discord interactions", () => {
           contextUsage: () => Effect.die("unexpected context read"),
           shake: () => Effect.die("unexpected chat shake"),
           closeChat: () => Effect.die("unexpected chat close"),
+          availableSkills: () => Effect.die("unexpected skill command discovery"),
         });
         yield* install(bot, config, acknowledgeInteraction).pipe(
           Effect.provideService(Application, application),
@@ -1858,6 +1863,7 @@ describe("discord interactions", () => {
           abort: () => Effect.die("unexpected chat abort"),
           contextUsage: () => Effect.die("unexpected context read"),
           shake: () => Effect.die("unexpected chat shake"),
+          availableSkills: () => Effect.die("unexpected skill command discovery"),
         });
         const acknowledgeClose = DiscordAcknowledgement.make(async (_id, _token, response) => {
           if (response.type === InteractionResponseTypes.DeferredUpdateMessage) {

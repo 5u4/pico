@@ -1,0 +1,22 @@
+diff --git a/dist/types/discordeno.d.ts b/dist/types/discordeno.d.ts
+index f7fcdf19a4c56c65e44e93b8d3d6864afe3b7753..70c050961a07f474025eec04d95ba0fdd9d9162d 100644
+--- a/dist/types/discordeno.d.ts
++++ b/dist/types/discordeno.d.ts
+@@ -902,7 +902,7 @@ export interface StartThreadWithMessage {
+     /** 1-100 character thread name */
+     name: string;
+     /** Duration in minutes to automatically archive the thread after recent activity */
+-    autoArchiveDuration: 60 | 1440 | 4320 | 10080;
++    autoArchiveDuration?: 60 | 1440 | 4320 | 10080;
+     /** Amount of seconds a user has to wait before sending another message (0-21600) */
+     rateLimitPerUser?: number | null;
+ }
+@@ -910,7 +910,7 @@ export interface StartThreadWithoutMessage {
+     /** 1-100 character thread name */
+     name: string;
+     /** Duration in minutes to automatically archive the thread after recent activity */
+-    autoArchiveDuration: 60 | 1440 | 4320 | 10080;
++    autoArchiveDuration?: 60 | 1440 | 4320 | 10080;
+     /** Amount of seconds a user has to wait before sending another message (0-21600) */
+     rateLimitPerUser?: number | null;
+     /** the type of thread to create */

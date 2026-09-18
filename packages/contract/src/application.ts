@@ -19,6 +19,7 @@ import type {
   ModelSwitchResult,
   ShakeMode,
   ShakeResult,
+  SkillCommand,
 } from "./agent-runtime.ts";
 import type { NavigateHistoryResult, TranscriptSnapshot } from "./agent-snapshot.ts";
 import type { Chat, ChatId, ChatListEntry } from "./chat-model.ts";
@@ -174,6 +175,11 @@ export class Application extends Context.Service<
     readonly availableModels: (
       chatId: ChatId,
     ) => Effect.Effect<readonly ModelInfo[], ApplicationError | ChatClosed>;
+
+    /** Platform adapters call this while displaying the current chat's skill command picker. */
+    readonly availableSkills: (
+      chatId: ChatId,
+    ) => Effect.Effect<readonly SkillCommand[], ApplicationError | ChatClosed>;
 
     /** Platform adapters call this after selecting a model for the current open chat. */
     readonly switchModel: (

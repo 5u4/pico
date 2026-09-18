@@ -162,6 +162,7 @@ const unusedApplication = Application.of({
   availableWorkspaceModels: () => Effect.die("unexpected workspace model discovery"),
   setWorkspaceModel: () => Effect.die("unexpected workspace model update"),
   availableModels: () => Effect.die("unexpected model discovery"),
+  availableSkills: () => Effect.die("unexpected skill command discovery"),
   switchModel: () => Effect.die("unexpected model switch"),
   shake: () => Effect.die("unexpected chat shake"),
   closeChat: () => Effect.die("unexpected chat close"),
@@ -620,6 +621,7 @@ describe("RPC", () => {
             client.Transcript({ chatId }).pipe(Effect.asVoid),
             client.ContextUsage({ chatId }).pipe(Effect.asVoid),
             client.AvailableModels({ chatId }).pipe(Effect.asVoid),
+            client.AvailableSkills({ chatId }).pipe(Effect.asVoid),
             client
               .SwitchModel({
                 chatId,

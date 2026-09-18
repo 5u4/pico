@@ -29,7 +29,9 @@ History navigation stays inside one chat because OMP owns its branches. Preview 
 
 Returning to a user entry recovers its text and images only for the initiating tab. Automatic recovery requires an empty draft that stayed unchanged during the request. Otherwise the tab retains both drafts until the user explicitly replaces the current one. Other clients retain their own drafts. A history revision change clears abandoned assistant and tool state, including after reconnect. Submission stays disabled until the authoritative replacement arrives. Notices survive replacement, but delivery events at or before its publication cut do not.
 
-History search matches full message, summary, and label text before clipping display excerpts. Native metadata stays out of search payloads. Visible assistant rows include unambiguous following tool results in their continuation target. Grouping stops at a fork so selecting a row never silently chooses a sibling branch.
+History search matches full message text, including visible thinking, summary text, and labels before clipping display excerpts. Native metadata stays out of search payloads. Visible assistant rows include unambiguous following tool results in their continuation target. Search does not change that target. Grouping stops at a fork so selecting a row never silently chooses a sibling branch.
+
+Typed searches wait for a quiet interval to avoid repeated journal reads. Each chat's history and preview lanes coalesce queued inputs and interrupt superseded requests. An accepted history replacement refreshes an open panel's current query and preview, including after reconnect. Closed panels defer refresh until reopened. Atom requests start outside the batch that notifies revision observers so both read lanes can restart.
 
 Schedules at `/schedules` is a read-only main-content page above the retained chat state. Direct links and reloads do not require a selected workspace. It shows all current definitions across every platform, including invalid definitions with unknown owners. Chat tabs, drafts, disclosure choices, and scroll positions remain mounted. Hidden chat content is inert, and its measurement, focus, and native-overlay behavior is suspended.
 
@@ -74,6 +76,10 @@ Context-estimate failures leave loaded history readable and show an error in the
 Context details use a controlled native popover above the footer, outside the composer's clipping form. The card stays mounted through refreshes and closes on chat selection. Disconnected values are labeled as the last snapshot. Category estimates may not add up exactly to the provider-derived total.
 
 The model picker at the lower left changes only the current chat through the same application operation as Discord `/switch`. It does not update the workspace default. Opening the picker on a new draft creates the chat and its configured worktree without sending the draft. This gives selection a durable chat identity before the first message.
+
+The slash skill menu uses the current OMP session's catalog, not a workspace preview. Opening it on a new draft creates the chat and its configured worktree without sending a message. The catalog refreshes on open. Typing filters locally by name and description. Rows display the invocable `/skill:name` command. Typing its `/skill:` prefix keeps the catalog visible. Selection replaces only the current token with `/skill:name ` and preserves the surrounding draft. Enter never sends while the menu is open, including loading, empty, and error states. Escape dismisses the menu until the text or caret changes. Shift+Enter and input-method composition retain their normal behavior.
+
+The skill menu stays above the composer within the conversation's visible bounds. Its height updates after resize, visual viewport scrolling, and welcome animation completion. Arrow navigation scrolls only the result list, so selecting a skill cannot move the conversation.
 
 Cold reads and session opening respect the latest intentional model change. A trailing temporary retry fallback does not become durable; Pico restores the latest non-fallback role selection.
 

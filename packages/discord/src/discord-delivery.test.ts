@@ -109,6 +109,7 @@ const installInput = Effect.fn("test.installDeliveryInput")(function* (options: 
     contextUsage: () => Effect.die("unexpected context read"),
     shake: () => Effect.die("unexpected chat shake"),
     closeChat: () => Effect.die("unexpected chat close"),
+    availableSkills: () => Effect.die("unexpected skill command discovery"),
   });
   yield* install(
     bot,
@@ -157,6 +158,7 @@ describe("Discord message delivery", () => {
             availableModels: unused,
             switchModel: unused,
             shake: unused,
+            availableSkills: () => Effect.die("unexpected skill command discovery"),
           });
           yield* Effect.gen(function* () {
             const router = yield* EventRouter;

@@ -11,6 +11,7 @@ import type {
   ModelSwitchResult,
   ShakeMode,
   ShakeResult,
+  SkillCommand,
 } from "@pico/contract/agent-runtime";
 import type {
   NavigateHistoryResult,
@@ -73,6 +74,7 @@ export interface OpenedSession {
   >;
   readonly flush: () => Promise<void>;
   readonly contextUsage: () => ContextUsage;
+  readonly availableSkills: () => readonly SkillCommand[];
   readonly historyBoundary: () => string;
   readonly settleHistory: () => Promise<void>;
   readonly appendAssistantMessage: (message: OmpAssistantMessage) => Promise<void>;
@@ -108,6 +110,9 @@ export interface SessionPool {
   readonly abort: (chatId: Chat.ChatId) => Effect.Effect<void, AgentError>;
   readonly contextUsage: (chatId: Chat.ChatId) => Effect.Effect<ContextUsage, AgentError>;
   readonly shake: (chatId: Chat.ChatId, mode: ShakeMode) => Effect.Effect<ShakeResult, AgentError>;
+  readonly availableSkills: (
+    chatId: Chat.ChatId,
+  ) => Effect.Effect<readonly SkillCommand[], AgentError>;
   readonly switchModel: (
     chatId: Chat.ChatId,
     model: ModelRef,
@@ -193,6 +198,7 @@ interface LiveEntry {
   readonly navigateHistory: OpenedSession["navigateHistory"];
   readonly flush: OpenedSession["flush"];
   readonly contextUsage: () => ContextUsage;
+  readonly availableSkills: OpenedSession["availableSkills"];
   readonly historyBoundary: OpenedSession["historyBoundary"];
   readonly settleHistory: OpenedSession["settleHistory"];
   readonly appendAssistantMessage: (message: OmpAssistantMessage) => Promise<void>;
@@ -660,6 +666,7 @@ const acquireEntry = Effect.fn("SessionPool.acquireEntry")(function* (
     switchModel: opened.switchModel,
     currentModel: opened.currentModel,
     navigateHistory: opened.navigateHistory,
+    availableSkills: opened.availableSkills,
     flush: opened.flush,
     appendAssistantMessage: opened.appendAssistantMessage,
     contextUsage: opened.contextUsage,
@@ -1442,6 +1449,27 @@ export const makeSessionPool = Effect.fn("SessionPool.make")(function* (
     );
   });
 
+  const availableSkills = Effect.fn("AgentRuntime.availableSkills")(function* (
+    chatId: Chat.ChatId,
+  ) {
+    return yield* Effect.scoped(
+      Effect.gen(function* () {
+        const entry = yield* retain(sessions, chatId);
+        return yield* entry.admission.withPermit(
+          Effect.try({
+            try: () => {
+              if (MutableRef.get(entry.lifecycle).type !== "open") {
+                throw new AgentError({ message: "OMP session is closing" });
+              }
+              return entry.availableSkills();
+            },
+            catch: (cause) => agentError("Failed to list OMP skill commands", cause),
+          }),
+        );
+      }),
+    );
+  });
+
   const switchModel = Effect.fn("AgentRuntime.switchModel")(function* (
     chatId: Chat.ChatId,
     model: ModelRef,
@@ -1529,6 +1557,7 @@ export const makeSessionPool = Effect.fn("SessionPool.make")(function* (
     close,
     abort,
     contextUsage,
+    availableSkills,
     switchModel,
     shake,
   } satisfies SessionPool;

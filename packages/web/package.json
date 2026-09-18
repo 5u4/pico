@@ -20,6 +20,7 @@
     "@tailwindcss/vite": "catalog:",
     "@tanstack/react-router": "catalog:",
     "@vitejs/plugin-react": "catalog:",
+    "beautiful-mermaid": "1.1.3",
     "effect": "catalog:",
     "react": "catalog:",
     "react-dom": "catalog:",

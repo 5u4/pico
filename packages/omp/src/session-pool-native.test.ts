@@ -380,6 +380,7 @@ const makePool = Effect.fn("NativePoolTest.make")(function* (
             }),
             currentModel: () => currentSession.model ?? null,
             contextUsage: () => ({ kind: "unavailable" }),
+            availableSkills: () => [],
             appendAssistantMessage: () =>
               Promise.reject(new Error("Publication is not part of ownership tests")),
           };
@@ -489,6 +490,62 @@ describe("native SessionPool ownership", () => {
             expect(
               (yield* pool.history({ chatId, query: "hidden-journal-credential" })).matches,
             ).toEqual([]);
+          }).pipe(Effect.provide(platform)),
+        ),
+      );
+    });
+  });
+
+  it("finds visible thinking beyond the excerpt without exposing thinking metadata", async () => {
+    await withSession([], async (session) => {
+      const manager = session.sessionManager;
+      const rootId = manager.appendMessage({ role: "user", content: "Question", timestamp: 1 });
+      const thoughtId = manager.appendMessage({
+        role: "assistant",
+        content: [
+          {
+            type: "thinking",
+            thinking: `${"Thought\n\t".repeat(60)}needle-in-thinking-tail`,
+            thinkingSignature: "hidden-thinking-signature",
+          },
+          { type: "text", text: "Final answer" },
+        ],
+        api: "openai-responses",
+        provider: "openai",
+        model: "gpt-4.1",
+        stopReason: "stop",
+        usage: {
+          input: 1,
+          output: 1,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 2,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        },
+        timestamp: 2,
+      });
+      await manager.ensureOnDisk();
+      await manager.flush();
+      await Effect.runPromise(
+        Effect.scoped(
+          Effect.gen(function* () {
+            const pool = yield* makePool(session);
+            const result = yield* pool.history({ chatId, query: "  NEEDLE-IN-THINKING-TAIL  " });
+            expect(result.matches).toEqual([thoughtId]);
+            expect(result.activeLeafId).toBe(thoughtId);
+            expect(result.nodes.map((node) => node.entryId)).toEqual([rootId, thoughtId]);
+            expect(result.nodes[1]).toMatchObject({
+              kind: "assistant",
+              excerpt: "Thought ".repeat(30),
+              visibleByDefault: true,
+            });
+            expect(JSON.stringify(result)).not.toContain("needle-in-thinking-tail");
+            const metadata = yield* pool.history({ chatId, query: "hidden-thinking-signature" });
+            expect(metadata.matches).toEqual([]);
+            expect(JSON.stringify(metadata)).not.toContain("hidden-thinking-signature");
+            expect((yield* pool.history({ chatId, query: "final answer" })).matches).toEqual([
+              thoughtId,
+            ]);
           }).pipe(Effect.provide(platform)),
         ),
       );

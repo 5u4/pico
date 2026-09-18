@@ -1,7 +1,13 @@
 import type { AgentEventEnvelope, Publication } from "@pico/contract/agent-event";
 import type { ChatHistoryRequest, NavigateChatHistoryRequest } from "@pico/contract/agent-history";
 import { AgentPrompt } from "@pico/contract/agent-message";
-import type { ContextUsage, ModelInfo, ModelRef, ShakeMode } from "@pico/contract/agent-runtime";
+import type {
+  ContextUsage,
+  ModelInfo,
+  ModelRef,
+  ShakeMode,
+  SkillCommand,
+} from "@pico/contract/agent-runtime";
 import type { NavigateHistoryResult, TranscriptSnapshot } from "@pico/contract/agent-snapshot";
 import type {
   CloseChatOptions,
@@ -70,6 +76,7 @@ interface ChatRecord {
   readonly contextResult: AsyncResult.AsyncResult<ContextUsage, ContextReadError>;
   readonly contextRequest: number;
   readonly historyReplacing: boolean;
+  readonly historyEpoch: number;
 }
 interface ChatRead extends ReadRecord {
   readonly chatId: ChatId;
@@ -114,6 +121,7 @@ export const make = ({ url }: { readonly url: string }) => {
       contextResult: AsyncResult.initial(),
       contextRequest: 0,
       historyReplacing: false,
+      historyEpoch: 0,
     }).pipe(Atom.keepAlive),
   );
 
@@ -389,6 +397,7 @@ export const make = ({ url }: { readonly url: string }) => {
   const list = <A, E = never>(
     execute: (client: Client) => Effect.Effect<A, E | ReadError>,
     kind: ReadRecord["kind"] = "list",
+    options: { readonly fastTimeout?: boolean } = {},
   ) => {
     const result = Atom.make<AsyncResult.AsyncResult<A, E | ReadError>>(AsyncResult.initial()).pipe(
       Atom.keepAlive,
@@ -404,10 +413,9 @@ export const make = ({ url }: { readonly url: string }) => {
             const manager = yield* get.resultOnce(owner);
             if (!manager.isCurrent(generation)) return;
             get.registry.update(result, AsyncResult.waiting);
-            const outcome = yield* execute(generation.client).pipe(
-              Effect.exit,
-              Effect.timeoutOption("5 seconds"),
-            );
+            const outcome = yield* options.fastTimeout === false
+              ? execute(generation.client).pipe(Effect.exit, Effect.map(Option.some))
+              : execute(generation.client).pipe(Effect.exit, Effect.timeoutOption("5 seconds"));
             if (!manager.isCurrent(generation)) return;
             const exit = Option.isSome(outcome) ? outcome.value : Exit.fail(unavailableError());
             if (!flight.dirty || Exit.isFailure(exit))
@@ -525,6 +533,7 @@ export const make = ({ url }: { readonly url: string }) => {
               ...state,
               live,
               historyReplacing: false,
+              historyEpoch: state.historyEpoch + Number(replacing),
               transcriptResult: AsyncResult.success(snapshot),
             };
           }),
@@ -565,6 +574,8 @@ export const make = ({ url }: { readonly url: string }) => {
                 live: cut?.generation === generation ? live : unconfirmChat(live),
                 historyReplacing:
                   state.historyReplacing || envelope.event.type === "history-replaced",
+                historyEpoch:
+                  state.historyEpoch + Number(envelope.event.type === "history-replaced"),
                 transcriptResult:
                   envelope.event.type === "history-replaced"
                     ? AsyncResult.waiting(state.transcriptResult)
@@ -728,6 +739,24 @@ export const make = ({ url }: { readonly url: string }) => {
   );
   const availableModels = Atom.family((chatId: ChatId) =>
     list<readonly ModelInfo[], ChatClosed>((client) => client.AvailableModels({ chatId })),
+  );
+  const availableSkills = Atom.family((chatId: ChatId) =>
+    list<readonly SkillCommand[], ChatClosed>(
+      (client) =>
+        client.AvailableSkills({ chatId }).pipe(
+          Effect.timeout("30 seconds"),
+          Effect.catchTag("TimeoutError", () =>
+            Effect.fail(
+              new ApplicationError({
+                reason: "operation",
+                message: "Skill catalog timed out.",
+              }),
+            ),
+          ),
+        ),
+      "list",
+      { fastTimeout: false },
+    ),
   );
   const transcriptRead = Atom.family((chatId: ChatId) =>
     Atom.make((get) =>
@@ -908,43 +937,98 @@ export const make = ({ url }: { readonly url: string }) => {
     ) => Effect.Effect<Value, HistoryReadError>,
   ) =>
     Atom.family((chatId: ChatId) => {
+      type Request = { readonly input: Input; readonly request: number };
       const lane = Atom.make<{
+        readonly input: Option.Option<Input>;
         readonly request: number;
+        readonly historyEpoch: number;
         readonly result: AsyncResult.AsyncResult<Value, HistoryReadError>;
-      }>({ request: 0, result: AsyncResult.initial() }).pipe(Atom.keepAlive);
-      const trigger = Atom.fn<{ readonly input: Input; readonly request: number }>()(
-        ({ input, request }, get) =>
-          Effect.gen(function* () {
-            const manager = yield* get.result(owner);
-            yield* manager
-              .write((client) => execute(client, chatId, input))
-              .pipe(
-                Effect.onExit((exit) =>
-                  Effect.sync(() =>
-                    manager.update(lane, (current) =>
-                      current.request !== request
-                        ? current
-                        : {
-                            request,
-                            result: Exit.isFailure(exit)
-                              ? AsyncResult.failure<Value, HistoryReadError>(exit.cause)
-                              : AsyncResult.success(exit.value),
-                          },
-                    ),
+      }>({ input: Option.none(), request: 0, historyEpoch: 0, result: AsyncResult.initial() }).pipe(
+        Atom.keepAlive,
+      );
+      const trigger = Atom.fn<Request>()(({ input, request }, get) =>
+        Effect.gen(function* () {
+          const manager = yield* get.result(owner);
+          yield* manager
+            .write((client) => execute(client, chatId, input))
+            .pipe(
+              Effect.onExit((exit) =>
+                Effect.sync(() =>
+                  manager.update(lane, (current) =>
+                    current.request !== request
+                      ? current
+                      : {
+                          ...current,
+                          result: Exit.isFailure(exit)
+                            ? AsyncResult.failure<Value, HistoryReadError>(exit.cause)
+                            : AsyncResult.success(exit.value),
+                        },
                   ),
                 ),
-              );
-          }),
-        { concurrent: true },
+              ),
+            );
+        }),
       ).pipe(Atom.keepAlive, Atom.setLazy(false));
+      const dispatch = Atom.make((get) => {
+        let pending: Request | typeof Atom.Interrupt | undefined;
+        get.addFinalizer(() => {
+          pending = undefined;
+        });
+        return (next: Request | typeof Atom.Interrupt) => {
+          const scheduled = pending !== undefined;
+          pending = next;
+          if (scheduled) return;
+          // Atom.fn must start outside the batch that notifies history observers.
+          queueMicrotask(() => {
+            const latest = pending;
+            pending = undefined;
+            if (latest !== undefined) get.registry.set(trigger, latest);
+          });
+        };
+      }).pipe(Atom.keepAlive);
+      const observe = Atom.make((get) => {
+        get.once(snapshot(chatId));
+        const cell = chatCell(chatId);
+        let epoch = get.registry.get(cell).historyEpoch;
+        const refresh = () => {
+          const current = get.registry.get(lane);
+          if (Option.isNone(current.input) || current.historyEpoch === epoch) return;
+          const active = get.registry.get(status).kind === "active";
+          const request = current.request + 1;
+          get.registry.set(lane, {
+            ...current,
+            request,
+            historyEpoch: active ? epoch : current.historyEpoch,
+            result: AsyncResult.initial(true),
+          });
+          get.once(dispatch)(active ? { input: current.input.value, request } : Atom.Interrupt);
+        };
+        get.subscribe(cell, (next) => {
+          if (epoch === next.historyEpoch) return;
+          epoch = next.historyEpoch;
+          refresh();
+        });
+        get.subscribe(status, (next) => {
+          if (next.kind === "active") refresh();
+        });
+        refresh();
+      }).pipe(Atom.setIdleTTL(0));
       return Atom.writable(
-        (get) => get(lane).result,
+        (get) => {
+          get(observe);
+          return get(lane).result;
+        },
         (get, input: Input) => {
           const request = get.get(lane).request + 1;
-          get.set(lane, { request, result: AsyncResult.initial(true) });
-          get.set(trigger, { input, request });
+          get.set(lane, {
+            input: Option.some(input),
+            request,
+            historyEpoch: get.get(chatCell(chatId)).historyEpoch,
+            result: AsyncResult.initial(true),
+          });
+          get.get(dispatch)({ input, request });
         },
-      ).pipe(Atom.keepAlive);
+      ).pipe(Atom.setIdleTTL(0));
     });
   const history = latestHistoryRead((client, chatId, query: ChatHistoryRequest["query"]) =>
     client.ChatHistory({ chatId, query }),
@@ -1108,8 +1192,9 @@ export const make = ({ url }: { readonly url: string }) => {
     observeContext,
     contextUsage,
     availableModels,
-    currentModel,
+    availableSkills,
     switchModel,
+    currentModel,
     modelSwitchRequest,
     live,
     history,

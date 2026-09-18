@@ -59,6 +59,7 @@ describe("EventRouter", () => {
           contextUsage: () => Effect.die("unused"),
           shake: () => Effect.die("unused"),
           close: () => Effect.die("unexpected runtime close"),
+          availableSkills: () => Effect.die("unexpected skill command discovery"),
         }),
       );
       const routerScope = yield* Scope.make();
@@ -201,6 +202,7 @@ describe("EventRouter", () => {
             contextUsage: () => Effect.die("unused"),
             shake: () => Effect.die("unused"),
             close: () => Effect.void,
+            availableSkills: () => Effect.die("unexpected skill command discovery"),
           }),
         );
         yield* Effect.gen(function* () {
