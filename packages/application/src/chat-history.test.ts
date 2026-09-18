@@ -110,7 +110,7 @@ const makeFixture = Effect.fn("HistoryTest.makeFixture")(function* () {
           targetId,
           version: History.HistoryVersion.make(`version-${activeLeafId}`),
           destinationLeafId: rootId,
-          blocks: [{ kind: "message", message: firstMessage }],
+          blocks: [{ label: "Assistant", text: "First answer" }],
         }),
       navigateHistory: ({ targetId }) =>
         Effect.sync(() => {
@@ -248,14 +248,7 @@ describe("Application history", () => {
         assert.strictEqual(history.activeLeafId, "tail");
         const preview = yield* application.previewHistory(request);
         assert.strictEqual(preview.destinationLeafId, "root");
-        assert.deepStrictEqual(
-          preview.blocks.flatMap((block) =>
-            block.kind === "message"
-              ? block.message.content.flatMap((part) => (part.type === "text" ? [part.text] : []))
-              : [],
-          ),
-          ["First answer"],
-        );
+        assert.deepStrictEqual(preview.blocks, [{ label: "Assistant", text: "First answer" }]);
         const denied = yield* application.navigateHistory(request);
         assert.strictEqual(denied.kind, "conflict");
         if (denied.kind !== "conflict") return yield* Effect.die("Expected busy conflict");

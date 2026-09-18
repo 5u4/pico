@@ -6,7 +6,7 @@ import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import { assert, describe, it } from "@effect/vitest";
 import type * as AgentEvent from "@pico/contract/agent-event";
 import { Publication } from "@pico/contract/agent-event";
-import { HistoryRevision } from "@pico/contract/agent-history";
+import { HistoryEntryId, HistoryRevision, HistoryVersion } from "@pico/contract/agent-history";
 import * as AgentMessage from "@pico/contract/agent-message";
 import type { ContextUsage, ShakeResult } from "@pico/contract/agent-runtime";
 import type { TranscriptSnapshot } from "@pico/contract/agent-snapshot";
@@ -616,9 +616,14 @@ describe("RPC", () => {
           yield* ownership.workspaces.findById(webWorkspace.id),
           Option.some({ ...webWorkspace, defaultCwd: updatedCwd }),
         );
+        const targetId = HistoryEntryId.make("history-target");
+        const expectedVersion = HistoryVersion.make("history-version");
         for (const chatId of [foreignChatId, missingChatId]) {
           for (const request of [
             client.Transcript({ chatId }).pipe(Effect.asVoid),
+            client.ChatHistory({ chatId, query: "" }).pipe(Effect.asVoid),
+            client.PreviewChatHistory({ chatId, targetId }).pipe(Effect.asVoid),
+            client.NavigateChatHistory({ chatId, targetId, expectedVersion }).pipe(Effect.asVoid),
             client.ContextUsage({ chatId }).pipe(Effect.asVoid),
             client.AvailableModels({ chatId }).pipe(Effect.asVoid),
             client.AvailableSkills({ chatId }).pipe(Effect.asVoid),
@@ -639,6 +644,7 @@ describe("RPC", () => {
             const rejected = yield* request.pipe(Effect.flip);
             assert.instanceOf(rejected, ApplicationError);
             assert.strictEqual(rejected.reason, "not-found");
+            assert.notInclude(rejected.message, chatId);
           }
         }
         assert.deepStrictEqual(transcriptInputs, []);

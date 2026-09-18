@@ -1,13 +1,12 @@
 import { useAtomValue } from "@effect/atom-react/Hooks";
 import { RegistryContext } from "@effect/atom-react/RegistryContext";
 import type {
-  HistoryDraft,
   HistoryPreview,
   HistoryPreviewBlock,
   HistorySnapshot,
   NavigateChatHistoryRequest,
 } from "@pico/contract/agent-history";
-import type { AgentImageAttachment, AgentMessage } from "@pico/contract/agent-message";
+import type { AgentImageAttachment, AgentPrompt } from "@pico/contract/agent-message";
 import type {
   ContextUsage,
   ModelInfo,
@@ -200,64 +199,19 @@ const toPromptAttachments = (draft: DraftValue): readonly AgentImageAttachment[]
     mimeType: image.mimeType,
     name: image.name || `restored-image-${index + 1}`,
   }));
-const toDraftValue = (draft: HistoryDraft): DraftValue => ({
+const toDraftValue = (draft: AgentPrompt): DraftValue => ({
   text: draft.text,
-  images: draft.images.map((image, index) => ({
+  images: draft.attachments.map((image) => ({
     id: crypto.randomUUID(),
     data: image.data,
-    mimeType: image.mimeType as AgentImageAttachment["mimeType"],
-    name: image.name ?? `restored-image-${index + 1}`,
+    mimeType: image.mimeType,
+    name: image.name,
   })),
 });
-const previewMessageText = (message: AgentMessage) => {
-  if (message.role === "tool-result") {
-    return message.content
-      .map((content) => (content.type === "text" ? content.text : "[Image result]"))
-      .join("\n");
-  }
-  return message.content
-    .map((content) => {
-      switch (content.type) {
-        case "text":
-          return content.text;
-        case "image":
-          return "[Image]";
-        case "thinking":
-          return content.text;
-        case "tool-call":
-          return `[Tool call] ${content.name}`;
-        default: {
-          const exhaustive: never = content;
-          return exhaustive;
-        }
-      }
-    })
-    .join("\n");
-};
-const previewRoleLabel = (message: AgentMessage) =>
-  message.role === "user"
-    ? "User"
-    : message.role === "assistant"
-      ? "Assistant"
-      : `Tool · ${message.toolName}`;
 const toPreviewBlocks = (
   blocks: readonly HistoryPreviewBlock[],
 ): readonly HistoryPreviewBlockPresentation[] =>
-  blocks.map((block, index) =>
-    block.kind === "message"
-      ? {
-          kind: "message",
-          id: `message-${index}`,
-          roleLabel: previewRoleLabel(block.message),
-          text: previewMessageText(block.message),
-        }
-      : {
-          kind: "context",
-          id: `context-${index}`,
-          label: block.label,
-          text: block.text,
-        },
-  );
+  blocks.map((block, index) => ({ id: `preview-${index}`, ...block }));
 function presentContextUsage(
   result: AsyncResult.AsyncResult<ContextUsage, unknown> | undefined,
   connection: FrontendState.Connection,

@@ -8,13 +8,17 @@ import {
   Publication,
 } from "./agent-event.ts";
 import {
-  HistoryDraft,
   HistoryRevision,
   HistorySnapshot,
   HistoryVersion,
   NavigateHistoryConflictReason,
 } from "./agent-history.ts";
-import { AgentAssistantMessage, AgentMessageId, AgentTranscript } from "./agent-message.ts";
+import {
+  AgentAssistantMessage,
+  AgentMessageId,
+  AgentPrompt,
+  AgentTranscript,
+} from "./agent-message.ts";
 import { ContextUsage, ModelInfo, TodoState } from "./agent-runtime.ts";
 
 const ObservedRun = Schema.Union([
@@ -64,7 +68,7 @@ export const NavigateHistoryResult = Schema.Union([
   Schema.Struct({
     kind: Schema.Literal("applied"),
     snapshot: TranscriptSnapshot,
-    draft: Schema.NullOr(HistoryDraft),
+    draft: Schema.NullOr(AgentPrompt),
   }),
   Schema.Struct({
     kind: Schema.Literal("conflict"),

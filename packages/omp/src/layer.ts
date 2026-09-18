@@ -16,12 +16,13 @@ import {
   sessionMessagePersistenceKey,
 } from "@oh-my-pi/pi-coding-agent/session/turn-persistence";
 import * as History from "@pico/contract/agent-history";
+import { AgentPrompt } from "@pico/contract/agent-message";
 import { AgentRuntime, type ContextUsage, type ShakeResult } from "@pico/contract/agent-runtime";
 import { BranchNaming, type BranchNamingHandler } from "@pico/contract/branch-naming";
 import type * as Chat from "@pico/contract/chat-model";
 import { ChatSessionContext } from "@pico/contract/chat-session-context";
 import type { BrowserConfig, PicoPaths } from "@pico/contract/config";
-import type { AgentError } from "@pico/contract/errors";
+import { AgentError } from "@pico/contract/errors";
 import type { AbsolutePath } from "@pico/contract/path";
 import type * as Schedule from "@pico/contract/schedule";
 import * as Cause from "effect/Cause";
@@ -31,11 +32,13 @@ import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as Schema from "effect/Schema";
 import { makeAgentBrowserExtension } from "./agent-browser/extension.ts";
 import { type AgentBrowserManager, makeAgentBrowserManager } from "./agent-browser/manager.ts";
 import { agentError } from "./agent-error.ts";
 import {
   normalizeAgentEvent,
+  normalizeHistoryPreview,
   normalizeMessage,
   normalizeTodo,
   normalizeTranscript,
@@ -159,43 +162,9 @@ export const make = Effect.fn("AgentRuntime.make")(function* ({
           path.join(sessionsDir, `${input.chatId}.jsonl`),
         ),
       );
-      return yield* syncBoundary("Failed to project OMP history preview", () => {
-        const entry = journal.entries.find((candidate) => candidate.id === input.targetId);
-        if (entry === undefined) throw new Error("History target no longer exists");
-        const destination = OmpSessionContext.resolveTreeNavigationTarget(
-          entry,
-          journal.activeLeafId,
-        );
-        const context = OmpSessionContext.buildSessionContext(
-          journal.entries,
-          input.targetId,
-          undefined,
-          {
-            transcript: true,
-            collapseCompactedHistory: true,
-            keepDanglingToolCalls: true,
-          },
-        );
-        const blocks: History.HistoryPreviewBlock[] = [];
-        for (const message of context.messages) {
-          const normalized = normalizeMessage(message);
-          if (normalized !== undefined) blocks.push({ kind: "message", message: normalized });
-          else if (message.role === "branchSummary" || message.role === "compactionSummary") {
-            blocks.push({
-              kind: "context",
-              label: message.role === "branchSummary" ? "Branch summary" : "Compaction summary",
-              text: message.summary,
-            });
-          }
-        }
-        return {
-          targetId: input.targetId,
-          version: History.HistoryVersion.make(journal.version),
-          destinationLeafId:
-            destination.leafId === null ? null : History.HistoryEntryId.make(destination.leafId),
-          blocks,
-        } satisfies History.HistoryPreview;
-      });
+      return yield* syncBoundary("Failed to project OMP history preview", () =>
+        projectHistoryPreview(journal, input.targetId),
+      );
     }),
     loadCurrentModel: Effect.fn("OmpSession.readCurrentModel")(function* (chatId) {
       const { chat } = yield* chatSessionContext.resolve(chatId);
@@ -295,9 +264,60 @@ export const makeSwitchModel =
     return { provider: model.provider, id: model.id, name: model.name };
   };
 
+// History requests project the selected journal branch without opening a session.
+export const projectHistoryPreview = (
+  journal: Awaited<ReturnType<typeof OmpSessionLoader.loadSessionHistoryReadOnly>>,
+  targetId: History.HistoryEntryId,
+): History.HistoryPreview => {
+  const entry = journal.entries.find((candidate) => candidate.id === targetId);
+  if (entry === undefined) throw new Error("History target no longer exists");
+  const destination = OmpSessionContext.resolveTreeNavigationTarget(entry, journal.activeLeafId);
+  const context = OmpSessionContext.buildSessionContext(journal.entries, targetId, undefined, {
+    transcript: true,
+    collapseCompactedHistory: true,
+    keepDanglingToolCalls: true,
+  });
+  return {
+    targetId,
+    version: History.HistoryVersion.make(journal.version),
+    destinationLeafId:
+      destination.leafId === null ? null : History.HistoryEntryId.make(destination.leafId),
+    blocks: normalizeHistoryPreview(context.messages),
+  };
+};
+
+const decodeRecoveredPrompt = Schema.decodeUnknownSync(AgentPrompt);
+
 export const makeNavigateHistory =
-  (session: Pick<OmpAgentSession.AgentSession, "navigateTree">): OpenedSession["navigateHistory"] =>
+  (
+    session: Pick<OmpAgentSession.AgentSession, "navigateTree" | "sessionManager">,
+  ): OpenedSession["navigateHistory"] =>
   async (targetId, onReplaced) => {
+    const entry = session.sessionManager.getEntry(targetId);
+    const recovered =
+      entry === undefined
+        ? null
+        : OmpSessionContext.resolveTreeNavigationTarget(entry, session.sessionManager.getLeafId())
+            .draft;
+    let draft: AgentPrompt | null = null;
+    if (recovered !== null && (recovered.text.trim().length > 0 || recovered.images.length > 0)) {
+      try {
+        draft = decodeRecoveredPrompt({
+          text: recovered.text,
+          attachments: recovered.images.map(({ data, mimeType }, index) => ({
+            type: "image",
+            name: `restored-image-${index + 1}`,
+            data,
+            mimeType,
+          })),
+        });
+      } catch {
+        throw new AgentError({
+          message:
+            "Cannot restore this prompt because its images are unsupported, malformed, or exceed attachment limits. Choose another history point and attach supported images in a new prompt.",
+        });
+      }
+    }
     const result = await session.navigateTree(targetId, {
       summarize: false,
       allowAskReopen: false,
@@ -308,16 +328,7 @@ export const makeNavigateHistory =
     if (result.cancelled) return { kind: "cancelled" };
     return {
       kind: "applied",
-      draft:
-        result.editorText === undefined && result.editorImages === undefined
-          ? null
-          : {
-              text: result.editorText ?? "",
-              images: (result.editorImages ?? []).map(({ data, mimeType }) => ({
-                data,
-                mimeType,
-              })),
-            },
+      draft: result.editorText === undefined && result.editorImages === undefined ? null : draft,
     };
   };
 

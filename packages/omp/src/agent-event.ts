@@ -1,5 +1,6 @@
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session-events";
 import type { AgentEvent } from "@pico/contract/agent-event";
+import type { HistoryPreviewBlock } from "@pico/contract/agent-history";
 import * as Agent from "@pico/contract/agent-message";
 import { TodoPhases, type TodoState } from "@pico/contract/agent-runtime";
 import * as Option from "effect/Option";
@@ -105,6 +106,98 @@ const normalizeToolResultContent = (
     }
   });
 
+const skillPromptText = (message: Extract<SessionMessage, { readonly role: "custom" }>) =>
+  message.customType === "skill-prompt" &&
+  message.attribution === "user" &&
+  message.display === true &&
+  typeof message.details === "object" &&
+  message.details !== null &&
+  "prompt" in message.details &&
+  typeof message.details.prompt === "string"
+    ? message.details.prompt
+    : undefined;
+
+export const normalizeHistoryPreview = (
+  messages: ReadonlyArray<SessionMessage>,
+): HistoryPreviewBlock[] => {
+  const blocks: HistoryPreviewBlock[] = [];
+  for (const message of messages) {
+    switch (message.role) {
+      case "user":
+        blocks.push({
+          label: "User",
+          text:
+            typeof message.content === "string"
+              ? message.content
+              : message.content
+                  .map((part) => (part.type === "text" ? part.text : "[Image]"))
+                  .join("\n"),
+        });
+        break;
+      case "assistant": {
+        const parts: string[] = [];
+        for (const part of message.content) {
+          switch (part.type) {
+            case "text":
+              parts.push(part.text);
+              break;
+            case "thinking":
+              parts.push(part.thinking);
+              break;
+            case "image":
+              parts.push("[Image]");
+              break;
+            case "toolCall":
+              parts.push(`[Tool call] ${part.name}`);
+              break;
+            case "redactedThinking":
+            case "fallback":
+            case "anthropicServerTool":
+              break;
+            default: {
+              const exhaustive: never = part;
+              return exhaustive;
+            }
+          }
+        }
+        blocks.push({ label: "Assistant", text: parts.join("\n") });
+        break;
+      }
+      case "toolResult":
+        blocks.push({
+          label: `Tool · ${message.toolName}`,
+          text: message.content
+            .map((part) => (part.type === "text" ? part.text : "[Image result]"))
+            .join("\n"),
+        });
+        break;
+      case "custom": {
+        const text = skillPromptText(message);
+        if (text !== undefined) blocks.push({ label: "User", text });
+        break;
+      }
+      case "branchSummary":
+      case "compactionSummary":
+        blocks.push({
+          label: message.role === "branchSummary" ? "Branch summary" : "Compaction summary",
+          text: message.summary,
+        });
+        break;
+      case "developer":
+      case "bashExecution":
+      case "pythonExecution":
+      case "hookMessage":
+      case "fileMention":
+        break;
+      default: {
+        const exhaustive: never = message;
+        return exhaustive;
+      }
+    }
+  }
+  return blocks;
+};
+
 export function normalizeMessage(message: AssistantMessage): Agent.AgentAssistantMessage;
 export function normalizeMessage(message: SessionMessage): Agent.AgentMessage | undefined;
 export function normalizeMessage(message: SessionMessage): Agent.AgentMessage | undefined {
@@ -164,23 +257,16 @@ export function normalizeMessage(message: SessionMessage): Agent.AgentMessage | 
           ? { todoSnapshot: true as const }
           : {}),
       };
-    case "custom":
-      if (
-        message.customType === "skill-prompt" &&
-        message.attribution === "user" &&
-        message.display === true &&
-        typeof message.details === "object" &&
-        message.details !== null &&
-        "prompt" in message.details &&
-        typeof message.details.prompt === "string"
-      ) {
-        return {
-          role: "user",
-          content: [{ type: "text", text: message.details.prompt }],
-          timestamp: message.timestamp,
-        };
-      }
-      return undefined;
+    case "custom": {
+      const text = skillPromptText(message);
+      return text === undefined
+        ? undefined
+        : {
+            role: "user",
+            content: [{ type: "text", text }],
+            timestamp: message.timestamp,
+          };
+    }
     case "developer":
     case "bashExecution":
     case "pythonExecution":

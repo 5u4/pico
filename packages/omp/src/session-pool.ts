@@ -70,7 +70,7 @@ export interface OpenedSession {
   ) => Promise<
     | { readonly kind: "cancelled" }
     | { readonly kind: "busy" }
-    | { readonly kind: "applied"; readonly draft: History.HistoryDraft | null }
+    | { readonly kind: "applied"; readonly draft: AgentMessage.AgentPrompt | null }
   >;
   readonly flush: () => Promise<void>;
   readonly contextUsage: () => ContextUsage;

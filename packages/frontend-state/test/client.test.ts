@@ -383,11 +383,16 @@ describe("frontend state over WebSocket", () => {
             const state = make({ url: yield* endpoint });
             registry.mount(state.connection);
             yield* waitFor(registry, state.connection, (value) => value.kind === "active");
+            const firstRoute = yield* Queue.take(server.opened);
             const result = Atom.readable((get) =>
               kind === "history"
                 ? AsyncResult.map(get(state.history(firstChat)), (value) => value.matches[0] ?? "")
                 : AsyncResult.map(get(state.previewHistory(firstChat)), (value) => value.targetId),
             );
+            registry.mount(result);
+            yield* AtomRegistry.getResult(registry, state.transcript(firstChat), {
+              suspendOnWaiting: true,
+            });
             const select = (id: string, chatId = firstChat) => {
               if (kind === "history") registry.set(state.history(chatId), id);
               else registry.set(state.previewHistory(chatId), HistoryEntryId.make(id));
@@ -404,6 +409,18 @@ describe("frontend state over WebSocket", () => {
             yield* Deferred.await(old.returned);
             registry.set(state.ensure, undefined);
             yield* AtomRegistry.getResult(registry, state.ensure, { suspendOnWaiting: true });
+            assert.strictEqual(server.openCount(), 1);
+            assert.isTrue(Option.isNone(yield* Queue.poll(requests)));
+            assert.strictEqual(AsyncResult.getOrThrow(registry.get(result)), "latest");
+            yield* Queue.end(firstRoute.queue);
+            yield* waitFor(registry, state.connection, (value) => value.kind === "unavailable");
+            registry.set(state.ensure, undefined);
+            const secondRoute = yield* Queue.take(server.opened);
+            yield* AtomRegistry.getResult(registry, state.ensure, { suspendOnWaiting: true });
+            const latestRefresh = yield* Queue.take(requests);
+            assert.strictEqual(latestRefresh.input, "latest");
+            yield* Deferred.succeed(latestRefresh.reply, "latest");
+            yield* waitFor(registry, result, (value) => value._tag === "Success" && !value.waiting);
             assert.strictEqual(AsyncResult.getOrThrow(registry.get(result)), "latest");
 
             select("pending");
@@ -431,10 +448,26 @@ describe("frontend state over WebSocket", () => {
               new ApplicationError({ reason: "operation", message: "Superseded failure" }),
             );
             yield* Deferred.await(pending.returned);
+            yield* Queue.end(secondRoute.queue);
+            yield* waitFor(registry, state.connection, (value) => value.kind === "unavailable");
             registry.set(state.ensure, undefined);
+            const thirdRoute = yield* Queue.take(server.opened);
             yield* AtomRegistry.getResult(registry, state.ensure, { suspendOnWaiting: true });
+            const recoveredRefresh = yield* Queue.take(requests);
+            assert.strictEqual(recoveredRefresh.input, "recovered");
+            yield* Deferred.succeed(recoveredRefresh.reply, "recovered");
+            yield* waitFor(registry, result, (value) => value._tag === "Success" && !value.waiting);
             assert.strictEqual(AsyncResult.getOrThrow(registry.get(result)), "recovered");
 
+            const otherResult = Atom.readable((get) =>
+              kind === "history"
+                ? AsyncResult.map(get(state.history(secondChat)), (value) => value.matches[0] ?? "")
+                : AsyncResult.map(get(state.previewHistory(secondChat)), (value) => value.targetId),
+            );
+            registry.mount(otherResult);
+            yield* AtomRegistry.getResult(registry, state.transcript(secondChat), {
+              suspendOnWaiting: true,
+            });
             select("other-chat", secondChat);
             const other = yield* Queue.take(requests);
             select("burst-blocked");
@@ -447,38 +480,330 @@ describe("frontend state over WebSocket", () => {
             yield* waitFor(registry, result, (value) => value._tag === "Success" && !value.waiting);
             assert.strictEqual(AsyncResult.getOrThrow(registry.get(result)), "burst-49");
             yield* Deferred.succeed(other.reply, "other-chat");
-            const otherResult = Atom.readable((get) =>
-              kind === "history"
-                ? AsyncResult.map(get(state.history(secondChat)), (value) => value.matches[0] ?? "")
-                : AsyncResult.map(get(state.previewHistory(secondChat)), (value) => value.targetId),
-            );
             yield* waitFor(
               registry,
               otherResult,
               (value) => value._tag === "Success" && !value.waiting,
             );
             assert.strictEqual(AsyncResult.getOrThrow(registry.get(otherResult)), "other-chat");
+            yield* Queue.end(thirdRoute.queue);
+            yield* waitFor(registry, state.connection, (value) => value.kind === "unavailable");
             registry.set(state.ensure, undefined);
             yield* AtomRegistry.getResult(registry, state.ensure, { suspendOnWaiting: true });
+            const refreshed = [yield* Queue.take(requests), yield* Queue.take(requests)];
+            assert.deepStrictEqual(refreshed.map((request) => request.input).sort(), [
+              "burst-49",
+              "other-chat",
+            ]);
+            for (const request of refreshed) yield* Deferred.succeed(request.reply, request.input);
+            yield* waitFor(registry, result, (value) => value._tag === "Success" && !value.waiting);
+            yield* waitFor(
+              registry,
+              otherResult,
+              (value) => value._tag === "Success" && !value.waiting,
+            );
+            assert.strictEqual(AsyncResult.getOrThrow(registry.get(result)), "burst-49");
+            assert.strictEqual(AsyncResult.getOrThrow(registry.get(otherResult)), "other-chat");
             assert.isTrue(Option.isNone(yield* Queue.poll(requests)));
-            assert.deepStrictEqual(received, [
+            assert.deepStrictEqual(received.slice(0, 10), [
               "old",
+              "latest",
               "latest",
               "pending",
               "failed",
+              "recovered",
               "recovered",
               "other-chat",
               "burst-blocked",
               "burst-49",
             ]);
+            assert.deepStrictEqual(received.slice(10).sort(), ["burst-49", "other-chat"]);
             select("disposed");
             registry.dispose();
             yield* Effect.promise(() => new Promise<void>((resolve) => queueMicrotask(resolve)));
-            assert.strictEqual(received.length, 8);
+            assert.strictEqual(received.length, 12);
           }).pipe(Effect.scoped, Effect.provide(server.layer));
         }),
     );
   }
+
+  it.live(
+    "refreshes open history and previews on ordinary turns without losing newer streams or refreshing duplicate cuts",
+    () =>
+      Effect.gen(function* () {
+        const previews = yield* Queue.unbounded<{
+          readonly targetId: HistoryEntryId;
+          readonly reply: Deferred.Deferred<HistoryPreview>;
+          readonly returned: Deferred.Deferred<void>;
+        }>();
+        const targetId = HistoryEntryId.make("selected-entry");
+        let version = "initial";
+        let historyReads = 0;
+        let previewReads = 0;
+        const preview = (text: string): HistoryPreview => ({
+          targetId,
+          version: HistoryVersion.make(text),
+          destinationLeafId: targetId,
+          blocks: [{ label: "Assistant", text }],
+        });
+        const server = yield* snapshotFixture({
+          history: ({ query }) =>
+            Effect.sync(() => {
+              historyReads += 1;
+              return {
+                ...historySnapshot(query ?? "", version),
+                revision: HistoryRevision.make("initial-history"),
+              };
+            }),
+          previewHistory: ({ targetId }) =>
+            Effect.gen(function* () {
+              previewReads += 1;
+              const reply = yield* Deferred.make<HistoryPreview>();
+              const returned = yield* Deferred.make<void>();
+              yield* Queue.offer(previews, { targetId, reply, returned });
+              return yield* Deferred.await(reply).pipe(
+                Effect.ensuring(Deferred.succeed(returned, undefined)),
+              );
+            }),
+        });
+        yield* Effect.gen(function* () {
+          yield* Effect.addFinalizer(() => server.release);
+          const registry = yield* registryInScope;
+          const state = make({ url: yield* endpoint });
+          registry.mount(state.live(firstChat));
+          const route = yield* Queue.take(server.opened);
+          yield* Deferred.succeed(
+            (yield* Queue.take(server.requests)).reply,
+            snapshot([], undefined, {
+              publication: Publication.make(0),
+              run: { kind: "idle" },
+              assistant: [
+                {
+                  kind: "draft",
+                  messageId: orphanMessageId,
+                  blocks: [
+                    {
+                      type: "text-delta",
+                      messageId: orphanMessageId,
+                      contentIndex: 0,
+                      text: "Retained earlier draft",
+                    },
+                  ],
+                },
+              ],
+              tools: [],
+            }),
+          );
+          yield* waitFor(registry, state.connection, (value) => value.kind === "active");
+          const closeHistory = registry.mount(state.history(firstChat));
+          const closePreview = registry.mount(state.previewHistory(firstChat));
+          registry.set(state.history(firstChat), "needle");
+          registry.set(state.previewHistory(firstChat), targetId);
+          yield* Deferred.succeed((yield* Queue.take(previews)).reply, preview("initial"));
+          yield* AtomRegistry.getResult(registry, state.history(firstChat), {
+            suspendOnWaiting: true,
+          });
+          yield* AtomRegistry.getResult(registry, state.previewHistory(firstChat), {
+            suspendOnWaiting: true,
+          });
+          assert.deepStrictEqual(
+            AsyncResult.getOrThrow(registry.get(state.history(firstChat))).matches,
+            [HistoryEntryId.make("initial:needle")],
+          );
+          assert.deepStrictEqual(
+            AsyncResult.getOrThrow(registry.get(state.previewHistory(firstChat))).blocks,
+            [{ label: "Assistant", text: "initial" }],
+          );
+
+          registry.set(state.previewHistory(firstChat), targetId);
+          const obsolete = yield* Queue.take(previews);
+          version = "settled";
+          yield* Queue.offer(route.queue, {
+            chatId: firstChat,
+            publication: Publication.make(10),
+            event: { type: "message-settled", message: assistant(firstMessageId, "Settled turn") },
+          });
+          const append = yield* Queue.take(server.requests);
+          yield* Queue.offerAll(route.queue, [
+            {
+              chatId: firstChat,
+              publication: Publication.make(11),
+              event: { type: "run-started" },
+            },
+            {
+              chatId: firstChat,
+              publication: Publication.make(12),
+              event: {
+                type: "text-delta",
+                messageId: secondMessageId,
+                contentIndex: 0,
+                text: "Newer stream",
+              },
+            },
+          ]);
+          yield* waitFor(
+            registry,
+            state.live(firstChat),
+            (live) => draftBlock(live, secondMessageId, 0)?.text === "Newer stream",
+          );
+          const settled = snapshot([assistant(firstMessageId, "Settled turn")], undefined, {
+            publication: Publication.make(10),
+            run: { kind: "idle" },
+            assistant: [],
+            tools: [],
+          });
+          yield* Deferred.succeed(append.reply, settled);
+          yield* AtomRegistry.getResult(registry, state.transcript(firstChat), {
+            suspendOnWaiting: true,
+          });
+          yield* AtomRegistry.getResult(registry, state.history(firstChat), {
+            suspendOnWaiting: true,
+          });
+          assert.deepStrictEqual(
+            AsyncResult.getOrThrow(registry.get(state.history(firstChat))).matches,
+            [HistoryEntryId.make("settled:needle")],
+          );
+          const refreshed = yield* Queue.take(previews);
+          yield* Deferred.await(obsolete.returned);
+          assert.strictEqual(refreshed.targetId, "selected-entry");
+          assert.deepStrictEqual(registry.get(state.live(firstChat)).run, { kind: "running" });
+          assert.strictEqual(
+            draftBlock(registry.get(state.live(firstChat)), orphanMessageId, 0)?.text,
+            "Retained earlier draft",
+          );
+          assert.strictEqual(
+            draftBlock(registry.get(state.live(firstChat)), secondMessageId, 0)?.text,
+            "Newer stream",
+          );
+          assert.isFalse(registry.get(state.historyReplacing(firstChat)));
+          yield* Deferred.succeed(obsolete.reply, preview("obsolete"));
+          yield* Deferred.succeed(refreshed.reply, preview("settled"));
+          yield* AtomRegistry.getResult(registry, state.previewHistory(firstChat), {
+            suspendOnWaiting: true,
+          });
+          assert.deepStrictEqual(
+            AsyncResult.getOrThrow(registry.get(state.previewHistory(firstChat))).blocks,
+            [{ label: "Assistant", text: "settled" }],
+          );
+
+          yield* Queue.offerAll(route.queue, [
+            {
+              chatId: firstChat,
+              publication: Publication.make(10),
+              event: { type: "history-replaced" },
+            },
+            {
+              chatId: firstChat,
+              publication: Publication.make(13),
+              event: {
+                type: "text-delta",
+                messageId: secondMessageId,
+                contentIndex: 0,
+                text: " continues",
+              },
+            },
+          ]);
+          const duplicate = yield* Queue.take(server.requests);
+          yield* waitFor(
+            registry,
+            state.live(firstChat),
+            (live) => draftBlock(live, secondMessageId, 0)?.text === "Newer stream continues",
+          );
+          yield* Deferred.succeed(duplicate.reply, settled);
+          yield* AtomRegistry.getResult(registry, state.transcript(firstChat), {
+            suspendOnWaiting: true,
+          });
+          registry.refresh(state.transcript(firstChat));
+          const stale = yield* Queue.take(server.requests);
+          yield* Deferred.succeed(
+            stale.reply,
+            snapshot(
+              [],
+              undefined,
+              {
+                publication: Publication.make(5),
+                run: { kind: "idle" },
+                assistant: [],
+                tools: [],
+              },
+              HistoryRevision.make("obsolete-history"),
+            ),
+          );
+          yield* Deferred.await(stale.returned);
+          registry.refresh(state.transcript(firstChat));
+          yield* Deferred.succeed((yield* Queue.take(server.requests)).reply, settled);
+          yield* AtomRegistry.getResult(registry, state.transcript(firstChat), {
+            suspendOnWaiting: true,
+          });
+          assert.deepStrictEqual(
+            AsyncResult.getOrThrow(registry.get(state.transcript(firstChat))),
+            [assistant(firstMessageId, "Settled turn")],
+          );
+          assert.strictEqual(
+            draftBlock(registry.get(state.live(firstChat)), secondMessageId, 0)?.text,
+            "Newer stream continues",
+          );
+          assert.strictEqual(
+            draftBlock(registry.get(state.live(firstChat)), orphanMessageId, 0)?.text,
+            "Retained earlier draft",
+          );
+          assert.deepStrictEqual(registry.get(state.live(firstChat)).run, { kind: "running" });
+          assert.isFalse(registry.get(state.historyReplacing(firstChat)));
+          assert.strictEqual(historyReads, 2);
+          assert.strictEqual(previewReads, 3);
+
+          closeHistory();
+          closePreview();
+          yield* Effect.yieldNow;
+          version = "closed";
+          yield* Queue.offer(route.queue, {
+            chatId: firstChat,
+            publication: Publication.make(20),
+            event: { type: "message-settled", message: assistant(secondMessageId, "Closed turn") },
+          });
+          yield* Deferred.succeed(
+            (yield* Queue.take(server.requests)).reply,
+            snapshot(
+              [
+                assistant(firstMessageId, "Settled turn"),
+                assistant(secondMessageId, "Closed turn"),
+              ],
+              undefined,
+              {
+                publication: Publication.make(20),
+                run: { kind: "idle" },
+                assistant: [],
+                tools: [],
+              },
+            ),
+          );
+          yield* AtomRegistry.getResult(registry, state.transcript(firstChat), {
+            suspendOnWaiting: true,
+          });
+          assert.strictEqual(historyReads, 2);
+          assert.strictEqual(previewReads, 3);
+          registry.mount(state.history(firstChat));
+          registry.mount(state.previewHistory(firstChat));
+          yield* Deferred.succeed((yield* Queue.take(previews)).reply, preview("closed"));
+          yield* AtomRegistry.getResult(registry, state.history(firstChat), {
+            suspendOnWaiting: true,
+          });
+          yield* AtomRegistry.getResult(registry, state.previewHistory(firstChat), {
+            suspendOnWaiting: true,
+          });
+          assert.deepStrictEqual(
+            AsyncResult.getOrThrow(registry.get(state.history(firstChat))).matches,
+            [HistoryEntryId.make("closed:needle")],
+          );
+          assert.deepStrictEqual(
+            AsyncResult.getOrThrow(registry.get(state.previewHistory(firstChat))).blocks,
+            [{ label: "Assistant", text: "closed" }],
+          );
+          assert.strictEqual(historyReads, 3);
+          assert.strictEqual(previewReads, 4);
+        }).pipe(Effect.scoped, Effect.provide(server.layer));
+      }),
+  );
 
   it.live(
     "refreshes the mounted history query and invalidates pending previews after a remote replacement",
@@ -636,6 +961,101 @@ describe("frontend state over WebSocket", () => {
             AsyncResult.getOrThrow(registry.get(state.previewHistory(firstChat))).version,
             "closed",
           );
+        }).pipe(Effect.scoped, Effect.provide(server.layer));
+      }),
+  );
+
+  it.live(
+    "refreshes open history and previews after a reconnect with the same revision and publication",
+    () =>
+      Effect.gen(function* () {
+        let version = "initial";
+        let historyReads = 0;
+        let previewReads = 0;
+        const targetId = HistoryEntryId.make("selected-entry");
+        const server = yield* snapshotFixture({
+          history: ({ query }) =>
+            Effect.sync(() => {
+              historyReads += 1;
+              return {
+                ...historySnapshot(query ?? "", version),
+                revision: HistoryRevision.make("initial-history"),
+              };
+            }),
+          previewHistory: ({ targetId }) =>
+            Effect.sync((): HistoryPreview => {
+              previewReads += 1;
+              return {
+                targetId,
+                version: HistoryVersion.make(version),
+                destinationLeafId: targetId,
+                blocks: [{ label: "Assistant", text: version }],
+              };
+            }),
+        });
+        yield* Effect.gen(function* () {
+          yield* Effect.addFinalizer(() => server.release);
+          const registry = yield* registryInScope;
+          const state = make({ url: yield* endpoint });
+          registry.mount(state.live(firstChat));
+          const first = yield* Queue.take(server.opened);
+          yield* Deferred.succeed((yield* Queue.take(server.requests)).reply, snapshot());
+          yield* waitFor(registry, state.connection, (value) => value.kind === "active");
+          registry.mount(state.history(firstChat));
+          registry.mount(state.previewHistory(firstChat));
+          registry.set(state.history(firstChat), "needle");
+          registry.set(state.previewHistory(firstChat), targetId);
+          yield* AtomRegistry.getResult(registry, state.history(firstChat), {
+            suspendOnWaiting: true,
+          });
+          yield* AtomRegistry.getResult(registry, state.previewHistory(firstChat), {
+            suspendOnWaiting: true,
+          });
+          assert.deepStrictEqual(
+            AsyncResult.getOrThrow(registry.get(state.history(firstChat))).matches,
+            [HistoryEntryId.make("initial:needle")],
+          );
+          assert.deepStrictEqual(
+            AsyncResult.getOrThrow(registry.get(state.previewHistory(firstChat))).blocks,
+            [{ label: "Assistant", text: "initial" }],
+          );
+
+          yield* Queue.end(first.queue);
+          yield* waitFor(registry, state.connection, (value) => value.kind === "unavailable");
+          version = "reconnected";
+          registry.set(state.ensure, undefined);
+          yield* Queue.take(server.opened);
+          yield* Deferred.succeed(
+            (yield* Queue.take(server.requests)).reply,
+            snapshot([assistant(firstMessageId, "Turn completed while disconnected")]),
+          );
+          yield* waitFor(registry, state.connection, (value) => value.kind === "active");
+          yield* AtomRegistry.getResult(registry, state.history(firstChat), {
+            suspendOnWaiting: true,
+          });
+          yield* AtomRegistry.getResult(registry, state.previewHistory(firstChat), {
+            suspendOnWaiting: true,
+          });
+          assert.deepStrictEqual(
+            AsyncResult.getOrThrow(registry.get(state.history(firstChat))).matches,
+            [HistoryEntryId.make("reconnected:needle")],
+          );
+          assert.strictEqual(
+            AsyncResult.getOrThrow(registry.get(state.previewHistory(firstChat))).targetId,
+            "selected-entry",
+          );
+          assert.deepStrictEqual(
+            AsyncResult.getOrThrow(registry.get(state.previewHistory(firstChat))).blocks,
+            [{ label: "Assistant", text: "reconnected" }],
+          );
+          assert.deepStrictEqual(
+            AsyncResult.getOrThrow(registry.get(state.transcript(firstChat))),
+            [assistant(firstMessageId, "Turn completed while disconnected")],
+          );
+          assert.deepStrictEqual(registry.get(state.live(firstChat)).run, { kind: "idle" });
+          assert.isFalse(registry.get(state.historyReplacing(firstChat)));
+          assert.strictEqual(historyReads, 2);
+          assert.strictEqual(previewReads, 2);
         }).pipe(Effect.scoped, Effect.provide(server.layer));
       }),
   );

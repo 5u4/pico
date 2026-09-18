@@ -237,9 +237,7 @@ function HistoryPane({
                       className="rounded-card border border-border bg-panel p-3"
                       key={block.id}
                     >
-                      <h4 className="text-meta font-medium text-muted">
-                        {block.kind === "message" ? block.roleLabel : block.label}
-                      </h4>
+                      <h4 className="text-meta font-medium text-muted">{block.label}</h4>
                       <p className="mt-1 whitespace-pre-wrap text-label text-foreground [overflow-wrap:anywhere]">
                         {block.text.length > 0 ? block.text : "(No text)"}
                       </p>

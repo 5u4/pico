@@ -510,6 +510,11 @@ export const make = ({ url }: { readonly url: string }) => {
                 cut?.generation === generation &&
                 cut.replacement !== undefined
               );
+            const historyChanged =
+              replacing ||
+              cut === undefined ||
+              cut.generation !== generation ||
+              publication > cut.publication;
             let baseline = pending?.baseline ?? state.live;
             if (replacing) baseline = replaceHistory(baseline);
             else
@@ -533,7 +538,7 @@ export const make = ({ url }: { readonly url: string }) => {
               ...state,
               live,
               historyReplacing: false,
-              historyEpoch: state.historyEpoch + Number(replacing),
+              historyEpoch: state.historyEpoch + Number(historyChanged),
               transcriptResult: AsyncResult.success(snapshot),
             };
           }),

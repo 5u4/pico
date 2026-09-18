@@ -260,19 +260,11 @@ export interface HistoryItemPresentation {
   readonly preview: boolean;
 }
 
-export type HistoryPreviewBlockPresentation =
-  | {
-      readonly kind: "message";
-      readonly id: string;
-      readonly roleLabel: string;
-      readonly text: string;
-    }
-  | {
-      readonly kind: "context";
-      readonly id: string;
-      readonly label: string;
-      readonly text: string;
-    };
+export interface HistoryPreviewBlockPresentation {
+  readonly id: string;
+  readonly label: string;
+  readonly text: string;
+}
 
 export type HistoryPreviewPresentation =
   | { readonly kind: "idle"; readonly label: string }

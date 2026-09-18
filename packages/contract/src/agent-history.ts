@@ -1,6 +1,5 @@
 import * as Schema from "effect/Schema";
 import { Publication } from "./agent-event.ts";
-import { AgentMessage } from "./agent-message.ts";
 import { ChatId } from "./chat-model.ts";
 
 export const HistoryEntryId = Schema.NonEmptyString.pipe(Schema.brand("HistoryEntryId"));
@@ -35,14 +34,10 @@ export const HistorySnapshot = Schema.Struct({
 });
 export type HistorySnapshot = typeof HistorySnapshot.Type;
 
-export const HistoryPreviewBlock = Schema.Union([
-  Schema.Struct({ kind: Schema.Literal("message"), message: AgentMessage }),
-  Schema.Struct({
-    kind: Schema.Literal("context"),
-    label: Schema.NonEmptyString,
-    text: Schema.String,
-  }),
-]);
+export const HistoryPreviewBlock = Schema.Struct({
+  label: Schema.String,
+  text: Schema.String,
+});
 export type HistoryPreviewBlock = typeof HistoryPreviewBlock.Type;
 
 export const HistoryPreview = Schema.Struct({
@@ -52,19 +47,6 @@ export const HistoryPreview = Schema.Struct({
   blocks: Schema.Array(HistoryPreviewBlock),
 });
 export type HistoryPreview = typeof HistoryPreview.Type;
-
-export const HistoryDraftImage = Schema.Struct({
-  data: Schema.NonEmptyString,
-  mimeType: Schema.NonEmptyString,
-  name: Schema.optional(Schema.NonEmptyString),
-});
-export type HistoryDraftImage = typeof HistoryDraftImage.Type;
-
-export const HistoryDraft = Schema.Struct({
-  text: Schema.String,
-  images: Schema.Array(HistoryDraftImage),
-});
-export type HistoryDraft = typeof HistoryDraft.Type;
 
 export const NavigateHistoryConflictReason = Schema.Literals([
   "version-mismatch",
