@@ -65,7 +65,7 @@ Context-estimate failures leave loaded history readable and show an error in the
 
 Context details use a controlled native popover above the footer, outside the composer's clipping form. The card stays mounted through refreshes and closes on chat selection. Disconnected values are labeled as the last snapshot. Category estimates may not add up exactly to the provider-derived total.
 
-The native model select at the lower left changes only the current chat through the same application operation as Discord `/switch`. It does not update the workspace default. Opening the picker on a new draft creates the chat and its configured worktree without sending the draft. This gives selection a durable chat identity before the first message.
+The model picker at the lower left changes only the current chat through the same application operation as Discord `/switch`. It does not update the workspace default. Opening the picker on a new draft creates the chat and its configured worktree without sending the draft. This gives selection a durable chat identity before the first message.
 
 Cold reads and session opening respect the latest intentional model change. A trailing temporary retry fallback does not become durable; Pico restores the latest non-fallback role selection.
 
