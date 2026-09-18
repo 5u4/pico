@@ -1,7 +1,12 @@
 import { useAtomValue } from "@effect/atom-react/Hooks";
 import { RegistryContext } from "@effect/atom-react/RegistryContext";
-import type { ModelInfo, ModelRef, ShakeMode, ShakeResult } from "@pico/contract/agent-runtime";
-import type { TranscriptSnapshot } from "@pico/contract/agent-snapshot";
+import type {
+  ContextUsage,
+  ModelInfo,
+  ModelRef,
+  ShakeMode,
+  ShakeResult,
+} from "@pico/contract/agent-runtime";
 import { CreateWorkspace } from "@pico/contract/application";
 import type { Chat, ChatId } from "@pico/contract/chat-model";
 import { GitError, WorkspaceBindingInvalid } from "@pico/contract/errors";
@@ -121,7 +126,7 @@ const modelValue = (model: ModelRef) => JSON.stringify([model.provider, model.id
 const modelLabel = (model: ModelInfo) => `${model.name || model.id} · ${model.provider}`;
 
 function presentContextUsage(
-  result: AsyncResult.AsyncResult<TranscriptSnapshot["contextUsage"], unknown> | undefined,
+  result: AsyncResult.AsyncResult<ContextUsage, unknown> | undefined,
   connection: FrontendState.Connection,
 ): ContextUsagePresentation {
   if (!result) {
@@ -144,7 +149,7 @@ function presentContextUsage(
           description: "Reading the current context estimate.",
         };
   }
-  if (result._tag === "Failure" || result.value.kind === "error") {
+  if (result._tag === "Failure") {
     return {
       kind: "error",
       label: "Context estimate unavailable",
@@ -159,8 +164,7 @@ function presentContextUsage(
     return {
       kind: "unavailable",
       label: "Context estimate unavailable",
-      description:
-        "No context estimate is available for this chat. Viewing history does not open an agent session.",
+      description: "This session did not provide a context estimate.",
     };
   }
   const fraction = usage.usedTokens / usage.contextWindow;
@@ -567,6 +571,13 @@ export function WorkspaceChat({
   const chatId =
     conversationEntry?.target.kind === "chat" ? conversationEntry.target.chat.id : null;
   const schedulesHref = router.buildLocation({ to: "/schedules" }).href;
+  const visibleChatId =
+    page.kind === "chat" &&
+    content.kind === "ready" &&
+    content.target.kind === "chat" &&
+    content.target.chat.archivedAt === null
+      ? content.target.chat.id
+      : null;
   const returnToChatHref = !returnEntry
     ? router.buildLocation({ to: "/" }).href
     : returnEntry.target.kind === "chat"
@@ -606,6 +617,51 @@ export function WorkspaceChat({
     setShakeFeedback(null);
   }, [visit, selected?.key]);
 
+  useEffect(() => {
+    if (!state || visibleChatId === null) return;
+    const observed = state.observeContext(visibleChatId);
+    let hiddenByPagehide = false;
+    let release: (() => void) | undefined;
+
+    const mount = () => {
+      if (hiddenByPagehide || document.visibilityState !== "visible" || release !== undefined)
+        return;
+      release = registry.mount(observed);
+    };
+    const unmount = () => {
+      if (release === undefined) return;
+      const mounted = release;
+      release = undefined;
+      mounted();
+      registry.refresh(observed);
+    };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        hiddenByPagehide = false;
+        mount();
+      } else unmount();
+    };
+    const onPageHide = () => {
+      hiddenByPagehide = true;
+      unmount();
+    };
+    const onPageShow = (event: PageTransitionEvent) => {
+      if (!event.persisted) return;
+      hiddenByPagehide = false;
+      mount();
+    };
+
+    mount();
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    window.addEventListener("pagehide", onPageHide);
+    window.addEventListener("pageshow", onPageShow);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      window.removeEventListener("pagehide", onPageHide);
+      window.removeEventListener("pageshow", onPageShow);
+      unmount();
+    };
+  }, [state, registry, visibleChatId]);
   const updateNavigation = (change: (current: TabState) => TabState) => {
     const current = navigationRef.current;
     const next = change(current);
@@ -1935,8 +1991,8 @@ export function WorkspaceChat({
           }
           onContextDetailsOpenChange={(open) => {
             setContextDetailsKey(open ? (selected?.key ?? null) : undefined);
-            if (open && state && chatId && registry.get(state.connection).kind === "active") {
-              registry.refresh(state.transcript(chatId));
+            if (open && state && visibleChatId) {
+              registry.set(state.contextUsage(visibleChatId), undefined);
             }
           }}
           contextLabel={

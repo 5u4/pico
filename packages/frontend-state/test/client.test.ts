@@ -118,6 +118,7 @@ const fixture = Effect.fnUntraced(function* (
         | "createChat"
         | "closeChat"
         | "shake"
+        | "contextUsage"
         | "availableModels"
         | "switchModel"
       >
@@ -440,18 +441,17 @@ describe("frontend state over WebSocket", () => {
         skillsTokens: 1_000,
       };
       const server = yield* fixture({
-        transcript: (chatId) =>
-          Effect.sync(() =>
-            snapshot([message], chatId === firstChat ? usage : { kind: "unavailable" }),
-          ),
+        transcript: () => Effect.sync(() => snapshot([message], { kind: "unavailable" })),
+        contextUsage: (chatId) =>
+          Effect.sync(() => (chatId === firstChat ? usage : ({ kind: "unavailable" } as const))),
         sendMessage: () => Effect.succeed({ kind: "handled" }),
         abort: () => Effect.void,
       });
       yield* Effect.gen(function* () {
         const state = make({ url: yield* endpoint });
         const registry = yield* registryInScope;
-        registry.mount(state.contextUsage(firstChat));
-        registry.mount(state.contextUsage(secondChat));
+        registry.mount(state.observeContext(firstChat));
+        registry.mount(state.observeContext(secondChat));
         const route = yield* Queue.take(server.opened);
         yield* waitFor(registry, state.contextUsage(firstChat), AsyncResult.isSuccess);
         yield* waitFor(registry, state.contextUsage(secondChat), AsyncResult.isSuccess);
@@ -479,10 +479,7 @@ describe("frontend state over WebSocket", () => {
           systemContextTokens: 2_000,
           skillsTokens: 1_000,
         };
-        yield* Queue.offer(route.queue, {
-          chatId: firstChat,
-          event: { type: "context-invalidated" },
-        });
+        registry.set(state.contextUsage(firstChat), undefined);
         yield* waitFor(
           registry,
           state.contextUsage(firstChat),
@@ -507,7 +504,312 @@ describe("frontend state over WebSocket", () => {
           draftBlock(registry.get(state.live(firstChat)), firstMessageId, 0)?.text,
           "keep this draft",
         );
-        assert.strictEqual(registry.get(state.live(firstChat)).run.kind, "idle");
+        assert.strictEqual(registry.get(state.live(firstChat)).run.kind, "running");
+      }).pipe(Effect.scoped, Effect.provide(server.layer));
+    }),
+  );
+
+  it.live("keeps newer context results when an older transcript response settles later", () =>
+    Effect.gen(function* () {
+      let usage: ContextUsage = {
+        kind: "available",
+        contextWindow: 200_000,
+        usedTokens: 12_345,
+        messagesTokens: 10_000,
+        systemPromptTokens: 800,
+        systemToolsTokens: 700,
+        systemContextTokens: 500,
+        skillsTokens: 345,
+      };
+      const transcriptRequests = yield* Queue.unbounded<{
+        readonly reply: Deferred.Deferred<TranscriptSnapshot>;
+        readonly returned: Deferred.Deferred<void>;
+      }>();
+      const server = yield* fixture({
+        transcript: () =>
+          Effect.gen(function* () {
+            const reply = yield* Deferred.make<TranscriptSnapshot>();
+            const returned = yield* Deferred.make<void>();
+            yield* Queue.offer(transcriptRequests, { reply, returned });
+            return yield* Deferred.await(reply).pipe(
+              Effect.ensuring(Deferred.succeed(returned, undefined)),
+              Effect.uninterruptible,
+            );
+          }),
+        contextUsage: () => Effect.sync(() => usage),
+        sendMessage: () => Effect.succeed({ kind: "handled" }),
+        abort: () => Effect.void,
+      });
+      yield* Effect.gen(function* () {
+        const state = make({ url: yield* endpoint });
+        const registry = yield* registryInScope;
+        registry.mount(state.observeContext(firstChat));
+        registry.mount(state.transcript(firstChat));
+
+        const initial = yield* Queue.take(transcriptRequests);
+        yield* Deferred.succeed(initial.reply, snapshot([message], { kind: "unavailable" }));
+        yield* Deferred.await(initial.returned);
+        yield* waitFor(
+          registry,
+          state.contextUsage(firstChat),
+          (value) =>
+            value._tag === "Success" &&
+            !value.waiting &&
+            value.value.kind === "available" &&
+            value.value.usedTokens === 12_345,
+        );
+
+        usage = {
+          kind: "available",
+          contextWindow: 200_000,
+          usedTokens: 6_000,
+          messagesTokens: 4_500,
+          systemPromptTokens: 700,
+          systemToolsTokens: 400,
+          systemContextTokens: 250,
+          skillsTokens: 150,
+        };
+        registry.refresh(state.transcript(firstChat));
+        const stale = yield* Queue.take(transcriptRequests);
+        registry.set(state.contextUsage(firstChat), undefined);
+        yield* waitFor(
+          registry,
+          state.contextUsage(firstChat),
+          (value) =>
+            value._tag === "Success" &&
+            !value.waiting &&
+            value.value.kind === "available" &&
+            value.value.usedTokens === 6_000,
+        );
+
+        yield* Deferred.succeed(stale.reply, snapshot([message], { kind: "unavailable" }));
+        yield* Deferred.await(stale.returned);
+        assert.deepStrictEqual(
+          AsyncResult.getOrThrow(registry.get(state.contextUsage(firstChat))),
+          usage,
+        );
+      }).pipe(Effect.scoped, Effect.provide(server.layer));
+    }),
+  );
+
+  it.live("consumes connection readiness in the initial context read", () =>
+    Effect.gen(function* () {
+      const reads: Array<ChatId> = [];
+      const server = yield* fixture({
+        contextUsage: (chatId) =>
+          Effect.sync(() => {
+            reads.push(chatId);
+            return { kind: "unavailable" } as const;
+          }),
+        transcript: () => Effect.succeed(snapshot()),
+        sendMessage: () => Effect.succeed({ kind: "handled" }),
+        abort: () => Effect.void,
+      });
+      yield* Effect.gen(function* () {
+        const state = make({ url: yield* endpoint });
+        const registry = yield* registryInScope;
+        registry.mount(state.observeContext(firstChat));
+        yield* waitFor(
+          registry,
+          state.contextUsage(firstChat),
+          (value) => value._tag === "Success" && !value.waiting,
+        );
+        yield* Effect.sleep("50 millis");
+        assert.deepStrictEqual(
+          AsyncResult.getOrThrow(registry.get(state.contextUsage(firstChat))),
+          { kind: "unavailable" },
+        );
+        assert.deepStrictEqual(reads, [firstChat]);
+      }).pipe(Effect.scoped, Effect.provide(server.layer));
+    }),
+  );
+
+  it.live("coalesces context refresh requests into one follow-up and never overlaps calls", () =>
+    Effect.gen(function* () {
+      let inFlight = 0;
+      let maxInFlight = 0;
+      const requests = yield* Queue.unbounded<Deferred.Deferred<ContextUsage>>();
+      const server = yield* fixture({
+        transcript: () => Effect.succeed(snapshot()),
+        contextUsage: () =>
+          Effect.gen(function* () {
+            inFlight += 1;
+            maxInFlight = Math.max(maxInFlight, inFlight);
+            const reply = yield* Deferred.make<ContextUsage>();
+            yield* Queue.offer(requests, reply);
+            return yield* Deferred.await(reply).pipe(
+              Effect.ensuring(
+                Effect.sync(() => {
+                  inFlight -= 1;
+                }),
+              ),
+              Effect.uninterruptible,
+            );
+          }),
+        sendMessage: () => Effect.succeed({ kind: "handled" }),
+        abort: () => Effect.void,
+      });
+      yield* Effect.gen(function* () {
+        const state = make({ url: yield* endpoint });
+        const registry = yield* registryInScope;
+        registry.mount(state.observeContext(firstChat));
+        const first = yield* Queue.take(requests);
+        registry.set(state.contextUsage(firstChat), undefined);
+        registry.set(state.contextUsage(firstChat), undefined);
+        registry.set(state.contextUsage(firstChat), undefined);
+        yield* Deferred.succeed(first, { kind: "unavailable" });
+        const second = yield* Queue.take(requests);
+        assert.strictEqual(maxInFlight, 1);
+        yield* Deferred.succeed(second, {
+          kind: "available",
+          contextWindow: 100_000,
+          usedTokens: 777,
+          messagesTokens: 500,
+          systemPromptTokens: 100,
+          systemToolsTokens: 100,
+          systemContextTokens: 50,
+          skillsTokens: 27,
+        });
+        yield* waitFor(
+          registry,
+          state.contextUsage(firstChat),
+          (value) =>
+            value._tag === "Success" &&
+            !value.waiting &&
+            value.value.kind === "available" &&
+            value.value.usedTokens === 777,
+        );
+        yield* Effect.yieldNow;
+        assert.isTrue(Option.isNone(yield* Queue.poll(requests)));
+      }).pipe(Effect.scoped, Effect.provide(server.layer));
+    }),
+  );
+
+  it.live("ignores stale context replies from a released observer", () =>
+    Effect.gen(function* () {
+      const firstRequests = yield* Queue.unbounded<Deferred.Deferred<ContextUsage>>();
+      const secondRequests = yield* Queue.unbounded<Deferred.Deferred<ContextUsage>>();
+      const server = yield* fixture({
+        transcript: () => Effect.succeed(snapshot()),
+        contextUsage: (chatId) =>
+          Effect.gen(function* () {
+            const reply = yield* Deferred.make<ContextUsage>();
+            yield* Queue.offer(chatId === firstChat ? firstRequests : secondRequests, reply);
+            return yield* Deferred.await(reply).pipe(Effect.uninterruptible);
+          }),
+        sendMessage: () => Effect.succeed({ kind: "handled" }),
+        abort: () => Effect.void,
+      });
+      yield* Effect.gen(function* () {
+        const state = make({ url: yield* endpoint });
+        const registry = yield* registryInScope;
+        const releaseFirst = registry.mount(state.observeContext(firstChat));
+        registry.mount(state.contextUsage(firstChat));
+        const stale = yield* Queue.take(firstRequests);
+
+        releaseFirst();
+        registry.refresh(state.observeContext(firstChat));
+
+        const releaseSecond = registry.mount(state.observeContext(secondChat));
+        registry.mount(state.contextUsage(secondChat));
+        const fresh = yield* Queue.take(secondRequests);
+        yield* Deferred.succeed(fresh, {
+          kind: "available",
+          contextWindow: 100_000,
+          usedTokens: 444,
+          messagesTokens: 300,
+          systemPromptTokens: 50,
+          systemToolsTokens: 50,
+          systemContextTokens: 30,
+          skillsTokens: 14,
+        });
+        yield* waitFor(
+          registry,
+          state.contextUsage(secondChat),
+          (value) =>
+            value._tag === "Success" &&
+            !value.waiting &&
+            value.value.kind === "available" &&
+            value.value.usedTokens === 444,
+        );
+
+        yield* Deferred.succeed(stale, {
+          kind: "available",
+          contextWindow: 100_000,
+          usedTokens: 99_999,
+          messagesTokens: 90_000,
+          systemPromptTokens: 2_000,
+          systemToolsTokens: 2_000,
+          systemContextTokens: 3_000,
+          skillsTokens: 2_999,
+        });
+        yield* Effect.yieldNow;
+        const first = registry.get(state.contextUsage(firstChat));
+        assert.isFalse(first.waiting);
+        if (first._tag === "Success" && first.value.kind === "available") {
+          assert.notStrictEqual(first.value.usedTokens, 99_999);
+        }
+
+        releaseSecond();
+        registry.refresh(state.observeContext(secondChat));
+      }).pipe(Effect.scoped, Effect.provide(server.layer));
+    }),
+  );
+
+  it.live("reconnects context reads only for the mounted chat", () =>
+    Effect.gen(function* () {
+      let recordingReconnect = false;
+      const reconnectReads: Array<ChatId> = [];
+      const reconnectFirst = yield* Deferred.make<ChatId>();
+      const server = yield* fixture({
+        transcript: () => Effect.succeed(snapshot([message])),
+        contextUsage: (chatId) =>
+          Effect.gen(function* () {
+            if (recordingReconnect) {
+              reconnectReads.push(chatId);
+              yield* Deferred.succeed(reconnectFirst, chatId);
+            }
+            return { kind: "unavailable" } as const;
+          }),
+        sendMessage: () => Effect.succeed({ kind: "handled" }),
+        abort: () => Effect.void,
+      });
+      yield* Effect.gen(function* () {
+        const state = make({ url: yield* endpoint });
+        const registry = yield* registryInScope;
+        registry.mount(state.transcript(firstChat));
+        registry.mount(state.transcript(secondChat));
+        registry.mount(state.observeContext(secondChat));
+        registry.mount(state.contextUsage(secondChat));
+        const first = yield* Queue.take(server.opened);
+        yield* waitFor(registry, state.connection, (value) => value.kind === "active");
+        yield* waitFor(
+          registry,
+          state.transcript(firstChat),
+          (value) => AsyncResult.isSuccess(value) && !value.waiting,
+        );
+        yield* waitFor(
+          registry,
+          state.transcript(secondChat),
+          (value) => AsyncResult.isSuccess(value) && !value.waiting,
+        );
+        yield* waitFor(
+          registry,
+          state.contextUsage(secondChat),
+          (value) => value._tag === "Success" && !value.waiting,
+        );
+
+        yield* Queue.end(first.queue);
+        yield* waitFor(registry, state.connection, (value) => value.kind === "unavailable");
+
+        recordingReconnect = true;
+        registry.set(state.ensure, undefined);
+        const second = yield* Queue.take(server.opened);
+        assert.strictEqual(yield* Deferred.await(reconnectFirst), secondChat);
+        yield* waitFor(registry, state.connection, (value) => value.kind === "active");
+        assert.isTrue(reconnectReads.length > 0);
+        assert.isTrue(reconnectReads.every((chatId) => chatId === secondChat));
+        yield* Queue.end(second.queue);
       }).pipe(Effect.scoped, Effect.provide(server.layer));
     }),
   );
@@ -1438,6 +1740,7 @@ describe("frontend state over WebSocket", () => {
       };
       const server = yield* fixture({
         transcript: () => Effect.sync(() => snapshot([], usage)),
+        contextUsage: () => Effect.sync(() => usage),
         sendMessage: () =>
           Effect.gen(function* () {
             yield* Deferred.succeed(sent, undefined);
@@ -1456,7 +1759,7 @@ describe("frontend state over WebSocket", () => {
       yield* Effect.gen(function* () {
         const state = make({ url: yield* endpoint });
         const registry = yield* registryInScope;
-        registry.mount(state.contextUsage(firstChat));
+        registry.mount(state.observeContext(firstChat));
         yield* waitFor(registry, state.connection, (value) => value.kind === "active");
         registry.set(state.send(firstChat), prompt("keep working"));
         yield* Deferred.await(sent);
@@ -1504,7 +1807,8 @@ describe("frontend state over WebSocket", () => {
       const releaseElide = yield* Deferred.make<ShakeResult, ApplicationError>();
       const releaseThinking = yield* Deferred.make<ShakeResult>();
       const ready = yield* Deferred.make<void>();
-      let current = snapshot();
+      const current = snapshot();
+      let usage: ContextUsage = { kind: "unavailable" };
       const rejection = new ApplicationError({
         reason: "operation",
         message: "Elide failed",
@@ -1517,6 +1821,7 @@ describe("frontend state over WebSocket", () => {
       const server = yield* fixture(
         {
           transcript: () => Effect.sync(() => current),
+          contextUsage: () => Effect.sync(() => usage),
           sendMessage: () => Effect.succeed({ kind: "handled" }),
           abort: () => Effect.void,
           shake: (_chatId, mode) =>
@@ -1541,19 +1846,37 @@ describe("frontend state over WebSocket", () => {
           state.shake(registry, firstChat, "thinking"),
         );
         yield* Queue.take(shaking);
+        registry.mount(state.observeContext(firstChat));
         registry.mount(state.contextUsage(firstChat));
-        yield* AtomRegistry.getResult(registry, state.contextUsage(firstChat), {
-          suspendOnWaiting: true,
-        });
-        current = { ...snapshot(), contextUsage: { kind: "error" } };
+        yield* waitFor(
+          registry,
+          state.contextUsage(firstChat),
+          (value) =>
+            value._tag === "Success" && !value.waiting && value.value.kind === "unavailable",
+        );
         yield* Deferred.fail(releaseElide, rejection);
         const failed = yield* Fiber.await(elideInvocation);
         if (failed._tag !== "Failure") return yield* Effect.die("Expected Shake rejection");
         assert.deepStrictEqual(Option.getOrNull(Cause.findErrorOption(failed.cause)), rejection);
+        usage = {
+          kind: "available",
+          contextWindow: 100_000,
+          usedTokens: 42_000,
+          messagesTokens: 30_000,
+          systemPromptTokens: 3_000,
+          systemToolsTokens: 4_000,
+          systemContextTokens: 2_000,
+          skillsTokens: 3_000,
+        };
+        registry.set(state.contextUsage(firstChat), undefined);
         yield* waitFor(
           registry,
           state.contextUsage(firstChat),
-          (value) => value._tag === "Success" && !value.waiting && value.value.kind === "error",
+          (value) =>
+            value._tag === "Success" &&
+            !value.waiting &&
+            value.value.kind === "available" &&
+            value.value.usedTokens === 42_000,
         );
         yield* Deferred.succeed(releaseThinking, thinking);
         assert.deepStrictEqual(yield* Fiber.join(thinkingInvocation), thinking);
@@ -2467,6 +2790,8 @@ describe("frontend state over WebSocket", () => {
         let current = snapshot([message]);
         let workspace = webWorkspace;
         let title = "Before disconnect";
+        const contextFromSnapshot = (): ContextUsage =>
+          current.contextUsage.kind === "error" ? { kind: "unavailable" } : current.contextUsage;
         const server = yield* fixture({
           listWorkspaces: () => Effect.sync(() => [workspace]),
           listChats: () =>
@@ -2492,6 +2817,7 @@ describe("frontend state over WebSocket", () => {
                 Effect.uninterruptible,
               );
             }),
+          contextUsage: () => Effect.sync(contextFromSnapshot),
           sendMessage: () =>
             Effect.gen(function* () {
               sends++;
@@ -2522,6 +2848,7 @@ describe("frontend state over WebSocket", () => {
           const registry = yield* registryInScope;
           registry.mount(state.workspaces);
           registry.mount(state.chats(webWorkspace.id));
+          registry.mount(state.observeContext(firstChat));
           registry.mount(state.live(firstChat));
           const first = yield* Queue.take(server.opened);
           yield* waitFor(registry, state.connection, (value) => value.kind === "active");
@@ -2625,9 +2952,18 @@ describe("frontend state over WebSocket", () => {
             AsyncResult.getOrThrow(registry.get(state.chats(webWorkspace.id)))[0]?.title,
             title,
           );
+          yield* waitFor(
+            registry,
+            state.contextUsage(firstChat),
+            (value) =>
+              value._tag === "Success" &&
+              !value.waiting &&
+              value.value.kind === "available" &&
+              value.value.usedTokens === 1234,
+          );
           assert.deepStrictEqual(
             AsyncResult.getOrThrow(registry.get(state.contextUsage(firstChat))),
-            current.contextUsage,
+            contextFromSnapshot(),
           );
           const fragment = registry.get(state.live(firstChat)).assistant.get(orphanMessageId);
           assert.strictEqual(fragment?.kind === "draft" ? fragment.phase : undefined, "retained");

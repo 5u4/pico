@@ -25,6 +25,7 @@ import * as Logger from "effect/Logger";
 import * as Path from "effect/Path";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 import { normalizeAgentEvent, normalizeTodo, normalizeTranscript } from "./agent-event.ts";
 import { makeSessionPool, type SessionFactory } from "./session-pool.ts";
 
@@ -787,6 +788,54 @@ describe("AgentRuntime", () => {
     ),
   );
 
+  it.effect("reacquires context sessions after the ten minute eviction window", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        let acquisitions = 0;
+        const pool = yield* makeSessionPool({
+          factory: {
+            open: () => {
+              acquisitions += 1;
+              return Effect.succeed({
+                session: {
+                  isStreaming: false,
+                  waitForIdle: async () => {},
+                  settleInFlightMessagePersistence: () => Promise.resolve(),
+                  abort: () => Promise.resolve(),
+                  beginDispose: () => {},
+                  dispose: () => Promise.resolve(),
+                },
+                askBtw: () => Promise.reject(new Error("unexpected side question")),
+                switchModel: () => Promise.reject(new Error("unexpected model switch")),
+                flush: () => Promise.resolve(),
+                historyBoundary: () => "stable",
+                settleHistory: () => Promise.resolve(),
+                sendPrompt: () => Promise.resolve(admitted),
+                shake: async (mode) => shakeResult(mode),
+                appendAssistantMessage: () => Promise.resolve(),
+                currentModel: () => null,
+                contextUsage: () => ({ kind: "unavailable" }),
+                unsubscribe: () => {},
+              });
+            },
+          },
+          loadCurrentModel: () => Effect.succeed(null),
+          loadTranscript: () =>
+            Effect.succeed({ messages: [], todo: { kind: "ready", phases: [] } }),
+        });
+
+        yield* pool.contextUsage(chatId);
+        assert.strictEqual(acquisitions, 1);
+
+        yield* TestClock.adjust("10 minutes");
+        yield* Effect.yieldNow;
+        yield* TestClock.adjust("1 millis");
+
+        yield* pool.contextUsage(chatId);
+        assert.strictEqual(acquisitions, 2);
+      }),
+    ),
+  );
   it.effect("closes and evicts an existing session without creating one", () =>
     Effect.scoped(
       Effect.gen(function* () {

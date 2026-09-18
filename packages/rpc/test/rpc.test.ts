@@ -7,7 +7,7 @@ import { assert, describe, it } from "@effect/vitest";
 import type * as AgentEvent from "@pico/contract/agent-event";
 import { Publication } from "@pico/contract/agent-event";
 import * as AgentMessage from "@pico/contract/agent-message";
-import type { ShakeResult } from "@pico/contract/agent-runtime";
+import type { ContextUsage, ShakeResult } from "@pico/contract/agent-runtime";
 import type { TranscriptSnapshot } from "@pico/contract/agent-snapshot";
 import { Application } from "@pico/contract/application";
 import * as Chat from "@pico/contract/chat-model";
@@ -113,6 +113,16 @@ const transcript: TranscriptSnapshot = {
   todo: { kind: "ready", phases: [] },
   runtime: { publication: Publication.make(0), run: { kind: "idle" }, assistant: [], tools: [] },
   currentModel: null,
+};
+const contextSnapshot: ContextUsage = {
+  kind: "available",
+  contextWindow: 200_000,
+  usedTokens: 12_345,
+  systemPromptTokens: 1_000,
+  systemToolsTokens: 2_000,
+  systemContextTokens: 3_000,
+  skillsTokens: 4_000,
+  messagesTokens: 2_345,
 };
 const firstEvent: AgentEvent.AgentEventEnvelope = {
   chatId: firstChatId,
@@ -433,6 +443,7 @@ describe("RPC", () => {
         readonly prompt: AgentMessage.AgentPrompt;
       }> = [];
       const abortInputs: Array<Chat.ChatId> = [];
+      const contextInputs: Array<Chat.ChatId> = [];
 
       const application = Application.of({
         ...unusedApplication,
@@ -480,6 +491,13 @@ describe("RPC", () => {
             : Effect.sync(() => {
                 transcriptInputs.push(chatId);
                 return transcript;
+              }),
+        contextUsage: (chatId) =>
+          chatId === secondChatId
+            ? Effect.fail(new ChatClosed())
+            : Effect.sync(() => {
+                contextInputs.push(chatId);
+                return contextSnapshot;
               }),
         sendMessage: (chatId, prompt) =>
           chatId === secondChatId
@@ -595,6 +613,7 @@ describe("RPC", () => {
         for (const chatId of [foreignChatId, missingChatId]) {
           for (const request of [
             client.Transcript({ chatId }).pipe(Effect.asVoid),
+            client.ContextUsage({ chatId }).pipe(Effect.asVoid),
             client.AvailableModels({ chatId }).pipe(Effect.asVoid),
             client
               .SwitchModel({
@@ -618,6 +637,7 @@ describe("RPC", () => {
         assert.deepStrictEqual(transcriptInputs, []);
         assert.deepStrictEqual(sendInputs, []);
         assert.deepStrictEqual(abortInputs, []);
+        assert.deepStrictEqual(contextInputs, []);
         assert.deepStrictEqual(yield* ownership.chats.listOpenByWorkspace(discordWorkspace.id), [
           foreignChat,
         ]);
@@ -633,6 +653,15 @@ describe("RPC", () => {
         assert.instanceOf(creation, ApplicationError);
         assert.strictEqual(creation.reason, "invalid-state");
 
+        assert.deepStrictEqual(
+          yield* client.ContextUsage({ chatId: firstChatId }),
+          contextSnapshot,
+        );
+        assert.deepStrictEqual(contextInputs, [firstChatId]);
+        assert.instanceOf(
+          yield* client.ContextUsage({ chatId: secondChatId }).pipe(Effect.flip),
+          ChatClosed,
+        );
         assert.deepStrictEqual(yield* client.Transcript({ chatId: firstChatId }), transcript);
         assert.deepStrictEqual(transcriptInputs, [firstChatId]);
         const operational = yield* client.Transcript({ chatId: secondChatId }).pipe(Effect.flip);

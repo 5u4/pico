@@ -1,6 +1,6 @@
 import type { AgentEventEnvelope } from "@pico/contract/agent-event";
 import { AgentPrompt } from "@pico/contract/agent-message";
-import type { ModelInfo, ModelRef, ShakeMode } from "@pico/contract/agent-runtime";
+import type { ContextUsage, ModelInfo, ModelRef, ShakeMode } from "@pico/contract/agent-runtime";
 import type { TranscriptSnapshot } from "@pico/contract/agent-snapshot";
 import type {
   CloseChatOptions,
@@ -9,7 +9,7 @@ import type {
   UpdateWorkspace,
 } from "@pico/contract/application";
 import type { ChatId, ChatListEntry } from "@pico/contract/chat-model";
-import { ApplicationError, type ChatClosed } from "@pico/contract/errors";
+import { ApplicationError, ChatClosed } from "@pico/contract/errors";
 import type { ScheduleOverviewResponse } from "@pico/contract/rpc";
 import type { ScheduleError } from "@pico/contract/schedule";
 import type { Workspace, WorkspaceId } from "@pico/contract/workspace-model";
@@ -60,9 +60,12 @@ interface ReadRecord {
   generation: Generation | undefined;
   flight: ReadFlight | undefined;
 }
+type ContextReadError = ReadError | ChatClosed;
 interface ChatRecord {
   readonly live: LiveChat;
   readonly transcriptResult: AsyncResult.AsyncResult<TranscriptSnapshot, ReadError>;
+  readonly contextResult: AsyncResult.AsyncResult<ContextUsage, ContextReadError>;
+  readonly contextRequest: number;
 }
 interface ChatRead extends ReadRecord {
   readonly chatId: ChatId;
@@ -82,6 +85,19 @@ const domainFailure = (cause: Cause.Cause<unknown>) =>
       !(reason.error instanceof RpcClientError) &&
       !(reason.error instanceof Cause.TimeoutError),
   );
+const clearWaiting = <A, E>(
+  result: AsyncResult.AsyncResult<A, E>,
+): AsyncResult.AsyncResult<A, E> => {
+  if (!result.waiting) return result;
+  switch (result._tag) {
+    case "Initial":
+      return AsyncResult.initial();
+    case "Success":
+      return AsyncResult.success(result.value);
+    case "Failure":
+      return AsyncResult.failure(result.cause, { previousSuccess: result.previousSuccess });
+  }
+};
 
 /** Construct once per page and dispose its registry at page shutdown. */
 export const make = ({ url }: { readonly url: string }) => {
@@ -90,6 +106,8 @@ export const make = ({ url }: { readonly url: string }) => {
     Atom.make<ChatRecord>({
       live: emptyLiveChat(),
       transcriptResult: AsyncResult.initial(),
+      contextResult: AsyncResult.initial(),
+      contextRequest: 0,
     }).pipe(Atom.keepAlive),
   );
 
@@ -507,12 +525,118 @@ export const make = ({ url }: { readonly url: string }) => {
                     live = reduce(live, envelope);
                 cut = { generation, publication: snapshot.runtime.publication };
                 buffered = undefined;
-                return { live, transcriptResult: AsyncResult.success(snapshot) };
+                return { ...state, live, transcriptResult: AsyncResult.success(snapshot) };
               }),
             );
           }),
       };
     }).pipe(Atom.keepAlive),
+  );
+  const observeContext = Atom.family((chatId: ChatId) =>
+    Atom.make((get) =>
+      Effect.gen(function* () {
+        const manager = yield* get.result(owner);
+        const cell = chatCell(chatId);
+        let active = true;
+        let closed = false;
+        let revision = 0;
+        let statusKind = get.registry.get(status).kind;
+        let transcriptResult = get.registry.get(cell).transcriptResult;
+        let contextRequest = get.registry.get(cell).contextRequest;
+        let wake = Deferred.makeUnsafe<void>();
+
+        const signal = () => {
+          revision += 1;
+          Deferred.doneUnsafe(wake, Effect.void);
+        };
+        const publish = (change: (state: ChatRecord) => ChatRecord) => {
+          if (active) get.registry.update(cell, change);
+        };
+
+        get.addFinalizer(() => {
+          active = false;
+          Deferred.doneUnsafe(wake, Effect.void);
+          if (!get.registry.get(cell).contextResult.waiting) return;
+          get.registry.update(cell, (state) => ({
+            ...state,
+            contextResult: clearWaiting(state.contextResult),
+          }));
+        });
+
+        get.subscribe(status, (next) => {
+          if (statusKind !== "active" && next.kind === "active") signal();
+          statusKind = next.kind;
+        });
+        get.subscribe(cell, (next) => {
+          if (next.contextRequest !== contextRequest) {
+            contextRequest = next.contextRequest;
+            signal();
+          }
+          if (next.transcriptResult !== transcriptResult) {
+            transcriptResult = next.transcriptResult;
+            if (next.transcriptResult._tag === "Success" && !next.transcriptResult.waiting)
+              signal();
+          }
+        });
+
+        while (active && !closed) {
+          wake = Deferred.makeUnsafe<void>();
+          if (get.registry.get(status).kind !== "active") {
+            const ensured = yield* manager.ensure().pipe(Effect.exit);
+            if (Exit.isFailure(ensured)) {
+              if (!active) break;
+              publish((state) => ({
+                ...state,
+                contextResult: AsyncResult.failureWithPrevious(ensured.cause, {
+                  previous: Option.some(state.contextResult),
+                }),
+              }));
+              yield* Effect.raceFirst(Deferred.await(wake), Effect.sleep("1 minute"));
+              continue;
+            }
+          }
+          if (!active) break;
+          const requestRevision = revision;
+          wake = Deferred.makeUnsafe<void>();
+          publish((state) => ({
+            ...state,
+            contextResult: AsyncResult.waiting(state.contextResult),
+          }));
+          const exit = yield* manager
+            .write((client) =>
+              client.ContextUsage({ chatId }).pipe(
+                Effect.timeout("30 seconds"),
+                Effect.catchTag("TimeoutError", () =>
+                  Effect.fail(
+                    new ApplicationError({
+                      reason: "operation",
+                      message: "Context estimate timed out.",
+                    }),
+                  ),
+                ),
+              ),
+            )
+            .pipe(Effect.exit);
+          if (!active) break;
+          if (Exit.isSuccess(exit)) {
+            if (requestRevision === revision)
+              publish((state) => ({ ...state, contextResult: AsyncResult.success(exit.value) }));
+          } else if (!Cause.hasInterruptsOnly(exit.cause)) {
+            publish((state) => ({
+              ...state,
+              contextResult: AsyncResult.failureWithPrevious(exit.cause, {
+                previous: Option.some(state.contextResult),
+              }),
+            }));
+            if (Option.getOrNull(Cause.findErrorOption(exit.cause)) instanceof ChatClosed) {
+              closed = true;
+            }
+          }
+          if (closed || requestRevision !== revision) continue;
+          yield* Effect.raceFirst(Deferred.await(wake), Effect.sleep("1 minute"));
+        }
+      }),
+    ).pipe(Atom.setIdleTTL(0)),
   );
   const availableModels = Atom.family((chatId: ChatId) =>
     list<readonly ModelInfo[], ChatClosed>((client) => client.AvailableModels({ chatId })),
@@ -550,9 +674,12 @@ export const make = ({ url }: { readonly url: string }) => {
     ).pipe(Atom.keepAlive),
   );
   const contextUsage = Atom.family((chatId: ChatId) =>
-    Atom.readable(
-      (get) => AsyncResult.map(get(snapshot(chatId)), (value) => value.contextUsage),
-      (refresh) => refresh(snapshot(chatId)),
+    Atom.writable(
+      (get) => get(chatCell(chatId)).contextResult,
+      (get, _input: undefined) => {
+        const state = get.get(chatCell(chatId));
+        get.set(chatCell(chatId), { ...state, contextRequest: state.contextRequest + 1 });
+      },
     ).pipe(Atom.keepAlive),
   );
   const modelSwitchRequest = Atom.family((_chatId: ChatId) =>
@@ -771,6 +898,7 @@ export const make = ({ url }: { readonly url: string }) => {
     closeChat,
     transcript,
     todo,
+    observeContext,
     contextUsage,
     availableModels,
     currentModel,
