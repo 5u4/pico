@@ -685,6 +685,98 @@ describe("frontend state over WebSocket", () => {
     }),
   );
 
+  it.live(
+    "keeps the last context estimate while a replacement for a superseded failure is pending",
+    () =>
+      Effect.gen(function* () {
+        const requests =
+          yield* Queue.unbounded<Deferred.Deferred<ContextUsage, ApplicationError>>();
+        const server = yield* fixture({
+          transcript: () => Effect.succeed(snapshot()),
+          contextUsage: () =>
+            Effect.gen(function* () {
+              const reply = yield* Deferred.make<ContextUsage, ApplicationError>();
+              yield* Queue.offer(requests, reply);
+              return yield* Deferred.await(reply);
+            }),
+          sendMessage: () => Effect.succeed({ kind: "handled" }),
+          abort: () => Effect.void,
+        });
+        yield* Effect.gen(function* () {
+          const state = make({ url: yield* endpoint });
+          const registry = yield* registryInScope;
+          registry.mount(state.observeContext(firstChat));
+          const initial = yield* Queue.take(requests);
+          yield* Deferred.succeed(initial, {
+            kind: "available",
+            contextWindow: 100_000,
+            usedTokens: 777,
+            messagesTokens: 500,
+            systemPromptTokens: 100,
+            systemToolsTokens: 100,
+            systemContextTokens: 50,
+            skillsTokens: 27,
+          });
+          yield* waitFor(
+            registry,
+            state.contextUsage(firstChat),
+            (value) => value._tag === "Success" && !value.waiting,
+          );
+
+          registry.set(state.contextUsage(firstChat), undefined);
+          const stale = yield* Queue.take(requests);
+          registry.set(state.contextUsage(firstChat), undefined);
+          yield* Deferred.fail(
+            stale,
+            new ApplicationError({ reason: "operation", message: "Context read failed" }),
+          );
+          const replacement = yield* Queue.take(requests);
+          const refreshing = registry.get(state.contextUsage(firstChat));
+          assert.strictEqual(refreshing._tag, "Success");
+          assert.isTrue(refreshing.waiting);
+          assert.deepStrictEqual(AsyncResult.getOrThrow(refreshing), {
+            kind: "available",
+            contextWindow: 100_000,
+            usedTokens: 777,
+            messagesTokens: 500,
+            systemPromptTokens: 100,
+            systemToolsTokens: 100,
+            systemContextTokens: 50,
+            skillsTokens: 27,
+          });
+
+          yield* Deferred.succeed(replacement, {
+            kind: "available",
+            contextWindow: 100_000,
+            usedTokens: 444,
+            messagesTokens: 300,
+            systemPromptTokens: 50,
+            systemToolsTokens: 50,
+            systemContextTokens: 30,
+            skillsTokens: 14,
+          });
+          yield* waitFor(
+            registry,
+            state.contextUsage(firstChat),
+            (value) => value._tag === "Success" && !value.waiting,
+          );
+          assert.deepStrictEqual(
+            AsyncResult.getOrThrow(registry.get(state.contextUsage(firstChat))),
+            {
+              kind: "available",
+              contextWindow: 100_000,
+              usedTokens: 444,
+              messagesTokens: 300,
+              systemPromptTokens: 50,
+              systemToolsTokens: 50,
+              systemContextTokens: 30,
+              skillsTokens: 14,
+            },
+          );
+        }).pipe(Effect.scoped, Effect.provide(server.layer));
+      }),
+  );
+
   it.live("ignores stale context replies from a released observer", () =>
     Effect.gen(function* () {
       const firstRequests = yield* Queue.unbounded<Deferred.Deferred<ContextUsage>>();
