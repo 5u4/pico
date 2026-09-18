@@ -380,6 +380,67 @@ textarea:disabled {
   overflow-wrap: normal;
 }
 
+.chat-mermaid {
+  margin-block: 0.4em;
+}
+
+.chat-mermaid-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.4rem;
+  margin-block-end: 0.45rem;
+}
+
+.chat-mermaid-source-panel {
+  display: grid;
+  gap: 0.4rem;
+}
+
+.chat-mermaid-status {
+  margin: 0;
+  color: var(--raw-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.chat-mermaid-source {
+  max-width: 100%;
+  overflow-x: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--raw-border-strong);
+  border-radius: var(--raw-radius-control);
+  background: var(--raw-surface);
+}
+
+.chat-mermaid-source pre {
+  margin: 0;
+  border: 0;
+}
+
+.chat-mermaid-preview {
+  max-width: 100%;
+  overflow-x: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--raw-border-strong);
+  border-radius: var(--raw-radius-control);
+  background: var(--raw-surface);
+}
+
+.chat-mermaid-stage {
+  min-width: max-content;
+  padding: 0.75rem;
+}
+
+.chat-mermaid-svg {
+  display: block;
+  width: auto;
+  max-width: none;
+  height: auto;
+  flex-shrink: 0;
+}
+
 .chat-markdown hr {
   margin-block: 1.5em;
   border: 0;
