@@ -81,6 +81,9 @@ describe("Workspace binding", () => {
       const runtimeLayer = Layer.succeed(
         AgentRuntime,
         AgentRuntime.of({
+          history: () => Effect.die("unexpected history read"),
+          previewHistory: () => Effect.die("unexpected history preview"),
+          navigateHistory: () => Effect.die("unexpected history navigation"),
           availableModels: () => Effect.die("unexpected model catalog read"),
           switchModel: () => Effect.die("unexpected model switch"),
           askBtw: () => Effect.die("unexpected side question"),
@@ -335,6 +338,9 @@ describe("Workspace binding", () => {
       const runtimeLayer = Layer.succeed(
         AgentRuntime,
         AgentRuntime.of({
+          history: () => Effect.die("unexpected history read"),
+          previewHistory: () => Effect.die("unexpected history preview"),
+          navigateHistory: () => Effect.die("unexpected history navigation"),
           availableModels: () => Effect.die("unexpected model catalog read"),
           switchModel: () => Effect.die("unexpected model switch"),
           askBtw: () => Effect.die("unexpected side question"),

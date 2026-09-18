@@ -37,6 +37,9 @@ describe("EventRouter", () => {
       const runtimeLayer = Layer.succeed(
         AgentRuntime,
         AgentRuntime.of({
+          history: () => Effect.die("unexpected history read"),
+          previewHistory: () => Effect.die("unexpected history preview"),
+          navigateHistory: () => Effect.die("unexpected history navigation"),
           availableModels: () => Effect.die("unused"),
           switchModel: () => Effect.die("unused"),
           askBtw: () => Effect.die("unexpected side question"),
@@ -175,6 +178,9 @@ describe("EventRouter", () => {
         const runtimeLayer = Layer.succeed(
           AgentRuntime,
           AgentRuntime.of({
+            history: () => Effect.die("unexpected history read"),
+            previewHistory: () => Effect.die("unexpected history preview"),
+            navigateHistory: () => Effect.die("unexpected history navigation"),
             availableModels: () => Effect.die("unused"),
             switchModel: () => Effect.die("unused"),
             askBtw: () => Effect.die("unexpected side question"),

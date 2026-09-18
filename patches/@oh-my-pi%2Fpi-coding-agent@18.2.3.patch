@@ -1,9 +1,3 @@
-diff --git a/node_modules/@oh-my-pi/pi-coding-agent/.bun-tag-69b1cfa72a307e7a b/.bun-tag-69b1cfa72a307e7a
-new file mode 100644
-index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
-diff --git a/node_modules/@oh-my-pi/pi-coding-agent/.bun-tag-f109258744839fd1 b/.bun-tag-f109258744839fd1
-new file mode 100644
-index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
 diff --git a/dist/types/internal-urls/memory-protocol.d.ts b/dist/types/internal-urls/memory-protocol.d.ts
 index b5a4db84f23f88ccfad24c0bb96d07de7efe77b2..178a90dcb2933075053242cdba00bde6b8e4064c 100644
 --- a/dist/types/internal-urls/memory-protocol.d.ts
@@ -151,7 +145,7 @@ index a2580e04885bfe092596e7610417793672338bb5..5977f5e87e0767573c4176ba54de21d3
      deliverAs?: "steer" | "followUp" | "aside";
      /** Explicit billing/initiator attribution. */
 diff --git a/dist/types/session/agent-session.d.ts b/dist/types/session/agent-session.d.ts
-index dfc41754a4753f597660aa719e2bf05ea78f00f3..21c7036ef512bad8b3f1770b6cfb2cd5ecc5cd0f 100644
+index dfc41754a4753f597660aa719e2bf05ea78f00f3..d965df9a8be0aebbb2af69510619470d55738036 100644
 --- a/dist/types/session/agent-session.d.ts
 +++ b/dist/types/session/agent-session.d.ts
 @@ -81,6 +81,7 @@ export declare class AgentSession {
@@ -180,6 +174,24 @@ index dfc41754a4753f597660aa719e2bf05ea78f00f3..21c7036ef512bad8b3f1770b6cfb2cd5
          queueChipText?: string;
          queueOnly?: boolean;
      }): Promise<boolean>;
+@@ -1013,6 +1014,9 @@ export declare class AgentSession {
+     navigateTree(targetId: string, options?: {
+         summarize?: boolean;
+         customInstructions?: string;
++        requireIdle?: boolean;
++        /** Hosts settle and publish replacement before post-navigation hooks can start work. */
++        onHistoryReplaced?: () => void | Promise<void>;
+         /**
+          * Opts into the two-phase `ask` toolResult re-answer protocol
+          * (issue #5642): set only by the interactive `/tree` selector, which
+@@ -1039,6 +1043,7 @@ export declare class AgentSession {
+         editorImages?: ImageContent[];
+         cancelled: boolean;
+         aborted?: boolean;
++        busy?: boolean;
+         summaryEntry?: BranchSummaryEntry;
+         /** Raw session context built during navigation — pass to renderInitialMessages to skip a second O(N) walk. */
+         sessionContext?: SessionContext;
 diff --git a/dist/types/session/artifacts.d.ts b/dist/types/session/artifacts.d.ts
 index 8decbb96f2ff02feb7e5f0a96498e8274f697a56..bb5988f8ed678c90e667ef36b5fc5c4d4a0229b0 100644
 --- a/dist/types/session/artifacts.d.ts
@@ -203,12 +215,13 @@ index 8decbb96f2ff02feb7e5f0a96498e8274f697a56..bb5988f8ed678c90e667ef36b5fc5c4d
       * Check if an artifact exists.
       * @param id Artifact ID (numeric string)
 diff --git a/dist/types/session/session-context.d.ts b/dist/types/session/session-context.d.ts
-index 719d6112e7639460efe4c6b2e24ec2e97f2625c4..ab764275558ffc8717e48e44de045919bfc4a61b 100644
+index 719d6112e7639460efe4c6b2e24ec2e97f2625c4..d301ea10964fbfa2e8b10465db0fd17f6bc6a0fd 100644
 --- a/dist/types/session/session-context.d.ts
 +++ b/dist/types/session/session-context.d.ts
 @@ -1,10 +1,12 @@
  import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
- import { type OpenAIResponsesHistoryPayload, type ServiceTierByFamily } from "@oh-my-pi/pi-ai";
+-import { type OpenAIResponsesHistoryPayload, type ServiceTierByFamily } from "@oh-my-pi/pi-ai";
++import { type ImageContent, type OpenAIResponsesHistoryPayload, type ServiceTierByFamily } from "@oh-my-pi/pi-ai";
  import * as snapcompact from "@oh-my-pi/snapcompact";
 +import type { TodoPhase } from "../tools/todo.js";
  import { type CustomMessage } from "./messages.js";
@@ -228,17 +241,94 @@ index 719d6112e7639460efe4c6b2e24ec2e97f2625c4..ab764275558ffc8717e48e44de045919
      /** In transcript mode, elide entries replaced by the latest compaction. */
      collapseCompactedHistory?: boolean;
      /**
+@@ -85,4 +89,9 @@ export declare function isUserRequestEntry(entry: SessionEntry): boolean;
+  * `undefined` for anything that is not a user request.
+  */
+ export declare function userTurnDraft(entry: TranscriptEntry): string | undefined;
++/** Resolve plain tree navigation without changing the session or reopening tools. */
++export declare function resolveTreeNavigationTarget(entry: SessionEntry, currentLeafId: string | null): {
++    leafId: string | null;
++    draft: { text: string; images: ImageContent[] } | null;
++};
+ export declare function buildSessionContext(entries: SessionEntry[], leafId?: string | null, byId?: Map<string, SessionEntry>, options?: BuildSessionContextOptions): SessionContext;
+diff --git a/dist/types/session/session-entries.d.ts b/dist/types/session/session-entries.d.ts
+index 963cd3ecab5f4581227dd318181dc5b2c0d07fc7..77eaa8bc6f550bf7bc6c9fcb254aa47d182bf408 100644
+--- a/dist/types/session/session-entries.d.ts
++++ b/dist/types/session/session-entries.d.ts
+@@ -16,6 +16,12 @@ export interface SessionTitleSlotEntry {
+     updatedAt: string;
+     pad: string;
+ }
++/** Physical journal position, excluded from the conversation tree. */
++export interface SessionCursorRecord {
++    type: "session_cursor";
++    leafId: string | null;
++    revision: string;
++}
+ export declare const EPHEMERAL_MODEL_CHANGE_ROLE = "fallback";
+ export interface SessionHeader {
+     type: "session";
+@@ -259,10 +265,10 @@ export interface CustomMessageEntry<T = unknown> extends SessionEntryBase {
+ }
+ /** Session entry - has id/parentId for tree structure (returned by "read" methods in SessionManager) */
+ export type SessionEntry = SessionMessageEntry | ModelUsageEntry | ThinkingLevelChangeEntry | ModelChangeEntry | ServiceTierChangeEntry | CompactionEntry | BranchSummaryEntry | CustomEntry | CustomMessageEntry | LabelEntry | TitleChangeEntry | TtsrInjectionEntry | SessionInitEntry | ModeChangeEntry | CredentialPinEntry | ResetBoundaryEntry;
+-/** Raw logical file entry after loaders strip any fixed-width title slot. */
++/** Logical file entry after loaders fold physical title and cursor records. */
+ export type FileEntry = SessionHeader | SessionEntry;
+-/** Physical JSONL entry before slot-aware loaders fold the title slot. */
+-export type RawFileEntry = SessionTitleSlotEntry | FileEntry;
++/** Physical JSONL record before loaders fold title and cursor state. */
++export type RawFileEntry = SessionTitleSlotEntry | SessionCursorRecord | FileEntry;
+ /** Tree node for getTree() - defensive copy of session structure */
+ export interface SessionTreeNode {
+     entry: SessionEntry;
 diff --git a/dist/types/session/session-loader.d.ts b/dist/types/session/session-loader.d.ts
-index f9ef063e38a735e149ad6a174f39df36d55f9f68..e7770380b0ac8a66a016272a2e29486edee225e0 100644
+index f9ef063e38a735e149ad6a174f39df36d55f9f68..e9c1053fe3041f9d3de7ed2aa8c6f3cb8a8fb35e 100644
 --- a/dist/types/session/session-loader.d.ts
 +++ b/dist/types/session/session-loader.d.ts
-@@ -1,4 +1,5 @@
+@@ -1,6 +1,7 @@
  import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 +import type { TodoPhase } from "../tools/todo.js";
  import { BlobStore } from "./blob-store.js";
- import type { FileEntry } from "./session-entries.js";
+-import type { FileEntry } from "./session-entries.js";
++import type { FileEntry, SessionCursorRecord, SessionEntry } from "./session-entries.js";
  import { type SessionStorage } from "./session-storage.js";
-@@ -68,3 +69,8 @@ export declare function resolveBlobRefsInEntries(entries: FileEntry[], blobStore
+ import { type SessionTitleUpdate } from "./session-title-slot.js";
+ export interface VisitEntriesFromFileStreamOptions {
+@@ -23,6 +24,8 @@ export interface VisitEntriesFromFileStreamOptions {
+      * callers derive the exact snapshot size without re-stating the file.
+      */
+     onBytesConsumed?: (bytes: number) => void;
++    /** Physical cursor records are never passed to the entry visitor. */
++    onCursor?: (cursor: SessionCursorRecord) => void;
+ }
+ /** Controls how a missing session file is handled. */
+ export interface LoadSessionOptions {
+@@ -33,13 +36,15 @@ export interface LoadSessionOptions {
+ export interface SessionLoadResult {
+     entries: FileEntry[];
+     titleSlot: SessionTitleUpdate | undefined;
++    cursor?: SessionCursorRecord;
+     malformedRecords: number;
+     /** Byte length of the snapshot actually parsed, or `null` when the path did not exist. */
+     sourceSize?: number | null;
+     /** Whether non-empty session data was found without a valid leading session header. */
+     invalidHeader: boolean;
+ }
+-/** Parse session JSONL while stripping and folding the optional fixed title slot. */
++export declare function sessionHistoryVersion(sessionId: string, entries: readonly SessionEntry[], cursor: Pick<SessionCursorRecord, "leafId" | "revision">): string;
++/** Parse session JSONL while folding physical title and cursor records. */
+ export declare function parseSessionContent(content: string): SessionLoadResult;
+ /** Parse session JSONL and visit each entry without retaining prior entries. */
+ export declare function visitEntriesFromFileStream(filePath: string, visit: (entry: FileEntry) => void | boolean, options?: VisitEntriesFromFileStreamOptions): Promise<SessionTitleUpdate | undefined>;
+@@ -62,9 +67,22 @@ export declare function resolveBlobRefsInEntries(entries: FileEntry[], blobStore
+ /**
+  * Read-only transcript view of a session file: load entries, migrate to the
+  * current version, resolve blob refs, and build the display transcript along
+- * the persisted leaf path (last entry). Uses transcript mode (collapsed to the
++ * the persisted cursor path. Uses transcript mode (collapsed to the
+  * latest compaction) so failed/aborted tail turns stay visible, unlike the
+  * provider-context builder which drops them. Does NOT create a writer or take
   * the session lock — safe to call against a file another session is writing.
   */
  export declare function loadSessionMessagesReadOnly(filePath: string): Promise<AgentMessage[]>;
@@ -246,12 +336,43 @@ index f9ef063e38a735e149ad6a174f39df36d55f9f68..e7770380b0ac8a66a016272a2e29486e
 +export declare function loadSessionSnapshotReadOnly(filePath: string): Promise<{
 +    messages: AgentMessage[];
 +    todoPhases: TodoPhase[] | null;
++    historyRevision: string;
++}>;
++export declare function loadSessionHistoryReadOnly(filePath: string): Promise<{
++    sessionId: string;
++    entries: SessionEntry[];
++    activeLeafId: string | null;
++    revision: string;
++    version: string;
 +}>;
 diff --git a/dist/types/session/session-manager.d.ts b/dist/types/session/session-manager.d.ts
-index 7229fb73560793a0364550aa1cff831b2255f7a7..06c40406507b26fb9e389b5817b4e33f4b59e466 100644
+index 7229fb73560793a0364550aa1cff831b2255f7a7..fde7f52d1b402f59bbcdfbff220eb2810425f478 100644
 --- a/dist/types/session/session-manager.d.ts
 +++ b/dist/types/session/session-manager.d.ts
-@@ -249,7 +249,7 @@ export declare class SessionManager {
+@@ -5,12 +5,12 @@ import { type BlobPutOptions, type BlobPutResult } from "./blob-store.js";
+ import type { CompactionMethod } from "./compaction-methods.js";
+ import { type BashExecutionMessage, type CustomMessage, type FileMentionMessage, type HookMessage, type PythonExecutionMessage } from "./messages.js";
+ import { type BuildSessionContextOptions, type SessionContext } from "./session-context.js";
+-import { type FileEntry, type ModelUsageEntry, type NewSessionOptions, type SessionEntry, type SessionHeader, type SessionTitleSource, type SessionTreeNode, type UsageStatistics } from "./session-entries.js";
++import { type FileEntry, type ModelUsageEntry, type NewSessionOptions, type SessionCursorRecord, type SessionEntry, type SessionHeader, type SessionTitleSource, type SessionTreeNode, type UsageStatistics } from "./session-entries.js";
+ import { type SessionInfo } from "./session-listing.js";
+ import { type SessionStorage } from "./session-storage.js";
+ /** Copy a session's artifact directory to another session, matching interactive `/fork`. */
+ export declare function copySessionArtifacts(sourceSessionFile: string, destinationSessionFile: string): Promise<void>;
+-export type ReadonlySessionManager = Pick<SessionManager, "getCwd" | "getRecordedCwd" | "getSessionDir" | "getSessionId" | "getSessionFile" | "getSessionName" | "getArtifactsDir" | "getArtifactManager" | "allocateArtifactPath" | "saveArtifact" | "getArtifactPath" | "getLeafId" | "getLeafEntry" | "getEntry" | "getLabel" | "getBranch" | "getHeader" | "getEntries" | "getTree" | "getUsageStatistics" | "putBlob" | "putBlobSync">;
++export type ReadonlySessionManager = Pick<SessionManager, "getCwd" | "getRecordedCwd" | "getSessionDir" | "getSessionId" | "getSessionFile" | "getSessionName" | "getArtifactsDir" | "getArtifactManager" | "allocateArtifactPath" | "saveArtifact" | "getArtifactPath" | "getLeafId" | "getLeafEntry" | "getHistoryRevision" | "getHistoryVersion" | "getEntry" | "getLabel" | "getBranch" | "getHeader" | "getEntries" | "getTree" | "getUsageStatistics" | "putBlob" | "putBlobSync">;
+ interface SessionManagerStateSnapshot {
+     cwd: string;
+     sessionDir: string;
+@@ -27,6 +27,7 @@ interface SessionManagerStateSnapshot {
+     fallbackRuntimeOnly: boolean;
+     header: SessionHeader;
+     entries: SessionEntry[];
++    cursor: SessionCursorRecord;
+ }
+ /**
+  * The storage may have published a write that rejected, and an authoritative
+@@ -249,7 +250,7 @@ export declare class SessionManager {
          id?: string;
          path?: string;
      }>;
@@ -260,6 +381,27 @@ index 7229fb73560793a0364550aa1cff831b2255f7a7..06c40406507b26fb9e389b5817b4e33f
      getArtifactPath(id: string): Promise<string | null>;
      saveDraft(text: string): Promise<void>;
      consumeDraft(): Promise<string | null>;
+@@ -422,6 +423,9 @@ export declare class SessionManager {
+     getHeader(): SessionHeader | null;
+     /** All session entries (excludes header). Returns a shallow copy. */
+     getEntries(): SessionEntry[];
++    getHistoryRevision(): string;
++    /** Opaque journal boundary. Settle persistence before publishing it to consumers. */
++    getHistoryVersion(): string;
+     /**
+      * The session as a tree. A well-formed session has exactly one root; orphaned
+      * entries (broken parent chain) are returned as roots too.
+@@ -437,9 +441,7 @@ export declare class SessionManager {
+     /**
+      * Durably move the active branch past a discarded entry.
+      *
+-     * The loader reconstructs the active branch from the last physical journal
+-     * entry, so changing the in-memory leaf alone is lost on reload. Known
+-     * metadata children are chained onto the discarded entry's parent before the
++     * Known metadata children are chained onto the discarded entry's parent before the
+      * entry is removed. If any child may carry content, the subtree is preserved
+      * off-branch instead. Both paths append a metadata-only branch marker and
+      * rewrite the journal, making the selected path durable.
 diff --git a/dist/types/session/session-migrations.d.ts b/dist/types/session/session-migrations.d.ts
 index 80aa77c3f5a8c4c373ed7aa1797885eb6dc17d24..b33493636c5db3069a870c526c6c1ead0334035b 100644
 --- a/dist/types/session/session-migrations.d.ts
@@ -942,7 +1084,7 @@ index 9237d9a59a5a225853258c20c4972cbd1a51f37b..58b03f25027623db725a0461e549a9b2
  	deliverAs?: "steer" | "followUp" | "aside";
  	/** Explicit billing/initiator attribution. */
 diff --git a/src/session/agent-session.ts b/src/session/agent-session.ts
-index 6c2b0bb9d23e9c6e6f3e81f38f7aecd46a80708b..f15c3dcb786c44ef96ad252f8cc029f4a581314f 100644
+index 6c2b0bb9d23e9c6e6f3e81f38f7aecd46a80708b..882bb3465362f6662d8da7afea41921deb956a1a 100644
 --- a/src/session/agent-session.ts
 +++ b/src/session/agent-session.ts
 @@ -33,9 +33,12 @@ import {
@@ -966,7 +1108,19 @@ index 6c2b0bb9d23e9c6e6f3e81f38f7aecd46a80708b..f15c3dcb786c44ef96ad252f8cc029f4
  	PromptOptions,
  	ResetSessionContextResult,
  	ResolvedRoleModel,
-@@ -572,6 +576,7 @@ export class AgentSession {
+@@ -367,10 +371,7 @@ import {
+ import type { BuildSessionContextOptions, SessionContext } from "./session-context";
+ import {
+ 	getRestorableSessionModels,
+-	isTranscriptEntry,
+-	isUserRequestEntry,
+-	transcriptEntryMessage,
+-	userTurnDraft,
++	resolveTreeNavigationTarget,
+ } from "./session-context";
+ import { formatSessionDumpText } from "./session-dump-format";
+ import type { BranchSummaryEntry, NewSessionOptions } from "./session-entries";
+@@ -572,6 +573,7 @@ export class AgentSession {
  	readonly agent: Agent;
  	readonly sessionManager: SessionManager;
  	readonly settings: Settings;
@@ -974,7 +1128,7 @@ index 6c2b0bb9d23e9c6e6f3e81f38f7aecd46a80708b..f15c3dcb786c44ef96ad252f8cc029f4
  	/** Session-start policy, independent of the selected project memory backend. */
  	readonly memoryEnabled: boolean;
  	/** Entries of tools mounted under `xd://`; empty when virtual devices are unmounted. */
-@@ -699,6 +704,7 @@ export class AgentSession {
+@@ -699,6 +701,7 @@ export class AgentSession {
  	/** Host hook invoked when a typed user prompt is dropped before dispatch;
  	 *  see {@link setPromptDropped}. */
  	#promptDropped: ((prompt: DroppedPrompt) => void) | undefined;
@@ -982,7 +1136,7 @@ index 6c2b0bb9d23e9c6e6f3e81f38f7aecd46a80708b..f15c3dcb786c44ef96ad252f8cc029f4
  	#titleGenerationAbortController = new AbortController();
  	#toolChoiceQueue = new ToolChoiceQueue();
  
-@@ -759,6 +765,7 @@ export class AgentSession {
+@@ -759,6 +762,7 @@ export class AgentSession {
  	#messageEndPersistenceTail: Promise<void> = Promise.resolve();
  	#pendingMessageEndPersistence = new Map<string, Promise<void>>();
  	#persistedMessageKeys: { anchor: string; keys: Set<string> } | undefined;
@@ -990,7 +1144,7 @@ index 6c2b0bb9d23e9c6e6f3e81f38f7aecd46a80708b..f15c3dcb786c44ef96ad252f8cc029f4
  
  	// Custom commands (TypeScript slash commands)
  	#customCommands: LoadedCustomCommand[] = [];
-@@ -1041,6 +1048,8 @@ export class AgentSession {
+@@ -1041,6 +1045,8 @@ export class AgentSession {
  		for (const record of records) {
  			this.agent.emitExternalEvent({ type: "message_start", message: record });
  			this.agent.emitExternalEvent({ type: "message_end", message: record });
@@ -999,7 +1153,7 @@ index 6c2b0bb9d23e9c6e6f3e81f38f7aecd46a80708b..f15c3dcb786c44ef96ad252f8cc029f4
  		}
  	}
  
-@@ -1298,6 +1307,7 @@ export class AgentSession {
+@@ -1298,6 +1304,7 @@ export class AgentSession {
  		this.sessionManager = config.sessionManager;
  		this.settings = config.settings;
  		this.memoryEnabled = config.memoryEnabled ?? true;
@@ -1007,7 +1161,7 @@ index 6c2b0bb9d23e9c6e6f3e81f38f7aecd46a80708b..f15c3dcb786c44ef96ad252f8cc029f4
  		this.#modelRegistry = config.modelRegistry;
  		this.#extensionRoots =
  			config.extensionRoots ??
-@@ -2661,6 +2671,40 @@ export class AgentSession {
+@@ -2661,6 +2668,40 @@ export class AgentSession {
  	 * event/persistence pipeline during teardown.
  	 */
  	#handleAgentEvent = (event: AgentEvent): Promise<void> => {
@@ -1048,7 +1202,7 @@ index 6c2b0bb9d23e9c6e6f3e81f38f7aecd46a80708b..f15c3dcb786c44ef96ad252f8cc029f4
  		const processing = this.#dispatchAgentEvent(event);
  		this.#inFlightEventHandlers.add(processing);
  		void processing.finally(() => this.#inFlightEventHandlers.delete(processing)).catch(() => {});
-@@ -2817,27 +2861,17 @@ export class AgentSession {
+@@ -2817,27 +2858,17 @@ export class AgentSession {
  		return keys;
  	}
  
@@ -1082,7 +1236,7 @@ index 6c2b0bb9d23e9c6e6f3e81f38f7aecd46a80708b..f15c3dcb786c44ef96ad252f8cc029f4
  		const branch = this.sessionManager.getBranch();
  		for (let index = branch.length - 1; index >= 0; index--) {
  			const entry = branch[index];
-@@ -4675,7 +4709,7 @@ export class AgentSession {
+@@ -4675,7 +4706,7 @@ export class AgentSession {
  
  	/**
  	 * Synchronously mark the session as disposing so new work is rejected
@@ -1091,7 +1245,7 @@ index 6c2b0bb9d23e9c6e6f3e81f38f7aecd46a80708b..f15c3dcb786c44ef96ad252f8cc029f4
  	 * aside provider is detached. Idempotent; `dispose()` runs it first.
  	 *
  	 * Wrappers that await other teardown before delegating to `dispose()` MUST
-@@ -4683,6 +4717,7 @@ export class AgentSession {
+@@ -4683,6 +4714,7 @@ export class AgentSession {
  	 * gap slips past the disposal guards.
  	 */
  	beginDispose(): void {
@@ -1099,7 +1253,7 @@ index 6c2b0bb9d23e9c6e6f3e81f38f7aecd46a80708b..f15c3dcb786c44ef96ad252f8cc029f4
  		this.#isDisposed = true;
  		this.#modelDiscoveryAbortController.abort();
  		this.#queuedMessageDrainBlocked = false;
-@@ -4698,6 +4733,7 @@ export class AgentSession {
+@@ -4698,6 +4730,7 @@ export class AgentSession {
  		this.#titleGenerationAbortController.abort();
  		this.#abortAutolearnCapture();
  		this.#irc.flushPending();
@@ -1107,7 +1261,7 @@ index 6c2b0bb9d23e9c6e6f3e81f38f7aecd46a80708b..f15c3dcb786c44ef96ad252f8cc029f4
  		this.yieldQueue.clear();
  		this.agent.setAsideMessageProvider(undefined);
  		this.agent.hasIrcInterrupts = undefined;
-@@ -4717,7 +4753,11 @@ export class AgentSession {
+@@ -4717,7 +4750,11 @@ export class AgentSession {
  	 */
  	#disposeCall?: Promise<void>;
  	dispose(options: AgentSessionDisposeOptions = {}): Promise<void> {
@@ -1120,7 +1274,7 @@ index 6c2b0bb9d23e9c6e6f3e81f38f7aecd46a80708b..f15c3dcb786c44ef96ad252f8cc029f4
  		return this.#disposeCall;
  	}
  
-@@ -5108,6 +5148,8 @@ export class AgentSession {
+@@ -5108,6 +5145,8 @@ export class AgentSession {
  		// Drop the conversation: messages, queued steers/follow-ups, pending tool
  		// calls, and error state. agent.reset() keeps the model and system prompt.
  		this.#releaseQueuedTtsrReservations();
@@ -1129,7 +1283,7 @@ index 6c2b0bb9d23e9c6e6f3e81f38f7aecd46a80708b..f15c3dcb786c44ef96ad252f8cc029f4
  		this.agent.reset();
  		this.#pendingNextTurnMessages = [];
  		this.#experimentalContextNotesReminder = undefined;
-@@ -5834,6 +5876,10 @@ export class AgentSession {
+@@ -5834,6 +5873,10 @@ export class AgentSession {
  		const filteredFollowUp = followUp.filter(message => !isVibeContext(message));
  		if (filteredSteering.length !== steering.length || filteredFollowUp.length !== followUp.length) {
  			this.agent.replaceQueues(filteredSteering, filteredFollowUp);
@@ -1140,7 +1294,7 @@ index 6c2b0bb9d23e9c6e6f3e81f38f7aecd46a80708b..f15c3dcb786c44ef96ad252f8cc029f4
  			this.#reconcileQueuedMessageDrain();
  		}
  		this.#pendingNextTurnMessages = this.#pendingNextTurnMessages.filter(message => !isVibeContext(message));
-@@ -6414,6 +6460,7 @@ export class AgentSession {
+@@ -6414,6 +6457,7 @@ export class AgentSession {
  			await this.#queueUserMessage(expandedText, options?.images, streamingBehavior, {
  				timestamp: submittedAt,
  				attribution: promptAttribution,
@@ -1148,7 +1302,7 @@ index 6c2b0bb9d23e9c6e6f3e81f38f7aecd46a80708b..f15c3dcb786c44ef96ad252f8cc029f4
  			});
  			outcome.sessionClaimed = true;
  			return true;
-@@ -6471,6 +6518,7 @@ export class AgentSession {
+@@ -6471,6 +6515,7 @@ export class AgentSession {
  					images: normalizedImages,
  					descriptionNotice: imageDescriptionNotice,
  				},
@@ -1156,7 +1310,7 @@ index 6c2b0bb9d23e9c6e6f3e81f38f7aecd46a80708b..f15c3dcb786c44ef96ad252f8cc029f4
  			});
  			outcome.sessionClaimed = true;
  			return true;
-@@ -6555,7 +6603,7 @@ export class AgentSession {
+@@ -6555,7 +6600,7 @@ export class AgentSession {
  	 */
  	async promptCustomMessage<T = unknown>(
  		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">,
@@ -1165,7 +1319,7 @@ index 6c2b0bb9d23e9c6e6f3e81f38f7aecd46a80708b..f15c3dcb786c44ef96ad252f8cc029f4
  			queueChipText?: string;
  			queueOnly?: boolean;
  		},
-@@ -6565,7 +6613,7 @@ export class AgentSession {
+@@ -6565,7 +6610,7 @@ export class AgentSession {
  
  	async #promptCustomMessage<T = unknown>(
  		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">,
@@ -1174,7 +1328,7 @@ index 6c2b0bb9d23e9c6e6f3e81f38f7aecd46a80708b..f15c3dcb786c44ef96ad252f8cc029f4
  			queueChipText?: string;
  			queueOnly?: boolean;
  		},
-@@ -6587,7 +6635,7 @@ export class AgentSession {
+@@ -6587,7 +6632,7 @@ export class AgentSession {
  	async #dispatchCustomPrompt<T = unknown>(
  		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">,
  		options:
@@ -1183,7 +1337,7 @@ index 6c2b0bb9d23e9c6e6f3e81f38f7aecd46a80708b..f15c3dcb786c44ef96ad252f8cc029f4
  					queueChipText?: string;
  					queueOnly?: boolean;
  			  })
-@@ -6628,7 +6676,7 @@ export class AgentSession {
+@@ -6628,7 +6673,7 @@ export class AgentSession {
  			for (const notice of keywordNotices) {
  				await this.#queueCustomMessage(notice, streamingBehavior);
  			}
@@ -1192,7 +1346,7 @@ index 6c2b0bb9d23e9c6e6f3e81f38f7aecd46a80708b..f15c3dcb786c44ef96ad252f8cc029f4
  			outcome.sessionClaimed = true;
  			return true;
  		}
-@@ -6644,7 +6692,7 @@ export class AgentSession {
+@@ -6644,7 +6689,7 @@ export class AgentSession {
  			for (const notice of keywordNotices) {
  				await this.#queueCustomMessage(notice, streamingBehavior);
  			}
@@ -1201,7 +1355,7 @@ index 6c2b0bb9d23e9c6e6f3e81f38f7aecd46a80708b..f15c3dcb786c44ef96ad252f8cc029f4
  			outcome.sessionClaimed = true;
  			return true;
  		}
-@@ -6790,7 +6838,7 @@ export class AgentSession {
+@@ -6790,7 +6835,7 @@ export class AgentSession {
  	async #promptWithMessage(
  		message: AgentMessage,
  		expandedText: string,
@@ -1210,7 +1364,7 @@ index 6c2b0bb9d23e9c6e6f3e81f38f7aecd46a80708b..f15c3dcb786c44ef96ad252f8cc029f4
  			prependMessages?: AgentMessage[];
  			skipPostPromptRecoveryWait?: boolean;
  			acceptTerminalEmptyStop?: boolean;
-@@ -6800,6 +6848,13 @@ export class AgentSession {
+@@ -6800,6 +6845,13 @@ export class AgentSession {
  		// every pre-dispatch bail (generation bump from abort, disposal, usage
  		// preflight denial) exits silently, and prompt() uses the outcome to hand
  		// the typed text back to the host instead of losing it.
@@ -1224,7 +1378,7 @@ index 6c2b0bb9d23e9c6e6f3e81f38f7aecd46a80708b..f15c3dcb786c44ef96ad252f8cc029f4
  		this.#beginInFlight();
  		const generation = this.#promptGeneration;
  		this.#promptSequence++;
-@@ -7001,6 +7056,9 @@ export class AgentSession {
+@@ -7001,6 +7053,9 @@ export class AgentSession {
  			}
  			return true;
  		} finally {
@@ -1234,7 +1388,7 @@ index 6c2b0bb9d23e9c6e6f3e81f38f7aecd46a80708b..f15c3dcb786c44ef96ad252f8cc029f4
  			// The per-turn before_agent_start override lives only for this turn.
  			this.#tools.clearTurnSystemPromptOverride();
  			this.#usagePreflightReadyForNextModelCall = false;
-@@ -7259,6 +7317,61 @@ export class AgentSession {
+@@ -7259,6 +7314,61 @@ export class AgentSession {
  		}
  	}
  
@@ -1296,7 +1450,7 @@ index 6c2b0bb9d23e9c6e6f3e81f38f7aecd46a80708b..f15c3dcb786c44ef96ad252f8cc029f4
  	async #queueUserMessage(
  		text: string,
  		images: ImageContent[] | undefined,
-@@ -7267,11 +7380,13 @@ export class AgentSession {
+@@ -7267,11 +7377,13 @@ export class AgentSession {
  			timestamp?: number;
  			attribution?: MessageAttribution;
  			preprocessed?: { images: ImageContent[] | undefined; descriptionNotice: CustomMessage | undefined };
@@ -1310,7 +1464,7 @@ index 6c2b0bb9d23e9c6e6f3e81f38f7aecd46a80708b..f15c3dcb786c44ef96ad252f8cc029f4
  		// Captured before any await below so the aside branch can detect a
  		// newSession()/switchSession() that completed while normalization/vision
  		// description was in flight and drop a record that would otherwise land in a
-@@ -7301,12 +7416,25 @@ export class AgentSession {
+@@ -7301,12 +7413,25 @@ export class AgentSession {
  			: normalizedImages?.length
  				? await this.#buildImageDescriptionNotice(normalizedImages)
  				: undefined;
@@ -1338,7 +1492,7 @@ index 6c2b0bb9d23e9c6e6f3e81f38f7aecd46a80708b..f15c3dcb786c44ef96ad252f8cc029f4
  			// The awaits above (image normalization / vision description) can span the run's
  			// settle, so the run may already be idle by the time the record lands in the aside
  			// queue with no loop left to drain it. Resuming here is a no-op while streaming and
-@@ -7318,23 +7446,13 @@ export class AgentSession {
+@@ -7318,23 +7443,13 @@ export class AgentSession {
  		if (mode === "followUp") {
  			for (const notice of videoAttachmentNotices) this.agent.followUp(notice);
  			if (imageDescriptionNotice) this.agent.followUp(imageDescriptionNotice);
@@ -1365,7 +1519,7 @@ index 6c2b0bb9d23e9c6e6f3e81f38f7aecd46a80708b..f15c3dcb786c44ef96ad252f8cc029f4
  		this.#scheduleIdleQueueDrain();
  	}
  
-@@ -7530,6 +7648,7 @@ export class AgentSession {
+@@ -7530,6 +7645,7 @@ export class AgentSession {
  		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">,
  		deliverAs: "steer" | "followUp" | "aside",
  		queueChipText?: string,
@@ -1373,7 +1527,7 @@ index 6c2b0bb9d23e9c6e6f3e81f38f7aecd46a80708b..f15c3dcb786c44ef96ad252f8cc029f4
  	): Promise<void> {
  		// Captured before the normalization await below — see #sessionGeneration's doc comment.
  		const sessionGeneration = this.#sessionGeneration;
-@@ -7553,12 +7672,21 @@ export class AgentSession {
+@@ -7553,12 +7669,21 @@ export class AgentSession {
  			timestamp: Date.now(),
  		};
  		const normalizedAppMessage = await this.#normalizeAgentMessageImages(appMessage);
@@ -1396,7 +1550,7 @@ index 6c2b0bb9d23e9c6e6f3e81f38f7aecd46a80708b..f15c3dcb786c44ef96ad252f8cc029f4
  			// The image-normalization await above can span the run's settle, so the run may
  			// already be idle by the time the record lands in the aside queue with no loop
  			// left to drain it. Resuming here is a no-op while streaming and wakes/folds
-@@ -7572,6 +7700,7 @@ export class AgentSession {
+@@ -7572,6 +7697,7 @@ export class AgentSession {
  		} else {
  			this.agent.steer(normalizedAppMessage);
  		}
@@ -1404,7 +1558,7 @@ index 6c2b0bb9d23e9c6e6f3e81f38f7aecd46a80708b..f15c3dcb786c44ef96ad252f8cc029f4
  		this.#scheduleIdleQueueDrain();
  	}
  
-@@ -7795,17 +7924,17 @@ export class AgentSession {
+@@ -7795,17 +7921,17 @@ export class AgentSession {
  		let deliveredAsAside = false;
  		if (options?.deliverAs === "aside") {
  			if (this.isStreaming) {
@@ -1425,7 +1579,7 @@ index 6c2b0bb9d23e9c6e6f3e81f38f7aecd46a80708b..f15c3dcb786c44ef96ad252f8cc029f4
  			return;
  		}
  
-@@ -7821,6 +7950,7 @@ export class AgentSession {
+@@ -7821,6 +7947,7 @@ export class AgentSession {
  			expandPromptTemplates: false,
  			images,
  			streamingBehavior: deliveredAsAside ? "aside" : "steer",
@@ -1433,7 +1587,7 @@ index 6c2b0bb9d23e9c6e6f3e81f38f7aecd46a80708b..f15c3dcb786c44ef96ad252f8cc029f4
  		});
  	}
  
-@@ -7849,6 +7979,10 @@ export class AgentSession {
+@@ -7849,6 +7976,10 @@ export class AgentSession {
  			}
  		}
  		this.agent.replaceQueues(steeringAll.filter(keep), followUpAll.filter(keep));
@@ -1444,7 +1598,7 @@ index 6c2b0bb9d23e9c6e6f3e81f38f7aecd46a80708b..f15c3dcb786c44ef96ad252f8cc029f4
  		this.#reconcileQueuedMessageDrain();
  		return { steering, followUp };
  	}
-@@ -7899,6 +8033,7 @@ export class AgentSession {
+@@ -7899,6 +8030,7 @@ export class AgentSession {
  		if (fromSteer >= 0) {
  			const removed = steering[fromSteer];
  			this.agent.replaceQueues(removeWithCompanions(steering, fromSteer), followUp.slice());
@@ -1452,7 +1606,7 @@ index 6c2b0bb9d23e9c6e6f3e81f38f7aecd46a80708b..f15c3dcb786c44ef96ad252f8cc029f4
  			this.#reconcileQueuedMessageDrain();
  			return toRestoredQueuedMessage(removed);
  		}
-@@ -7906,6 +8041,7 @@ export class AgentSession {
+@@ -7906,6 +8038,7 @@ export class AgentSession {
  		if (fromFollowUp >= 0) {
  			const removed = followUp[fromFollowUp];
  			this.agent.replaceQueues(steering.slice(), removeWithCompanions(followUp, fromFollowUp));
@@ -1460,7 +1614,7 @@ index 6c2b0bb9d23e9c6e6f3e81f38f7aecd46a80708b..f15c3dcb786c44ef96ad252f8cc029f4
  			this.#reconcileQueuedMessageDrain();
  			return toRestoredQueuedMessage(removed);
  		}
-@@ -8334,6 +8470,7 @@ export class AgentSession {
+@@ -8334,6 +8467,7 @@ export class AgentSession {
  			await this.#advisors.drainAndDetachRecorders();
  			try {
  				this.#releaseQueuedTtsrReservations();
@@ -1468,7 +1622,7 @@ index 6c2b0bb9d23e9c6e6f3e81f38f7aecd46a80708b..f15c3dcb786c44ef96ad252f8cc029f4
  				this.agent.reset();
  				if (options?.drop && previousSessionFile) {
  					try {
-@@ -9376,6 +9513,9 @@ export class AgentSession {
+@@ -9376,6 +9510,9 @@ export class AgentSession {
  				break;
  			}
  			if (event.type === "error") {
@@ -1478,7 +1632,7 @@ index 6c2b0bb9d23e9c6e6f3e81f38f7aecd46a80708b..f15c3dcb786c44ef96ad252f8cc029f4
  				throw new Error(event.error.errorMessage || "Ephemeral turn failed");
  			}
  		}
-@@ -9751,6 +9891,11 @@ export class AgentSession {
+@@ -9751,6 +9888,11 @@ export class AgentSession {
  			}
  			generationSettled.resolve();
  			this.#sessionGenerationSettled = previousSessionGenerationSettled;
@@ -1490,7 +1644,7 @@ index 6c2b0bb9d23e9c6e6f3e81f38f7aecd46a80708b..f15c3dcb786c44ef96ad252f8cc029f4
  			return true;
  		} catch (error) {
  			this.sessionManager.restoreState(previousSessionState);
-@@ -10014,6 +10159,8 @@ export class AgentSession {
+@@ -10014,6 +10156,8 @@ export class AgentSession {
  		this.#pendingNextTurnMessages = [];
  		this.#scheduledHiddenNextTurnGeneration = undefined;
  		this.#releaseQueuedTtsrReservations();
@@ -1499,6 +1653,132 @@ index 6c2b0bb9d23e9c6e6f3e81f38f7aecd46a80708b..f15c3dcb786c44ef96ad252f8cc029f4
  		this.agent.replaceQueues([], []);
  		this.#queuedMessageDrainBlocked = false;
  		this.#usagePreflightReadyForNextModelCall = false;
+@@ -10103,6 +10247,9 @@ export class AgentSession {
+ 		options: {
+ 			summarize?: boolean;
+ 			customInstructions?: string;
++			requireIdle?: boolean;
++			/** Hosts settle and publish replacement before post-navigation hooks can start work. */
++			onHistoryReplaced?: () => void | Promise<void>;
+ 			/**
+ 			 * Opts into the two-phase `ask` toolResult re-answer protocol
+ 			 * (issue #5642): set only by the interactive `/tree` selector, which
+@@ -10130,6 +10277,7 @@ export class AgentSession {
+ 		editorImages?: ImageContent[];
+ 		cancelled: boolean;
+ 		aborted?: boolean;
++		busy?: boolean;
+ 		summaryEntry?: BranchSummaryEntry;
+ 		/** Raw session context built during navigation — pass to renderInitialMessages to skip a second O(N) walk. */
+ 		sessionContext?: SessionContext;
+@@ -10151,9 +10299,30 @@ export class AgentSession {
+ 		 */
+ 		askReanswerCommitted?: boolean;
+ 	}> {
++		const isBusy = () =>
++			this.isDisposed ||
++			this.hasAdmittedSubmission ||
++			this.isStreaming ||
++			this.isAborting ||
++			this.#abortInProgress ||
++			this.isRetrying ||
++			this.isCompacting ||
++			this.isGeneratingHandoff ||
++			this.isBashRunning ||
++			this.isEvalRunning ||
++			this.hasPendingBashMessages ||
++			this.hasPendingPythonMessages ||
++			this.hasPostPromptWork ||
++			this.agent.peekSteeringQueue().length > 0 ||
++			this.agent.peekFollowUpQueue().length > 0 ||
++			this.#pendingNextTurnMessages.length > 0 ||
++			(this.#asyncJobManager?.getRunningJobs(this.#agentId ? { ownerId: this.#agentId } : undefined).length ?? 0) > 0 ||
++			(this.#asyncJobManager?.hasPendingDeliveries(this.#agentId ? { ownerId: this.#agentId } : undefined) ?? false);
++		if (options.requireIdle && (this.isSessionTransitioning || isBusy())) return { cancelled: false, busy: true };
+ 		using _transition = this.#beginSessionTransition();
+-		await this.#bash.flushPending();
++		if (!options.requireIdle) await this.#bash.flushPending();
+ 		const oldLeafId = this.sessionManager.getLeafId();
++		const historyVersion = options.requireIdle ? this.sessionManager.getHistoryVersion() : undefined;
+ 
+ 		const targetEntry = this.sessionManager.getEntry(targetId);
+ 		if (!targetEntry) {
+@@ -10302,41 +10471,29 @@ export class AgentSession {
+ 			summaryDetails = hookSummary.details;
+ 		}
+ 
++		if (
++			options.requireIdle &&
++			(this.#sessionTransitionDepth > 1 || isBusy() || this.sessionManager.getHistoryVersion() !== historyVersion)
++		) {
++			this.#branchSummaryAbortController = undefined;
++			return { cancelled: false, busy: true };
++		}
++
+ 		// All cancellation/no-op exits are behind us. Invalidate prompt setup
+ 		// admitted on the abandoned branch before committing any tree changes.
+ 		this.#promptGeneration++;
+ 
+ 		// Determine the new leaf position based on target type
+-		let newLeafId: string | null;
+-		let editorText: string | undefined;
+-		let editorImages: ImageContent[] | undefined;
++		const target = resolveTreeNavigationTarget(targetEntry, oldLeafId);
++		let newLeafId = target.leafId;
++		const editorText = target.draft?.text;
++		const editorImages = target.draft?.images.length ? target.draft.images : undefined;
+ 		// Set when the second-pass `ask` re-answer branch below actually commits a
+ 		// new sibling answer — the trigger for resuming the agent afterwards so the
+ 		// model consumes it, mirroring a live `ask` completion (issue #6483).
+ 		let isAskReanswerCompletion = false;
+ 
+-		if (isTranscriptEntry(targetEntry) && isUserRequestEntry(targetEntry)) {
+-			// User request (plain prompt, or a user-invoked skill/collab prompt): leaf = parent
+-			// (null if root), the draft the user typed goes back to the editor with its images.
+-			newLeafId = targetEntry.parentId;
+-			editorText = userTurnDraft(targetEntry);
+-			const request = transcriptEntryMessage(targetEntry);
+-			const targetImages =
+-				request && (request.role === "user" || request.role === "custom")
+-					? this.#extractUserMessageImages(request.content)
+-					: [];
+-			if (targetImages.length > 0) editorImages = targetImages;
+-		} else if (targetEntry.type === "custom_message" && targetEntry.customType !== SKILL_PROMPT_MESSAGE_TYPE) {
+-			// Other custom message: leaf = parent (null if root), text goes to editor
+-			newLeafId = targetEntry.parentId;
+-			editorText =
+-				typeof targetEntry.content === "string"
+-					? targetEntry.content
+-					: targetEntry.content
+-							.filter((c): c is { type: "text"; text: string } => c.type === "text")
+-							.map(c => c.text)
+-							.join("");
+-		} else if (
++		if (
+ 			targetEntry.type === "message" &&
+ 			targetEntry.message.role === "toolResult" &&
+ 			targetEntry.message.toolName === "ask" &&
+@@ -10358,12 +10515,6 @@ export class AgentSession {
+ 			};
+ 			newLeafId = this.sessionManager.appendMessageToBranch(toolResultMessage, targetEntry.parentId);
+ 			isAskReanswerCompletion = true;
+-		} else {
+-			// Non-user message (or an agent/autoload skill-prompt injection): land the
+-			// leaf on the selected node so it stays on the active branch. Injected skill
+-			// prompts must not be re-editable — their content is a large expanded body,
+-			// not a user turn (issue #5374).
+-			newLeafId = targetId;
+ 		}
+ 
+ 		// Switch leaf (with or without summary)
+@@ -10403,6 +10554,7 @@ export class AgentSession {
+ 		this.#closeCodexProviderSessionsForHistoryRewrite();
+ 
+ 		this.#branchSummaryAbortController = undefined;
++		if (options.onHistoryReplaced) await options.onHistoryReplaced();
+ 
+ 		// Report a committed `ask` re-answer so the interactive caller can resume
+ 		// the agent via `resumeAfterAskReanswer()` *after* rebuilding its
 diff --git a/src/session/artifacts.ts b/src/session/artifacts.ts
 index b617d0523f1f4163d3ee8182c82824eb6d5fe625..cfa66a94a29608a379a2fb58c222c04af940e180 100644
 --- a/src/session/artifacts.ts
@@ -1571,10 +1851,16 @@ index 35c0a35b1d19ec438d8cea17c9f957caa13efbb2..462fc3a06c4b8ca7d9d6d78fd7929629
  	}
  
 diff --git a/src/session/session-context.ts b/src/session/session-context.ts
-index 777d8c093350f38b70c21f6eef4db266e8f0eb84..ec14f258a6a747f193154fb2af7482bd90865059 100644
+index 777d8c093350f38b70c21f6eef4db266e8f0eb84..b7fb3a9e6563badeb2439263163aa7b6e5b9ca34 100644
 --- a/src/session/session-context.ts
 +++ b/src/session/session-context.ts
-@@ -7,6 +7,7 @@ import {
+@@ -2,11 +2,13 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+ import { getAnthropicCompactionPayload, isTurnStartEntry } from "@oh-my-pi/pi-agent-core/compaction";
+ import {
+ 	coerceServiceTierByFamily,
++	type ImageContent,
+ 	type OpenAIResponsesHistoryPayload,
+ 	type ServiceTierByFamily,
  } from "@oh-my-pi/pi-ai";
  import * as snapcompact from "@oh-my-pi/snapcompact";
  import { isRecord } from "@oh-my-pi/pi-utils";
@@ -1582,7 +1868,15 @@ index 777d8c093350f38b70c21f6eef4db266e8f0eb84..ec14f258a6a747f193154fb2af7482bd
  import {
  	type CustomMessage,
  	createBranchSummaryMessage,
-@@ -100,6 +101,7 @@ function snapcompactHistoryBlockOptions(
+@@ -18,6 +20,7 @@ import {
+ 	isUserTurnInitiator,
+ 	normalizeCustomMessagePayload,
+ 	PREWALK_PLAN_MESSAGE_TYPE,
++	SKILL_PROMPT_MESSAGE_TYPE,
+ 	VIBE_MODE_CONTEXT_MESSAGE_TYPE,
+ } from "./messages";
+ import { CONTEXT_NOTES_ENTRY_TYPE, getContextNotes, renderContextNotes } from "./context-notes";
+@@ -100,6 +103,7 @@ function snapcompactHistoryBlockOptions(
  
  export interface SessionContext {
  	messages: AgentMessage[];
@@ -1590,7 +1884,7 @@ index 777d8c093350f38b70c21f6eef4db266e8f0eb84..ec14f258a6a747f193154fb2af7482bd
  	thinkingLevel?: string;
  	/** Configured thinking selector (`"auto"` or a concrete level) from the latest change. */
  	configuredThinkingLevel?: string;
-@@ -158,6 +160,8 @@ export interface BuildSessionContextOptions {
+@@ -158,6 +162,8 @@ export interface BuildSessionContextOptions {
  	 * latest compacted tail.
  	 */
  	transcript?: boolean;
@@ -1599,7 +1893,34 @@ index 777d8c093350f38b70c21f6eef4db266e8f0eb84..ec14f258a6a747f193154fb2af7482bd
  	/** In transcript mode, elide entries replaced by the latest compaction. */
  	collapseCompactedHistory?: boolean;
  	/**
-@@ -302,6 +306,7 @@ export function buildSessionContext(
+@@ -282,6 +288,26 @@ function textContent(content: string | ReadonlyArray<{ type: string; text?: stri
+ 	return text;
+ }
+ 
++/** Resolve plain tree navigation without changing the session or reopening tools. */
++export function resolveTreeNavigationTarget(
++	entry: SessionEntry,
++	currentLeafId: string | null,
++): { leafId: string | null; draft: { text: string; images: ImageContent[] } | null } {
++	if (entry.id === currentLeafId && !(entry.type === "message" && entry.message.role === "user")) {
++		return { leafId: currentLeafId, draft: null };
++	}
++	if (isTranscriptEntry(entry) && isUserRequestEntry(entry)) {
++		const request = transcriptEntryMessage(entry);
++		const content = request && (request.role === "user" || request.role === "custom") ? request.content : [];
++		const images = Array.isArray(content) ? content.filter((block): block is ImageContent => block.type === "image") : [];
++		return { leafId: entry.parentId, draft: { text: userTurnDraft(entry) ?? "", images } };
++	}
++	if (entry.type === "custom_message" && entry.customType !== SKILL_PROMPT_MESSAGE_TYPE) {
++		return { leafId: entry.parentId, draft: { text: textContent(entry.content), images: [] } };
++	}
++	return { leafId: entry.id, draft: null };
++}
++
+ export function buildSessionContext(
+ 	entries: SessionEntry[],
+ 	leafId?: string | null,
+@@ -302,6 +328,7 @@ export function buildSessionContext(
  		// Explicitly null - return no messages (navigated to before first entry)
  		return {
  			messages: [],
@@ -1607,7 +1928,7 @@ index 777d8c093350f38b70c21f6eef4db266e8f0eb84..ec14f258a6a747f193154fb2af7482bd
  			thinkingLevel: "off",
  			serviceTier: undefined,
  			models: {},
-@@ -320,6 +325,7 @@ export function buildSessionContext(
+@@ -320,6 +347,7 @@ export function buildSessionContext(
  	if (!leaf) {
  		return {
  			messages: [],
@@ -1615,7 +1936,7 @@ index 777d8c093350f38b70c21f6eef4db266e8f0eb84..ec14f258a6a747f193154fb2af7482bd
  			thinkingLevel: "off",
  			serviceTier: undefined,
  			models: {},
-@@ -339,6 +345,14 @@ export function buildSessionContext(
+@@ -339,6 +367,14 @@ export function buildSessionContext(
  		current = current.parentId ? byId.get(current.parentId) : undefined;
  	}
  	path.reverse();
@@ -1630,7 +1951,7 @@ index 777d8c093350f38b70c21f6eef4db266e8f0eb84..ec14f258a6a747f193154fb2af7482bd
  
  	// Extract settings and find compaction
  	let thinkingLevel: string | undefined = "off";
-@@ -781,6 +795,7 @@ export function buildSessionContext(
+@@ -781,6 +817,7 @@ export function buildSessionContext(
  
  	return {
  		messages,
@@ -1638,45 +1959,234 @@ index 777d8c093350f38b70c21f6eef4db266e8f0eb84..ec14f258a6a747f193154fb2af7482bd
  		cacheMissExplainedAt: options?.transcript ? cacheMissExplainedAt : undefined,
  		thinkingLevel,
  		configuredThinkingLevel,
+diff --git a/src/session/session-entries.ts b/src/session/session-entries.ts
+index d8be66daf349918222d1984b756e61c752f93d0a..03a2ef6dbc7863b4dd088db0f8b59e722045fb23 100644
+--- a/src/session/session-entries.ts
++++ b/src/session/session-entries.ts
+@@ -30,6 +30,13 @@ export interface SessionTitleSlotEntry {
+ 	pad: string;
+ }
+ 
++/** Physical journal position, excluded from the conversation tree. */
++export interface SessionCursorRecord {
++	type: "session_cursor";
++	leafId: string | null;
++	revision: string;
++}
++
+ export const EPHEMERAL_MODEL_CHANGE_ROLE = "fallback";
+ 
+ export interface SessionHeader {
+@@ -311,11 +318,11 @@ export type SessionEntry =
+ 	| CredentialPinEntry
+ 	| ResetBoundaryEntry;
+ 
+-/** Raw logical file entry after loaders strip any fixed-width title slot. */
++/** Logical file entry after loaders fold physical title and cursor records. */
+ export type FileEntry = SessionHeader | SessionEntry;
+ 
+-/** Physical JSONL entry before slot-aware loaders fold the title slot. */
+-export type RawFileEntry = SessionTitleSlotEntry | FileEntry;
++/** Physical JSONL record before loaders fold title and cursor state. */
++export type RawFileEntry = SessionTitleSlotEntry | SessionCursorRecord | FileEntry;
+ 
+ /** Tree node for getTree() - defensive copy of session structure */
+ export interface SessionTreeNode {
 diff --git a/src/session/session-loader.ts b/src/session/session-loader.ts
-index 732fc693457fc464ad5b4d4b6f620d96aa6177ce..594d424218b7a65cf0a39a5fdf914494b1b8b33e 100644
+index 732fc693457fc464ad5b4d4b6f620d96aa6177ce..b7c82d295038e1da3248c3a6080ae0f8aca2d6c2 100644
 --- a/src/session/session-loader.ts
 +++ b/src/session/session-loader.ts
-@@ -2,6 +2,7 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+@@ -1,10 +1,12 @@
++import { createHash } from "node:crypto";
+ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
  import { ConcatSink, getBlobsDir, isEnoent, isEnotdir, parseJsonlLenient } from "@oh-my-pi/pi-utils";
  import * as snapcompact from "@oh-my-pi/snapcompact";
  import { Semaphore } from "../task/parallel";
 +import type { TodoPhase } from "../tools/todo";
  import { BlobStore, isBlobRef, lazyImageDataSync, resolveImageData, resolveImageDataUrl } from "./blob-store";
  import { buildSessionContext } from "./session-context";
- import type { FileEntry, RawFileEntry, SessionEntry, SessionHeader } from "./session-entries";
-@@ -529,15 +530,31 @@ export async function resolveBlobRefsInEntries(entries: FileEntry[], blobStore:
+-import type { FileEntry, RawFileEntry, SessionEntry, SessionHeader } from "./session-entries";
++import type { FileEntry, RawFileEntry, SessionCursorRecord, SessionEntry, SessionHeader } from "./session-entries";
+ import { migrateToCurrentVersion } from "./session-migrations";
+ import { isExternalizableImagePosition, isPersistenceTruncatedString } from "./session-persistence";
+ import { FileSessionStorage, type SessionStorage } from "./session-storage";
+@@ -37,6 +39,8 @@ export interface VisitEntriesFromFileStreamOptions {
+ 	onMalformedRecord?: () => void;
+ 	/** Rethrow missing source instead of visiting nothing (fork backstop). */
+ 	throwIfMissing?: boolean;
++	/** Physical cursor records are never passed to the entry visitor. */
++	onCursor?: (cursor: SessionCursorRecord) => void;
+ 	/**
+ 	 * Called with each stream chunk's byte length as it is consumed. Lets
+ 	 * callers derive the exact snapshot size without re-stating the file.
+@@ -54,6 +58,7 @@ export interface LoadSessionOptions {
+ export interface SessionLoadResult {
+ 	entries: FileEntry[];
+ 	titleSlot: SessionTitleUpdate | undefined;
++	cursor?: SessionCursorRecord;
+ 	malformedRecords: number;
+ 	/** Byte length of the snapshot actually parsed, or `null` when the path did not exist. */
+ 	sourceSize?: number | null;
+@@ -86,19 +91,61 @@ function applyTitleSlot(entry: FileEntry | undefined, slot: SessionTitleUpdate |
+ 	}
+ }
+ 
+-/** Parse session JSONL while stripping and folding the optional fixed title slot. */
++function parseSessionCursor(record: SessionCursorRecord): SessionCursorRecord {
++	if (
++		(record.leafId !== null && (typeof record.leafId !== "string" || record.leafId.length === 0)) ||
++		typeof record.revision !== "string" ||
++		record.revision.length === 0
++	) {
++		throw new Error("Session cursor is malformed. The file was not modified.");
++	}
++	return { type: "session_cursor", leafId: record.leafId, revision: record.revision };
++}
++
++function validateSessionCursor(entries: readonly FileEntry[], cursor: SessionCursorRecord | undefined): void {
++	if (cursor && cursor.leafId !== null && !entries.some(entry => entry?.type !== "session" && entry?.id === cursor.leafId)) {
++		throw new Error(`Session cursor references missing entry ${cursor.leafId}. The file was not modified.`);
++	}
++}
++
++export function sessionHistoryVersion(
++	sessionId: string,
++	entries: readonly SessionEntry[],
++	cursor: Pick<SessionCursorRecord, "leafId" | "revision">,
++): string {
++	const hash = createHash("sha256");
++	hash.update(JSON.stringify([sessionId, cursor.leafId, cursor.revision]));
++	for (const entry of entries) hash.update(`\n${JSON.stringify(entry)}`);
++	return hash.digest("hex");
++}
++
++/** Parse session JSONL while folding physical title and cursor records. */
+ export function parseSessionContent(content: string): SessionLoadResult {
+ 	const { body, slot } = splitTitleSlot(content);
+ 	let malformedRecords = 0;
+-	const entries = parseJsonlLenient<RawFileEntry>(body, {
++	const records = parseJsonlLenient<RawFileEntry>(body, {
+ 		onMalformedRecord: () => {
+ 			malformedRecords++;
+ 		},
+-	}) as FileEntry[];
++	});
++	let entryCount = 0;
++	let cursor: SessionCursorRecord | undefined;
++	for (const record of records) {
++		if (record?.type === "session_cursor") {
++			cursor = parseSessionCursor(record);
++		} else if (record?.type !== "title") {
++			records[entryCount++] = record;
++			if (cursor && record?.type !== "session" && typeof record?.id === "string") cursor.leafId = record.id;
++		}
++	}
++	records.length = entryCount;
++	const entries = records as FileEntry[];
++	validateSessionCursor(entries, cursor);
+ 	applyTitleSlot(entries[0], slot);
+ 	return {
+ 		entries,
+ 		titleSlot: slot,
++		cursor,
+ 		malformedRecords,
+ 		sourceSize: Buffer.byteLength(content, "utf8"),
+ 		invalidHeader: entries.length > 0 ? !isValidSessionHeader(entries[0]) : malformedRecords > 0,
+@@ -171,17 +218,22 @@ export async function visitEntriesFromFileStream(
+ 					stopped = true;
+ 					break;
+ 				}
+-				const entry = value as FileEntry;
+-				if (!sawFirstEntry) {
+-					sawFirstEntry = true;
+-					applyTitleSlot(entry, titleSlot);
+-				}
+ 				try {
+-					if (visit(entry) === false) {
++					const record = value as RawFileEntry;
++					recordsSeen++;
++					if (record?.type === "session_cursor") {
++						options.onCursor?.(parseSessionCursor(record));
++						continue;
++					}
++					if (record?.type === "title") continue;
++					if (!sawFirstEntry) {
++						sawFirstEntry = true;
++						applyTitleSlot(record, titleSlot);
++					}
++					if (visit(record) === false) {
+ 						stopped = true;
+ 						break;
+ 					}
+-					recordsSeen++;
+ 					entriesSinceYield++;
+ 					if (recordsSeen >= maxRecords) {
+ 						stopped = true;
+@@ -299,12 +351,17 @@ export async function loadEntriesFromFileStream(
+ 	const entries: FileEntry[] = [];
+ 	let malformedRecords = 0;
+ 	let bytesConsumed = 0;
++	let cursor: SessionCursorRecord | undefined;
+ 	const titleSlot = await visitEntriesFromFileStream(
+ 		filePath,
+ 		entry => {
+ 			entries.push(entry);
++			if (cursor && entry?.type !== "session" && typeof entry?.id === "string") cursor.leafId = entry.id;
+ 		},
+ 		{
++			onCursor: record => {
++				cursor = record;
++			},
+ 			onMalformedRecord: () => {
+ 				malformedRecords++;
+ 			},
+@@ -314,9 +371,11 @@ export async function loadEntriesFromFileStream(
+ 			},
+ 		},
+ 	);
++	validateSessionCursor(entries, cursor);
+ 	return {
+ 		entries,
+ 		titleSlot,
++		cursor,
+ 		malformedRecords,
+ 		sourceSize: bytesConsumed,
+ 		invalidHeader: entries.length > 0 ? !isValidSessionHeader(entries[0]) : malformedRecords > 0,
+@@ -523,21 +582,37 @@ export async function resolveBlobRefsInEntries(entries: FileEntry[], blobStore:
+ /**
+  * Read-only transcript view of a session file: load entries, migrate to the
+  * current version, resolve blob refs, and build the display transcript along
+- * the persisted leaf path (last entry). Uses transcript mode (collapsed to the
++ * the persisted cursor path. Uses transcript mode (collapsed to the
+  * latest compaction) so failed/aborted tail turns stay visible, unlike the
+  * provider-context builder which drops them. Does NOT create a writer or take
   * the session lock — safe to call against a file another session is writing.
   */
  export async function loadSessionMessagesReadOnly(filePath: string): Promise<AgentMessage[]> {
+-	const entries = await loadEntriesFromFile(filePath);
+-	if (entries.length === 0) return [];
 +	return (await loadSessionReadOnly(filePath, false)).messages;
 +}
 +
 +/** Transcript consumers call this to read messages and canonical todos from one journal version. */
 +export function loadSessionSnapshotReadOnly(
 +	filePath: string,
-+): Promise<{ messages: AgentMessage[]; todoPhases: TodoPhase[] | null }> {
++): Promise<{ messages: AgentMessage[]; todoPhases: TodoPhase[] | null; historyRevision: string }> {
 +	return loadSessionReadOnly(filePath, true);
 +}
 +
 +async function loadSessionReadOnly(
 +	filePath: string,
 +	includeTodoPhases: boolean,
-+): Promise<{ messages: AgentMessage[]; todoPhases: TodoPhase[] | null }> {
- 	const entries = await loadEntriesFromFile(filePath);
--	if (entries.length === 0) return [];
-+	if (entries.length === 0) return { messages: [], todoPhases: [] };
++): Promise<{ messages: AgentMessage[]; todoPhases: TodoPhase[] | null; historyRevision: string }> {
++	const { entries, cursor } = await loadSessionFile(filePath);
++	if (entries.length === 0) return { messages: [], todoPhases: [], historyRevision: "empty" };
  	migrateToCurrentVersion(entries);
  	for (const entry of entries) repairTruncatedSnapcompactFrames(entry);
  	const blobs = new BlobStore(getBlobsDir());
  	const sessionEntries = entries.filter((e): e is SessionEntry => e.type !== "session");
 -	const { messages } = buildSessionContext(sessionEntries, undefined, undefined, {
-+	const { messages, todoPhases } = buildSessionContext(sessionEntries, undefined, undefined, {
++	const { messages, todoPhases } = buildSessionContext(sessionEntries, cursor?.leafId, undefined, {
  		transcript: true,
 +		includeTodoPhases,
  		collapseCompactedHistory: true,
@@ -1684,12 +2194,40 @@ index 732fc693457fc464ad5b4d4b6f620d96aa6177ce..594d424218b7a65cf0a39a5fdf914494
  		resolveFrameData: data => lazyImageDataSync(blobs, data),
  	});
  	// A collapsed summary carries the remote-compaction replacement history for
-@@ -550,5 +567,5 @@ export async function loadSessionMessagesReadOnly(filePath: string): Promise<Age
+@@ -550,5 +625,33 @@ export async function loadSessionMessagesReadOnly(filePath: string): Promise<Age
  			: message,
  	);
  	await resolveBlobRefs(displayMessages, blobs);
 -	return displayMessages;
-+	return { messages: displayMessages, todoPhases: todoPhases ?? null };
++	return {
++		messages: displayMessages,
++		todoPhases: todoPhases ?? null,
++		historyRevision: cursor?.revision ?? entries[0]!.id,
++	};
++}
++
++export async function loadSessionHistoryReadOnly(filePath: string): Promise<{
++	sessionId: string;
++	entries: SessionEntry[];
++	activeLeafId: string | null;
++	revision: string;
++	version: string;
++}> {
++	const loaded = await loadSessionFile(filePath, undefined, { throwIfMissing: true });
++	const header = loaded.entries[0];
++	if (!header || header.type !== "session") throw new Error("Session header is missing or malformed.");
++	migrateToCurrentVersion(loaded.entries);
++	await resolveBlobRefsInEntries(loaded.entries, new BlobStore(getBlobsDir()));
++	const entries = loaded.entries.slice(1) as SessionEntry[];
++	const activeLeafId = loaded.cursor ? loaded.cursor.leafId : (entries.at(-1)?.id ?? null);
++	const revision = loaded.cursor?.revision ?? header.id;
++	return {
++		sessionId: header.id,
++		entries,
++		activeLeafId,
++		revision,
++		version: sessionHistoryVersion(header.id, entries, { leafId: activeLeafId, revision }),
++	};
  }
 diff --git a/src/session/session-maintenance.ts b/src/session/session-maintenance.ts
 index 4fdf8acf498e12b1f2589b8bdddd626e031b58a7..ae7db616b8e84533feade35799e146acdeef1173 100644
@@ -1786,10 +2324,257 @@ index 4fdf8acf498e12b1f2589b8bdddd626e031b58a7..ae7db616b8e84533feade35799e146ac
  
  	/**
 diff --git a/src/session/session-manager.ts b/src/session/session-manager.ts
-index 650628e4949b60d88f4861e0101eb9bc87347768..74b827332064c73dea235a94837caf7c2b434421 100644
+index 650628e4949b60d88f4861e0101eb9bc87347768..011421ac8b57350f784a313a288cd46621f08594 100644
 --- a/src/session/session-manager.ts
 +++ b/src/session/session-manager.ts
-@@ -2503,9 +2503,10 @@ export class SessionManager {
+@@ -55,6 +55,7 @@ import {
+ 	type NewSessionOptions,
+ 	type ResetBoundaryEntry,
+ 	type ServiceTierChangeEntry,
++	type SessionCursorRecord,
+ 	type SessionEntry,
+ 	type SessionHeader,
+ 	type SessionInitEntry,
+@@ -69,11 +70,11 @@ import {
+ } from "./session-entries";
+ import { findMostRecentSession, listAllSessions, listSessions, type SessionInfo } from "./session-listing";
+ import {
+-	loadEntriesFromFile,
+ 	loadSessionFile,
+ 	parseSessionContent,
+ 	resolveBlobRefsInEntries,
+ 	type SessionLoadResult,
++	sessionHistoryVersion,
+ 	visitEntriesFromFile,
+ } from "./session-loader";
+ import { generateId, migrateToCurrentVersion } from "./session-migrations";
+@@ -547,6 +548,8 @@ export type ReadonlySessionManager = Pick<
+ 	| "getArtifactPath"
+ 	| "getLeafId"
+ 	| "getLeafEntry"
++	| "getHistoryRevision"
++	| "getHistoryVersion"
+ 	| "getEntry"
+ 	| "getLabel"
+ 	| "getBranch"
+@@ -574,6 +577,7 @@ interface SessionManagerStateSnapshot {
+ 	fallbackRuntimeOnly: boolean;
+ 	header: SessionHeader;
+ 	entries: SessionEntry[];
++	cursor: SessionCursorRecord;
+ }
+ 
+ interface DiskQueueOptions {
+@@ -587,6 +591,8 @@ interface AtomicEntryBatch {
+ 	entryIds: Set<string>;
+ 	deferredNotifications: SessionEntry[];
+ 	preBatchLeafId: string | null;
++	preBatchRevision: string;
++	externalRevision?: string;
+ 	externalLeafChanged: boolean;
+ 	externalLeafId: string | null;
+ }
+@@ -656,6 +662,7 @@ export class SessionManager {
+ 	readonly #blobs: BlobStore;
+ 
+ 	#sessionId = "";
++	#historyRevision = "";
+ 	#sessionName: string | undefined;
+ 	#titleSource: SessionTitleSource | undefined;
+ 	#titleRevision = 0;
+@@ -1007,8 +1014,9 @@ export class SessionManager {
+ 		return this.#writer;
+ 	}
+ 
+-	#lineFor(entry: FileEntry): string {
+-		return `${stringifyJson(prepareEntryForPersistence(entry, this.#blobs)) ?? "null"}\n`;
++	#lineFor(entry: FileEntry | SessionCursorRecord): string {
++		const persisted = entry.type === "session_cursor" ? entry : prepareEntryForPersistence(entry, this.#blobs);
++		return `${stringifyJson(persisted) ?? "null"}\n`;
+ 	}
+ 	#recordDurableAppend(line: string): void {
+ 		this.#expectedDiskSize = (this.#expectedDiskSize ?? 0) + Buffer.byteLength(line, "utf8");
+@@ -1064,10 +1072,15 @@ export class SessionManager {
+ 		});
+ 	}
+ 
++	#cursorRecord(): SessionCursorRecord {
++		return { type: "session_cursor", leafId: this.#index.leafId(), revision: this.#historyRevision };
++	}
++
+ 	#fileBody(): string {
+ 		let body = this.#titleSlotLine();
+ 		body += this.#lineFor(this.#header);
+ 		for (const entry of this.#entries) body += this.#lineFor(entry);
++		body += this.#lineFor(this.#cursorRecord());
+ 		return body;
+ 	}
+ 
+@@ -1250,7 +1263,7 @@ export class SessionManager {
+ 		}
+ 	}
+ 
+-	#appendToSessionFile(entry: SessionEntry): void {
++	#appendToSessionFile(entry: SessionEntry | SessionCursorRecord): void {
+ 		if (this.#released || !this.#persist || !this.#sessionFile) return;
+ 		if (this.#atomicEntryBatch) {
+ 			this.#fileIsCurrent = false;
+@@ -1279,6 +1292,7 @@ export class SessionManager {
+ 		// durable entry exists, later appends cannot satisfy its delete predicate.
+ 		if (
+ 			this.#storage.withSessionFileLockSync &&
++			entry.type !== "session_cursor" &&
+ 			this.#draftOnlySessionCleanupArmed &&
+ 			!isDraftOnlyMetadataEntry(entry) &&
+ 			this.#entries.every(candidate => candidate === entry || isDraftOnlyMetadataEntry(candidate))
+@@ -1295,7 +1309,7 @@ export class SessionManager {
+ 		this.#appendToCurrentSessionFile(entry);
+ 	}
+ 
+-	#appendToCurrentSessionFile(entry: SessionEntry): void {
++	#appendToCurrentSessionFile(entry: SessionEntry | SessionCursorRecord): void {
+ 		// Atomic replacement / move window: do not open a fresh append writer that
+ 		// a Windows EPERM replace could detach from the current JSONL path.
+ 		// - moveTo: write a full body to the live relocation path (source pre-
+@@ -1331,7 +1345,10 @@ export class SessionManager {
+ 		// opens a fresh append handle and the entry still lands.
+ 		try {
+ 			const writer = this.#appendWriter();
+-			const line = this.#lineFor(entry);
++			let line = this.#lineFor(entry);
++			if (entry.type !== "session_cursor" && entry.id !== this.#index.leafId()) {
++				line += this.#lineFor(this.#cursorRecord());
++			}
+ 			if (writer.appendSync && !this.#storage.defersSyncPublish) {
+ 				writer.appendSync(line);
+ 				this.#recordDurableAppend(line);
+@@ -1393,13 +1410,13 @@ export class SessionManager {
+ 		}
+ 
+ 		const epoch = this.#diskEpoch;
+-		const line = this.#lineFor(entry);
+ 		await this.#scheduleDiskWork(
+ 			async () => {
+ 				if (this.#released) return;
+ 				const sessionFile = this.#sessionFile;
+ 				if (!sessionFile) return;
+ 				try {
++					const line = this.#lineFor(entry) + this.#lineFor(this.#cursorRecord());
+ 					await this.#appendWriter().append(line);
+ 					this.#recordDurableAppend(line);
+ 					await this.#storage.updateSessionTitle(sessionFile, update);
+@@ -1433,6 +1450,7 @@ export class SessionManager {
+ 		this.#expectedDiskSize = null;
+ 		this.#reconcileSessionDirForFallback();
+ 		this.#sessionId = mintSessionId();
++		this.#historyRevision = this.#sessionId;
+ 		this.#sessionName = undefined;
+ 		this.#titleSource = undefined;
+ 		this.#titleUpdatedAt = "";
+@@ -1486,7 +1504,7 @@ export class SessionManager {
+ 		return this.#sessionFile;
+ 	}
+ 
+-	#applyEntries(header: SessionHeader, entries: SessionEntry[]): void {
++	#applyEntries(header: SessionHeader, entries: SessionEntry[], cursor?: SessionCursorRecord): void {
+ 		this.#header = header;
+ 		this.#entries = entries;
+ 		this.#sessionId = header.id;
+@@ -1494,6 +1512,8 @@ export class SessionManager {
+ 		this.#titleSource = header.titleSource;
+ 		this.#titleUpdatedAt = header.timestamp;
+ 		this.#index.rebuild(entries);
++		this.#historyRevision = cursor?.revision ?? header.id;
++		if (cursor) this.#index.setLeaf(cursor.leafId);
+ 	}
+ 
+ 	#freshEntryFields(): { id: string; parentId: string | null; timestamp: string } {
+@@ -1505,26 +1525,31 @@ export class SessionManager {
+ 	}
+ 
+ 	#setLeaf(id: string | null): void {
++		if (this.#released || id === this.#index.leafId()) return;
+ 		this.#index.setLeaf(id);
++		this.#historyRevision = Bun.randomUUIDv7();
+ 		const batch = this.#atomicEntryBatch;
+ 		if (batch && !batch.collecting) {
+ 			batch.externalLeafChanged = true;
+ 			batch.externalLeafId = id;
++			batch.externalRevision = this.#historyRevision;
+ 		}
++		this.#appendToSessionFile(this.#cursorRecord());
+ 	}
+ 
+-	#recordEntry(entry: SessionEntry): void {
++	#recordEntry(entry: SessionEntry, retainedLeafId?: string | null): void {
+ 		if (this.#released) {
+ 			logger.warn("Dropped session entry appended after terminal release", { type: entry.type });
+ 			return;
+ 		}
+ 		this.#entries.push(entry);
+ 		this.#index.insert(entry);
++		if (retainedLeafId !== undefined) this.#index.setLeaf(retainedLeafId);
+ 		const batch = this.#atomicEntryBatch;
+ 		if (batch?.collecting) batch.entryIds.add(entry.id);
+ 		if (batch && !batch.collecting) {
+ 			batch.externalLeafChanged = true;
+-			batch.externalLeafId = entry.id;
++			batch.externalLeafId = this.#index.leafId();
+ 		}
+ 		this.#appendToSessionFile(entry);
+ 		if (batch) batch.deferredNotifications.push(entry);
+@@ -1546,6 +1571,7 @@ export class SessionManager {
+ 		this.#entries = retained;
+ 		this.#index.rebuild(retained);
+ 		this.#index.setLeaf(restoredLeaf && this.#index.has(restoredLeaf) ? restoredLeaf : null);
++		this.#historyRevision = batch.externalRevision ?? batch.preBatchRevision;
+ 	}
+ 
+ 	#draftPath(): string | null {
+@@ -1644,6 +1670,7 @@ export class SessionManager {
+ 			// a rollback observe the move it is undoing.
+ 			header: structuredClone(this.#header),
+ 			entries: [...this.#entries],
++			cursor: this.#cursorRecord(),
+ 		};
+ 	}
+ 
+@@ -1682,7 +1709,7 @@ export class SessionManager {
+ 		this.#forceFileCreation = snapshot.onDisk;
+ 		this.#draftOnlySessionCleanupArmed = snapshot.draftOnlySessionCleanupArmed;
+ 		this.#fallbackRuntimeOnly = snapshot.fallbackRuntimeOnly;
+-		this.#applyEntries(snapshot.header, [...snapshot.entries]);
++		this.#applyEntries(snapshot.header, [...snapshot.entries], snapshot.cursor);
+ 		this.#additionalDirectories = snapshot.header.additionalDirectories ?? [];
+ 		this.#sessionName = snapshot.sessionName;
+ 
+@@ -1809,7 +1836,7 @@ export class SessionManager {
+ 			this.#fallbackRuntimeOnly = false;
+ 		}
+ 
+-		this.#applyEntries(header, fileEntries.slice(1) as SessionEntry[]);
++		this.#applyEntries(header, fileEntries.slice(1) as SessionEntry[], loaded.cursor);
+ 		this.#expectedDiskSize = sourceSize;
+ 		this.#additionalDirectories = header.additionalDirectories ?? [];
+ 		this.#titleUpdatedAt = titleSlot?.updatedAt ?? header.timestamp;
+@@ -2068,6 +2095,8 @@ export class SessionManager {
+ 			manager.#additionalDirectories.length > 0 ? [...manager.#additionalDirectories] : undefined;
+ 		manager.#entries = structuredClone(this.#entries);
+ 		manager.#index.rebuild(manager.#entries);
++		manager.#index.setLeaf(this.#index.leafId());
++		manager.#historyRevision = this.#historyRevision;
+ 		manager.#forceFileCreation = true;
+ 		await manager.#rewriteAtomically();
+ 		return manager;
+@@ -2103,6 +2132,7 @@ export class SessionManager {
+ 			entryIds: new Set(),
+ 			deferredNotifications: [],
+ 			preBatchLeafId: this.#index.leafId(),
++			preBatchRevision: this.#historyRevision,
+ 			externalLeafChanged: false,
+ 			externalLeafId: null,
+ 		};
+@@ -2503,9 +2533,10 @@ export class SessionManager {
  		return (await this.#artifactManagerForSession()?.allocatePath(toolType)) ?? {};
  	}
  
@@ -1802,6 +2587,107 @@ index 650628e4949b60d88f4861e0101eb9bc87347768..74b827332064c73dea235a94837caf7c
  
  		// Non-persistent session: keep an in-memory copy so spill truncation works.
  		this.#inMemoryArtifacts ??= new Map();
+@@ -2726,8 +2757,7 @@ export class SessionManager {
+ 			timestamp: nowIso(),
+ 			message,
+ 		};
+-		this.#recordEntry(entry);
+-		this.#index.setLeaf(activeLeafId);
++		this.#recordEntry(entry, activeLeafId);
+ 		return entry.id;
+ 	}
+ 
+@@ -2750,8 +2780,7 @@ export class SessionManager {
+ 			timestamp: nowIso(),
+ 			...usage,
+ 		};
+-		this.#recordEntry(entry);
+-		if (activeLeafId !== owner.parentId) this.#index.setLeaf(activeLeafId);
++		this.#recordEntry(entry, activeLeafId !== owner.parentId ? activeLeafId : undefined);
+ 		return entry.id;
+ 	}
+ 
+@@ -3058,6 +3087,16 @@ export class SessionManager {
+ 		return [...this.#entries];
+ 	}
+ 
++	getHistoryRevision(): string {
++		return this.#historyRevision;
++	}
++
++	/** Opaque journal boundary. Settle persistence before publishing it to consumers. */
++	getHistoryVersion(): string {
++		if (this.#diskFailure) throw this.#diskFailure;
++		return sessionHistoryVersion(this.#sessionId, this.#entries, this.#cursorRecord());
++	}
++
+ 	/**
+ 	 * The session as a tree. A well-formed session has exactly one root; orphaned
+ 	 * entries (broken parent chain) are returned as roots too.
+@@ -3083,9 +3122,7 @@ export class SessionManager {
+ 	/**
+ 	 * Durably move the active branch past a discarded entry.
+ 	 *
+-	 * The loader reconstructs the active branch from the last physical journal
+-	 * entry, so changing the in-memory leaf alone is lost on reload. Known
+-	 * metadata children are chained onto the discarded entry's parent before the
++	 * Known metadata children are chained onto the discarded entry's parent before the
+ 	 * entry is removed. If any child may carry content, the subtree is preserved
+ 	 * off-branch instead. Both paths append a metadata-only branch marker and
+ 	 * rewrite the journal, making the selected path durable.
+@@ -3181,6 +3218,7 @@ export class SessionManager {
+ 		this.#header = header;
+ 		this.#entries = [...entriesToKeep, ...labels];
+ 		this.#sessionId = newSessionId;
++		this.#historyRevision = newSessionId;
+ 		this.#sessionName = header.title;
+ 		this.#titleSource = header.titleSource;
+ 		this.#titleUpdatedAt = timestamp;
+@@ -3243,7 +3281,11 @@ export class SessionManager {
+ 			cwd: path.resolve(cwd),
+ 		};
+ 		const file = path.join(sessionDir, `${fileSafeTimestamp(timestamp)}_${id}.jsonl`);
+-		storage.writeTextSync(file, `${serializeTitleSlot({ updatedAt: timestamp })}${JSON.stringify(header)}\n`);
++		const cursor: SessionCursorRecord = { type: "session_cursor", leafId: null, revision: id };
++		storage.writeTextSync(
++			file,
++			`${serializeTitleSlot({ updatedAt: timestamp })}${JSON.stringify(header)}\n${JSON.stringify(cursor)}\n`,
++		);
+ 		return file;
+ 	}
+ 
+@@ -3276,10 +3318,12 @@ export class SessionManager {
+ 		// A missing source must fail instead of forking an empty parentless session:
+ 		// the loader swallows ENOENT by default for fresh-session opens, so fork opts out.
+ 		let sourceEntries: FileEntry[];
++		let sourceCursor: SessionCursorRecord | undefined;
+ 		try {
+-			sourceEntries = structuredClone(
+-				await loadEntriesFromFile(sourcePath, storage, { throwIfMissing: true }),
+-			) as FileEntry[];
++			const loaded = await loadSessionFile(sourcePath, storage, { throwIfMissing: true });
++			if (loaded.invalidHeader) throw new Error("Fork source has a malformed session header.");
++			sourceEntries = structuredClone(loaded.entries);
++			sourceCursor = loaded.cursor;
+ 		} catch (err) {
+ 			if (isEnoent(err) || isEnotdir(err)) throw new ForkSourceNotFoundError(sourcePath);
+ 			throw err;
+@@ -3308,10 +3352,15 @@ export class SessionManager {
+ 		manager.#hasTitleSlot = true;
+ 		manager.#entries = history;
+ 		manager.#index.rebuild(history);
++		if (sourceCursor) manager.#index.setLeaf(sourceCursor.leafId);
++		manager.#historyRevision = sourceCursor?.revision ?? sourceHeader?.id ?? manager.#sessionId;
+ 		manager.sanitizeLoadedOpenAIResponsesReplayMetadata();
+ 		if (options?.repairInterruptedTail) {
++			const leafId = manager.#index.leafId();
++			const entryCount = history.length;
+ 			SessionManager.#repairForkedInterruptedTail(history, manager.#index.pathTo());
+ 			manager.#index.rebuild(history);
++			if (history.length === entryCount) manager.#index.setLeaf(leafId);
+ 		}
+ 		manager.#forceFileCreation = true;
+ 		await manager.#rewriteAtomically();
 diff --git a/src/session/session-migrations.ts b/src/session/session-migrations.ts
 index 9f1dbf3631bc1fb8b8e136442e702a3af2e60804..9fb6540a85d0b3082c3693fd249adb6aada1a3de 100644
 --- a/src/session/session-migrations.ts

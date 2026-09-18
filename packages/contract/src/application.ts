@@ -3,6 +3,13 @@ import type * as Effect from "effect/Effect";
 import type * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Struct from "effect/Struct";
+import type {
+  ChatHistoryRequest,
+  HistoryPreview,
+  HistorySnapshot,
+  NavigateChatHistoryRequest,
+  PreviewChatHistoryRequest,
+} from "./agent-history.ts";
 import type { AgentPrompt } from "./agent-message.ts";
 import type {
   ContextUsage,
@@ -13,7 +20,7 @@ import type {
   ShakeMode,
   ShakeResult,
 } from "./agent-runtime.ts";
-import type { TranscriptSnapshot } from "./agent-snapshot.ts";
+import type { NavigateHistoryResult, TranscriptSnapshot } from "./agent-snapshot.ts";
 import type { Chat, ChatId, ChatListEntry } from "./chat-model.ts";
 import type { ApplicationError, ChatClosed, GitError, WorkspaceBindingInvalid } from "./errors.ts";
 import type { AbsolutePath } from "./path.ts";
@@ -130,6 +137,17 @@ export class Application extends Context.Service<
     /** Platform adapters read persisted chat snapshots and the retained session's context estimate. */
     readonly transcript: (chatId: ChatId) => Effect.Effect<TranscriptSnapshot, ApplicationError>;
 
+    readonly history: (
+      input: ChatHistoryRequest,
+    ) => Effect.Effect<HistorySnapshot, ApplicationError | ChatClosed>;
+
+    readonly previewHistory: (
+      input: PreviewChatHistoryRequest,
+    ) => Effect.Effect<HistoryPreview, ApplicationError | ChatClosed>;
+
+    readonly navigateHistory: (
+      input: NavigateChatHistoryRequest,
+    ) => Effect.Effect<NavigateHistoryResult, ApplicationError | ChatClosed>;
     readonly closeChat: (
       chatId: ChatId,
       options: CloseChatOptions,

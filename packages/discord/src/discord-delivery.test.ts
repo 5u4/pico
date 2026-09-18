@@ -74,6 +74,9 @@ const installInput = Effect.fn("test.installDeliveryInput")(function* (options: 
     },
   };
   const application = Application.of({
+    history: () => Effect.die("unexpected history read"),
+    previewHistory: () => Effect.die("unexpected history preview"),
+    navigateHistory: () => Effect.die("unexpected history navigation"),
     deleteWorkspace: () => Effect.die("unexpected workspace deletion"),
     updateWorkspace: () => Effect.die("unexpected workspace update"),
     availableWorkspaceModels: () => Effect.die("unexpected workspace model discovery"),
@@ -137,6 +140,9 @@ describe("Discord message delivery", () => {
           const titles: string[] = [];
           const unused = () => Effect.die("Unexpected agent operation");
           const runtime = AgentRuntime.of({
+            history: () => Effect.die("unexpected history read"),
+            previewHistory: () => Effect.die("unexpected history preview"),
+            navigateHistory: () => Effect.die("unexpected history navigation"),
             events: Stream.fromQueue(events),
             drain: () => Effect.void,
             transcript: unused,

@@ -149,6 +149,39 @@ const handlers = PicoRpcs.toLayer(
             requestId: String(requestId),
           }),
         ),
+      ChatHistory: (input, { requestId }) =>
+        requireWebChat(workspaces, chats, input.chatId).pipe(
+          Effect.andThen(() => application.history(input)),
+          Effect.tapCause(reportFailure),
+          Effect.annotateLogs({
+            component: "rpc",
+            procedure: "ChatHistory",
+            chatId: input.chatId,
+            requestId: String(requestId),
+          }),
+        ),
+      PreviewChatHistory: (input, { requestId }) =>
+        requireWebChat(workspaces, chats, input.chatId).pipe(
+          Effect.andThen(() => application.previewHistory(input)),
+          Effect.tapCause(reportFailure),
+          Effect.annotateLogs({
+            component: "rpc",
+            procedure: "PreviewChatHistory",
+            chatId: input.chatId,
+            requestId: String(requestId),
+          }),
+        ),
+      NavigateChatHistory: (input, { requestId }) =>
+        requireWebChat(workspaces, chats, input.chatId).pipe(
+          Effect.andThen(() => application.navigateHistory(input)),
+          Effect.tapCause(reportFailure),
+          Effect.annotateLogs({
+            component: "rpc",
+            procedure: "NavigateChatHistory",
+            chatId: input.chatId,
+            requestId: String(requestId),
+          }),
+        ),
       ContextUsage: ({ chatId }, { requestId }) =>
         requireWebChat(workspaces, chats, chatId).pipe(
           Effect.andThen(() => application.contextUsage(chatId)),

@@ -1,5 +1,6 @@
 import { assert, describe, it } from "@effect/vitest";
 import type * as AgentEvent from "@pico/contract/agent-event";
+import { HistoryRevision } from "@pico/contract/agent-history";
 import { ChatId } from "@pico/contract/chat-model";
 import { AgentError } from "@pico/contract/errors";
 import * as Cause from "effect/Cause";
@@ -47,6 +48,7 @@ const fixture = Effect.fn("SessionPoolOperationsTest.fixture")(function* (
               options.shake ?? (async () => ({ mode: "images", imagesDropped: 1, tokensFreed: 0 })),
             switchModel: () => Promise.reject(new Error("unexpected model switch")),
             flush: async () => {},
+            navigateHistory: () => Promise.reject(new Error("unexpected history navigation")),
             historyBoundary: () => "stable",
             settleHistory: async () => {},
             currentModel: () => null,
@@ -56,8 +58,15 @@ const fixture = Effect.fn("SessionPoolOperationsTest.fixture")(function* (
           } satisfies OpenedSession;
         }),
     },
+    loadHistory: () => Effect.die("unexpected history read"),
+    loadHistoryPreview: () => Effect.die("unexpected history preview"),
     loadCurrentModel: () => Effect.succeed(null),
-    loadTranscript: () => Effect.succeed({ messages: [], todo: { kind: "ready", phases: [] } }),
+    loadTranscript: () =>
+      Effect.succeed({
+        historyRevision: HistoryRevision.make("test-history"),
+        messages: [],
+        todo: { kind: "ready", phases: [] },
+      }),
   });
   return { pool };
 });

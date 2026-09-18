@@ -3,8 +3,15 @@ import type * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import type * as Stream from "effect/Stream";
 import type { AgentEventEnvelope } from "./agent-event.ts";
+import type {
+  ChatHistoryRequest,
+  HistoryPreview,
+  HistorySnapshot,
+  NavigateChatHistoryRequest,
+  PreviewChatHistoryRequest,
+} from "./agent-history.ts";
 import type { AgentAssistantMessage, AgentPrompt } from "./agent-message.ts";
-import type { TranscriptSnapshot } from "./agent-snapshot.ts";
+import type { NavigateHistoryResult, TranscriptSnapshot } from "./agent-snapshot.ts";
 import type { ChatId } from "./chat-model.ts";
 import type { AgentError } from "./errors.ts";
 import type { AbsolutePath } from "./path.ts";
@@ -108,6 +115,14 @@ export class AgentRuntime extends Context.Service<
 
     /** Application reads persisted chat snapshots without initializing an absent session. */
     readonly transcript: (chatId: ChatId) => Effect.Effect<TranscriptSnapshot, AgentError>;
+
+    readonly history: (input: ChatHistoryRequest) => Effect.Effect<HistorySnapshot, AgentError>;
+    readonly previewHistory: (
+      input: PreviewChatHistoryRequest,
+    ) => Effect.Effect<HistoryPreview, AgentError>;
+    readonly navigateHistory: (
+      input: NavigateChatHistoryRequest,
+    ) => Effect.Effect<NavigateHistoryResult, AgentError>;
 
     readonly send: (
       chatId: ChatId,

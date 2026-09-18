@@ -7,6 +7,13 @@ import {
   AgentToolStarted,
   Publication,
 } from "./agent-event.ts";
+import {
+  HistoryDraft,
+  HistoryRevision,
+  HistorySnapshot,
+  HistoryVersion,
+  NavigateHistoryConflictReason,
+} from "./agent-history.ts";
 import { AgentAssistantMessage, AgentMessageId, AgentTranscript } from "./agent-message.ts";
 import { ContextUsage, ModelInfo, TodoState } from "./agent-runtime.ts";
 
@@ -47,6 +54,23 @@ export const TranscriptSnapshot = Schema.Struct({
   todo: TodoState,
   contextUsage: Schema.Union([ContextUsage, Schema.Struct({ kind: Schema.Literal("error") })]),
   currentModel: Schema.NullOr(ModelInfo),
+  historyRevision: HistoryRevision,
   runtime: RuntimeSnapshot,
 });
 export type TranscriptSnapshot = typeof TranscriptSnapshot.Type;
+
+export const NavigateHistoryResult = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("cancelled") }),
+  Schema.Struct({
+    kind: Schema.Literal("applied"),
+    snapshot: TranscriptSnapshot,
+    draft: Schema.NullOr(HistoryDraft),
+  }),
+  Schema.Struct({
+    kind: Schema.Literal("conflict"),
+    reason: NavigateHistoryConflictReason,
+    version: HistoryVersion,
+    history: HistorySnapshot,
+  }),
+]);
+export type NavigateHistoryResult = typeof NavigateHistoryResult.Type;

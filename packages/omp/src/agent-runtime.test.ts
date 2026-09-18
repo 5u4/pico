@@ -4,6 +4,7 @@ import { assert, describe, it } from "@effect/vitest";
 import * as OmpSessionLoader from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import * as OmpSessionManager from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { type AgentEvent, Publication } from "@pico/contract/agent-event";
+import { HistoryRevision } from "@pico/contract/agent-history";
 import * as Agent from "@pico/contract/agent-message";
 import type {
   ContextUsage,
@@ -77,6 +78,7 @@ describe("AgentRuntime", () => {
               askBtw: () => Promise.reject(new Error("unexpected side question")),
               switchModel: () => Promise.reject(new Error("unexpected model switch")),
               flush: () => Promise.resolve(),
+              navigateHistory: () => Promise.reject(new Error("unexpected history navigation")),
               historyBoundary: () => "stable",
               settleHistory: () => Promise.resolve(),
               sendPrompt: async (): Promise<MessageDelivery> => ({
@@ -91,8 +93,15 @@ describe("AgentRuntime", () => {
               unsubscribe: () => {},
             }),
         },
+        loadHistory: () => Effect.die("unexpected history read"),
+        loadHistoryPreview: () => Effect.die("unexpected history preview"),
         loadCurrentModel: () => Effect.succeed(null),
-        loadTranscript: () => Effect.succeed({ messages: [], todo: { kind: "ready", phases: [] } }),
+        loadTranscript: () =>
+          Effect.succeed({
+            historyRevision: HistoryRevision.make("test-history"),
+            messages: [],
+            todo: { kind: "ready", phases: [] },
+          }),
       }).pipe(Scope.provide(owner));
       const delivery = yield* pool.send(chatId, prompt("queued"));
       if (delivery.kind !== "steered") return yield* Effect.die("Expected steering admission");
@@ -133,6 +142,7 @@ describe("AgentRuntime", () => {
                   askBtw: () => Promise.reject(new Error("unexpected side question")),
                   switchModel: () => Promise.reject(new Error("unexpected model switch")),
                   flush: () => Promise.resolve(),
+                  navigateHistory: () => Promise.reject(new Error("unexpected history navigation")),
                   historyBoundary: () => "stable",
                   settleHistory: () => Promise.resolve(),
                   sendPrompt: async (value, onStarted): Promise<MessageDelivery> => {
@@ -164,9 +174,15 @@ describe("AgentRuntime", () => {
                   unsubscribe: () => {},
                 }),
             },
+            loadHistory: () => Effect.die("unexpected history read"),
+            loadHistoryPreview: () => Effect.die("unexpected history preview"),
             loadCurrentModel: () => Effect.succeed(null),
             loadTranscript: () =>
-              Effect.succeed({ messages: [], todo: { kind: "ready", phases: [] } }),
+              Effect.succeed({
+                historyRevision: HistoryRevision.make("test-history"),
+                messages: [],
+                todo: { kind: "ready", phases: [] },
+              }),
           });
           const first = yield* pool.send(chatId, prompt("same"));
           const second = yield* pool.send(chatId, prompt("same"));
@@ -521,6 +537,7 @@ describe("AgentRuntime", () => {
               askBtw: () => Promise.reject(new Error("unexpected side question")),
               switchModel: () => Promise.reject(new Error("unexpected model switch")),
               flush: () => Promise.resolve(),
+              navigateHistory: () => Promise.reject(new Error("unexpected history navigation")),
               historyBoundary: () => "stable",
               settleHistory: () => Promise.resolve(),
               sendPrompt: (value) => {
@@ -544,9 +561,15 @@ describe("AgentRuntime", () => {
         Effect.gen(function* () {
           const pool = yield* makeSessionPool({
             factory,
+            loadHistory: () => Effect.die("unexpected history read"),
+            loadHistoryPreview: () => Effect.die("unexpected history preview"),
             loadCurrentModel: () => Effect.succeed(null),
             loadTranscript: () =>
-              Effect.succeed({ messages: [], todo: { kind: "ready", phases: [] } }),
+              Effect.succeed({
+                historyRevision: HistoryRevision.make("test-history"),
+                messages: [],
+                todo: { kind: "ready", phases: [] },
+              }),
           });
           const firstAcquisitions = yield* Effect.all(
             [pool.send(chatId, prompt("acquire")), pool.send(chatId, prompt("acquire"))],
@@ -655,6 +678,7 @@ describe("AgentRuntime", () => {
               askBtw: () => Promise.reject(new Error("unexpected side question")),
               switchModel: () => Promise.reject(new Error("unexpected model switch")),
               flush: () => Promise.resolve(),
+              navigateHistory: () => Promise.reject(new Error("unexpected history navigation")),
               historyBoundary: () => "stable",
               settleHistory: () =>
                 persistenceFailure === undefined
@@ -685,15 +709,22 @@ describe("AgentRuntime", () => {
         };
         const pool = yield* makeSessionPool({
           factory,
+          loadHistory: () => Effect.die("unexpected history read"),
+          loadHistoryPreview: () => Effect.die("unexpected history preview"),
           loadCurrentModel: () => Effect.succeed(null),
           loadTranscript: () =>
             transcriptFailure === undefined
-              ? Effect.succeed({ messages, todo: { kind: "ready", phases: [] } })
+              ? Effect.succeed({
+                  historyRevision: HistoryRevision.make("test-history"),
+                  messages,
+                  todo: { kind: "ready", phases: [] },
+                })
               : Effect.fail(transcriptFailure),
         });
 
         assert.deepStrictEqual(yield* pool.transcript(chatId), {
           messages,
+          historyRevision: HistoryRevision.make("test-history"),
           todo: { kind: "ready", phases: [] },
           currentModel: null,
           contextUsage: { kind: "unavailable" },
@@ -755,6 +786,7 @@ describe("AgentRuntime", () => {
         assert.strictEqual(contextReads, 4);
         assert.deepStrictEqual(yield* pool.transcript(chatId), {
           messages,
+          historyRevision: HistoryRevision.make("test-history"),
           todo: { kind: "ready", phases: [] },
           currentModel: null,
           contextUsage: { kind: "error" },
@@ -808,6 +840,7 @@ describe("AgentRuntime", () => {
                 askBtw: () => Promise.reject(new Error("unexpected side question")),
                 switchModel: () => Promise.reject(new Error("unexpected model switch")),
                 flush: () => Promise.resolve(),
+                navigateHistory: () => Promise.reject(new Error("unexpected history navigation")),
                 historyBoundary: () => "stable",
                 settleHistory: () => Promise.resolve(),
                 sendPrompt: () => Promise.resolve(admitted),
@@ -819,9 +852,15 @@ describe("AgentRuntime", () => {
               });
             },
           },
+          loadHistory: () => Effect.die("unexpected history read"),
+          loadHistoryPreview: () => Effect.die("unexpected history preview"),
           loadCurrentModel: () => Effect.succeed(null),
           loadTranscript: () =>
-            Effect.succeed({ messages: [], todo: { kind: "ready", phases: [] } }),
+            Effect.succeed({
+              historyRevision: HistoryRevision.make("test-history"),
+              messages: [],
+              todo: { kind: "ready", phases: [] },
+            }),
         });
 
         yield* pool.contextUsage(chatId);
@@ -861,6 +900,7 @@ describe("AgentRuntime", () => {
               askBtw: () => Promise.reject(new Error("unexpected side question")),
               switchModel: () => Promise.reject(new Error("unexpected model switch")),
               flush: () => Promise.resolve(),
+              navigateHistory: () => Promise.reject(new Error("unexpected history navigation")),
               historyBoundary: () => "stable",
               settleHistory: () => Promise.resolve(),
               sendPrompt: () => Promise.resolve(admitted),
@@ -876,9 +916,15 @@ describe("AgentRuntime", () => {
         };
         const pool = yield* makeSessionPool({
           factory,
+          loadHistory: () => Effect.die("unexpected history read"),
+          loadHistoryPreview: () => Effect.die("unexpected history preview"),
           loadCurrentModel: () => Effect.succeed(null),
           loadTranscript: () =>
-            Effect.succeed({ messages: [], todo: { kind: "ready", phases: [] } }),
+            Effect.succeed({
+              historyRevision: HistoryRevision.make("test-history"),
+              messages: [],
+              todo: { kind: "ready", phases: [] },
+            }),
         });
 
         yield* pool.close(chatId);
@@ -893,6 +939,7 @@ describe("AgentRuntime", () => {
         assert.deepStrictEqual(yield* pool.transcript(chatId), {
           messages: [],
           contextUsage: { kind: "unavailable" },
+          historyRevision: HistoryRevision.make("test-history"),
           todo: { kind: "ready", phases: [] },
           runtime: {
             publication: Publication.make(0),
@@ -941,6 +988,8 @@ describe("AgentRuntime", () => {
                     askBtw: () => Promise.reject(new Error("unexpected side question")),
                     switchModel: () => Promise.reject(new Error("unexpected model switch")),
                     flush: () => Promise.resolve(),
+                    navigateHistory: () =>
+                      Promise.reject(new Error("unexpected history navigation")),
                     historyBoundary: () => "stable",
                     settleHistory: () => Promise.resolve(),
                     sendPrompt: () => Promise.resolve(admitted),
@@ -954,9 +1003,15 @@ describe("AgentRuntime", () => {
                     },
                   }),
               },
+              loadHistory: () => Effect.die("unexpected history read"),
+              loadHistoryPreview: () => Effect.die("unexpected history preview"),
               loadCurrentModel: () => Effect.succeed(null),
               loadTranscript: () =>
-                Effect.succeed({ messages: [], todo: { kind: "ready", phases: [] } }),
+                Effect.succeed({
+                  historyRevision: HistoryRevision.make("test-history"),
+                  messages: [],
+                  todo: { kind: "ready", phases: [] },
+                }),
             });
             yield* pool.send(chatId, prompt("private prompt"));
             const first = yield* pool.close(chatId).pipe(Effect.flip);
@@ -990,8 +1045,15 @@ describe("AgentRuntime", () => {
         factory: {
           open: () => Effect.die("unexpected session open"),
         },
+        loadHistory: () => Effect.die("unexpected history read"),
+        loadHistoryPreview: () => Effect.die("unexpected history preview"),
         loadCurrentModel: () => Effect.succeed(null),
-        loadTranscript: () => Effect.succeed({ messages: [], todo: { kind: "ready", phases: [] } }),
+        loadTranscript: () =>
+          Effect.succeed({
+            historyRevision: HistoryRevision.make("test-history"),
+            messages: [],
+            todo: { kind: "ready", phases: [] },
+          }),
       }).pipe(Scope.provide(scope));
 
       yield* Scope.close(scope, Exit.void);
@@ -1020,6 +1082,7 @@ describe("AgentRuntime", () => {
                 askBtw: () => Promise.reject(new Error("unexpected side question")),
                 switchModel: () => Promise.reject(new Error("unexpected model switch")),
                 flush: () => Promise.resolve(),
+                navigateHistory: () => Promise.reject(new Error("unexpected history navigation")),
                 historyBoundary: () => "stable",
                 settleHistory: () => Promise.resolve(),
                 sendPrompt: () => {
@@ -1033,9 +1096,15 @@ describe("AgentRuntime", () => {
                 unsubscribe: () => {},
               }),
           },
+          loadHistory: () => Effect.die("unexpected history read"),
+          loadHistoryPreview: () => Effect.die("unexpected history preview"),
           loadCurrentModel: () => Effect.succeed(null),
           loadTranscript: () =>
-            Effect.succeed({ messages: [], todo: { kind: "ready", phases: [] } }),
+            Effect.succeed({
+              historyRevision: HistoryRevision.make("test-history"),
+              messages: [],
+              todo: { kind: "ready", phases: [] },
+            }),
         });
         yield* pool.events.pipe(
           Stream.runForEach(() =>
@@ -1078,6 +1147,7 @@ describe("AgentRuntime", () => {
                 askBtw: () => Promise.reject(new Error("unexpected side question")),
                 switchModel: () => Promise.reject(new Error("unexpected model switch")),
                 flush: () => Promise.resolve(),
+                navigateHistory: () => Promise.reject(new Error("unexpected history navigation")),
                 historyBoundary: () => "stable",
                 settleHistory: () => Promise.resolve(),
                 sendPrompt: async (_value, onStarted) => {
@@ -1092,9 +1162,15 @@ describe("AgentRuntime", () => {
                 unsubscribe: () => {},
               }),
           },
+          loadHistory: () => Effect.die("unexpected history read"),
+          loadHistoryPreview: () => Effect.die("unexpected history preview"),
           loadCurrentModel: () => Effect.succeed(null),
           loadTranscript: () =>
-            Effect.succeed({ messages: [], todo: { kind: "ready", phases: [] } }),
+            Effect.succeed({
+              historyRevision: HistoryRevision.make("test-history"),
+              messages: [],
+              todo: { kind: "ready", phases: [] },
+            }),
         });
         const capture = yield* pool
           .sendCaptured(
@@ -1160,6 +1236,8 @@ describe("AgentRuntime", () => {
                     shake: async (mode) => shakeResult(mode),
                     switchModel: () => Promise.reject(new Error("Unexpected model switch")),
                     flush: async () => {},
+                    navigateHistory: () =>
+                      Promise.reject(new Error("unexpected history navigation")),
                     historyBoundary: () => "stable",
                     settleHistory: async () => {},
                     contextUsage: () => ({ kind: "unavailable" }),
@@ -1169,6 +1247,8 @@ describe("AgentRuntime", () => {
                   };
                 }),
             },
+            loadHistory: () => Effect.die("unexpected history read"),
+            loadHistoryPreview: () => Effect.die("unexpected history preview"),
             loadCurrentModel: () => Effect.succeed(null),
             loadTranscript: () =>
               Effect.gen(function* () {
@@ -1177,7 +1257,11 @@ describe("AgentRuntime", () => {
                   yield* Deferred.succeed(reading, undefined);
                   yield* Deferred.await(release);
                 }
-                return { messages: [], todo: { kind: "ready", phases: [] } };
+                return {
+                  historyRevision: HistoryRevision.make("test-history"),
+                  messages: [],
+                  todo: { kind: "ready", phases: [] },
+                };
               }),
           });
           yield* pool.contextUsage(chatId);

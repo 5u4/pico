@@ -3,6 +3,7 @@ import {
   ArrowLeftIcon,
   BookOpenIcon,
   BugIcon,
+  GitBranchIcon,
   MagnifyingGlassIcon,
   MoonIcon,
   PlusIcon,
@@ -19,6 +20,7 @@ import type {
   ComposerPresentation,
   ContextUsagePresentation,
   DeleteWorkspacePresentation,
+  HistoryPanelPresentation,
   ModelPickerPresentation,
   PromptSuggestion,
   ShakeFeedback,
@@ -30,6 +32,7 @@ import { CloseChatDialog } from "./close-chat-dialog.tsx";
 import { Composer } from "./composer.tsx";
 import { ContextUsage } from "./context-usage.tsx";
 import { DeleteWorkspaceDialog } from "./delete-workspace-dialog.tsx";
+import { HistoryPaneShell } from "./history-pane.tsx";
 import { MobileSidebar } from "./mobile-sidebar.tsx";
 import { ModelPicker } from "./model-picker.tsx";
 import { SchedulePage, type SchedulePageProps } from "./schedule-page.tsx";
@@ -63,6 +66,7 @@ export interface ChatScreenProps
   readonly suggestions: readonly PromptSuggestion[];
   readonly suggestionsEnabled: boolean;
   readonly toolPane: ToolCallPresentation | null;
+  readonly historyPane: HistoryPanelPresentation | null;
   readonly transcript: TranscriptPresentation;
   readonly composer: ComposerPresentation;
   readonly todo: TodoPresentation | null;
@@ -97,10 +101,17 @@ export interface ChatScreenProps
   readonly onTabSelect: (id: string) => void;
   readonly onTabClose: (id: string) => void;
   readonly onToolSelect: (id: string | null) => void;
+  readonly onHistoryPaneOpenChange: (open: boolean) => void;
+  readonly onHistoryQueryChange: (query: string) => void;
+  readonly onHistoryRevealAllChange: (revealAll: boolean) => void;
+  readonly onHistoryPreviewSelect: (targetId: string) => void;
+  readonly onHistoryContinue: () => void;
+  readonly onHistoryRestoreDraft: () => void;
   readonly onComposerValueChange: (value: string) => void;
+  readonly onComposerImageRemove: (id: string) => void;
   readonly onComposerSubmit: () => void;
-  readonly onSuggestionSelect: (text: string) => void;
   readonly onSuggestionsShuffle: () => void;
+  readonly onSuggestionSelect: (text: string) => void;
   readonly onStop: () => void;
   readonly onTranscriptRetry: () => void;
   readonly onDisclosuresChange: (ids: readonly string[], open: boolean) => void;
@@ -118,6 +129,7 @@ export function ChatScreen({
   suggestionsEnabled,
   search,
   toolPane,
+  historyPane,
   transcript,
   composer,
   todo,
@@ -164,10 +176,17 @@ export function ChatScreen({
   onTabClose,
   onSearchChange,
   onToolSelect,
+  onHistoryPaneOpenChange,
+  onHistoryQueryChange,
+  onHistoryRevealAllChange,
+  onHistoryPreviewSelect,
+  onHistoryContinue,
+  onHistoryRestoreDraft,
   onComposerValueChange,
+  onComposerImageRemove,
   onComposerSubmit,
-  onSuggestionSelect,
   onSuggestionsShuffle,
+  onSuggestionSelect,
   onStop,
   onTranscriptRetry,
   onDisclosuresChange,
@@ -181,6 +200,7 @@ export function ChatScreen({
   const [composerHeight, setComposerHeight] = useState(150);
   const sidebarOpener = useRef<HTMLButtonElement>(null);
   const toolOpener = useRef<HTMLElement | null>(null);
+  const historyOpener = useRef<HTMLButtonElement>(null);
   const workspaceDeleteOrigin = useRef<HTMLElement | null>(null);
   const [tabButtons] = useState(() => new Map<string, HTMLButtonElement>());
   const newTabButton = useRef<HTMLButtonElement>(null);
@@ -345,11 +365,20 @@ export function ChatScreen({
     setShowJump(false);
     element.focus({ preventScroll: true });
   };
+  const historyOpen = chatVisible && historyPane?.open === true;
+  const toolOpen = chatVisible && toolPane !== null;
   const selectTool = (id: string | null) => {
     if (id !== null && document.activeElement instanceof HTMLElement) {
       toolOpener.current = document.activeElement;
     }
+    if (id !== null && historyOpen) onHistoryPaneOpenChange(false);
     onToolSelect(id);
+  };
+  const toggleHistoryPane = () => {
+    if (!historyPane) return;
+    const opening = !historyPane.open;
+    if (opening && toolOpen) onToolSelect(null);
+    onHistoryPaneOpenChange(opening);
   };
   const closeSidebar = () => onSidebarOpenChange(false);
   const sidebar = {
@@ -530,6 +559,20 @@ export function ChatScreen({
                 </a>
               </div>
             )}
+            {chatVisible && historyPane && (
+              <button
+                aria-pressed={historyPane.open}
+                className={`inline-flex h-7 shrink-0 items-center gap-1.5 rounded-control px-2.5 text-label font-medium transition-colors ${historyPane.open ? "bg-surface-hover-strong text-foreground" : "text-muted hover:bg-surface-hover hover:text-foreground"}`}
+                onClick={(event) => {
+                  historyOpener.current = event.currentTarget;
+                  toggleHistoryPane();
+                }}
+                type="button"
+              >
+                <GitBranchIcon aria-hidden="true" size={14} />
+                History and branches
+              </button>
+            )}
             <Button
               aria-label="Dark theme"
               aria-pressed={theme === "dark"}
@@ -709,6 +752,7 @@ export function ChatScreen({
                     )}
                     <Composer
                       contextLabel={contextLabel}
+                      onImageRemove={onComposerImageRemove}
                       onStop={onStop}
                       onSubmit={onComposerSubmit}
                       onValueChange={onComposerValueChange}
@@ -791,7 +835,20 @@ export function ChatScreen({
             </div>
           )}
         </section>
-        {chatVisible && toolPane && (
+        {chatVisible && historyPane?.open && (
+          <HistoryPaneShell
+            fallbackFocus={transcriptRef}
+            onClose={() => onHistoryPaneOpenChange(false)}
+            onContinue={onHistoryContinue}
+            onPreviewSelect={onHistoryPreviewSelect}
+            onQueryChange={onHistoryQueryChange}
+            onRestoreDraft={onHistoryRestoreDraft}
+            onRevealAllChange={onHistoryRevealAllChange}
+            presentation={historyPane}
+            returnFocus={historyOpener}
+          />
+        )}
+        {chatVisible && toolPane && !historyPane?.open && (
           <ToolPaneShell
             call={toolPane}
             fallbackFocus={transcriptRef}

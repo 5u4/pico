@@ -9,6 +9,7 @@ import type { AssistantMessage, Context, ToolCall } from "@oh-my-pi/pi-ai";
 import type { ExtensionFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type * as AgentEvent from "@pico/contract/agent-event";
+import { HistoryEntryId, HistoryRevision, HistoryVersion } from "@pico/contract/agent-history";
 import * as AgentMessage from "@pico/contract/agent-message";
 import * as Chat from "@pico/contract/chat-model";
 import { AgentError } from "@pico/contract/errors";
@@ -93,6 +94,8 @@ const importNative = async () => {
     makeBtw: adapter.makeBtw,
     makeShake: adapter.makeShake,
     makeSwitchModel: adapter.makeSwitchModel,
+    makeNavigateHistory: adapter.makeNavigateHistory,
+    normalizeHistory: adapter.normalizeHistory,
   };
 };
 
@@ -371,6 +374,7 @@ const makePool = Effect.fn("NativePoolTest.make")(function* (
               await currentSession.sessionManager.ensureOnDisk();
               await currentSession.sessionManager.flush();
             },
+            navigateHistory: native.makeNavigateHistory(currentSession),
             ...native.makeSessionObservation(currentSession, emit, (cause) => {
               throw cause;
             }),
@@ -381,10 +385,25 @@ const makePool = Effect.fn("NativePoolTest.make")(function* (
           };
         }),
     },
+    loadHistory: (_chatId, query) =>
+      Effect.promise(async () => {
+        const file = session.sessionManager.getSessionFile();
+        if (file === undefined) throw new Error("Expected native history journal");
+        const journal = await native.loadSessionHistoryReadOnly(file);
+        return {
+          ...native.normalizeHistory(journal.entries, query),
+          activeLeafId:
+            journal.activeLeafId === null ? null : HistoryEntryId.make(journal.activeLeafId),
+          revision: HistoryRevision.make(journal.revision),
+          version: HistoryVersion.make(journal.version),
+        };
+      }),
+    loadHistoryPreview: () => Effect.die("unexpected history preview"),
     loadCurrentModel: () => Effect.succeed(session.model ?? null),
     loadTranscript: () =>
       Effect.succeed({
         messages: native.normalizeTranscript(session.messages),
+        historyRevision: HistoryRevision.make(session.sessionManager.getHistoryRevision()),
         todo: { kind: "ready", phases: [] },
       }),
   });
@@ -420,6 +439,280 @@ const seedShake = async (session: AgentSession) => {
 };
 
 describe("native SessionPool ownership", () => {
+  it("finds full prompt, label and summary text without exposing journal payloads", async () => {
+    await withSession([], async (session) => {
+      const manager = session.sessionManager;
+      const rootId = manager.appendMessage({ role: "user", content: "Root", timestamp: 1 });
+      const longPrompt = `${"Intro ".repeat(100)}needle-at-prompt-tail`;
+      const targetId = manager.appendMessage({ role: "user", content: longPrompt, timestamp: 2 });
+      manager.appendLabelChange(targetId, `${"Label ".repeat(100)}needle-at-label-tail`);
+      manager.appendCustomEntry("private", { credential: "hidden-journal-credential" });
+      const summaryId = manager.branchWithSummary(
+        targetId,
+        `${"Summary ".repeat(100)}needle-at-summary-tail`,
+        { credential: "hidden-journal-credential" },
+      );
+      await manager.ensureOnDisk();
+      await manager.flush();
+      await Effect.runPromise(
+        Effect.scoped(
+          Effect.gen(function* () {
+            const pool = yield* makePool(session);
+            for (const query of ["  NEEDLE-AT-PROMPT-TAIL  ", "needle-at-label-tail"]) {
+              const result = yield* pool.history({ chatId, query });
+              expect(result.matches).toEqual([targetId]);
+              expect(result.nodes.map(({ entryId, parentId }) => ({ entryId, parentId }))).toEqual([
+                { entryId: rootId, parentId: null },
+                { entryId: targetId, parentId: rootId },
+              ]);
+              expect(result.nodes[1]).toMatchObject({
+                kind: "user",
+                excerpt: "Intro ".repeat(40),
+                label: "Label ".repeat(40),
+              });
+              expect(JSON.stringify(result)).not.toContain("needle-at-");
+            }
+            const summary = yield* pool.history({ chatId, query: "needle-at-summary-tail" });
+            expect(summary.matches).toEqual([summaryId]);
+            expect(summary.nodes.map((node) => node.entryId)).toEqual([
+              rootId,
+              targetId,
+              summaryId,
+            ]);
+            expect(summary.nodes[2]).toMatchObject({
+              kind: "summary",
+              excerpt: "Summary ".repeat(30),
+            });
+            expect(JSON.stringify(yield* pool.history({ chatId, query: "" }))).not.toContain(
+              "hidden-journal-credential",
+            );
+            expect(
+              (yield* pool.history({ chatId, query: "hidden-journal-credential" })).matches,
+            ).toEqual([]);
+          }).pipe(Effect.provide(platform)),
+        ),
+      );
+    });
+  });
+
+  it("groups tool results only until a native history fork", async () => {
+    const call = providerTurn("Calling echo", "aborted", {
+      toolCall: { type: "toolCall", id: "echo-call", name: "echo", arguments: {} },
+    });
+    const answer = providerTurn("Echo complete");
+    call.release.resolve();
+    answer.release.resolve();
+    await withSession([call, answer], (session) =>
+      Effect.runPromise(
+        Effect.scoped(
+          Effect.gen(function* () {
+            session.agent.setTools([
+              {
+                name: "echo",
+                label: "Echo",
+                description: "Return a local result",
+                parameters: { type: "object", properties: {}, additionalProperties: false },
+                execute: async () => ({
+                  content: [{ type: "text", text: "Original result" }],
+                  details: {},
+                }),
+              },
+            ]);
+            const pool = yield* makePool(session);
+            const delivery = yield* pool.send(chatId, prompt("Run echo"));
+            if (delivery.kind !== "started") throw new Error("Expected native run admission");
+            yield* delivery.completed;
+            const manager = session.sessionManager;
+            const entries = manager.getEntries();
+            const assistant = entries.find(
+              (entry) => entry.type === "message" && entry.message.role === "assistant",
+            );
+            const tool = entries.find(
+              (entry) => entry.type === "message" && entry.message.role === "toolResult",
+            );
+            if (
+              assistant === undefined ||
+              tool?.type !== "message" ||
+              tool.message.role !== "toolResult"
+            ) {
+              throw new Error("Expected persisted assistant and tool result");
+            }
+            const grouped = yield* pool.history({ chatId, query: "" });
+            expect(
+              grouped.nodes.find((node) => node.entryId === assistant.id)?.defaultTargetId,
+            ).toBe(tool.id);
+            const forkId = manager.appendMessageToBranch(
+              {
+                ...tool.message,
+                content: [{ type: "text", text: "Forked result" }],
+              },
+              assistant.id,
+            );
+            const forked = yield* pool.history({ chatId, query: "" });
+            expect(
+              forked.nodes
+                .filter((node) => node.parentId === assistant.id)
+                .map((node) => node.entryId),
+            ).toEqual([tool.id, forkId]);
+            const target = forked.nodes.find((node) => node.entryId === assistant.id);
+            if (target === undefined) throw new Error("Expected assistant history node");
+            expect(target.defaultTargetId).toBe(assistant.id);
+            const result = yield* pool.navigateHistory({
+              chatId,
+              targetId: target.defaultTargetId,
+              expectedVersion: forked.version,
+            });
+            if (result.kind !== "applied") throw new Error("Expected grouped navigation to apply");
+            expect(
+              result.snapshot.messages.flatMap((message) =>
+                message.content.flatMap((block) => (block.type === "text" ? [block.text] : [])),
+              ),
+            ).toEqual(["Run echo", "Calling echo"]);
+            expect((yield* pool.history({ chatId, query: "" })).activeLeafId).toBe(assistant.id);
+          }).pipe(Effect.provide(platform)),
+        ),
+      ),
+    );
+  });
+
+  it("rejects busy, stale and missing navigation, then publishes the persisted replacement", async () => {
+    const side = providerTurn("Side answer");
+    await withSession([side], async (session) => {
+      const manager = session.sessionManager;
+      const rootId = manager.appendMessage({ role: "user", content: "Root", timestamp: 1 });
+      const targetId = manager.appendMessage({
+        role: "user",
+        content: "Saved prompt",
+        timestamp: 2,
+      });
+      await manager.ensureOnDisk();
+      await manager.flush();
+      const file = manager.getSessionFile();
+      if (file === undefined) throw new Error("Expected native history journal");
+      const flushing = Promise.withResolvers<void>();
+      const releaseFlush = Promise.withResolvers<void>();
+      let blocked = false;
+      const flush = manager.flush.bind(manager);
+      const intercepted = vi.spyOn(manager, "flush").mockImplementation(async () => {
+        if (manager.getLeafId() === rootId && !blocked) {
+          blocked = true;
+          flushing.resolve();
+          await releaseFlush.promise;
+        }
+        await flush();
+      });
+      try {
+        await Effect.runPromise(
+          Effect.scoped(
+            Effect.gen(function* () {
+              const pool = yield* makePool(session);
+              const stale = yield* pool.history({ chatId, query: "" });
+              const currentId = manager.appendMessage({
+                role: "user",
+                content: "Current",
+                timestamp: 3,
+              });
+              session.agent.replaceMessages(manager.buildSessionContext().messages);
+              yield* Effect.promise(() => manager.flush());
+              const before = yield* pool.transcript(chatId);
+              const aside = yield* pool.askBtw(chatId, "Explain the branch").pipe(Effect.forkChild);
+              yield* Effect.promise(() => side.entered.promise);
+              expect(session.isStreaming).toBe(false);
+              const current = yield* pool.history({ chatId, query: "" });
+              const request = {
+                chatId,
+                targetId: HistoryEntryId.make(targetId),
+                expectedVersion: current.version,
+              };
+              expect(yield* pool.navigateHistory(request)).toMatchObject({
+                kind: "conflict",
+                reason: "busy",
+                history: { activeLeafId: currentId, canContinue: false },
+              });
+              expect((yield* pool.transcript(chatId)).messages).toEqual(before.messages);
+              side.release.resolve();
+              expect(yield* Fiber.join(aside)).toBe("Side answer");
+              const journalBefore = yield* Effect.promise(() =>
+                NodeFileSystem.readFile(file, "utf8"),
+              );
+              expect(
+                yield* pool.navigateHistory({ ...request, expectedVersion: stale.version }),
+              ).toMatchObject({
+                kind: "conflict",
+                reason: "version-mismatch",
+                history: { activeLeafId: currentId },
+              });
+              expect(
+                yield* pool.navigateHistory({
+                  ...request,
+                  targetId: HistoryEntryId.make("missing"),
+                }),
+              ).toMatchObject({
+                kind: "conflict",
+                reason: "target-missing",
+                history: { activeLeafId: currentId },
+              });
+              expect((yield* pool.transcript(chatId)).messages).toEqual(before.messages);
+              expect(yield* Effect.promise(() => NodeFileSystem.readFile(file, "utf8"))).toBe(
+                journalBefore,
+              );
+              const replacements: { publication: number; contents: unknown[] }[] = [];
+              yield* pool.events.pipe(
+                Stream.runForEach((envelope) =>
+                  envelope.event.type === "history-replaced"
+                    ? Effect.promise(async () => {
+                        const persisted = await native.loadSessionSnapshotReadOnly(file);
+                        replacements.push({
+                          publication: envelope.publication,
+                          contents: native
+                            .normalizeTranscript(persisted.messages)
+                            .map((message) => message.content),
+                        });
+                      })
+                    : Effect.void,
+                ),
+                Effect.forkChild,
+              );
+              const navigation = yield* pool.navigateHistory(request).pipe(Effect.forkChild);
+              yield* Effect.promise(() => flushing.promise);
+              expect(replacements).toEqual([]);
+              releaseFlush.resolve();
+              const result = yield* Fiber.join(navigation);
+              if (result.kind !== "applied") throw new Error("Expected idle navigation to apply");
+              yield* pool.drain();
+              expect(result.snapshot.messages.map(({ content }) => content)).toEqual([
+                [{ type: "text", text: "Root" }],
+              ]);
+              expect(result.draft).toEqual({ text: "Saved prompt", images: [] });
+              expect(result.snapshot.runtime).toMatchObject({
+                run: { kind: "idle" },
+                assistant: [],
+                tools: [],
+              });
+              expect(replacements).toEqual([
+                {
+                  publication: result.snapshot.runtime.publication,
+                  contents: [[{ type: "text", text: "Root" }]],
+                },
+              ]);
+              expect((yield* pool.history({ chatId, query: "" })).activeLeafId).toBe(rootId);
+            }).pipe(
+              Effect.ensuring(
+                Effect.sync(() => {
+                  side.release.resolve();
+                  releaseFlush.resolve();
+                }),
+              ),
+              Effect.provide(platform),
+            ),
+          ),
+        );
+      } finally {
+        intercepted.mockRestore();
+      }
+    });
+  }, 10_000);
+
   it("confirms obfuscated assistant persistence by lifecycle ID before and after its append", async () => {
     const secret = "native-observation-secret-value";
     const obfuscator = new native.SecretObfuscator(

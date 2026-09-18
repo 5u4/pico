@@ -3,6 +3,7 @@ import * as BunFileSystem from "@effect/platform-bun/BunFileSystem";
 import * as BunPath from "@effect/platform-bun/BunPath";
 import { assert, describe, it } from "@effect/vitest";
 import { Publication } from "@pico/contract/agent-event";
+import { HistoryRevision } from "@pico/contract/agent-history";
 import { AgentRuntime } from "@pico/contract/agent-runtime";
 import { AgentSessionStore } from "@pico/contract/agent-session-store";
 import type { TranscriptSnapshot } from "@pico/contract/agent-snapshot";
@@ -33,6 +34,7 @@ const platformLayer = Layer.mergeAll(BunCrypto.layer, BunFileSystem.layer, BunPa
 const emptyTranscript: TranscriptSnapshot = {
   messages: [],
   contextUsage: { kind: "unavailable" },
+  historyRevision: HistoryRevision.make("test-history"),
   todo: { kind: "ready", phases: [] },
   runtime: { publication: Publication.make(0), run: { kind: "idle" }, assistant: [], tools: [] },
   currentModel: null,
@@ -88,6 +90,9 @@ const fixture = Effect.fn("WorkspaceDelete.test.fixture")(function* (
         Layer.succeed(
           AgentRuntime,
           AgentRuntime.of({
+            history: () => Effect.die("unexpected history read"),
+            previewHistory: () => Effect.die("unexpected history preview"),
+            navigateHistory: () => Effect.die("unexpected history navigation"),
             events: Stream.empty,
             drain: () => Effect.void,
             transcript: () => Effect.succeed(emptyTranscript),

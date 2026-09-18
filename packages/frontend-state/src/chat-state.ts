@@ -54,6 +54,14 @@ const retainDrafts = (messages: LiveChat["assistant"]): LiveChat["assistant"] =>
   return retained ?? messages;
 };
 
+export const replaceHistory = (state: LiveChat): LiveChat => ({
+  ...state,
+  run: { kind: "unknown" },
+  assistant: new Map(),
+  snapshotIds: new Set(),
+  tools: new Map(),
+});
+
 export const unconfirmChat = (state: LiveChat): LiveChat => ({
   ...state,
   run: { kind: "unknown" },
@@ -121,6 +129,8 @@ export const reduceLiveChat = (
   switch (event.type) {
     case "context-invalidated":
       return state;
+    case "history-replaced":
+      return replaceHistory(state);
     case "notice":
       return { ...state, notices: [...state.notices, event] };
     case "run-started":

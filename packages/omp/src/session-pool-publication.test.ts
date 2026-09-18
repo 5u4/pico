@@ -4,6 +4,7 @@ import { assert, describe, it } from "@effect/vitest";
 import * as OmpSessionLoader from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import * as OmpSessionManager from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type * as AgentEvent from "@pico/contract/agent-event";
+import { HistoryRevision } from "@pico/contract/agent-history";
 import * as Agent from "@pico/contract/agent-message";
 import type { MessageDelivery, ShakeMode, ShakeResult } from "@pico/contract/agent-runtime";
 import * as Chat from "@pico/contract/chat-model";
@@ -73,6 +74,8 @@ describe("session pool publication", () => {
                     appendAssistantMessage: () =>
                       Promise.reject(new Error("Delivery must not append")),
                     flush: async () => {},
+                    navigateHistory: () =>
+                      Promise.reject(new Error("unexpected history navigation")),
                     historyBoundary: () => JSON.stringify(messages),
                     settleHistory: async () => {},
                     contextUsage: () => ({ kind: "unavailable" }),
@@ -81,6 +84,8 @@ describe("session pool publication", () => {
                   } satisfies OpenedSession;
                 }),
             },
+            loadHistory: () => Effect.die("unexpected history read"),
+            loadHistoryPreview: () => Effect.die("unexpected history preview"),
             loadCurrentModel: () => Effect.succeed(null),
             loadTranscript: () =>
               Effect.gen(function* () {
@@ -89,7 +94,11 @@ describe("session pool publication", () => {
                   yield* Deferred.succeed(observing, undefined);
                   yield* Deferred.await(finishRead);
                 }
-                return { messages: current, todo: { kind: "ready", phases: [] } };
+                return {
+                  historyRevision: HistoryRevision.make("test-history"),
+                  messages: current,
+                  todo: { kind: "ready", phases: [] },
+                };
               }),
           });
           const envelopes: AgentEvent.AgentEventEnvelope[] = [];
@@ -201,6 +210,7 @@ describe("session pool publication", () => {
                     await manager.ensureOnDisk();
                     await manager.flush();
                   },
+                  navigateHistory: () => Promise.reject(new Error("unexpected history navigation")),
                   historyBoundary: () => JSON.stringify(manager.getEntries()),
                   settleHistory: () => manager.flush(),
                   sendPrompt: () => Promise.resolve(admitted),
@@ -219,11 +229,14 @@ describe("session pool publication", () => {
           };
           const pool = yield* makeSessionPool({
             factory,
+            loadHistory: () => Effect.die("unexpected history read"),
+            loadHistoryPreview: () => Effect.die("unexpected history preview"),
             loadCurrentModel: () => Effect.succeed(null),
             loadTranscript: () =>
               Effect.promise(() => OmpSessionLoader.loadSessionSnapshotReadOnly(sessionFile)).pipe(
                 Effect.map((snapshot) => ({
                   messages: normalizeTranscript(snapshot.messages),
+                  historyRevision: HistoryRevision.make(snapshot.historyRevision),
                   todo: normalizeTodo(snapshot.todoPhases),
                 })),
               ),
@@ -429,6 +442,7 @@ describe("session pool publication", () => {
                     await manager.ensureOnDisk();
                     await manager.flush();
                   },
+                  navigateHistory: () => Promise.reject(new Error("unexpected history navigation")),
                   historyBoundary: () => JSON.stringify(manager.getEntries()),
                   settleHistory: () => manager.flush(),
                   sendPrompt: (_value, onStarted) => {
@@ -450,11 +464,14 @@ describe("session pool publication", () => {
                 } satisfies OpenedSession;
               }),
           },
+          loadHistory: () => Effect.die("unexpected history read"),
+          loadHistoryPreview: () => Effect.die("unexpected history preview"),
           loadCurrentModel: () => Effect.succeed(null),
           loadTranscript: () =>
             Effect.promise(() => OmpSessionLoader.loadSessionSnapshotReadOnly(sessionFile)).pipe(
               Effect.map((snapshot) => ({
                 messages: normalizeTranscript(snapshot.messages),
+                historyRevision: HistoryRevision.make(snapshot.historyRevision),
                 todo: normalizeTodo(snapshot.todoPhases),
               })),
             ),

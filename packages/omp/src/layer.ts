@@ -5,6 +5,8 @@ import * as OmpAgentRegistry from "@oh-my-pi/pi-coding-agent/registry/agent-regi
 import * as OmpSdk from "@oh-my-pi/pi-coding-agent/sdk";
 import type * as OmpAgentSession from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session-events";
+import * as OmpSessionContext from "@oh-my-pi/pi-coding-agent/session/session-context";
+import type { SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import * as OmpSessionLoader from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import * as OmpSessionManager from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type * as OmpShake from "@oh-my-pi/pi-coding-agent/session/shake-types";
@@ -12,6 +14,7 @@ import {
   sameMessageContent,
   sessionMessagePersistenceKey,
 } from "@oh-my-pi/pi-coding-agent/session/turn-persistence";
+import * as History from "@pico/contract/agent-history";
 import { AgentRuntime, type ContextUsage, type ShakeResult } from "@pico/contract/agent-runtime";
 import { BranchNaming, type BranchNamingHandler } from "@pico/contract/branch-naming";
 import type * as Chat from "@pico/contract/chat-model";
@@ -30,7 +33,12 @@ import * as Path from "effect/Path";
 import { makeAgentBrowserExtension } from "./agent-browser/extension.ts";
 import { type AgentBrowserManager, makeAgentBrowserManager } from "./agent-browser/manager.ts";
 import { agentError } from "./agent-error.ts";
-import { normalizeAgentEvent, normalizeTodo, normalizeTranscript } from "./agent-event.ts";
+import {
+  normalizeAgentEvent,
+  normalizeMessage,
+  normalizeTodo,
+  normalizeTranscript,
+} from "./agent-event.ts";
 import { makeExchangeTitleFlow } from "./exchange-title.ts";
 import { makeOmpPromptSender } from "./omp-prompt-sender.ts";
 import { make as makeScheduleExtension } from "./schedule-extension.ts";
@@ -91,6 +99,7 @@ export const make = Effect.fn("AgentRuntime.make")(function* ({
     return yield* syncBoundary("Failed to normalize OMP transcript", () => ({
       messages: normalizeTranscript(snapshot.messages),
       todo: normalizeTodo(snapshot.todoPhases),
+      historyRevision: History.HistoryRevision.make(snapshot.historyRevision),
     }));
   });
 
@@ -131,6 +140,62 @@ export const make = Effect.fn("AgentRuntime.make")(function* ({
       browsers,
     ),
     loadTranscript,
+    loadHistory: Effect.fn("OmpSession.loadHistory")(function* (chatId, query) {
+      const journal = yield* promiseBoundary("Failed to read OMP history", () =>
+        OmpSessionLoader.loadSessionHistoryReadOnly(path.join(sessionsDir, `${chatId}.jsonl`)),
+      );
+      return yield* syncBoundary("Failed to normalize OMP history", () => ({
+        ...normalizeHistory(journal.entries, query),
+        activeLeafId:
+          journal.activeLeafId === null ? null : History.HistoryEntryId.make(journal.activeLeafId),
+        revision: History.HistoryRevision.make(journal.revision),
+        version: History.HistoryVersion.make(journal.version),
+      }));
+    }),
+    loadHistoryPreview: Effect.fn("OmpSession.loadHistoryPreview")(function* (input) {
+      const journal = yield* promiseBoundary("Failed to read OMP history preview", () =>
+        OmpSessionLoader.loadSessionHistoryReadOnly(
+          path.join(sessionsDir, `${input.chatId}.jsonl`),
+        ),
+      );
+      return yield* syncBoundary("Failed to project OMP history preview", () => {
+        const entry = journal.entries.find((candidate) => candidate.id === input.targetId);
+        if (entry === undefined) throw new Error("History target no longer exists");
+        const destination = OmpSessionContext.resolveTreeNavigationTarget(
+          entry,
+          journal.activeLeafId,
+        );
+        const context = OmpSessionContext.buildSessionContext(
+          journal.entries,
+          input.targetId,
+          undefined,
+          {
+            transcript: true,
+            collapseCompactedHistory: true,
+            keepDanglingToolCalls: true,
+          },
+        );
+        const blocks: History.HistoryPreviewBlock[] = [];
+        for (const message of context.messages) {
+          const normalized = normalizeMessage(message);
+          if (normalized !== undefined) blocks.push({ kind: "message", message: normalized });
+          else if (message.role === "branchSummary" || message.role === "compactionSummary") {
+            blocks.push({
+              kind: "context",
+              label: message.role === "branchSummary" ? "Branch summary" : "Compaction summary",
+              text: message.summary,
+            });
+          }
+        }
+        return {
+          targetId: input.targetId,
+          version: History.HistoryVersion.make(journal.version),
+          destinationLeafId:
+            destination.leafId === null ? null : History.HistoryEntryId.make(destination.leafId),
+          blocks,
+        } satisfies History.HistoryPreview;
+      });
+    }),
     loadCurrentModel: Effect.fn("OmpSession.readCurrentModel")(function* (chatId) {
       const { chat } = yield* chatSessionContext.resolve(chatId);
       return yield* loadCurrentModel(
@@ -145,6 +210,9 @@ export const make = Effect.fn("AgentRuntime.make")(function* ({
     events: pool.events,
     drain: pool.drain,
     transcript: pool.transcript,
+    history: pool.history,
+    previewHistory: pool.previewHistory,
+    navigateHistory: pool.navigateHistory,
     send: pool.send,
     askBtw: pool.askBtw,
     sendCaptured: pool.sendCaptured,
@@ -223,6 +291,32 @@ export const makeSwitchModel =
     if (model === undefined) throw new Error("The selected model is no longer available");
     await session.setModelTemporary(model);
     return { provider: model.provider, id: model.id, name: model.name };
+  };
+
+export const makeNavigateHistory =
+  (session: Pick<OmpAgentSession.AgentSession, "navigateTree">): OpenedSession["navigateHistory"] =>
+  async (targetId, onReplaced) => {
+    const result = await session.navigateTree(targetId, {
+      summarize: false,
+      allowAskReopen: false,
+      requireIdle: true,
+      onHistoryReplaced: onReplaced,
+    });
+    if (result.busy) return { kind: "busy" };
+    if (result.cancelled) return { kind: "cancelled" };
+    return {
+      kind: "applied",
+      draft:
+        result.editorText === undefined && result.editorImages === undefined
+          ? null
+          : {
+              text: result.editorText ?? "",
+              images: (result.editorImages ?? []).map(({ data, mimeType }) => ({
+                data,
+                mimeType,
+              })),
+            },
+    };
   };
 
 const promiseBoundary = <A>(message: string, evaluate: () => Promise<A>) =>
@@ -394,7 +488,7 @@ export const makeSessionObservation = (
   return {
     historyBoundary: () => {
       if (observationFailure !== undefined) throw observationFailure;
-      return JSON.stringify(manager.getEntries());
+      return manager.getHistoryVersion();
     },
     settleHistory,
     unsubscribe: () => {
@@ -595,6 +689,7 @@ const makeFactory = (
       askBtw: makeBtw(created.session),
       shake: makeShake(created.session),
       switchModel: makeSwitchModel(created.session),
+      navigateHistory: makeNavigateHistory(created.session),
       currentModel: () => {
         const model = created.session.model;
         return model ? { provider: model.provider, id: model.id, name: model.name } : null;
@@ -623,3 +718,89 @@ const makeFactory = (
     return opened;
   }),
 });
+
+const historyText = (text: string): string =>
+  text
+    .replace(/\p{Cc}/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+export const normalizeHistory = (
+  entries: ReadonlyArray<SessionEntry>,
+  search: string,
+): Pick<History.HistorySnapshot, "nodes" | "matches"> => {
+  const query = search.trim().toLocaleLowerCase();
+  const matches: History.HistoryEntryId[] = [];
+  const labels = new Map<string, string>();
+  const children = new Map<string, SessionEntry[]>();
+  for (const entry of entries) {
+    if (entry.parentId !== null) {
+      const siblings = children.get(entry.parentId);
+      if (siblings === undefined) children.set(entry.parentId, [entry]);
+      else siblings.push(entry);
+    }
+    if (entry.type !== "label") continue;
+    if (entry.label) labels.set(entry.targetId, historyText(entry.label));
+    else labels.delete(entry.targetId);
+  }
+  const nodes = entries.map((entry) => {
+    let kind: History.HistoryNode["kind"] = "metadata";
+    let excerpt = entry.type.replaceAll("_", " ");
+    if (OmpSessionContext.isTranscriptEntry(entry)) {
+      const message = OmpSessionContext.transcriptEntryMessage(entry);
+      const normalized = message === undefined ? undefined : normalizeMessage(message);
+      if (normalized !== undefined) {
+        kind = normalized.role === "tool-result" ? "tool" : normalized.role;
+        excerpt = normalized.content
+          .map((block) => {
+            switch (block.type) {
+              case "text":
+                return block.text;
+              case "image":
+                return "[Image]";
+              case "tool-call":
+                return block.name;
+              case "thinking":
+                return "";
+              default: {
+                const exhaustive: never = block;
+                return exhaustive;
+              }
+            }
+          })
+          .join(" ");
+        if (normalized.role === "tool-result") excerpt = `${normalized.toolName}: ${excerpt}`;
+      }
+    } else if (entry.type === "compaction" || entry.type === "branch_summary") {
+      kind = "summary";
+      excerpt = entry.summary;
+    }
+    excerpt = historyText(excerpt);
+    const entryId = History.HistoryEntryId.make(entry.id);
+    const label = labels.get(entry.id);
+    if (query.length > 0 && `${label ?? ""} ${excerpt}`.toLocaleLowerCase().includes(query)) {
+      matches.push(entryId);
+    }
+    let target = entry;
+    if (kind === "assistant") {
+      while (true) {
+        const next = children.get(target.id);
+        if (next?.length !== 1) break;
+        const child = next[0];
+        if (child?.type !== "message" || child.message.role !== "toolResult") break;
+        target = child;
+      }
+    }
+    return {
+      entryId,
+      parentId: entry.parentId === null ? null : History.HistoryEntryId.make(entry.parentId),
+      defaultTargetId: History.HistoryEntryId.make(target.id),
+      kind,
+      timestamp: entry.timestamp,
+      label: label?.slice(0, 240) ?? null,
+      excerpt: excerpt.slice(0, 240),
+      visibleByDefault: kind === "user" || kind === "assistant" || kind === "summary",
+    };
+  });
+  return { nodes, matches };
+};

@@ -2,6 +2,7 @@ import * as Schema from "effect/Schema";
 import * as Rpc from "effect/unstable/rpc/Rpc";
 import * as RpcGroup from "effect/unstable/rpc/RpcGroup";
 import * as AgentEvent from "./agent-event.ts";
+import * as AgentHistory from "./agent-history.ts";
 import * as AgentMessage from "./agent-message.ts";
 import {
   ContextUsage,
@@ -11,7 +12,7 @@ import {
   ShakeMode,
   ShakeResult,
 } from "./agent-runtime.ts";
-import { TranscriptSnapshot } from "./agent-snapshot.ts";
+import { NavigateHistoryResult, TranscriptSnapshot } from "./agent-snapshot.ts";
 import * as Application from "./application.ts";
 import * as Chat from "./chat-model.ts";
 import * as Errors from "./errors.ts";
@@ -80,6 +81,21 @@ export const PicoRpcs = RpcGroup.make(
     payload: { chatId: Chat.ChatId },
     success: TranscriptSnapshot,
     error: Errors.ApplicationError,
+  }),
+  Rpc.make("ChatHistory", {
+    payload: AgentHistory.ChatHistoryRequest,
+    success: AgentHistory.HistorySnapshot,
+    error: Schema.Union([Errors.ApplicationError, Errors.ChatClosed]),
+  }),
+  Rpc.make("PreviewChatHistory", {
+    payload: AgentHistory.PreviewChatHistoryRequest,
+    success: AgentHistory.HistoryPreview,
+    error: Schema.Union([Errors.ApplicationError, Errors.ChatClosed]),
+  }),
+  Rpc.make("NavigateChatHistory", {
+    payload: AgentHistory.NavigateChatHistoryRequest,
+    success: NavigateHistoryResult,
+    error: Schema.Union([Errors.ApplicationError, Errors.ChatClosed]),
   }),
   Rpc.make("ContextUsage", {
     payload: { chatId: Chat.ChatId },

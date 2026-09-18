@@ -3,6 +3,7 @@ import * as BunFileSystem from "@effect/platform-bun/BunFileSystem";
 import * as BunPath from "@effect/platform-bun/BunPath";
 import { assert, describe, it } from "@effect/vitest";
 import { Publication } from "@pico/contract/agent-event";
+import { HistoryRevision } from "@pico/contract/agent-history";
 import * as AgentMessage from "@pico/contract/agent-message";
 import {
   AgentRuntime,
@@ -58,6 +59,7 @@ const runtimeTranscript: TranscriptSnapshot = {
     },
   ],
   contextUsage: { kind: "unavailable" },
+  historyRevision: HistoryRevision.make("test-history"),
   todo: { kind: "ready", phases: [] },
   runtime: { publication: Publication.make(0), run: { kind: "idle" }, assistant: [], tools: [] },
   currentModel: null,
@@ -116,6 +118,9 @@ describe("Application", () => {
       const runtimeLayer = Layer.succeed(
         AgentRuntime,
         AgentRuntime.of({
+          history: () => Effect.die("unexpected history read"),
+          previewHistory: () => Effect.die("unexpected history preview"),
+          navigateHistory: () => Effect.die("unexpected history navigation"),
           availableModels: () => Effect.die("unexpected model catalog read"),
           switchModel: () => Effect.die("unexpected model switch"),
           askBtw: () => Effect.die("unexpected side question"),
@@ -871,6 +876,9 @@ describe("Application", () => {
       const runtimeLayer = Layer.succeed(
         AgentRuntime,
         AgentRuntime.of({
+          history: () => Effect.die("unexpected history read"),
+          previewHistory: () => Effect.die("unexpected history preview"),
+          navigateHistory: () => Effect.die("unexpected history navigation"),
           availableModels: () => Effect.die("unexpected model catalog read"),
           switchModel: () => Effect.die("unexpected model switch"),
           askBtw: () => Effect.die("unexpected side question"),
