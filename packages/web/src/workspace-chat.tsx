@@ -1591,6 +1591,14 @@ export function WorkspaceChat({
   const sending = conversationEntry?.submission.kind === "sending" || conversation?.sending.waiting;
   const running = conversation?.live.run.kind === "running";
   const switching = conversation?.switching.waiting === true;
+  const suggestionsEnabled =
+    available &&
+    !!selected &&
+    !creating &&
+    !creationUnconfirmed &&
+    !switching &&
+    !running &&
+    !sending;
   const statusLabel = !conversationEntry
     ? groups.length > 0
       ? "Choose a chat or start a new one"
@@ -1641,13 +1649,7 @@ export function WorkspaceChat({
               ? "Choose a chat or start a new one"
               : "Add a workspace to start",
           editable: !!conversationEntry,
-          canSubmit:
-            available &&
-            !!selected &&
-            !creating &&
-            !creationUnconfirmed &&
-            !switching &&
-            selected.value.text.trim().length > 0,
+          canSubmit: suggestionsEnabled && selected.value.text.trim().length > 0,
           statusLabel,
         };
   const todo = conversation
@@ -2026,9 +2028,8 @@ export function WorkspaceChat({
           }}
           search={search}
           sidebarOpen={sidebarOpen}
-          suggestions={
-            available && conversationEntry && !creating && !sending && !running ? suggestions : []
-          }
+          suggestions={suggestions}
+          suggestionsEnabled={suggestionsEnabled}
           tabs={tabs}
           theme={theme}
           title={chatId ? (titles.get(chatId) ?? `Chat ${chatId.slice(-8)}`) : "New chat"}

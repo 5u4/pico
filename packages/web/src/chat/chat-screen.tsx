@@ -61,6 +61,7 @@ export interface ChatScreenProps
   readonly contextLabel: string;
   readonly tabs: readonly ChatTabPresentation[];
   readonly suggestions: readonly PromptSuggestion[];
+  readonly suggestionsEnabled: boolean;
   readonly toolPane: ToolCallPresentation | null;
   readonly transcript: TranscriptPresentation;
   readonly composer: ComposerPresentation;
@@ -114,6 +115,7 @@ export function ChatScreen({
   contextLabel,
   tabs,
   suggestions,
+  suggestionsEnabled,
   search,
   toolPane,
   transcript,
@@ -220,7 +222,7 @@ export function ChatScreen({
     conversationKey !== null &&
     composer.editable &&
     composer.mode === "send" &&
-    composer.canSubmit &&
+    suggestionsEnabled &&
     suggestions.length > 0;
   const onboarding =
     search.kind === "closed" &&
