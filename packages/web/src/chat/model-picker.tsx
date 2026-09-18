@@ -1,4 +1,12 @@
+import { CaretDown } from "@phosphor-icons/react";
 import { useId, useLayoutEffect, useRef } from "react";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "../components/ui/select.tsx";
 import type { ModelPickerPresentation } from "./chat-model.ts";
 
 interface ModelPickerProps {
@@ -10,7 +18,7 @@ interface ModelPickerProps {
 
 export function ModelPicker({ presentation, onOpen, onSelect, onRetry }: ModelPickerProps) {
   const id = useId();
-  const select = useRef<HTMLSelectElement>(null);
+  const select = useRef<HTMLButtonElement>(null);
   const container = useRef<HTMLDivElement>(null);
   const focusWhenReady = useRef(false);
   const { control, feedback } = presentation;
@@ -27,61 +35,61 @@ export function ModelPicker({ presentation, onOpen, onSelect, onRetry }: ModelPi
     }
   }, [control.kind]);
 
-  const classes =
-    "min-h-8 max-w-full rounded-control bg-transparent px-2 text-caption text-muted hover:bg-surface-hover hover:text-foreground disabled:cursor-not-allowed";
   return (
     <div className="min-w-0 flex-1" ref={container}>
       {control.kind === "draft" ? (
         <button
-          className={classes}
+          className="inline-flex min-h-8 max-w-full min-w-0 items-center gap-1 rounded-control bg-transparent px-2 text-caption text-muted hover:bg-surface-hover hover:text-foreground"
           onClick={() => {
             focusWhenReady.current = true;
             onOpen();
           }}
           type="button"
         >
-          {presentation.label}
+          <span className="min-w-0 flex-1 truncate text-left">{presentation.label}</span>
+          <CaretDown aria-hidden="true" className="size-3.5 shrink-0" />
         </button>
       ) : (
         <>
           <label className="sr-only" htmlFor={id}>
             Model for this chat
           </label>
-          <select
-            aria-describedby={`${id}-status`}
-            aria-invalid={feedback.kind === "error" || undefined}
-            className={classes}
+          <Select
             disabled={control.kind === "disabled"}
-            id={id}
-            onChange={(event) => {
+            key={control.kind}
+            onValueChange={(value) => {
               focusWhenReady.current = true;
-              onSelect(event.currentTarget.value);
+              onSelect(value);
             }}
-            ref={select}
-            title={presentation.label}
             value={control.kind === "select" ? control.value : ""}
           >
-            {control.kind === "select" ? (
-              <>
-                {!control.options.some((option) => option.value === control.value) && (
-                  <option disabled value={control.value}>
-                    {presentation.label}
-                  </option>
-                )}
+            <SelectTrigger
+              aria-describedby={`${id}-status`}
+              aria-invalid={feedback.kind === "error" || undefined}
+              id={id}
+              ref={select}
+              title={presentation.label}
+            >
+              <SelectValue placeholder={presentation.label}>
+                {control.kind === "select" && control.value !== "" ? presentation.label : undefined}
+              </SelectValue>
+            </SelectTrigger>
+            {control.kind === "select" && (
+              <SelectContent align="start" side="top" sideOffset={4}>
+                {control.value !== "" &&
+                  !control.options.some((option) => option.value === control.value) && (
+                    <SelectItem disabled value={control.value}>
+                      {presentation.label}
+                    </SelectItem>
+                  )}
                 {control.options.map((option) => (
-                  <option
-                    className="bg-panel text-foreground"
-                    key={option.value}
-                    value={option.value}
-                  >
+                  <SelectItem key={option.value} value={option.value}>
                     {option.label}
-                  </option>
+                  </SelectItem>
                 ))}
-              </>
-            ) : (
-              <option value="">{presentation.label}</option>
+              </SelectContent>
             )}
-          </select>
+          </Select>
         </>
       )}
       <div className="px-2 text-caption" id={`${id}-status`} role="status">
