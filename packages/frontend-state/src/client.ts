@@ -618,9 +618,9 @@ export const make = ({ url }: { readonly url: string }) => {
             )
             .pipe(Effect.exit);
           if (!active) break;
+          if (requestRevision !== revision) continue;
           if (Exit.isSuccess(exit)) {
-            if (requestRevision === revision)
-              publish((state) => ({ ...state, contextResult: AsyncResult.success(exit.value) }));
+            publish((state) => ({ ...state, contextResult: AsyncResult.success(exit.value) }));
           } else if (!Cause.hasInterruptsOnly(exit.cause)) {
             publish((state) => ({
               ...state,
@@ -632,7 +632,7 @@ export const make = ({ url }: { readonly url: string }) => {
               closed = true;
             }
           }
-          if (closed || requestRevision !== revision) continue;
+          if (closed) continue;
           yield* Effect.raceFirst(Deferred.await(wake), Effect.sleep("1 minute"));
         }
       }),
