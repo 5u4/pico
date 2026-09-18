@@ -95,6 +95,7 @@ describe("Workspace binding", () => {
           contextUsage: () => Effect.die("unexpected runtime context read"),
           shake: () => Effect.die("unexpected runtime shake"),
           close: () => Effect.die("unexpected runtime close"),
+          availableSkills: () => Effect.die("unexpected skill command discovery"),
         }),
       );
       const validations: Array<Workspace.WorkspaceConfiguration> = [];
@@ -349,6 +350,7 @@ describe("Workspace binding", () => {
           contextUsage: () => Effect.die("unexpected runtime context read"),
           shake: () => Effect.die("unexpected runtime shake"),
           close: () => Effect.die("unexpected runtime close"),
+          availableSkills: () => Effect.die("unexpected skill command discovery"),
         }),
       );
       const sessionsLayer = Layer.succeed(

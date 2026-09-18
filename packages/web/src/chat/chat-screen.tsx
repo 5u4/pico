@@ -22,6 +22,7 @@ import type {
   ModelPickerPresentation,
   PromptSuggestion,
   ShakeFeedback,
+  SkillCompletionPresentation,
   TodoPresentation,
   ToolCallPresentation,
   TranscriptPresentation,
@@ -34,6 +35,7 @@ import { MobileSidebar } from "./mobile-sidebar.tsx";
 import { ModelPicker } from "./model-picker.tsx";
 import { SchedulePage, type SchedulePageProps } from "./schedule-page.tsx";
 import { ShakeMenu, type ShakeMenuProps } from "./shake-menu.tsx";
+import { SkillCompletionMenu } from "./skill-completion-menu.tsx";
 import { TodoDock } from "./todo-dock.tsx";
 import { ToolDetailPane } from "./tool-detail-pane.tsx";
 import { Transcript } from "./transcript.tsx";
@@ -66,6 +68,11 @@ export interface ChatScreenProps
   readonly transcript: TranscriptPresentation;
   readonly composer: ComposerPresentation;
   readonly todo: TodoPresentation | null;
+  readonly skillCompletion: SkillCompletionPresentation;
+  readonly composerCaretRequest: {
+    readonly revision: number;
+    readonly selection: { readonly start: number; readonly end: number };
+  } | null;
   readonly modelPicker: ModelPickerPresentation;
   readonly onModelPickerOpen: () => void;
   readonly onModelSelect: (value: string) => void;
@@ -101,6 +108,15 @@ export interface ChatScreenProps
   readonly onComposerSubmit: () => void;
   readonly onSuggestionSelect: (text: string) => void;
   readonly onSuggestionsShuffle: () => void;
+  readonly onComposerCaretChange: (selection: {
+    readonly start: number;
+    readonly end: number;
+  }) => void;
+  readonly onSkillCompletionCommit: () => void;
+  readonly onSkillCompletionMove: (delta: -1 | 1) => void;
+  readonly onSkillCompletionDismiss: () => void;
+  readonly onSkillCompletionSelect: (name: string) => void;
+  readonly onSkillCompletionRetry: () => void;
   readonly onStop: () => void;
   readonly onTranscriptRetry: () => void;
   readonly onDisclosuresChange: (ids: readonly string[], open: boolean) => void;
@@ -121,6 +137,7 @@ export function ChatScreen({
   transcript,
   composer,
   todo,
+  skillCompletion,
   modelPicker,
   onModelPickerOpen,
   onModelSelect,
@@ -166,6 +183,13 @@ export function ChatScreen({
   onToolSelect,
   onComposerValueChange,
   onComposerSubmit,
+  composerCaretRequest,
+  onComposerCaretChange,
+  onSkillCompletionCommit,
+  onSkillCompletionMove,
+  onSkillCompletionDismiss,
+  onSkillCompletionSelect,
+  onSkillCompletionRetry,
   onSuggestionSelect,
   onSuggestionsShuffle,
   onStop,
@@ -707,13 +731,29 @@ export function ChatScreen({
                         presentation={todo}
                       />
                     )}
-                    <Composer
-                      contextLabel={contextLabel}
-                      onStop={onStop}
-                      onSubmit={onComposerSubmit}
-                      onValueChange={onComposerValueChange}
-                      presentation={composer}
-                    />
+                    <div className="relative">
+                      <div className="absolute inset-x-0 bottom-full z-20 mb-2">
+                        <SkillCompletionMenu
+                          onRetry={onSkillCompletionRetry}
+                          onSelect={onSkillCompletionSelect}
+                          presentation={skillCompletion}
+                        />
+                      </div>
+                      <Composer
+                        key={conversationKey}
+                        caretRequest={composerCaretRequest}
+                        completion={skillCompletion}
+                        contextLabel={contextLabel}
+                        onCaretChange={onComposerCaretChange}
+                        onCompletionCommit={onSkillCompletionCommit}
+                        onCompletionDismiss={onSkillCompletionDismiss}
+                        onCompletionMove={onSkillCompletionMove}
+                        onStop={onStop}
+                        onSubmit={onComposerSubmit}
+                        onValueChange={onComposerValueChange}
+                        presentation={composer}
+                      />
+                    </div>
                     <div className="mt-1 flex items-start justify-between gap-2">
                       <ModelPicker
                         key={conversationKey}

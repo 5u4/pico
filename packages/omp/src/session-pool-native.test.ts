@@ -376,6 +376,7 @@ const makePool = Effect.fn("NativePoolTest.make")(function* (
             }),
             currentModel: () => currentSession.model ?? null,
             contextUsage: () => ({ kind: "unavailable" }),
+            availableSkills: () => [],
             appendAssistantMessage: () =>
               Promise.reject(new Error("Publication is not part of ownership tests")),
           };

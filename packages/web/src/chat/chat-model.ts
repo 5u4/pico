@@ -237,6 +237,35 @@ export type ComposerPresentation =
       readonly statusLabel: string;
     };
 
+export interface SkillCompletionOptionPresentation {
+  readonly id: string;
+  readonly name: string;
+  readonly description: string;
+  readonly selected: boolean;
+}
+
+export type SkillCompletionPresentation =
+  | { readonly kind: "closed" }
+  | {
+      readonly kind: "loading" | "empty";
+      readonly listboxId: string;
+      readonly activeDescendantId: string;
+      readonly message: string;
+    }
+  | {
+      readonly kind: "error";
+      readonly listboxId: string;
+      readonly activeDescendantId: string;
+      readonly message: string;
+      readonly retry: "enabled" | "disabled";
+    }
+  | {
+      readonly kind: "ready";
+      readonly listboxId: string;
+      readonly activeDescendantId: string;
+      readonly options: readonly SkillCompletionOptionPresentation[];
+    };
+
 export interface ModelPickerPresentation {
   readonly label: string;
   readonly control:

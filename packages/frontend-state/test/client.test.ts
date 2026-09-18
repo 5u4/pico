@@ -120,6 +120,7 @@ const fixture = Effect.fnUntraced(function* (
         | "shake"
         | "contextUsage"
         | "availableModels"
+        | "availableSkills"
         | "switchModel"
       >
     >,
@@ -171,6 +172,7 @@ const fixture = Effect.fnUntraced(function* (
     availableWorkspaceModels: () => Effect.die("unexpected workspace model discovery"),
     setWorkspaceModel: () => Effect.die("unexpected workspace model update"),
     availableModels: () => Effect.die("unexpected model discovery"),
+    availableSkills: () => Effect.die("unexpected skill command discovery"),
     switchModel: () => Effect.die("unexpected model switch"),
     shake: () => Effect.die("unexpected chat shake"),
     closeChat: () => Effect.die("unexpected chat close"),

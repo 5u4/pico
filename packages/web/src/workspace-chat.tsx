@@ -6,6 +6,7 @@ import type {
   ModelRef,
   ShakeMode,
   ShakeResult,
+  SkillCommand,
 } from "@pico/contract/agent-runtime";
 import { CreateWorkspace } from "@pico/contract/application";
 import type { Chat, ChatId } from "@pico/contract/chat-model";
@@ -35,11 +36,18 @@ import type {
   ScheduleListPresentation,
   ShakeFeedback,
   SidebarSearchPresentation,
+  SkillCompletionPresentation,
   ToolCallPresentation,
   TranscriptPresentation,
 } from "./chat/chat-model.ts";
 import { ChatScreen } from "./chat/chat-screen.tsx";
 import { ConnectionRecovery } from "./chat/connection-recovery.tsx";
+import {
+  applySkill,
+  filterSkills,
+  findSkillToken,
+  type SkillMenuVisibility,
+} from "./chat/skill-completion.ts";
 import type { WorkspaceFormProps } from "./chat/workspace-dialog.tsx";
 import type { WorkspaceSettingsEditor } from "./chat/workspace-settings-dialog.tsx";
 import { Button } from "./components/ui/button.tsx";
@@ -64,6 +72,41 @@ interface DraftEntry {
     | { readonly kind: "sending" }
     | { readonly kind: "error"; readonly message: string };
 }
+
+interface SkillMenuTabState {
+  readonly caretStart: number;
+  readonly caretEnd: number;
+  readonly selectedIndex: number;
+  readonly dismissedSignature: string | null;
+  readonly tokenKey: string | null;
+}
+
+interface SkillMenuResolved {
+  readonly token: NonNullable<ReturnType<typeof findSkillToken>>;
+  readonly state: SkillMenuTabState;
+  readonly signature: string;
+  readonly visibility: SkillMenuVisibility;
+  readonly options: readonly SkillCommand[];
+  readonly selectedIndex: number;
+}
+
+const initialSkillMenuTabState = (caret: number): SkillMenuTabState => ({
+  caretStart: caret,
+  caretEnd: caret,
+  selectedIndex: 0,
+  dismissedSignature: null,
+  tokenKey: null,
+});
+
+const menuSignature = (text: string, caretStart: number, caretEnd: number) =>
+  `${text}\u0000${caretStart}:${caretEnd}`;
+
+const menuTokenKey = (token: NonNullable<ReturnType<typeof findSkillToken>>) =>
+  `${token.start}:${token.end}:${token.query.toLocaleLowerCase()}`;
+
+const menuListboxId = (key: string) => `skill-completion-${key}`;
+const menuStatusId = (key: string) => `skill-completion-status-${key}`;
+const menuOptionId = (key: string, index: number) => `skill-completion-option-${key}-${index}`;
 const isCreationUnconfirmed = (entry: DraftEntry | undefined) =>
   entry?.target.kind === "new" && entry.submission.kind === "error";
 interface TabState {
@@ -416,6 +459,16 @@ export function WorkspaceChat({
     () => suggestionPool.slice(suggestionOffset, suggestionOffset + 3),
     [suggestionOffset],
   );
+  const [skillMenuByKey, setSkillMenuByKey] = useState<ReadonlyMap<string, SkillMenuTabState>>(
+    () => new Map(),
+  );
+  const skillMenuOpenTokens = useRef(new Map<string, string>());
+  const skillMenuCaretRevision = useRef(0);
+  const [composerCaretRequest, setComposerCaretRequest] = useState<{
+    readonly key: string;
+    readonly revision: number;
+    readonly selection: { readonly start: number; readonly end: number };
+  } | null>(null);
   const [toolSelection, setToolSelection] = useState<{
     readonly conversationKey: string;
     readonly callId: string;
@@ -590,6 +643,10 @@ export function WorkspaceChat({
           params: { workspaceId: returnEntry.workspace.id },
           search: { tab: returnEntry.key },
         }).href;
+  const skillsVisible =
+    page.kind !== "schedules" &&
+    conversationEntry !== undefined &&
+    skillMenuByKey.get(conversationEntry.key)?.tokenKey != null;
   const conversationAtom = useMemo(
     () =>
       Atom.make((get) =>
@@ -601,13 +658,14 @@ export function WorkspaceChat({
               todo: get(state.todo(chatId)),
               currentModel: get(state.currentModel(chatId)),
               models: get(state.availableModels(chatId)),
+              skills: skillsVisible ? get(state.availableSkills(chatId)) : undefined,
               switching: get(state.switchModel(chatId)),
               sending: get(state.send(chatId)),
               stopping: get(state.abort(chatId)),
             }
           : null,
       ),
-    [state, chatId],
+    [state, chatId, skillsVisible],
   );
   const conversation = useAtomValue(conversationAtom);
 
@@ -615,6 +673,7 @@ export function WorkspaceChat({
     setContextDetailsKey(undefined);
     setToolSelection(null);
     setShakeFeedback(null);
+    skillMenuOpenTokens.current.clear();
   }, [visit, selected?.key]);
 
   useEffect(() => {
@@ -683,6 +742,124 @@ export function WorkspaceChat({
       return { ...current, entries: new Map(current.entries).set(key, change(entry)) };
     });
   };
+
+  const readSkillMenuState = (entry: DraftEntry): SkillMenuTabState =>
+    skillMenuByKey.get(entry.key) ?? initialSkillMenuTabState(entry.value.text.length);
+
+  const updateSkillMenuState = (
+    key: string,
+    make: (current: SkillMenuTabState) => SkillMenuTabState,
+  ) => {
+    setSkillMenuByKey((current) => {
+      const entry = navigationRef.current.entries.get(key);
+      const previous =
+        current.get(key) ?? initialSkillMenuTabState(entry ? entry.value.text.length : 0);
+      const next = make(previous);
+      if (
+        next.caretStart === previous.caretStart &&
+        next.caretEnd === previous.caretEnd &&
+        next.selectedIndex === previous.selectedIndex &&
+        next.dismissedSignature === previous.dismissedSignature &&
+        next.tokenKey === previous.tokenKey
+      )
+        return current;
+      const updated = new Map(current);
+      updated.set(key, next);
+      return updated;
+    });
+  };
+
+  const requestComposerCaret = (key: string, start: number, end: number) => {
+    skillMenuCaretRevision.current += 1;
+    setComposerCaretRequest({
+      key,
+      revision: skillMenuCaretRevision.current,
+      selection: { start, end },
+    });
+  };
+
+  const skillMenuResolved: SkillMenuResolved | null = (() => {
+    if (
+      page.kind === "schedules" ||
+      !conversationEntry ||
+      !available ||
+      isCreationUnconfirmed(conversationEntry)
+    )
+      return null;
+    const tabState = readSkillMenuState(conversationEntry);
+    const token = findSkillToken(
+      conversationEntry.value.text,
+      tabState.caretStart,
+      tabState.caretEnd,
+    );
+    if (token === null) return null;
+    const signature = menuSignature(
+      conversationEntry.value.text,
+      tabState.caretStart,
+      tabState.caretEnd,
+    );
+    if (tabState.dismissedSignature === signature) return null;
+    const tokenKey = menuTokenKey(token);
+    const selectedIndex = tabState.tokenKey === tokenKey ? tabState.selectedIndex : 0;
+    const skillsResult =
+      conversationEntry.target.kind === "chat" ? conversation?.skills : undefined;
+    if (
+      conversationEntry.target.kind === "new" ||
+      conversationEntry.submission.kind === "creating" ||
+      skillsResult === undefined ||
+      skillsResult._tag === "Initial" ||
+      skillsResult.waiting
+    ) {
+      return {
+        token,
+        state: { ...tabState, tokenKey },
+        signature,
+        visibility: "loading",
+        options: [],
+        selectedIndex: 0,
+      };
+    }
+    if (skillsResult._tag === "Failure") {
+      return {
+        token,
+        state: { ...tabState, tokenKey },
+        signature,
+        visibility: "error",
+        options: [],
+        selectedIndex: 0,
+      };
+    }
+    const options = filterSkills(
+      Option.getOrElse(AsyncResult.value(skillsResult), () => []),
+      token.query,
+    );
+    if (options.length === 0) {
+      return {
+        token,
+        state: { ...tabState, tokenKey },
+        signature,
+        visibility: "empty",
+        options,
+        selectedIndex: 0,
+      };
+    }
+    return {
+      token,
+      state: { ...tabState, tokenKey },
+      signature,
+      visibility: "ready",
+      options,
+      selectedIndex: Math.max(0, Math.min(selectedIndex, options.length - 1)),
+    };
+  })();
+
+  useEffect(() => {
+    if (!conversationEntry) return;
+    if (skillMenuResolved === null) {
+      skillMenuOpenTokens.current.delete(conversationEntry.key);
+      return;
+    }
+  }, [conversationEntry, skillMenuResolved]);
   const navigatePage = (
     destination: Exclude<Page, { readonly kind: "invalid" }>,
     replace = false,
@@ -1365,6 +1542,30 @@ export function WorkspaceChat({
     }
     return chat;
   };
+
+  const openSkillCatalog = async (entryKey: string) => {
+    if (!state || registry.get(state.connection).kind !== "active") return;
+    const entry = navigationRef.current.entries.get(entryKey);
+    if (!entry || isCreationUnconfirmed(entry)) return;
+    const chat = entry.target.kind === "chat" ? entry.target.chat : await ensureChat(entry);
+    if (!chat) return;
+    const catalog = registry.get(state.availableSkills(chat.id));
+    if (catalog._tag !== "Initial" && !catalog.waiting) {
+      registry.refresh(state.availableSkills(chat.id));
+    }
+  };
+
+  useEffect(() => {
+    if (!conversationEntry || skillMenuResolved === null) return;
+    if (skillMenuOpenTokens.current.get(conversationEntry.key) === "open") return;
+    if (
+      conversationEntry.target.kind === "new" &&
+      creatingChats.current.has(conversationEntry.workspace.id)
+    )
+      return;
+    skillMenuOpenTokens.current.set(conversationEntry.key, "open");
+    void openSkillCatalog(conversationEntry.key);
+  }, [conversationEntry, skillMenuResolved, state]);
   const modelEntry = () => {
     if (!state || !ownsVisit() || registry.get(state.connection).kind !== "active") return;
     const entry = findPageEntry(page, navigationRef.current.entries);
@@ -1418,6 +1619,83 @@ export function WorkspaceChat({
       registry.refresh(state.availableModels(id));
       registry.refresh(state.currentModel(id));
     }
+  };
+
+  const moveSkillCompletion = (delta: -1 | 1) => {
+    if (skillMenuResolved?.visibility !== "ready") return;
+    const entry = findPageEntry(page, navigationRef.current.entries);
+    if (!entry || entry.key !== selected?.key) return;
+    const size = skillMenuResolved.options.length;
+    if (size === 0) return;
+    updateSkillMenuState(entry.key, (current) => ({
+      ...current,
+      selectedIndex: (size + skillMenuResolved.selectedIndex + delta) % size,
+    }));
+  };
+
+  const dismissSkillCompletion = () => {
+    if (!skillMenuResolved) return;
+    const entry = findPageEntry(page, navigationRef.current.entries);
+    if (!entry || entry.key !== selected?.key) return;
+    updateSkillMenuState(entry.key, (current) => ({
+      ...current,
+      dismissedSignature: skillMenuResolved.signature,
+      selectedIndex: 0,
+    }));
+    skillMenuOpenTokens.current.delete(entry.key);
+  };
+
+  const applySkillCompletion = (name?: string) => {
+    if (skillMenuResolved?.visibility !== "ready") return;
+    const entry = findPageEntry(page, navigationRef.current.entries);
+    if (!entry || entry.key !== selected?.key) return;
+    const selectedSkill =
+      name === undefined
+        ? skillMenuResolved.options[skillMenuResolved.selectedIndex]
+        : skillMenuResolved.options.find((option) => option.name === name);
+    if (!selectedSkill) return;
+    const replaced = applySkill(entry.value.text, skillMenuResolved.token, selectedSkill.name);
+    updateEntry(entry.key, (value) => ({ ...value, value: { text: replaced.text } }));
+    const dismissedSignature = menuSignature(replaced.text, replaced.caret, replaced.caret);
+    updateSkillMenuState(entry.key, (current) => ({
+      ...current,
+      caretStart: replaced.caret,
+      caretEnd: replaced.caret,
+      selectedIndex: 0,
+      tokenKey: null,
+      dismissedSignature,
+    }));
+    requestComposerCaret(entry.key, replaced.caret, replaced.caret);
+    skillMenuOpenTokens.current.delete(entry.key);
+  };
+
+  const retrySkillCatalog = () => {
+    if (!state || !conversationEntry || skillMenuResolved?.visibility !== "error") return;
+    if (!available || conversationEntry.target.kind !== "chat") return;
+    if (conversation?.skills?.waiting) return;
+    registry.refresh(state.availableSkills(conversationEntry.target.chat.id));
+  };
+
+  const recordComposerCaret = (selection: { readonly start: number; readonly end: number }) => {
+    if (!ownsVisit()) return;
+    const entry = findPageEntry(page, navigationRef.current.entries);
+    if (!entry || entry.key !== selected?.key) return;
+    setComposerCaretRequest((current) =>
+      current?.key === entry.key &&
+      current.selection.start === selection.start &&
+      current.selection.end === selection.end
+        ? null
+        : current,
+    );
+    const token = findSkillToken(entry.value.text, selection.start, selection.end);
+    const tokenKey = token ? menuTokenKey(token) : null;
+    updateSkillMenuState(entry.key, (current) => ({
+      ...current,
+      caretStart: selection.start,
+      caretEnd: selection.end,
+      tokenKey,
+      selectedIndex: current.tokenKey === tokenKey ? current.selectedIndex : 0,
+    }));
   };
   const submitDraft = async () => {
     if (
@@ -1812,6 +2090,58 @@ export function WorkspaceChat({
       feedback,
     };
   })();
+
+  const skillCompletion: SkillCompletionPresentation = (() => {
+    if (!conversationEntry || !available || skillMenuResolved === null) return { kind: "closed" };
+    const listboxId = menuListboxId(conversationEntry.key);
+    if (skillMenuResolved.visibility === "ready") {
+      const options = skillMenuResolved.options.map((option, index) => ({
+        id: menuOptionId(conversationEntry.key, index),
+        name: option.name,
+        description: option.description,
+        selected: index === skillMenuResolved.selectedIndex,
+      }));
+      const activeDescendantId =
+        options[skillMenuResolved.selectedIndex]?.id ?? menuStatusId(conversationEntry.key);
+      return {
+        kind: "ready",
+        listboxId,
+        activeDescendantId,
+        options,
+      };
+    }
+    if (skillMenuResolved.visibility === "error") {
+      return {
+        kind: "error",
+        listboxId,
+        activeDescendantId: menuStatusId(conversationEntry.key),
+        message:
+          conversation?.skills?._tag === "Failure"
+            ? errorMessage(conversation.skills.cause)
+            : "Could not load skill commands.",
+        retry:
+          conversationEntry.target.kind === "chat" &&
+          conversation?.skills?.waiting !== true &&
+          available
+            ? "enabled"
+            : "disabled",
+      };
+    }
+    if (skillMenuResolved.visibility === "empty") {
+      return {
+        kind: "empty",
+        listboxId,
+        activeDescendantId: menuStatusId(conversationEntry.key),
+        message: "No matching skill commands.",
+      };
+    }
+    return {
+      kind: "loading",
+      listboxId,
+      activeDescendantId: menuStatusId(conversationEntry.key),
+      message: "Loading skill commands...",
+    };
+  })();
   const transcript: TranscriptPresentation =
     content.kind === "error"
       ? {
@@ -1973,6 +2303,15 @@ export function WorkspaceChat({
           onCloseChatDismiss={dismissCloseChat}
           onCloseChatRetry={retryCloseChat}
           composer={composer}
+          skillCompletion={skillCompletion}
+          composerCaretRequest={
+            composerCaretRequest && composerCaretRequest.key === conversationEntry?.key
+              ? {
+                  revision: composerCaretRequest.revision,
+                  selection: composerCaretRequest.selection,
+                }
+              : null
+          }
           todo={presentTodo(todo, conversationEntry?.disclosures.get("todo-dock") ?? false)}
           shakeEnabled={available && page.kind === "chat" && selected?.target.kind === "chat"}
           onShake={shake}
@@ -2012,8 +2351,23 @@ export function WorkspaceChat({
           onComposerValueChange={(text) => {
             if (!ownsVisit()) return;
             const entry = findPageEntry(page, navigationRef.current.entries);
-            if (entry) updateEntry(entry.key, (entry) => ({ ...entry, value: { text } }));
+            if (!entry) return;
+            updateEntry(entry.key, (current) => ({ ...current, value: { text } }));
+            const tabState = readSkillMenuState(entry);
+            const token = findSkillToken(text, tabState.caretStart, tabState.caretEnd);
+            const tokenKey = token ? menuTokenKey(token) : null;
+            updateSkillMenuState(entry.key, (current) => ({
+              ...current,
+              tokenKey,
+              selectedIndex: current.tokenKey === tokenKey ? current.selectedIndex : 0,
+            }));
           }}
+          onComposerCaretChange={recordComposerCaret}
+          onSkillCompletionCommit={() => applySkillCompletion()}
+          onSkillCompletionMove={moveSkillCompletion}
+          onSkillCompletionDismiss={dismissSkillCompletion}
+          onSkillCompletionSelect={applySkillCompletion}
+          onSkillCompletionRetry={retrySkillCatalog}
           onDisclosuresChange={(ids, open) => {
             if (
               !ownsVisit() ||

@@ -199,6 +199,7 @@ describe("Application", () => {
               ),
             ),
           close: () => Effect.die("unexpected runtime close"),
+          availableSkills: () => Effect.die("unexpected skill command discovery"),
         }),
       );
       const gitWorktree: GitWorktree = {
@@ -885,6 +886,7 @@ describe("Application", () => {
           contextUsage: () => Effect.die("unexpected runtime context read"),
           shake: () => Effect.die("unexpected runtime shake"),
           close: () => Effect.die("unexpected runtime close"),
+          availableSkills: () => Effect.die("unexpected skill command discovery"),
         }),
       );
       const gitWorktree: GitWorktree = {

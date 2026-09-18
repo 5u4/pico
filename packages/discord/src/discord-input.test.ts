@@ -193,6 +193,7 @@ describe("discord input", () => {
                   ? Option.some(chat)
                   : Option.none(),
               ),
+            availableSkills: () => Effect.die("unexpected skill command discovery"),
           });
           const { schedule } = yield* install(bot, config, acknowledgeInteraction).pipe(
             Effect.provideService(Application, application),
@@ -367,6 +368,7 @@ describe("discord input", () => {
           contextUsage: () => Effect.die("unexpected context read"),
           shake: () => Effect.die("unexpected chat shake"),
           closeChat: () => Effect.die("unexpected chat close"),
+          availableSkills: () => Effect.die("unexpected skill command discovery"),
         });
         resolveThreadId = yield* install(bot, config, acknowledgeInteraction).pipe(
           Effect.map((installed) => installed.resolveThreadId),
@@ -516,6 +518,7 @@ describe("discord input", () => {
               }),
             shake: () => Effect.die("unexpected chat shake"),
             closeChat: () => Effect.die("unexpected chat close"),
+            availableSkills: () => Effect.die("unexpected skill command discovery"),
           });
           const { resolveThreadId } = yield* install(bot, config, acknowledgeInteraction).pipe(
             Effect.provideService(Application, application),
@@ -755,6 +758,7 @@ describe("discord input", () => {
           contextUsage: () => Effect.die("unexpected context read"),
           shake: () => Effect.die("unexpected chat shake"),
           closeChat: () => Effect.die("unexpected chat close"),
+          availableSkills: () => Effect.die("unexpected skill command discovery"),
         });
         const acknowledgeAbort = DiscordAcknowledgement.make(async (_id, _token, response) => {
           assert.deepStrictEqual(response, {
@@ -895,6 +899,7 @@ describe("discord input", () => {
               closed = true;
               return { kind: "closed" } as const;
             }),
+          availableSkills: () => Effect.die("unexpected skill command discovery"),
         });
         const acknowledgeClose = DiscordAcknowledgement.make(async () => {
           Effect.runSync(Deferred.succeed(closeDeferred, undefined));
@@ -1013,6 +1018,7 @@ describe("discord input", () => {
               return { mode: "elide", toolResultsDropped: 0, blocksDropped: 0, tokensFreed: 0 };
             }),
           closeChat: () => Effect.die("unexpected chat close"),
+          availableSkills: () => Effect.die("unexpected skill command discovery"),
         });
 
         yield* install(bot, config, acknowledgeInteraction).pipe(
@@ -1122,6 +1128,7 @@ describe("discord input", () => {
             }),
           shake: () => Effect.die("unexpected chat shake"),
           closeChat: () => Effect.die("unexpected chat close"),
+          availableSkills: () => Effect.die("unexpected skill command discovery"),
         });
 
         yield* install(bot, config, acknowledgeInteraction).pipe(
@@ -1246,6 +1253,7 @@ describe("discord input", () => {
           contextUsage: () => Effect.die("unexpected context read"),
           shake: () => Effect.die("unexpected chat shake"),
           closeChat: () => Effect.die("unexpected chat close"),
+          availableSkills: () => Effect.die("unexpected skill command discovery"),
         });
 
         yield* install(bot, config, acknowledgeBind).pipe(
@@ -1377,6 +1385,7 @@ describe("discord input", () => {
           contextUsage: () => Effect.die("unexpected context read"),
           shake: () => Effect.die("unexpected chat shake"),
           closeChat: () => Effect.die("unexpected chat close"),
+          availableSkills: () => Effect.die("unexpected skill command discovery"),
         });
 
         yield* install(bot, config, acknowledgeInteraction).pipe(
@@ -1490,6 +1499,7 @@ describe("discord input", () => {
           contextUsage: () => Effect.die("unexpected context read"),
           shake: () => Effect.die("unexpected chat shake"),
           closeChat: () => Effect.die("unexpected chat close"),
+          availableSkills: () => Effect.die("unexpected skill command discovery"),
         });
 
         yield* install(bot, config, acknowledgeInteraction).pipe(
@@ -1635,6 +1645,7 @@ describe("discord input", () => {
               }),
             shake: () => Effect.die("unexpected chat shake"),
             closeChat: () => Effect.die("unexpected chat close"),
+            availableSkills: () => Effect.die("unexpected skill command discovery"),
           });
 
           yield* install(bot, config, acknowledgeInteraction, () => Effect.void, httpClient).pipe(
@@ -1752,6 +1763,7 @@ describe("discord input", () => {
           contextUsage: () => Effect.die("unexpected context read"),
           shake: () => Effect.die("unexpected shake"),
           closeChat: () => Effect.die("unexpected close"),
+          availableSkills: () => Effect.die("unexpected skill command discovery"),
         });
         const testAcknowledgement = DiscordAcknowledgement.make((_id, token) => {
           if (token === "sync-failure") {
@@ -1921,6 +1933,7 @@ describe("discord input", () => {
           contextUsage: () => Effect.die("unexpected context read"),
           shake: () => Effect.die("unexpected shake"),
           closeChat: () => Effect.die("unexpected close"),
+          availableSkills: () => Effect.die("unexpected skill command discovery"),
         });
         const httpClient = HttpClient.make((request) =>
           Effect.succeed(HttpClientResponse.fromWeb(request, new Response(null, { status: 500 }))),
@@ -2059,6 +2072,7 @@ describe("discord input", () => {
           shake: () =>
             Effect.fail(new ApplicationError({ reason: "operation", message: "Shake failed" })),
           closeChat: () => Effect.die("unexpected close"),
+          availableSkills: () => Effect.die("unexpected skill command discovery"),
         });
         yield* install(bot, config, acknowledgeInteraction).pipe(
           Effect.provideService(Application, application),

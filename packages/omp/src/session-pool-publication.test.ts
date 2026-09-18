@@ -78,6 +78,7 @@ describe("session pool publication", () => {
                     contextUsage: () => ({ kind: "unavailable" }),
                     currentModel: () => null,
                     unsubscribe: () => {},
+                    availableSkills: () => [],
                   } satisfies OpenedSession;
                 }),
             },
@@ -214,6 +215,7 @@ describe("session pool publication", () => {
                   currentModel: () => null,
                   contextUsage: () => ({ kind: "unavailable" }),
                   unsubscribe: () => {},
+                  availableSkills: () => [],
                 } satisfies OpenedSession;
               }),
           };
@@ -447,6 +449,7 @@ describe("session pool publication", () => {
                   currentModel: () => null,
                   contextUsage: () => ({ kind: "unavailable" }),
                   unsubscribe: () => {},
+                  availableSkills: () => [],
                 } satisfies OpenedSession;
               }),
           },

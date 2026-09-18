@@ -894,6 +894,18 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
       .pipe(Effect.mapError(failure("Failed to list available models")));
   });
 
+  const availableSkills = Effect.fn("Application.availableSkills")(function* (chatId: Chat.ChatId) {
+    return yield* serialized(
+      chatId,
+      Effect.gen(function* () {
+        yield* ensureChatOpen(chatId, "Failed to list chat skill commands");
+        return yield* runtime
+          .availableSkills(chatId)
+          .pipe(Effect.mapError(failure("Failed to list chat skill commands")));
+      }),
+    );
+  });
+
   const switchModel = Effect.fn("Application.switchModel")(function* (
     chatId: Chat.ChatId,
     model: ModelRef,
@@ -952,6 +964,7 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
     abort,
     contextUsage,
     availableModels,
+    availableSkills,
     switchModel,
     shake,
   });
