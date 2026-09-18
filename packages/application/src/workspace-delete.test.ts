@@ -103,6 +103,7 @@ const fixture = Effect.fn("WorkspaceDelete.test.fixture")(function* (
             switchModel: unused,
             shake: unused,
             ...options.runtime,
+            availableSkills: () => Effect.die("unexpected skill command discovery"),
           }),
         ),
       ),

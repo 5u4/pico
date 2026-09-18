@@ -143,6 +143,7 @@ describe("discord attachments", () => {
           contextUsage: () => Effect.die("unexpected context read"),
           shake: () => Effect.die("unexpected chat shake"),
           closeChat: () => Effect.die("unexpected chat close"),
+          availableSkills: () => Effect.die("unexpected skill command discovery"),
         });
 
         yield* install(bot, config, acknowledgeInteraction, () => Effect.void, httpClient).pipe(
@@ -317,6 +318,7 @@ describe("discord attachments", () => {
           contextUsage: () => Effect.die("unexpected context read"),
           shake: () => Effect.die("unexpected chat shake"),
           closeChat: () => Effect.die("unexpected chat close"),
+          availableSkills: () => Effect.die("unexpected skill command discovery"),
         });
 
         yield* install(bot, config, acknowledgeInteraction, () => Effect.void, httpClient).pipe(

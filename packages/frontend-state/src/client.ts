@@ -1,6 +1,12 @@
 import type { AgentEventEnvelope } from "@pico/contract/agent-event";
 import { AgentPrompt } from "@pico/contract/agent-message";
-import type { ContextUsage, ModelInfo, ModelRef, ShakeMode } from "@pico/contract/agent-runtime";
+import type {
+  ContextUsage,
+  ModelInfo,
+  ModelRef,
+  ShakeMode,
+  SkillCommand,
+} from "@pico/contract/agent-runtime";
 import type { TranscriptSnapshot } from "@pico/contract/agent-snapshot";
 import type {
   CloseChatOptions,
@@ -366,6 +372,7 @@ export const make = ({ url }: { readonly url: string }) => {
   const list = <A, E = never>(
     execute: (client: Client) => Effect.Effect<A, E | ReadError>,
     kind: ReadRecord["kind"] = "list",
+    options: { readonly fastTimeout?: boolean } = {},
   ) => {
     const result = Atom.make<AsyncResult.AsyncResult<A, E | ReadError>>(AsyncResult.initial()).pipe(
       Atom.keepAlive,
@@ -381,10 +388,9 @@ export const make = ({ url }: { readonly url: string }) => {
             const manager = yield* get.resultOnce(owner);
             if (!manager.isCurrent(generation)) return;
             get.registry.update(result, AsyncResult.waiting);
-            const outcome = yield* execute(generation.client).pipe(
-              Effect.exit,
-              Effect.timeoutOption("5 seconds"),
-            );
+            const outcome = yield* options.fastTimeout === false
+              ? execute(generation.client).pipe(Effect.exit, Effect.map(Option.some))
+              : execute(generation.client).pipe(Effect.exit, Effect.timeoutOption("5 seconds"));
             if (!manager.isCurrent(generation)) return;
             const exit = Option.isSome(outcome) ? outcome.value : Exit.fail(unavailableError());
             if (!flight.dirty || Exit.isFailure(exit))
@@ -640,6 +646,24 @@ export const make = ({ url }: { readonly url: string }) => {
   );
   const availableModels = Atom.family((chatId: ChatId) =>
     list<readonly ModelInfo[], ChatClosed>((client) => client.AvailableModels({ chatId })),
+  );
+  const availableSkills = Atom.family((chatId: ChatId) =>
+    list<readonly SkillCommand[], ChatClosed>(
+      (client) =>
+        client.AvailableSkills({ chatId }).pipe(
+          Effect.timeout("30 seconds"),
+          Effect.catchTag("TimeoutError", () =>
+            Effect.fail(
+              new ApplicationError({
+                reason: "operation",
+                message: "Skill catalog timed out.",
+              }),
+            ),
+          ),
+        ),
+      "list",
+      { fastTimeout: false },
+    ),
   );
   const transcriptRead = Atom.family((chatId: ChatId) =>
     Atom.make((get) =>
@@ -901,8 +925,9 @@ export const make = ({ url }: { readonly url: string }) => {
     observeContext,
     contextUsage,
     availableModels,
-    currentModel,
+    availableSkills,
     switchModel,
+    currentModel,
     modelSwitchRequest,
     live,
     send,

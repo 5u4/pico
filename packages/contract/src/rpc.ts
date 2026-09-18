@@ -10,6 +10,7 @@ import {
   ModelSwitchResult,
   ShakeMode,
   ShakeResult,
+  SkillCommand,
 } from "./agent-runtime.ts";
 import { TranscriptSnapshot } from "./agent-snapshot.ts";
 import * as Application from "./application.ts";
@@ -89,6 +90,11 @@ export const PicoRpcs = RpcGroup.make(
   Rpc.make("AvailableModels", {
     payload: { chatId: Chat.ChatId },
     success: Schema.Array(ModelInfo),
+    error: Schema.Union([Errors.ApplicationError, Errors.ChatClosed]),
+  }),
+  Rpc.make("AvailableSkills", {
+    payload: { chatId: Chat.ChatId },
+    success: Schema.Array(SkillCommand),
     error: Schema.Union([Errors.ApplicationError, Errors.ChatClosed]),
   }),
   Rpc.make("SwitchModel", {

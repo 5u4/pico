@@ -558,6 +558,30 @@ textarea:disabled {
   background: linear-gradient(to top, var(--raw-page) 64%, transparent);
 }
 
+.skill-completion {
+  background: var(--raw-panel);
+}
+
+.skill-completion-option,
+.skill-completion-status {
+  border-radius: var(--raw-radius-control);
+  padding: 8px;
+}
+
+.skill-completion-option-active {
+  background: var(--raw-surface-hover);
+}
+
+.skill-completion-option button {
+  border-radius: inherit;
+}
+
+.skill-completion-option button:focus-visible,
+.skill-completion-status button:focus-visible {
+  outline: 2px solid var(--raw-focus);
+  outline-offset: 1px;
+}
+
 .transcript-scroll {
   scrollbar-gutter: stable;
   scrollbar-color: var(--raw-border-strong) transparent;

@@ -87,6 +87,7 @@ describe("AgentRuntime", () => {
               shake: async (mode) => shakeResult(mode),
               currentModel: () => null,
               contextUsage: () => ({ kind: "unavailable" }),
+              availableSkills: () => [],
               appendAssistantMessage: async () => {},
               unsubscribe: () => {},
             }),
@@ -160,6 +161,7 @@ describe("AgentRuntime", () => {
                   shake: async (mode) => shakeResult(mode),
                   currentModel: () => null,
                   contextUsage: () => ({ kind: "unavailable" }),
+                  availableSkills: () => [],
                   appendAssistantMessage: async () => {},
                   unsubscribe: () => {},
                 }),
@@ -533,6 +535,7 @@ describe("AgentRuntime", () => {
               appendAssistantMessage: () => Promise.resolve(),
               currentModel: () => null,
               contextUsage: () => ({ kind: "unavailable" }),
+              availableSkills: () => [],
               unsubscribe: () => {
                 lifecycle.push("unsubscribe");
               },
@@ -674,6 +677,7 @@ describe("AgentRuntime", () => {
               },
               appendAssistantMessage: () => Promise.resolve(),
               currentModel: () => null,
+              availableSkills: () => [],
               contextUsage: () => {
                 contextReads += 1;
                 if (throwContext) throw new Error("context failed");
@@ -815,6 +819,7 @@ describe("AgentRuntime", () => {
                 appendAssistantMessage: () => Promise.resolve(),
                 currentModel: () => null,
                 contextUsage: () => ({ kind: "unavailable" }),
+                availableSkills: () => [],
                 unsubscribe: () => {},
               });
             },
@@ -868,6 +873,7 @@ describe("AgentRuntime", () => {
               appendAssistantMessage: () => Promise.resolve(),
               currentModel: () => null,
               contextUsage: () => ({ kind: "unavailable" }),
+              availableSkills: () => [],
               unsubscribe: () => {
                 lifecycle.push("unsubscribe");
               },
@@ -948,6 +954,7 @@ describe("AgentRuntime", () => {
                     appendAssistantMessage: () => Promise.resolve(),
                     currentModel: () => null,
                     contextUsage: () => ({ kind: "unavailable" }),
+                    availableSkills: () => [],
                     unsubscribe: () => {
                       lifecycle.push("unsubscribe");
                       if (unsubscribeFails) throw unsubscribeFailure;
@@ -1030,6 +1037,7 @@ describe("AgentRuntime", () => {
                 appendAssistantMessage: () => Promise.resolve(),
                 currentModel: () => null,
                 contextUsage: () => ({ kind: "unavailable" }),
+                availableSkills: () => [],
                 unsubscribe: () => {},
               }),
           },
@@ -1089,6 +1097,7 @@ describe("AgentRuntime", () => {
                 appendAssistantMessage: () => Promise.resolve(),
                 currentModel: () => null,
                 contextUsage: () => ({ kind: "unavailable" }),
+                availableSkills: () => [],
                 unsubscribe: () => {},
               }),
           },
@@ -1163,6 +1172,7 @@ describe("AgentRuntime", () => {
                     historyBoundary: () => "stable",
                     settleHistory: async () => {},
                     contextUsage: () => ({ kind: "unavailable" }),
+                    availableSkills: () => [],
                     currentModel: () => null,
                     appendAssistantMessage: async () => {},
                     unsubscribe: () => {},

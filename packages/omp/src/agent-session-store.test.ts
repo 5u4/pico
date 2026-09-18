@@ -80,6 +80,7 @@ describe("AgentSessionStore", () => {
           availableModels: unused,
           switchModel: unused,
           shake: unused,
+          availableSkills: () => Effect.die("unexpected skill command discovery"),
         });
         const applicationLayer = ApplicationLayer.layer({
           validate: () => Effect.void,
@@ -249,6 +250,7 @@ describe("AgentSessionStore", () => {
         availableModels: (cwd) => Effect.succeed(cwd === firstCwd ? [firstModel] : [secondModel]),
         switchModel: unused,
         shake: unused,
+        availableSkills: () => Effect.die("unexpected skill command discovery"),
       });
       const dependencies = Layer.mergeAll(
         Persistence.layer(AbsolutePath.make(path.join(directory, "store.db"))),

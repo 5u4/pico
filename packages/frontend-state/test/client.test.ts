@@ -39,6 +39,7 @@ import * as HttpServer from "effect/unstable/http/HttpServer";
 import * as AsyncResult from "effect/unstable/reactivity/AsyncResult";
 import type * as Atom from "effect/unstable/reactivity/Atom";
 import * as AtomRegistry from "effect/unstable/reactivity/AtomRegistry";
+import { vi } from "vitest";
 import * as Persistence from "../../persistence/src/layer.ts";
 import * as ScheduleLayer from "../../schedule/src/schedule.ts";
 import { type LiveChat, make } from "../src/client.ts";
@@ -120,6 +121,7 @@ const fixture = Effect.fnUntraced(function* (
         | "shake"
         | "contextUsage"
         | "availableModels"
+        | "availableSkills"
         | "switchModel"
       >
     >,
@@ -171,6 +173,7 @@ const fixture = Effect.fnUntraced(function* (
     availableWorkspaceModels: () => Effect.die("unexpected workspace model discovery"),
     setWorkspaceModel: () => Effect.die("unexpected workspace model update"),
     availableModels: () => Effect.die("unexpected model discovery"),
+    availableSkills: () => Effect.die("unexpected skill command discovery"),
     switchModel: () => Effect.die("unexpected model switch"),
     shake: () => Effect.die("unexpected chat shake"),
     closeChat: () => Effect.die("unexpected chat close"),
@@ -1070,6 +1073,76 @@ describe("frontend state over WebSocket", () => {
         );
       }).pipe(Effect.scoped, Effect.provide(server.layer));
     }),
+  );
+
+  it.live(
+    "times out skill discovery locally after thirty seconds and refreshes without reconnecting",
+    () =>
+      Effect.gen(function* () {
+        const reading = yield* Deferred.make<void>();
+        let reads = 0;
+        const server = yield* fixture({
+          transcript: () => Effect.succeed(snapshot()),
+          sendMessage: () => Effect.succeed({ kind: "handled" }),
+          abort: () => Effect.void,
+          availableSkills: () =>
+            Effect.gen(function* () {
+              reads += 1;
+              if (reads === 1) {
+                yield* Deferred.succeed(reading, undefined);
+                return yield* Effect.never;
+              }
+              return [{ name: "review", description: "Review the current changes" }];
+            }),
+        });
+        yield* Effect.gen(function* () {
+          const state = make({ url: yield* endpoint });
+          const registry = yield* registryInScope;
+          registry.mount(state.connection);
+          const route = yield* Queue.take(server.opened);
+          yield* waitFor(registry, state.connection, (value) => value.kind === "active");
+
+          // Keep the established socket's heartbeat live while advancing the catalog deadline.
+          yield* Effect.acquireRelease(
+            Effect.sync(() => vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })),
+            () => Effect.sync(() => vi.useRealTimers()),
+          );
+          const skills = state.availableSkills(firstChat);
+          registry.mount(skills);
+          yield* Deferred.await(reading);
+
+          yield* Effect.promise(() => vi.advanceTimersByTimeAsync(6_000));
+          assert.strictEqual(registry.get(skills)._tag, "Initial");
+          assert.isTrue(registry.get(skills).waiting);
+          assert.deepStrictEqual(registry.get(state.connection), { kind: "active" });
+
+          yield* Effect.promise(() => vi.advanceTimersByTimeAsync(23_999));
+          assert.strictEqual(registry.get(skills)._tag, "Initial");
+          assert.isTrue(registry.get(skills).waiting);
+
+          yield* Effect.promise(() => vi.advanceTimersByTimeAsync(1));
+          const failed = registry.get(skills);
+          if (failed._tag !== "Failure") return yield* Effect.die("Expected skill catalog timeout");
+          assert.isFalse(failed.waiting);
+          const error = Option.getOrThrow(Cause.findErrorOption(failed.cause));
+          assert.instanceOf(error, ApplicationError);
+          if (!(error instanceof ApplicationError))
+            return yield* Effect.die("Expected application error");
+          assert.strictEqual(error.reason, "operation");
+          assert.deepStrictEqual(registry.get(state.connection), { kind: "active" });
+          assert.strictEqual(server.openCount(), 1);
+          assert.isFalse(yield* Deferred.isDone(route.closed));
+
+          registry.refresh(skills);
+          yield* waitFor(registry, skills, (value) => value._tag === "Success" && !value.waiting);
+          assert.deepStrictEqual(AsyncResult.getOrThrow(registry.get(skills)), [
+            { name: "review", description: "Review the current changes" },
+          ]);
+          assert.deepStrictEqual(registry.get(state.connection), { kind: "active" });
+          assert.strictEqual(server.openCount(), 1);
+          assert.isFalse(yield* Deferred.isDone(route.closed));
+        }).pipe(Effect.scoped, Effect.provide(server.layer));
+      }),
   );
 
   it.live(
