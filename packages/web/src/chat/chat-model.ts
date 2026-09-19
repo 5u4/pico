@@ -219,10 +219,18 @@ export interface TodoPresentation {
   }[];
 }
 
+export interface ComposerImagePresentation {
+  readonly id: string;
+  readonly name: string;
+  readonly mimeType: string;
+  readonly data: string;
+}
+
 export type ComposerPresentation =
   | {
       readonly mode: "send";
       readonly value: string;
+      readonly images: readonly ComposerImagePresentation[];
       readonly placeholder: string;
       readonly editable: boolean;
       readonly canSubmit: boolean;
@@ -231,11 +239,57 @@ export type ComposerPresentation =
   | {
       readonly mode: "stop";
       readonly value: string;
+      readonly images: readonly ComposerImagePresentation[];
       readonly placeholder: string;
       readonly editable: boolean;
       readonly canStop: boolean;
       readonly statusLabel: string;
     };
+
+export interface HistoryItemPresentation {
+  readonly id: string;
+  readonly targetId: string;
+  readonly depth: number;
+  readonly kindLabel: string;
+  readonly timestampLabel: string;
+  readonly label: string;
+  readonly excerpt: string;
+  readonly matched: boolean;
+  readonly visibleByDefault: boolean;
+  readonly active: boolean;
+  readonly preview: boolean;
+}
+
+export interface HistoryPreviewBlockPresentation {
+  readonly id: string;
+  readonly label: string;
+  readonly text: string;
+}
+
+export type HistoryPreviewPresentation =
+  | { readonly kind: "idle"; readonly label: string }
+  | { readonly kind: "loading"; readonly label: string }
+  | { readonly kind: "error"; readonly label: string }
+  | {
+      readonly kind: "ready";
+      readonly destinationLabel: string;
+      readonly blocks: readonly HistoryPreviewBlockPresentation[];
+    };
+
+export interface HistoryPanelPresentation {
+  readonly open: boolean;
+  readonly loading: boolean;
+  readonly busy: boolean;
+  readonly error: string | null;
+  readonly query: string;
+  readonly revealAll: boolean;
+  readonly canContinue: boolean;
+  readonly items: readonly HistoryItemPresentation[];
+  readonly activeTargetId: string | null;
+  readonly previewTargetId: string | null;
+  readonly preview: HistoryPreviewPresentation;
+  readonly hasRecoveredDraft: boolean;
+}
 
 export interface SkillCompletionOptionPresentation {
   readonly id: string;

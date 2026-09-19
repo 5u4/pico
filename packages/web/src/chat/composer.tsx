@@ -1,4 +1,4 @@
-import { ArrowUpIcon, FolderSimpleIcon, StopIcon } from "@phosphor-icons/react";
+import { ArrowUpIcon, FolderSimpleIcon, StopIcon, XIcon } from "@phosphor-icons/react";
 import { type FormEvent, type KeyboardEvent, useLayoutEffect, useRef } from "react";
 import { Button } from "../components/ui/button.tsx";
 import type { ComposerPresentation, SkillCompletionPresentation } from "./chat-model.ts";
@@ -16,6 +16,7 @@ export interface ComposerProps {
   readonly onValueChange: (value: string) => void;
   readonly onSubmit: () => void;
   readonly onStop: () => void;
+  readonly onImageRemove: (id: string) => void;
   readonly onCompletionCommit: () => void;
   readonly onCompletionMove: (delta: -1 | 1) => void;
   readonly onCompletionDismiss: () => void;
@@ -30,6 +31,7 @@ export function Composer({
   onValueChange,
   onSubmit,
   onStop,
+  onImageRemove,
   onCompletionCommit,
   onCompletionMove,
   onCompletionDismiss,
@@ -114,6 +116,28 @@ export function Composer({
       <label className="sr-only" htmlFor="chat-composer">
         Message pico
       </label>
+      {presentation.images.length > 0 && (
+        <ul aria-label="Attached images" className="flex flex-wrap gap-2 px-2 pt-2">
+          {presentation.images.map((image) => (
+            <li className="group relative" key={image.id}>
+              <img
+                alt={image.name}
+                className="size-14 rounded-control border border-border object-cover"
+                src={`data:${image.mimeType};base64,${image.data}`}
+              />
+              <button
+                aria-label={`Remove ${image.name}`}
+                className="absolute -right-1.5 -top-1.5 grid size-5 place-items-center rounded-full border border-border bg-panel text-subtle transition-colors hover:text-foreground"
+                disabled={!presentation.editable}
+                onClick={() => onImageRemove(image.id)}
+                type="button"
+              >
+                <XIcon aria-hidden="true" size={11} weight="bold" />
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
       <textarea
         aria-activedescendant={
           completion.kind === "ready" ? completion.activeDescendantId : undefined

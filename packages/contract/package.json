@@ -21,6 +21,7 @@
     "./agent-event": "./src/agent-event.ts",
     "./event-router": "./src/event-router.ts",
     "./agent-runtime": "./src/agent-runtime.ts",
+    "./agent-history": "./src/agent-history.ts",
     "./agent-snapshot": "./src/agent-snapshot.ts",
     "./schedule": "./src/schedule.ts"
   },

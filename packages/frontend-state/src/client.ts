@@ -1,4 +1,5 @@
-import type { AgentEventEnvelope } from "@pico/contract/agent-event";
+import type { AgentEventEnvelope, Publication } from "@pico/contract/agent-event";
+import type { ChatHistoryRequest, NavigateChatHistoryRequest } from "@pico/contract/agent-history";
 import { AgentPrompt } from "@pico/contract/agent-message";
 import type {
   ContextUsage,
@@ -7,7 +8,7 @@ import type {
   ShakeMode,
   SkillCommand,
 } from "@pico/contract/agent-runtime";
-import type { TranscriptSnapshot } from "@pico/contract/agent-snapshot";
+import type { NavigateHistoryResult, TranscriptSnapshot } from "@pico/contract/agent-snapshot";
 import type {
   CloseChatOptions,
   CreateChat,
@@ -37,6 +38,7 @@ import {
   type LiveChat,
   reduceLiveChat,
   rehydrateChat,
+  replaceHistory,
   unconfirmChat,
 } from "./chat-state.ts";
 
@@ -67,16 +69,20 @@ interface ReadRecord {
   flight: ReadFlight | undefined;
 }
 type ContextReadError = ReadError | ChatClosed;
+type HistoryReadError = ReadError | ChatClosed;
 interface ChatRecord {
   readonly live: LiveChat;
   readonly transcriptResult: AsyncResult.AsyncResult<TranscriptSnapshot, ReadError>;
   readonly contextResult: AsyncResult.AsyncResult<ContextUsage, ContextReadError>;
   readonly contextRequest: number;
+  readonly historyReplacing: boolean;
+  readonly historyEpoch: number;
 }
 interface ChatRead extends ReadRecord {
   readonly chatId: ChatId;
   readonly accept: (envelope: AgentEventEnvelope, generation: Generation) => void;
   readonly buffer: (generation: Generation) => void;
+  readonly replaceSnapshot: (generation: Generation, snapshot: TranscriptSnapshot) => boolean;
 }
 const decodePrompt = Schema.decodeUnknownEffect(AgentPrompt);
 const unavailableError = () =>
@@ -114,6 +120,8 @@ export const make = ({ url }: { readonly url: string }) => {
       transcriptResult: AsyncResult.initial(),
       contextResult: AsyncResult.initial(),
       contextRequest: 0,
+      historyReplacing: false,
+      historyEpoch: 0,
     }).pipe(Atom.keepAlive),
   );
 
@@ -210,7 +218,8 @@ export const make = ({ url }: { readonly url: string }) => {
           if (
             envelope.event.type === "message-settled" ||
             envelope.event.type === "run-finished" ||
-            envelope.event.type === "context-invalidated"
+            envelope.event.type === "context-invalidated" ||
+            envelope.event.type === "history-replaced"
           )
             yield* invalidate(record, generation);
         });
@@ -351,8 +360,24 @@ export const make = ({ url }: { readonly url: string }) => {
           settled?.();
           return exit.value;
         });
+      const applyHistorySnapshot = (chatId: ChatId, snapshot: TranscriptSnapshot): boolean => {
+        const generation = current;
+        if (generation?.phase !== "active" || !isCurrent(generation)) return false;
+        const record = chatReads.get(chatId);
+        if (record === undefined) return false;
+        return record.replaceSnapshot(generation, snapshot);
+      };
       yield* ensure().pipe(Effect.ignore, Effect.forkIn(pageScope));
-      return { ensure, read, registerChat, isCurrent, fail, update, write };
+      return {
+        ensure,
+        read,
+        registerChat,
+        applyHistorySnapshot,
+        isCurrent,
+        fail,
+        update,
+        write,
+      };
     }),
   ).pipe(Atom.keepAlive);
 
@@ -449,7 +474,13 @@ export const make = ({ url }: { readonly url: string }) => {
             readonly events: AgentEventEnvelope[];
           }
         | undefined;
-      let cut: { readonly generation: Generation; readonly publication: number } | undefined;
+      let cut:
+        | {
+            readonly generation: Generation;
+            readonly publication: Publication;
+            readonly replacement: Publication | undefined;
+          }
+        | undefined;
       const reduce = (live: LiveChat, envelope: AgentEventEnvelope) => {
         if (envelope.event.type === "title-changed") return live;
         if (
@@ -459,28 +490,113 @@ export const make = ({ url }: { readonly url: string }) => {
           return live;
         return reduceLiveChat(live, envelope.event);
       };
+      const reconcile = (
+        generation: Generation,
+        snapshot: TranscriptSnapshot,
+        replacement = false,
+      ): boolean => {
+        const publication = snapshot.runtime.publication;
+        if (cut?.generation === generation && publication < cut.publication) return false;
+        const pending = buffered?.generation === generation ? buffered : undefined;
+        Atom.batch(() =>
+          get.registry.update(cell, (state) => {
+            const previous = AsyncResult.value(state.transcriptResult);
+            const replacing =
+              (replacement ||
+                (Option.isSome(previous) &&
+                  previous.value.historyRevision !== snapshot.historyRevision)) &&
+              !(
+                state.historyReplacing &&
+                cut?.generation === generation &&
+                cut.replacement !== undefined
+              );
+            const historyChanged =
+              replacing ||
+              cut === undefined ||
+              cut.generation !== generation ||
+              publication > cut.publication;
+            let baseline = pending?.baseline ?? state.live;
+            if (replacing) baseline = replaceHistory(baseline);
+            else
+              for (const envelope of pending?.events ?? [])
+                if (envelope.publication <= publication) baseline = reduce(baseline, envelope);
+            baseline = rehydrateChat({ ...baseline, notices: state.live.notices }, snapshot);
+            const events = pending?.events.filter((event) => event.publication > publication) ?? [];
+            let live = baseline;
+            for (const envelope of events) live = reduce(live, envelope);
+            cut = {
+              generation,
+              publication,
+              replacement: replacing
+                ? publication
+                : cut?.generation === generation
+                  ? cut.replacement
+                  : undefined,
+            };
+            buffered = { generation, baseline, events };
+            return {
+              ...state,
+              live,
+              historyReplacing: false,
+              historyEpoch: state.historyEpoch + Number(historyChanged),
+              transcriptResult: AsyncResult.success(snapshot),
+            };
+          }),
+        );
+        return true;
+      };
       return {
         kind: "transcript",
         chatId,
         generation: undefined,
         flight: undefined,
         buffer: (generation) => {
-          if (buffered?.generation !== generation)
-            buffered = { generation, baseline: get.registry.get(cell).live, events: [] };
+          if (buffered?.generation === generation) return;
+          buffered = { generation, baseline: get.registry.get(cell).live, events: [] };
+          get.registry.update(cell, (state) => ({ ...state, historyReplacing: true }));
         },
+        replaceSnapshot: (generation, snapshot) => reconcile(generation, snapshot, true),
         accept: (envelope, generation) => {
           if (
-            !outsideSnapshot(envelope) &&
             cut?.generation === generation &&
-            envelope.publication <= cut.publication
+            envelope.publication <= cut.publication &&
+            (!outsideSnapshot(envelope) ||
+              (envelope.event.type !== "notice" &&
+                cut.replacement !== undefined &&
+                envelope.publication <= cut.replacement))
           )
             return;
-          if (envelope.event.type !== "notice" && buffered?.generation === generation)
+          if (
+            envelope.event.type !== "notice" &&
+            envelope.event.type !== "history-replaced" &&
+            buffered?.generation === generation
+          )
             buffered.events.push(envelope);
-          get.registry.update(cell, (state) => {
-            const live = reduce(state.live, envelope);
-            return { ...state, live: cut?.generation === generation ? live : unconfirmChat(live) };
-          });
+          Atom.batch(() =>
+            get.registry.update(cell, (state) => {
+              const live = reduce(state.live, envelope);
+              return {
+                ...state,
+                live: cut?.generation === generation ? live : unconfirmChat(live),
+                historyReplacing:
+                  state.historyReplacing || envelope.event.type === "history-replaced",
+                historyEpoch:
+                  state.historyEpoch + Number(envelope.event.type === "history-replaced"),
+                transcriptResult:
+                  envelope.event.type === "history-replaced"
+                    ? AsyncResult.waiting(state.transcriptResult)
+                    : state.transcriptResult,
+              };
+            }),
+          );
+          if (envelope.event.type === "history-replaced") {
+            cut = {
+              generation,
+              publication: envelope.publication,
+              replacement: envelope.publication,
+            };
+            buffered = { generation, baseline: get.registry.get(cell).live, events: [] };
+          }
         },
         run: (flight) =>
           Effect.gen(function* () {
@@ -490,7 +606,6 @@ export const make = ({ url }: { readonly url: string }) => {
             if (buffered?.generation !== generation)
               buffered = { generation, baseline: get.registry.get(cell).live, events: [] };
             const pending = buffered;
-            const baseline = pending.baseline;
             get.registry.update(cell, (state) => ({
               ...state,
               transcriptResult: AsyncResult.waiting(state.transcriptResult),
@@ -510,30 +625,14 @@ export const make = ({ url }: { readonly url: string }) => {
                   { previous: Option.some(state.transcriptResult) },
                 ),
               }));
-              buffered = undefined;
-              cut = undefined;
               if (!domainFailure(exit.cause)) yield* manager.fail(generation, exit.cause);
               return;
             }
-            Atom.batch(() =>
-              get.registry.update(cell, (state) => {
-                const currentModel = Option.match(AsyncResult.value(state.transcriptResult), {
-                  onNone: () => null,
-                  onSome: (snapshot) => snapshot.currentModel,
-                });
-                const snapshot = flight.dirty ? { ...exit.value, currentModel } : exit.value;
-                let live = rehydrateChat({ ...baseline, notices: state.live.notices }, snapshot);
-                for (const envelope of pending.events)
-                  if (
-                    outsideSnapshot(envelope) ||
-                    envelope.publication > snapshot.runtime.publication
-                  )
-                    live = reduce(live, envelope);
-                cut = { generation, publication: snapshot.runtime.publication };
-                buffered = undefined;
-                return { ...state, live, transcriptResult: AsyncResult.success(snapshot) };
-              }),
+            const currentModel = Option.match(
+              AsyncResult.value(get.registry.get(cell).transcriptResult),
+              { onNone: () => null, onSome: (snapshot) => snapshot.currentModel },
             );
+            reconcile(generation, flight.dirty ? { ...exit.value, currentModel } : exit.value);
           }),
       };
     }).pipe(Atom.keepAlive),
@@ -765,6 +864,12 @@ export const make = ({ url }: { readonly url: string }) => {
       return get(connection).kind !== "active" ? unconfirmChat(value) : value;
     }).pipe(Atom.keepAlive),
   );
+  const historyReplacing = Atom.family((chatId: ChatId) =>
+    Atom.readable((get) => {
+      get(snapshot(chatId));
+      return get(chatCell(chatId)).historyReplacing;
+    }).pipe(Atom.keepAlive),
+  );
 
   const createWorkspace = Atom.fn<CreateWorkspace>()((input, get) =>
     Effect.gen(function* () {
@@ -829,6 +934,179 @@ export const make = ({ url }: { readonly url: string }) => {
       }),
     ).pipe(Atom.keepAlive, Atom.setLazy(false)),
   );
+
+  const latestHistoryRead = <Input, Value>(
+    execute: (
+      client: Client,
+      chatId: ChatId,
+      input: Input,
+    ) => Effect.Effect<Value, HistoryReadError>,
+  ) =>
+    Atom.family((chatId: ChatId) => {
+      type Request = { readonly input: Input; readonly request: number };
+      const lane = Atom.make<{
+        readonly input: Option.Option<Input>;
+        readonly request: number;
+        readonly historyEpoch: number;
+        readonly result: AsyncResult.AsyncResult<Value, HistoryReadError>;
+      }>({ input: Option.none(), request: 0, historyEpoch: 0, result: AsyncResult.initial() }).pipe(
+        Atom.keepAlive,
+      );
+      const trigger = Atom.fn<Request>()(({ input, request }, get) =>
+        Effect.gen(function* () {
+          const manager = yield* get.result(owner);
+          yield* manager
+            .write((client) => execute(client, chatId, input))
+            .pipe(
+              Effect.onExit((exit) =>
+                Effect.sync(() =>
+                  manager.update(lane, (current) =>
+                    current.request !== request
+                      ? current
+                      : {
+                          ...current,
+                          result: Exit.isFailure(exit)
+                            ? AsyncResult.failure<Value, HistoryReadError>(exit.cause)
+                            : AsyncResult.success(exit.value),
+                        },
+                  ),
+                ),
+              ),
+            );
+        }),
+      ).pipe(Atom.keepAlive, Atom.setLazy(false));
+      const dispatch = Atom.make((get) => {
+        let pending: Request | typeof Atom.Interrupt | undefined;
+        get.addFinalizer(() => {
+          pending = undefined;
+        });
+        return (next: Request | typeof Atom.Interrupt) => {
+          const scheduled = pending !== undefined;
+          pending = next;
+          if (scheduled) return;
+          // Atom.fn must start outside the batch that notifies history observers.
+          queueMicrotask(() => {
+            const latest = pending;
+            pending = undefined;
+            if (latest !== undefined) get.registry.set(trigger, latest);
+          });
+        };
+      }).pipe(Atom.keepAlive);
+      const observe = Atom.make((get) => {
+        get.once(snapshot(chatId));
+        const cell = chatCell(chatId);
+        let epoch = get.registry.get(cell).historyEpoch;
+        const refresh = () => {
+          const current = get.registry.get(lane);
+          if (Option.isNone(current.input) || current.historyEpoch === epoch) return;
+          const active = get.registry.get(status).kind === "active";
+          const request = current.request + 1;
+          get.registry.set(lane, {
+            ...current,
+            request,
+            historyEpoch: active ? epoch : current.historyEpoch,
+            result: AsyncResult.initial(true),
+          });
+          get.once(dispatch)(active ? { input: current.input.value, request } : Atom.Interrupt);
+        };
+        get.subscribe(cell, (next) => {
+          if (epoch === next.historyEpoch) return;
+          epoch = next.historyEpoch;
+          refresh();
+        });
+        get.subscribe(status, (next) => {
+          if (next.kind === "active") refresh();
+        });
+        refresh();
+      }).pipe(Atom.setIdleTTL(0));
+      return Atom.writable(
+        (get) => {
+          get(observe);
+          return get(lane).result;
+        },
+        (get, input: Input) => {
+          const request = get.get(lane).request + 1;
+          get.set(lane, {
+            input: Option.some(input),
+            request,
+            historyEpoch: get.get(chatCell(chatId)).historyEpoch,
+            result: AsyncResult.initial(true),
+          });
+          get.get(dispatch)({ input, request });
+        },
+      ).pipe(Atom.setIdleTTL(0));
+    });
+  const history = latestHistoryRead((client, chatId, query: ChatHistoryRequest["query"]) =>
+    client.ChatHistory({ chatId, query }),
+  );
+  const previewHistory = latestHistoryRead(
+    (client, chatId, targetId: NavigateChatHistoryRequest["targetId"]) =>
+      client.PreviewChatHistory({ chatId, targetId }),
+  );
+
+  const navigateHistory = Atom.family((chatId: ChatId) => {
+    const lane = Atom.make<{
+      readonly pending: number;
+      readonly result: AsyncResult.AsyncResult<NavigateHistoryResult, HistoryReadError>;
+    }>({ pending: 0, result: AsyncResult.initial() }).pipe(Atom.keepAlive);
+    const trigger = Atom.fn<Omit<NavigateChatHistoryRequest, "chatId">>()(
+      (input, get) =>
+        Effect.gen(function* () {
+          const manager = yield* get.result(owner);
+          let accepted = false;
+          yield* manager
+            .write(
+              (client) => client.NavigateChatHistory({ chatId, ...input }),
+              (result) => {
+                if (result.kind === "applied") {
+                  accepted = manager.applyHistorySnapshot(chatId, result.snapshot);
+                }
+              },
+            )
+            .pipe(
+              Effect.map(
+                (result): NavigateHistoryResult =>
+                  result.kind === "applied" && !accepted ? { kind: "cancelled" } : result,
+              ),
+              Effect.onExit((exit) =>
+                Effect.sync(() =>
+                  manager.update(lane, (current) => {
+                    const pending = current.pending - 1;
+                    const waiting = pending > 0;
+                    const result = AsyncResult.isFailure(current.result)
+                      ? AsyncResult.failure(current.result.cause, {
+                          previousSuccess: current.result.previousSuccess,
+                          waiting,
+                        })
+                      : Exit.isFailure(exit)
+                        ? AsyncResult.failure<NavigateHistoryResult, HistoryReadError>(exit.cause, {
+                            waiting,
+                          })
+                        : AsyncResult.success<NavigateHistoryResult, HistoryReadError>(exit.value, {
+                            waiting,
+                          });
+                    return { pending, result };
+                  }),
+                ),
+              ),
+            );
+        }),
+      { concurrent: true },
+    ).pipe(Atom.keepAlive, Atom.setLazy(false));
+    return Atom.writable(
+      (get) => get(lane).result,
+      (get, input: Omit<NavigateChatHistoryRequest, "chatId">) => {
+        get.set(lane, {
+          pending: get.get(lane).pending + 1,
+          result:
+            get.get(lane).pending === 0
+              ? AsyncResult.initial(true)
+              : AsyncResult.waiting(get.get(lane).result),
+        });
+        get.set(trigger, input);
+      },
+    ).pipe(Atom.keepAlive);
+  });
 
   const command = <Input, Error>(
     chatId: ChatId,
@@ -930,6 +1208,10 @@ export const make = ({ url }: { readonly url: string }) => {
     currentModel,
     modelSwitchRequest,
     live,
+    history,
+    previewHistory,
+    navigateHistory,
+    historyReplacing,
     send,
     abort,
     shake,

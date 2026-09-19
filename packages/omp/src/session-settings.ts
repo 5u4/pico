@@ -16,8 +16,7 @@ import type {
   ModelChangeEntry,
   SessionEntry,
 } from "@oh-my-pi/pi-coding-agent/session/session-entries";
-import { loadEntriesFromFile } from "@oh-my-pi/pi-coding-agent/session/session-loader";
-import { migrateToCurrentVersion } from "@oh-my-pi/pi-coding-agent/session/session-migrations";
+import { loadSessionHistoryReadOnly } from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import type { ModelInfo } from "@pico/contract/agent-runtime";
 import type { ExternalBrowser } from "@pico/contract/config";
 import type { AbsolutePath } from "@pico/contract/path";
@@ -68,19 +67,14 @@ export const loadCurrentModel = Effect.fn("OmpSession.loadCurrentModel")(functio
 ) {
   return yield* Effect.tryPromise({
     try: async (): Promise<ModelInfo | null> => {
-      const [settings, entries] = await Promise.all([
+      const [settings, history] = await Promise.all([
         OmpSettings.Settings.loadReadOnly({ cwd }),
-        loadEntriesFromFile(sessionFile),
+        loadSessionHistoryReadOnly(sessionFile),
       ]);
-      migrateToCurrentVersion(entries);
-      const byId = new Map(
-        entries
-          .filter((entry): entry is SessionEntry => entry.type !== "session")
-          .map((entry) => [entry.id, entry]),
-      );
+      const byId = new Map(history.entries.map((entry) => [entry.id, entry]));
       const branch: SessionEntry[] = [];
       const visited = new Set<string>();
-      let entry = entries.findLast((entry) => entry.type !== "session");
+      let entry = history.activeLeafId === null ? undefined : byId.get(history.activeLeafId);
       while (entry && !visited.has(entry.id)) {
         visited.add(entry.id);
         branch.push(entry);

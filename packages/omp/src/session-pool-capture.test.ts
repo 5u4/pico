@@ -1,5 +1,6 @@
 import { assert, describe, it } from "@effect/vitest";
 import type * as AgentEvent from "@pico/contract/agent-event";
+import { HistoryRevision } from "@pico/contract/agent-history";
 import * as Agent from "@pico/contract/agent-message";
 import type { MessageDelivery, ShakeMode, ShakeResult } from "@pico/contract/agent-runtime";
 import * as Chat from "@pico/contract/chat-model";
@@ -70,6 +71,7 @@ describe("session pool capture", () => {
                   askBtw: () => Promise.reject(new Error("unexpected side question")),
                   switchModel: () => Promise.reject(new Error("unexpected model switch")),
                   flush: () => Promise.resolve(),
+                  navigateHistory: () => Promise.reject(new Error("unexpected history navigation")),
                   historyBoundary: () => "stable",
                   settleHistory: () => Promise.resolve(),
                   sendPrompt: async (value, onStarted): Promise<MessageDelivery> => {
@@ -106,9 +108,15 @@ describe("session pool capture", () => {
                   unsubscribe: () => {},
                 }),
             },
+            loadHistory: () => Effect.die("unexpected history read"),
+            loadHistoryPreview: () => Effect.die("unexpected history preview"),
             loadCurrentModel: () => Effect.succeed(null),
             loadTranscript: () =>
-              Effect.succeed({ messages: [], todo: { kind: "ready", phases: [] } }),
+              Effect.succeed({
+                historyRevision: HistoryRevision.make("test-history"),
+                messages: [],
+                todo: { kind: "ready", phases: [] },
+              }),
           });
           yield* pool.send(chatId, prompt("ordinary"));
           assert.instanceOf(
@@ -163,6 +171,7 @@ describe("session pool capture", () => {
                 askBtw: () => Promise.reject(new Error("unexpected side question")),
                 switchModel: () => Promise.reject(new Error("unexpected model switch")),
                 flush: () => Promise.resolve(),
+                navigateHistory: () => Promise.reject(new Error("unexpected history navigation")),
                 historyBoundary: () => "stable",
                 settleHistory: () => Promise.resolve(),
                 sendPrompt: async (value, onStarted): Promise<MessageDelivery> => {
@@ -194,9 +203,15 @@ describe("session pool capture", () => {
                 unsubscribe: () => {},
               }),
           },
+          loadHistory: () => Effect.die("unexpected history read"),
+          loadHistoryPreview: () => Effect.die("unexpected history preview"),
           loadCurrentModel: () => Effect.succeed(null),
           loadTranscript: () =>
-            Effect.succeed({ messages: [], todo: { kind: "ready", phases: [] } }),
+            Effect.succeed({
+              historyRevision: HistoryRevision.make("test-history"),
+              messages: [],
+              todo: { kind: "ready", phases: [] },
+            }),
         });
         yield* Effect.gen(function* () {
           const first = yield* pool.send(chatId, prompt("ordinary"));
@@ -247,6 +262,7 @@ describe("session pool capture", () => {
                 askBtw: () => Promise.reject(new Error("unexpected side question")),
                 switchModel: () => Promise.reject(new Error("unexpected model switch")),
                 flush: () => Promise.resolve(),
+                navigateHistory: () => Promise.reject(new Error("unexpected history navigation")),
                 historyBoundary: () => "stable",
                 settleHistory: () => Promise.resolve(),
                 sendPrompt: (_value, onStarted) => {
@@ -275,9 +291,15 @@ describe("session pool capture", () => {
                 unsubscribe: () => {},
               }),
           },
+          loadHistory: () => Effect.die("unexpected history read"),
+          loadHistoryPreview: () => Effect.die("unexpected history preview"),
           loadCurrentModel: () => Effect.succeed(null),
           loadTranscript: () =>
-            Effect.succeed({ messages: [], todo: { kind: "ready", phases: [] } }),
+            Effect.succeed({
+              historyRevision: HistoryRevision.make("test-history"),
+              messages: [],
+              todo: { kind: "ready", phases: [] },
+            }),
         });
         const observed: Array<string> = [];
         const runId = Schedule.ScheduleRunId.make(
@@ -334,6 +356,7 @@ describe("session pool capture", () => {
                 askBtw: () => Promise.reject(new Error("unexpected side question")),
                 switchModel: () => Promise.reject(new Error("unexpected model switch")),
                 flush: () => Promise.resolve(),
+                navigateHistory: () => Promise.reject(new Error("unexpected history navigation")),
                 historyBoundary: () => "stable",
                 settleHistory: () => Promise.resolve(),
                 sendPrompt: (_value, onStarted) => {
@@ -360,9 +383,15 @@ describe("session pool capture", () => {
               });
             },
           },
+          loadHistory: () => Effect.die("unexpected history read"),
+          loadHistoryPreview: () => Effect.die("unexpected history preview"),
           loadCurrentModel: () => Effect.succeed(null),
           loadTranscript: () =>
-            Effect.succeed({ messages: [], todo: { kind: "ready", phases: [] } }),
+            Effect.succeed({
+              historyRevision: HistoryRevision.make("test-history"),
+              messages: [],
+              todo: { kind: "ready", phases: [] },
+            }),
         });
         const forwarded = yield* pool.events.pipe(
           Stream.take(1),
@@ -430,6 +459,7 @@ describe("session pool capture", () => {
                 askBtw: () => Promise.reject(new Error("unexpected side question")),
                 switchModel: () => Promise.reject(new Error("unexpected model switch")),
                 flush: () => Promise.resolve(),
+                navigateHistory: () => Promise.reject(new Error("unexpected history navigation")),
                 historyBoundary: () => "stable",
                 settleHistory: () => Promise.resolve(),
                 sendPrompt: (_value, onStarted) => {
@@ -462,9 +492,15 @@ describe("session pool capture", () => {
                 unsubscribe: () => {},
               }),
           },
+          loadHistory: () => Effect.die("unexpected history read"),
+          loadHistoryPreview: () => Effect.die("unexpected history preview"),
           loadCurrentModel: () => Effect.succeed(null),
           loadTranscript: () =>
-            Effect.succeed({ messages: [], todo: { kind: "ready", phases: [] } }),
+            Effect.succeed({
+              historyRevision: HistoryRevision.make("test-history"),
+              messages: [],
+              todo: { kind: "ready", phases: [] },
+            }),
         });
         const forwarded: Array<string> = [];
         yield* pool.events.pipe(
@@ -548,6 +584,7 @@ describe("session pool capture", () => {
                 askBtw: () => Promise.reject(new Error("unexpected side question")),
                 switchModel: () => Promise.reject(new Error("unexpected model switch")),
                 flush: () => Promise.resolve(),
+                navigateHistory: () => Promise.reject(new Error("unexpected history navigation")),
                 historyBoundary: () => "stable",
                 settleHistory: () => Promise.resolve(),
                 sendPrompt: (_value, onStarted) => {
@@ -569,9 +606,15 @@ describe("session pool capture", () => {
                 unsubscribe: () => {},
               }),
           },
+          loadHistory: () => Effect.die("unexpected history read"),
+          loadHistoryPreview: () => Effect.die("unexpected history preview"),
           loadCurrentModel: () => Effect.succeed(null),
           loadTranscript: () =>
-            Effect.succeed({ messages: [], todo: { kind: "ready", phases: [] } }),
+            Effect.succeed({
+              historyRevision: HistoryRevision.make("test-history"),
+              messages: [],
+              todo: { kind: "ready", phases: [] },
+            }),
         });
         const forwarded: Array<string> = [];
         yield* pool.events.pipe(
@@ -635,6 +678,7 @@ describe("session pool capture", () => {
                   askBtw: () => Promise.reject(new Error("unexpected side question")),
                   switchModel: () => Promise.reject(new Error("unexpected model switch")),
                   flush: () => Promise.resolve(),
+                  navigateHistory: () => Promise.reject(new Error("unexpected history navigation")),
                   historyBoundary: () => "stable",
                   settleHistory: () => Promise.resolve(),
                   sendPrompt: (value, onStarted) => {
@@ -682,9 +726,15 @@ describe("session pool capture", () => {
                   unsubscribe: () => {},
                 }),
             },
+            loadHistory: () => Effect.die("unexpected history read"),
+            loadHistoryPreview: () => Effect.die("unexpected history preview"),
             loadCurrentModel: () => Effect.succeed(null),
             loadTranscript: () =>
-              Effect.succeed({ messages: [], todo: { kind: "ready", phases: [] } }),
+              Effect.succeed({
+                historyRevision: HistoryRevision.make("test-history"),
+                messages: [],
+                todo: { kind: "ready", phases: [] },
+              }),
           });
           const resolved = yield* pool.send(chatId, prompt("resolved"));
           if (resolved.kind !== "handled") yield* resolved.completed;

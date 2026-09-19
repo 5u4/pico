@@ -1,6 +1,13 @@
 import { useAtomValue } from "@effect/atom-react/Hooks";
 import { RegistryContext } from "@effect/atom-react/RegistryContext";
 import type {
+  HistoryPreview,
+  HistoryPreviewBlock,
+  HistorySnapshot,
+  NavigateChatHistoryRequest,
+} from "@pico/contract/agent-history";
+import type { AgentImageAttachment, AgentPrompt } from "@pico/contract/agent-message";
+import type {
   ContextUsage,
   ModelInfo,
   ModelRef,
@@ -28,8 +35,11 @@ import { useContext, useEffect, useMemo, useRef, useState } from "react";
 import type {
   ChatTabPresentation,
   CloseChatPresentation,
+  ComposerImagePresentation,
   ComposerPresentation,
   ContextUsagePresentation,
+  HistoryPanelPresentation,
+  HistoryPreviewBlockPresentation,
   ModelPickerPresentation,
   NavigationPresentation,
   PromptSuggestion,
@@ -51,19 +61,28 @@ import {
 import type { WorkspaceFormProps } from "./chat/workspace-dialog.tsx";
 import type { WorkspaceSettingsEditor } from "./chat/workspace-settings-dialog.tsx";
 import { Button } from "./components/ui/button.tsx";
+import { presentHistoryItems } from "./history-presentation.ts";
 import { type ConversationPage, type Page, pageFromMatches } from "./routes.tsx";
 import { formatScheduleTime, presentSchedule } from "./schedule-presentation.ts";
 import { applyThemePreference, readBootstrappedTheme, type Theme } from "./theme.ts";
 import { errorMessage, presentTodo, presentTranscript } from "./transcript-presentation.ts";
 
 type State = ReturnType<typeof FrontendState.make>;
+interface DraftImage {
+  readonly id: string;
+  readonly name: string;
+  readonly mimeType: AgentImageAttachment["mimeType"];
+  readonly data: string;
+}
 interface DraftValue {
   readonly text: string;
+  readonly images: readonly DraftImage[];
 }
 interface DraftEntry {
   readonly key: string;
   readonly workspace: Workspace;
   readonly value: DraftValue;
+  readonly recoveredDraft: DraftValue | null;
   readonly disclosures: ReadonlyMap<string, boolean>;
   readonly target: { readonly kind: "new" } | { readonly kind: "chat"; readonly chat: Chat };
   readonly submission:
@@ -158,7 +177,9 @@ type DeleteWorkspaceFlow =
     }
   | { readonly kind: "deleting"; readonly target: Pick<Workspace, "id" | "name"> };
 const emptySchedules = Atom.make(AsyncResult.initial<ScheduleOverviewResponse>());
-const emptyDraft: DraftValue = { text: "" };
+const emptyHistory = AsyncResult.initial<HistorySnapshot>();
+const emptyHistoryPreview = AsyncResult.initial<HistoryPreview>();
+const emptyDraft: DraftValue = { text: "", images: [] };
 const workspaceStorageKey = "pico-last-workspace";
 const openingConnection = Atom.make<FrontendState.Connection>({ kind: "opening" });
 const decodeWorkspace = Schema.decodeUnknownOption(CreateWorkspace);
@@ -167,7 +188,30 @@ const percentageFormat = new Intl.NumberFormat("en-US", { maximumFractionDigits:
 
 const modelValue = (model: ModelRef) => JSON.stringify([model.provider, model.id]);
 const modelLabel = (model: ModelInfo) => `${model.name || model.id} · ${model.provider}`;
-
+const isDraftEmpty = (draft: DraftValue) => draft.text.length === 0 && draft.images.length === 0;
+const isDraftSendable = (draft: DraftValue) =>
+  draft.text.trim().length > 0 || draft.images.length > 0;
+const toComposerImages = (draft: DraftValue): readonly ComposerImagePresentation[] => draft.images;
+const toPromptAttachments = (draft: DraftValue): readonly AgentImageAttachment[] =>
+  draft.images.map((image, index) => ({
+    type: "image",
+    data: image.data,
+    mimeType: image.mimeType,
+    name: image.name || `restored-image-${index + 1}`,
+  }));
+const toDraftValue = (draft: AgentPrompt): DraftValue => ({
+  text: draft.text,
+  images: draft.attachments.map((image) => ({
+    id: crypto.randomUUID(),
+    data: image.data,
+    mimeType: image.mimeType,
+    name: image.name,
+  })),
+});
+const toPreviewBlocks = (
+  blocks: readonly HistoryPreviewBlock[],
+): readonly HistoryPreviewBlockPresentation[] =>
+  blocks.map((block, index) => ({ id: `preview-${index}`, ...block }));
 function presentContextUsage(
   result: AsyncResult.AsyncResult<ContextUsage, unknown> | undefined,
   connection: FrontendState.Connection,
@@ -473,6 +517,14 @@ export function WorkspaceChat({
     readonly conversationKey: string;
     readonly callId: string;
   } | null>(null);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyQuery, setHistoryQuery] = useState("");
+  const historyWasOpen = useRef(false);
+  const [historyRevealAll, setHistoryRevealAll] = useState(false);
+  const [historyPreviewTarget, setHistoryPreviewTarget] = useState<{
+    readonly conversationKey: string;
+    readonly targetId: NavigateChatHistoryRequest["targetId"];
+  } | null>(null);
   const [contextDetailsKey, setContextDetailsKey] = useState<string | null>();
   const [shakeFeedback, setShakeFeedback] = useState<{
     readonly visit: number;
@@ -616,6 +668,8 @@ export function WorkspaceChat({
       : { kind: "loading", label: "Loading chat..." };
   })();
   const selected = content.kind === "ready" ? findPageEntry(page, navigation.entries) : undefined;
+  const selectedConversationKey = selected?.key ?? null;
+  const selectedChatId = selected?.target.kind === "chat" ? selected.target.chat.id : null;
   const returnEntry =
     lastConversationKey.current === null
       ? undefined
@@ -647,6 +701,9 @@ export function WorkspaceChat({
     page.kind !== "schedules" &&
     conversationEntry !== undefined &&
     skillMenuByKey.get(conversationEntry.key)?.tokenKey != null;
+  const historyVisible = historyOpen && selectedChatId !== null;
+  const historyPreviewVisible =
+    historyVisible && historyPreviewTarget?.conversationKey === selectedConversationKey;
   const conversationAtom = useMemo(
     () =>
       Atom.make((get) =>
@@ -654,6 +711,12 @@ export function WorkspaceChat({
           ? {
               snapshot: get(state.transcript(chatId)),
               live: get(state.live(chatId)),
+              history: historyVisible ? get(state.history(chatId)) : emptyHistory,
+              previewHistory: historyPreviewVisible
+                ? get(state.previewHistory(chatId))
+                : emptyHistoryPreview,
+              navigateHistory: get(state.navigateHistory(chatId)),
+              historyReplacing: get(state.historyReplacing(chatId)),
               contextUsage: get(state.contextUsage(chatId)),
               todo: get(state.todo(chatId)),
               currentModel: get(state.currentModel(chatId)),
@@ -665,13 +728,17 @@ export function WorkspaceChat({
             }
           : null,
       ),
-    [state, chatId, skillsVisible],
+    [state, chatId, skillsVisible, historyVisible, historyPreviewVisible],
   );
   const conversation = useAtomValue(conversationAtom);
 
   useEffect(() => {
     setContextDetailsKey(undefined);
     setToolSelection(null);
+    setHistoryOpen(false);
+    setHistoryQuery("");
+    setHistoryRevealAll(false);
+    setHistoryPreviewTarget(null);
     setShakeFeedback(null);
     skillMenuOpenTokens.current.clear();
   }, [visit, selected?.key]);
@@ -922,7 +989,7 @@ export function WorkspaceChat({
           (target.kind === "chat"
             ? entry.target.kind === "chat" && entry.target.chat.id === target.chat.id
             : entry.target.kind === "new" &&
-              entry.value.text.length === 0 &&
+              isDraftEmpty(entry.value) &&
               entry.submission.kind === "idle")
         ) {
           existing = entry;
@@ -935,6 +1002,7 @@ export function WorkspaceChat({
       workspace,
       target,
       value: emptyDraft,
+      recoveredDraft: null,
       disclosures: new Map(),
       submission: { kind: "idle" },
     };
@@ -1655,7 +1723,10 @@ export function WorkspaceChat({
         : skillMenuResolved.options.find((option) => option.name === name);
     if (!selectedSkill) return;
     const replaced = applySkill(entry.value.text, skillMenuResolved.token, selectedSkill.name);
-    updateEntry(entry.key, (value) => ({ ...value, value: { text: replaced.text } }));
+    updateEntry(entry.key, (value) => ({
+      ...value,
+      value: { ...value.value, text: replaced.text },
+    }));
     const dismissedSignature = menuSignature(replaced.text, replaced.caret, replaced.caret);
     updateSkillMenuState(entry.key, (current) => ({
       ...current,
@@ -1709,7 +1780,7 @@ export function WorkspaceChat({
     const entry = findPageEntry(page, navigationRef.current.entries);
     if (
       !entry ||
-      entry.value.text.trim().length === 0 ||
+      !isDraftSendable(entry.value) ||
       entry.submission.kind === "creating" ||
       entry.submission.kind === "sending" ||
       isCreationUnconfirmed(entry)
@@ -1722,6 +1793,8 @@ export function WorkspaceChat({
       if (
         registry.get(state.send(id)).waiting ||
         registry.get(state.switchModel(id)).waiting ||
+        registry.get(state.navigateHistory(id)).waiting ||
+        registry.get(state.historyReplacing(id)) ||
         registry.get(state.live(id)).run.kind === "running"
       )
         return;
@@ -1731,11 +1804,12 @@ export function WorkspaceChat({
     updateEntry(key, (value) => ({
       ...value,
       value: value.value === sentValue ? emptyDraft : value.value,
+      recoveredDraft: null,
       submission: { kind: "sending" },
     }));
     const exit = await runCommand(registry, state.send(chat.id), {
       text: sentValue.text,
-      attachments: [],
+      attachments: toPromptAttachments(sentValue),
     });
     updateEntry(key, (value) => ({
       ...value,
@@ -1764,12 +1838,33 @@ export function WorkspaceChat({
     } else if (
       registry.get(state.send(entry.target.chat.id)).waiting ||
       registry.get(state.switchModel(entry.target.chat.id)).waiting ||
+      registry.get(state.navigateHistory(entry.target.chat.id)).waiting ||
+      registry.get(state.historyReplacing(entry.target.chat.id)) ||
       registry.get(state.live(entry.target.chat.id)).run.kind === "running"
     ) {
       return;
     }
-    updateEntry(entry.key, (value) => ({ ...value, value: { text } }));
+    updateEntry(entry.key, (value) => ({ ...value, value: { ...value.value, text } }));
     void submitDraft();
+  };
+  const removeComposerImage = (id: string) => {
+    if (!ownsVisit() || !selected) return;
+    const entry = findPageEntry(page, navigationRef.current.entries);
+    if (!entry || entry.key !== selected.key) return;
+    updateEntry(entry.key, (value) => ({
+      ...value,
+      value: { ...value.value, images: value.value.images.filter((image) => image.id !== id) },
+    }));
+  };
+  const restoreRecoveredDraft = () => {
+    if (!ownsVisit() || !selected) return;
+    const entry = findPageEntry(page, navigationRef.current.entries);
+    if (!entry || entry.key !== selected.key || entry.recoveredDraft === null) return;
+    updateEntry(entry.key, (value) =>
+      value.recoveredDraft === null
+        ? value
+        : { ...value, value: value.recoveredDraft, recoveredDraft: null },
+    );
   };
   const stop = async () => {
     if (!state || !ownsVisit() || registry.get(state.connection).kind !== "active") return;
@@ -1797,13 +1892,131 @@ export function WorkspaceChat({
         : { kind: "error", message: `Shake was not confirmed. ${errorMessage(exit.cause)}` },
     });
   };
-
   const orphanDrafts = [...navigation.entries.values()].filter(
     (entry) =>
-      entry.value.text.length > 0 &&
+      !isDraftEmpty(entry.value) &&
       workspaces._tag === "Success" &&
       !workspaces.value.some((workspace) => workspace.id === entry.workspace.id),
   );
+  const historySnapshot = conversation
+    ? Option.getOrNull(AsyncResult.value(conversation.history))
+    : null;
+  const historyPreview = conversation
+    ? Option.getOrNull(AsyncResult.value(conversation.previewHistory))
+    : null;
+  const activeHistoryTargetId = historySnapshot?.activeLeafId ?? null;
+  const selectedHistoryTargetId =
+    historyPreviewTarget?.conversationKey === selectedConversationKey
+      ? historyPreviewTarget.targetId
+      : null;
+
+  useEffect(() => {
+    if (!state || !historyOpen || selectedChatId === null) {
+      historyWasOpen.current = false;
+      return;
+    }
+    const initialOpen = !historyWasOpen.current;
+    historyWasOpen.current = true;
+    if (initialOpen) {
+      registry.set(state.history(selectedChatId), historyQuery);
+      return;
+    }
+    const timeout = setTimeout(() => {
+      registry.set(state.history(selectedChatId), historyQuery);
+    }, 200);
+    return () => clearTimeout(timeout);
+  }, [state, registry, historyOpen, historyQuery, selectedChatId, visit]);
+
+  useEffect(() => {
+    if (!historyOpen || selectedConversationKey === null || historySnapshot === null) return;
+    const current =
+      historyPreviewTarget?.conversationKey === selectedConversationKey
+        ? historyPreviewTarget.targetId
+        : null;
+    const next =
+      current ??
+      historySnapshot.activeLeafId ??
+      historySnapshot.nodes.find((node) => node.visibleByDefault && node.kind !== "tool")
+        ?.defaultTargetId ??
+      null;
+    if (next === null || current === next) return;
+    setHistoryPreviewTarget({ conversationKey: selectedConversationKey, targetId: next });
+  }, [historyOpen, historySnapshot, selectedConversationKey, historyPreviewTarget]);
+
+  useEffect(() => {
+    if (
+      !state ||
+      !historyOpen ||
+      selectedChatId === null ||
+      selectedHistoryTargetId === null ||
+      historySnapshot?.version === undefined
+    )
+      return;
+    registry.set(state.previewHistory(selectedChatId), selectedHistoryTargetId);
+  }, [
+    state,
+    registry,
+    historyOpen,
+    selectedChatId,
+    selectedHistoryTargetId,
+    historySnapshot?.version,
+  ]);
+
+  const continueHistory = async () => {
+    if (
+      !state ||
+      !ownsVisit() ||
+      !historyOpen ||
+      selectedConversationKey === null ||
+      selectedChatId === null ||
+      historySnapshot === null ||
+      selectedHistoryTargetId === null ||
+      historyPreview?.targetId !== selectedHistoryTargetId ||
+      historyPreview.version !== historySnapshot.version ||
+      registry.get(state.connection).kind !== "active"
+    )
+      return;
+    const entry = findPageEntry(page, navigationRef.current.entries);
+    if (!entry || entry.key !== selectedConversationKey || entry.target.kind !== "chat") return;
+    const id = entry.target.chat.id;
+    if (
+      registry.get(state.navigateHistory(id)).waiting ||
+      registry.get(state.historyReplacing(id)) ||
+      registry.get(state.send(id)).waiting ||
+      registry.get(state.switchModel(id)).waiting ||
+      registry.get(state.live(id)).run.kind === "running"
+    )
+      return;
+    const draftBefore = entry.value;
+    const exit = await runCommand(registry, state.navigateHistory(entry.target.chat.id), {
+      targetId: selectedHistoryTargetId,
+      expectedVersion: historySnapshot.version,
+    });
+    if (!ownsVisit()) return;
+    if (Exit.isFailure(exit)) return;
+    const result = exit.value;
+    if (result.kind === "cancelled") return;
+    if (result.kind === "conflict") {
+      registry.set(state.history(entry.target.chat.id), historyQuery);
+      if (result.history.activeLeafId !== null)
+        setHistoryPreviewTarget({
+          conversationKey: entry.key,
+          targetId: result.history.activeLeafId,
+        });
+      return;
+    }
+    registry.set(state.history(entry.target.chat.id), historyQuery);
+    updateEntry(entry.key, (value) => ({ ...value, recoveredDraft: null }));
+    if (result.draft === null) return;
+    const recovered = toDraftValue(result.draft);
+    const current = navigationRef.current.entries.get(entry.key);
+    if (!current) return;
+    if (isDraftEmpty(draftBefore) && isDraftEmpty(current.value) && current.value === draftBefore) {
+      updateEntry(entry.key, (value) => ({ ...value, value: recovered, recoveredDraft: null }));
+      return;
+    }
+    updateEntry(entry.key, (value) => ({ ...value, recoveredDraft: recovered }));
+  };
   const unavailable = connection.kind === "unavailable";
   const closePresentation: CloseChatPresentation =
     closeFlow.kind === "idle"
@@ -1925,50 +2138,57 @@ export function WorkspaceChat({
   const sending = conversationEntry?.submission.kind === "sending" || conversation?.sending.waiting;
   const running = conversation?.live.run.kind === "running";
   const switching = conversation?.switching.waiting === true;
+  const historyPending =
+    conversation?.navigateHistory.waiting === true || conversation?.historyReplacing === true;
   const suggestionsEnabled =
     available &&
     !!selected &&
     !creating &&
     !creationUnconfirmed &&
     !switching &&
+    !historyPending &&
     !running &&
     !sending;
-  const statusLabel = !conversationEntry
-    ? groups.length > 0
-      ? "Choose a chat or start a new one"
-      : "Add a workspace to start a chat"
-    : creationUnconfirmed
-      ? "Chat creation was not confirmed. Check the chat list, then close this tab before starting another chat."
-      : connection.kind === "opening"
-        ? "Opening connection. Draft kept."
-        : !available
-          ? "Connection unavailable. Draft kept."
-          : creating
-            ? conversationEntry.submission.kind === "creating"
-              ? "Creating chat. Draft kept."
-              : "Another chat is being created. Draft kept."
-            : switching
-              ? "Switching model. Draft kept."
-              : conversation?.stopping.waiting
-                ? "Stop requested..."
-                : running
-                  ? "Pico is working"
-                  : sending
-                    ? "Waiting for response completion..."
-                    : conversation?.live.run.kind === "unknown"
-                      ? "Run status unknown. You can send or request Stop."
-                      : conversation?.live.run.kind === "finished" &&
-                          conversation.live.run.outcome === "aborted"
-                        ? "Response stopped"
+  const statusLabel = historyPending
+    ? "Confirming conversation destination. Draft kept."
+    : !conversationEntry
+      ? groups.length > 0
+        ? "Choose a chat or start a new one"
+        : "Add a workspace to start a chat"
+      : creationUnconfirmed
+        ? "Chat creation was not confirmed. Check the chat list, then close this tab before starting another chat."
+        : connection.kind === "opening"
+          ? "Opening connection. Draft kept."
+          : !available
+            ? "Connection unavailable. Draft kept."
+            : creating
+              ? conversationEntry.submission.kind === "creating"
+                ? "Creating chat. Draft kept."
+                : "Another chat is being created. Draft kept."
+              : switching
+                ? "Switching model. Draft kept."
+                : conversation?.stopping.waiting
+                  ? "Stop requested..."
+                  : running
+                    ? "Pico is working"
+                    : sending
+                      ? "Waiting for response completion..."
+                      : conversation?.live.run.kind === "unknown"
+                        ? "Run status unknown. You can send or request Stop."
                         : conversation?.live.run.kind === "finished" &&
-                            conversation.live.run.outcome === "failed"
-                          ? "Response failed. Review the error before sending again."
-                          : "Enter to send · Shift+Enter for a new line";
+                            conversation.live.run.outcome === "aborted"
+                          ? "Response stopped"
+                          : conversation?.live.run.kind === "finished" &&
+                              conversation.live.run.outcome === "failed"
+                            ? "Response failed. Review the error before sending again."
+                            : "Enter to send · Shift+Enter for a new line";
+  const composerImages = toComposerImages(conversationEntry?.value ?? emptyDraft);
   const composer: ComposerPresentation =
     running || sending
       ? {
           mode: "stop",
           value: conversationEntry?.value.text ?? "",
+          images: composerImages,
           placeholder: "Write your next message...",
           editable: true,
           canStop: available && !conversation?.stopping.waiting,
@@ -1977,13 +2197,14 @@ export function WorkspaceChat({
       : {
           mode: "send",
           value: conversationEntry?.value.text ?? "",
+          images: composerImages,
           placeholder: conversationEntry
             ? "Ask pico to help with your project..."
             : groups.length > 0
               ? "Choose a chat or start a new one"
               : "Add a workspace to start",
           editable: !!conversationEntry,
-          canSubmit: suggestionsEnabled && selected.value.text.trim().length > 0,
+          canSubmit: suggestionsEnabled && !!selected && isDraftSendable(selected.value),
           statusLabel,
         };
   const todo = conversation
@@ -2090,6 +2311,80 @@ export function WorkspaceChat({
       feedback,
     };
   })();
+  const historyItems = useMemo(
+    () =>
+      presentHistoryItems(historySnapshot, {
+        revealAll: historyRevealAll,
+        previewTargetId: selectedHistoryTargetId,
+      }),
+    [historySnapshot, historyRevealAll, selectedHistoryTargetId],
+  );
+  const navigateResult = conversation
+    ? Option.getOrNull(AsyncResult.value(conversation.navigateHistory))
+    : null;
+  const historyConflictMessage =
+    navigateResult?.kind === "conflict"
+      ? navigateResult.reason === "version-mismatch"
+        ? "History changed in another session. Refresh and pick a branch again."
+        : navigateResult.reason === "busy"
+          ? "Another history action is still running. Wait for it to finish and try again."
+          : "The selected branch target is no longer available. Pick a different branch."
+      : null;
+  const historyError =
+    conversation?.history._tag === "Failure"
+      ? errorMessage(conversation.history.cause)
+      : conversation?.previewHistory._tag === "Failure"
+        ? errorMessage(conversation.previewHistory.cause)
+        : conversation?.navigateHistory._tag === "Failure"
+          ? errorMessage(conversation.navigateHistory.cause)
+          : historyConflictMessage;
+  const historyPreviewPresentation: HistoryPanelPresentation["preview"] = !historyOpen
+    ? { kind: "idle", label: "Open history and branches to preview branch targets." }
+    : selectedHistoryTargetId === null
+      ? { kind: "idle", label: "Select a branch target to preview." }
+      : conversation?.previewHistory._tag === "Failure"
+        ? { kind: "error", label: errorMessage(conversation.previewHistory.cause) }
+        : conversation?.previewHistory.waiting || historyPreview === null
+          ? { kind: "loading", label: "Loading preview..." }
+          : historyPreview.targetId !== selectedHistoryTargetId ||
+              historyPreview.version !== historySnapshot?.version
+            ? { kind: "loading", label: "Refreshing preview..." }
+            : {
+                kind: "ready",
+                destinationLabel:
+                  historySnapshot?.nodes.find((node) => node.entryId === historyPreview.targetId)
+                    ?.kind === "user"
+                    ? "Continue before this user message and recover its prompt as a draft."
+                    : historyPreview.destinationLeafId === null
+                      ? "Continue from the start of this conversation."
+                      : "Continue after this entry. Earlier branches remain in history.",
+                blocks: toPreviewBlocks(historyPreview.blocks),
+              };
+  const historyPanel: HistoryPanelPresentation | null =
+    conversationEntry?.target.kind === "chat" && conversation
+      ? {
+          open: historyOpen,
+          loading: conversation.history._tag === "Initial" || conversation.history.waiting,
+          busy: historyPending,
+          error: historyError,
+          query: historyQuery,
+          revealAll: historyRevealAll,
+          canContinue:
+            available &&
+            !historyPending &&
+            !running &&
+            !sending &&
+            !switching &&
+            historySnapshot?.canContinue === true &&
+            historyPreviewPresentation.kind === "ready" &&
+            historyPreview?.version === historySnapshot.version,
+          items: historyItems,
+          activeTargetId: activeHistoryTargetId,
+          previewTargetId: selectedHistoryTargetId,
+          preview: historyPreviewPresentation,
+          hasRecoveredDraft: conversationEntry.recoveredDraft !== null,
+        }
+      : null;
 
   const skillCompletion: SkillCompletionPresentation = (() => {
     if (!conversationEntry || !available || skillMenuResolved === null) return { kind: "closed" };
@@ -2200,7 +2495,7 @@ export function WorkspaceChat({
   let toolPane: ToolCallPresentation | null = null;
   if (
     toolSelection &&
-    toolSelection.conversationKey === selected?.key &&
+    toolSelection.conversationKey === selectedConversationKey &&
     transcript.state === "ready"
   ) {
     for (const item of transcript.items) {
@@ -2219,7 +2514,7 @@ export function WorkspaceChat({
         orphanDrafts={orphanDrafts.map((entry) => ({
           key: entry.key,
           label: `${entry.target.kind === "chat" ? `Chat ${entry.target.chat.id.slice(-8)}` : "New chat"} in ${entry.workspace.name}`,
-          text: entry.value.text,
+          text: entry.value.text || (entry.value.images.length > 0 ? "[Image draft]" : ""),
         }))}
         onRetry={retryConnection}
       />
@@ -2352,7 +2647,10 @@ export function WorkspaceChat({
             if (!ownsVisit()) return;
             const entry = findPageEntry(page, navigationRef.current.entries);
             if (!entry) return;
-            updateEntry(entry.key, (current) => ({ ...current, value: { text } }));
+            updateEntry(entry.key, (current) => ({
+              ...current,
+              value: { ...current.value, text },
+            }));
             const tabState = readSkillMenuState(entry);
             const token = findSkillToken(text, tabState.caretStart, tabState.caretEnd);
             const tokenKey = token ? menuTokenKey(token) : null;
@@ -2362,6 +2660,7 @@ export function WorkspaceChat({
               selectedIndex: current.tokenKey === tokenKey ? current.selectedIndex : 0,
             }));
           }}
+          onComposerImageRemove={removeComposerImage}
           onComposerCaretChange={recordComposerCaret}
           onSkillCompletionCommit={() => applySkillCompletion()}
           onSkillCompletionMove={moveSkillCompletion}
@@ -2413,10 +2712,29 @@ export function WorkspaceChat({
             applyThemePreference(next);
             setTheme(next);
           }}
+          onHistoryPaneOpenChange={(open) => {
+            if (!ownsVisit() || selectedConversationKey === null) return;
+            setHistoryOpen(open);
+            if (open) setToolSelection(null);
+          }}
+          onHistoryQueryChange={setHistoryQuery}
+          onHistoryRevealAllChange={setHistoryRevealAll}
+          onHistoryPreviewSelect={(targetId) => {
+            if (!ownsVisit() || selectedConversationKey === null) return;
+            setHistoryPreviewTarget({
+              conversationKey: selectedConversationKey,
+              targetId: targetId as NavigateChatHistoryRequest["targetId"],
+            });
+          }}
+          onHistoryContinue={() => {
+            void continueHistory();
+          }}
+          onHistoryRestoreDraft={restoreRecoveredDraft}
           onToolSelect={(id) => {
             if (!ownsVisit()) return;
             const key = findPageEntry(page, navigationRef.current.entries)?.key;
-            if (key !== selected?.key) return;
+            if (key !== selectedConversationKey) return;
+            if (id !== null) setHistoryOpen(false);
             setToolSelection(
               id === null || key === undefined ? null : { conversationKey: key, callId: id },
             );
@@ -2444,6 +2762,7 @@ export function WorkspaceChat({
           theme={theme}
           title={chatId ? (titles.get(chatId) ?? `Chat ${chatId.slice(-8)}`) : "New chat"}
           toolPane={toolPane}
+          historyPane={historyPanel}
           transcript={transcript}
           workspaceEditPending={workspaceSaving}
           workspaceSettings={

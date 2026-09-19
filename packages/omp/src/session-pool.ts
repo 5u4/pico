@@ -1,5 +1,6 @@
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session-events";
 import * as AgentEvent from "@pico/contract/agent-event";
+import type * as History from "@pico/contract/agent-history";
 import type * as AgentMessage from "@pico/contract/agent-message";
 import type {
   CapturedAgentRun,
@@ -12,7 +13,11 @@ import type {
   ShakeResult,
   SkillCommand,
 } from "@pico/contract/agent-runtime";
-import type { RuntimeSnapshot, TranscriptSnapshot } from "@pico/contract/agent-snapshot";
+import type {
+  NavigateHistoryResult,
+  RuntimeSnapshot,
+  TranscriptSnapshot,
+} from "@pico/contract/agent-snapshot";
 import type * as Chat from "@pico/contract/chat-model";
 import { AgentError } from "@pico/contract/errors";
 import type { ScheduleRunId } from "@pico/contract/schedule";
@@ -59,6 +64,14 @@ export interface OpenedSession {
   readonly shake: (mode: ShakeMode, signal: AbortSignal) => Promise<ShakeResult>;
   readonly switchModel: (model: ModelRef) => Promise<ModelInfo>;
   readonly currentModel: () => ModelInfo | null;
+  readonly navigateHistory: (
+    targetId: History.HistoryEntryId,
+    onReplaced: () => Promise<void>,
+  ) => Promise<
+    | { readonly kind: "cancelled" }
+    | { readonly kind: "busy" }
+    | { readonly kind: "applied"; readonly draft: AgentMessage.AgentPrompt | null }
+  >;
   readonly flush: () => Promise<void>;
   readonly contextUsage: () => ContextUsage;
   readonly availableSkills: () => readonly SkillCommand[];
@@ -79,6 +92,15 @@ export interface SessionPool {
   readonly events: Stream.Stream<AgentEvent.AgentEventEnvelope>;
   readonly drain: () => Effect.Effect<void>;
   readonly transcript: (chatId: Chat.ChatId) => Effect.Effect<TranscriptSnapshot, AgentError>;
+  readonly history: (
+    input: History.ChatHistoryRequest,
+  ) => Effect.Effect<History.HistorySnapshot, AgentError>;
+  readonly previewHistory: (
+    input: History.PreviewChatHistoryRequest,
+  ) => Effect.Effect<History.HistoryPreview, AgentError>;
+  readonly navigateHistory: (
+    input: History.NavigateChatHistoryRequest,
+  ) => Effect.Effect<NavigateHistoryResult, AgentError>;
   readonly send: (
     chatId: Chat.ChatId,
     prompt: AgentMessage.AgentPrompt,
@@ -173,6 +195,7 @@ interface LiveEntry {
   readonly shake: OpenedSession["shake"];
   readonly switchModel: OpenedSession["switchModel"];
   readonly currentModel: OpenedSession["currentModel"];
+  readonly navigateHistory: OpenedSession["navigateHistory"];
   readonly flush: OpenedSession["flush"];
   readonly contextUsage: () => ContextUsage;
   readonly availableSkills: OpenedSession["availableSkills"];
@@ -275,6 +298,11 @@ const projectEvent = (
       runtime.run = { kind: "finished", outcome: event.outcome };
       for (const [id, tool] of runtime.tools) if (tool.kind === "running") runtime.tools.delete(id);
       break;
+    case "history-replaced":
+      runtime.run = { kind: "idle" };
+      runtime.assistant.clear();
+      runtime.tools.clear();
+      break;
     case "title-changed":
     case "context-invalidated":
     case "notice":
@@ -303,8 +331,18 @@ interface MakeOptions {
   readonly factory: SessionFactory;
   readonly loadTranscript: (
     chatId: Chat.ChatId,
-  ) => Effect.Effect<Pick<TranscriptSnapshot, "messages" | "todo">, AgentError>;
+  ) => Effect.Effect<Pick<TranscriptSnapshot, "messages" | "todo" | "historyRevision">, AgentError>;
   readonly loadCurrentModel: (chatId: Chat.ChatId) => Effect.Effect<ModelInfo | null, AgentError>;
+  readonly loadHistory: (
+    chatId: Chat.ChatId,
+    query: string,
+  ) => Effect.Effect<
+    Pick<History.HistorySnapshot, "nodes" | "activeLeafId" | "revision" | "version" | "matches">,
+    AgentError
+  >;
+  readonly loadHistoryPreview: (
+    input: History.PreviewChatHistoryRequest,
+  ) => Effect.Effect<History.HistoryPreview, AgentError>;
 }
 
 type OutputItem =
@@ -627,6 +665,7 @@ const acquireEntry = Effect.fn("SessionPool.acquireEntry")(function* (
     shake: opened.shake,
     switchModel: opened.switchModel,
     currentModel: opened.currentModel,
+    navigateHistory: opened.navigateHistory,
     availableSkills: opened.availableSkills,
     flush: opened.flush,
     appendAssistantMessage: opened.appendAssistantMessage,
@@ -685,6 +724,7 @@ const retainOption = (sessions: SessionEntries, chatId: Chat.ChatId) =>
 export const makeSessionPool = Effect.fn("SessionPool.make")(function* (
   options: MakeOptions,
 ): Effect.fn.Return<SessionPool, never, Scope.Scope> {
+  const runEffect = Effect.runPromiseWith(yield* Effect.context<never>());
   const scope = yield* Effect.scope;
   const output = yield* Effect.acquireRelease(Queue.unbounded<OutputItem, Cause.Done>(), (queue) =>
     Queue.end(queue).pipe(Effect.asVoid),
@@ -712,6 +752,52 @@ export const makeSessionPool = Effect.fn("SessionPool.make")(function* (
     yield* Effect.yieldNow;
   });
 
+  const observeTranscript = Effect.fn("SessionPool.observeTranscript")(function* (
+    entry: LiveEntry,
+  ) {
+    const runtime = entry.key.runtime;
+    if (!runtime.healthy || MutableRef.get(entry.lifecycle).type !== "open")
+      return yield* new AgentError({ message: "OMP runtime observation is unavailable" });
+    if (runtime.mutations !== 0)
+      return yield* new AgentError({ message: "OMP history is changing" });
+    const structural = runtime.structural;
+    const before = yield* Effect.try({
+      try: entry.historyBoundary,
+      catch: (cause) => agentError("Failed to observe OMP history", cause),
+    });
+    yield* boundary("Failed to settle OMP transcript persistence", entry.settleHistory);
+    const snapshot = yield* options.loadTranscript(entry.chatId);
+    return yield* Effect.try({
+      try: (): TranscriptSnapshot | undefined => {
+        if (!runtime.healthy) throw new Error("OMP event forwarder stopped");
+        if (
+          runtime.structural !== structural ||
+          runtime.mutations !== 0 ||
+          keys.get(entry.chatId) !== entry.key ||
+          entry.historyBoundary() !== before
+        )
+          return undefined;
+        for (const message of snapshot.messages) {
+          if (message.role === "assistant" && runtime.assistant.get(message.id)?.kind === "settled")
+            runtime.assistant.delete(message.id);
+        }
+        let contextUsage: TranscriptSnapshot["contextUsage"];
+        try {
+          contextUsage = entry.contextUsage();
+        } catch {
+          contextUsage = { kind: "error" };
+        }
+        return {
+          ...snapshot,
+          currentModel: entry.currentModel(),
+          contextUsage,
+          runtime: runtimeSnapshot(runtime, publication),
+        };
+      },
+      catch: (cause) => agentError("Failed to observe OMP runtime", cause),
+    });
+  });
+
   const transcript = Effect.fn("AgentRuntime.transcript")(function* (
     chatId: Chat.ChatId,
   ): Effect.fn.Return<TranscriptSnapshot, AgentError> {
@@ -732,54 +818,7 @@ export const makeSessionPool = Effect.fn("SessionPool.make")(function* (
             } satisfies TranscriptSnapshot;
           }
           const entry = retained.value;
-          const value = yield* entry.admission.withPermit(
-            Effect.gen(function* () {
-              const runtime = entry.key.runtime;
-              if (!runtime.healthy || MutableRef.get(entry.lifecycle).type !== "open")
-                return yield* new AgentError({ message: "OMP runtime observation is unavailable" });
-              if (runtime.mutations !== 0)
-                return yield* new AgentError({ message: "OMP history is changing" });
-              const structural = runtime.structural;
-              const before = yield* Effect.try({
-                try: entry.historyBoundary,
-                catch: (cause) => agentError("Failed to observe OMP history", cause),
-              });
-              yield* boundary("Failed to settle OMP transcript persistence", entry.settleHistory);
-              const snapshot = yield* options.loadTranscript(chatId);
-              return yield* Effect.try({
-                try: (): TranscriptSnapshot | undefined => {
-                  if (!runtime.healthy) throw new Error("OMP event forwarder stopped");
-                  if (
-                    runtime.structural !== structural ||
-                    runtime.mutations !== 0 ||
-                    keys.get(chatId) !== entry.key ||
-                    entry.historyBoundary() !== before
-                  )
-                    return undefined;
-                  for (const message of snapshot.messages) {
-                    if (
-                      message.role === "assistant" &&
-                      runtime.assistant.get(message.id)?.kind === "settled"
-                    )
-                      runtime.assistant.delete(message.id);
-                  }
-                  let contextUsage: TranscriptSnapshot["contextUsage"];
-                  try {
-                    contextUsage = entry.contextUsage();
-                  } catch {
-                    contextUsage = { kind: "error" };
-                  }
-                  return {
-                    ...snapshot,
-                    currentModel: entry.currentModel(),
-                    contextUsage,
-                    runtime: runtimeSnapshot(runtime, publication),
-                  };
-                },
-                catch: (cause) => agentError("Failed to observe OMP runtime", cause),
-              });
-            }),
-          );
+          const value = yield* entry.admission.withPermit(observeTranscript(entry));
           if (value !== undefined) return value;
         }
       }),
@@ -788,6 +827,164 @@ export const makeSessionPool = Effect.fn("SessionPool.make")(function* (
       Effect.catchTag("TimeoutError", () =>
         Effect.fail(new AgentError({ message: "OMP history did not reach a stable observation" })),
       ),
+    );
+  });
+
+  const isBusy = (entry: LiveEntry): boolean =>
+    entry.session.isStreaming ||
+    MutableRef.get(entry.run) !== null ||
+    MutableRef.get(entry.capture) !== null ||
+    entry.operations.size !== 0 ||
+    entry.key.runtime.mutations !== 0;
+
+  const readHistory = Effect.fn("SessionPool.readHistory")(function* (
+    input: History.ChatHistoryRequest,
+    entry?: LiveEntry,
+  ) {
+    const observedPublication = publication;
+    const snapshot = yield* options.loadHistory(input.chatId, input.query);
+    let nodes = snapshot.nodes;
+    if (input.query.trim().length > 0) {
+      const byId = new Map(nodes.map((node) => [node.entryId, node]));
+      const included = new Set<History.HistoryEntryId>();
+      for (const match of snapshot.matches) {
+        let ancestor = byId.get(match);
+        while (ancestor !== undefined && !included.has(ancestor.entryId)) {
+          included.add(ancestor.entryId);
+          ancestor = ancestor.parentId === null ? undefined : byId.get(ancestor.parentId);
+        }
+      }
+      nodes = nodes.filter((node) => included.has(node.entryId));
+    }
+    return {
+      ...snapshot,
+      nodes,
+      publication: observedPublication,
+      canContinue:
+        entry === undefined ||
+        (entry.key.runtime.healthy &&
+          MutableRef.get(entry.lifecycle).type === "open" &&
+          !isBusy(entry)),
+    } satisfies History.HistorySnapshot;
+  });
+
+  const history = Effect.fn("AgentRuntime.history")(function* (input: History.ChatHistoryRequest) {
+    return yield* Effect.scoped(
+      Effect.gen(function* () {
+        const retained = yield* retainOption(sessions, input.chatId);
+        if (Option.isNone(retained)) return yield* readHistory(input);
+        const entry = retained.value;
+        return yield* entry.admission.withPermit(
+          boundary("Failed to settle OMP history", entry.settleHistory).pipe(
+            Effect.andThen(readHistory(input, entry)),
+          ),
+        );
+      }),
+    );
+  });
+
+  const previewHistory = (input: History.PreviewChatHistoryRequest) =>
+    options.loadHistoryPreview(input);
+
+  const navigateHistory = Effect.fn("AgentRuntime.navigateHistory")(function* (
+    input: History.NavigateChatHistoryRequest,
+  ): Effect.fn.Return<NavigateHistoryResult, AgentError> {
+    return yield* Effect.scoped(
+      Effect.gen(function* () {
+        const retained = yield* retainOption(sessions, input.chatId);
+        if (Option.isNone(retained)) {
+          const snapshot = yield* readHistory({ chatId: input.chatId, query: "" });
+          if (snapshot.version !== input.expectedVersion)
+            return {
+              kind: "conflict",
+              reason: "version-mismatch",
+              version: snapshot.version,
+              history: snapshot,
+            } as const;
+          if (!snapshot.nodes.some((node) => node.entryId === input.targetId))
+            return {
+              kind: "conflict",
+              reason: "target-missing",
+              version: snapshot.version,
+              history: snapshot,
+            } as const;
+        }
+        const entry = Option.isSome(retained)
+          ? retained.value
+          : yield* retain(sessions, input.chatId);
+        const conflict = Effect.fn("SessionPool.historyConflict")(function* (
+          reason: History.NavigateHistoryConflictReason,
+        ) {
+          const snapshot = yield* readHistory({ chatId: input.chatId, query: "" }, entry);
+          return {
+            kind: "conflict",
+            reason,
+            version: snapshot.version,
+            history: snapshot,
+          } as const;
+        });
+        const admitted = yield* entry.admission.withPermitsIfAvailable(1)(
+          Effect.gen(function* () {
+            if (MutableRef.get(entry.lifecycle).type !== "open" || !entry.key.runtime.healthy)
+              return yield* new AgentError({ message: "OMP runtime observation is unavailable" });
+            if (isBusy(entry)) return yield* conflict("busy");
+            yield* boundary("Failed to settle OMP history", entry.settleHistory);
+            const current = yield* readHistory({ chatId: input.chatId, query: "" }, entry);
+            if (current.version !== input.expectedVersion)
+              return yield* conflict("version-mismatch");
+            if (!current.nodes.some((node) => node.entryId === input.targetId))
+              return yield* conflict("target-missing");
+            const runtime = entry.key.runtime;
+            runtime.structural++;
+            runtime.mutations++;
+            const result = yield* boundary("Failed to navigate OMP history", () =>
+              entry.navigateHistory(input.targetId, () =>
+                runEffect(
+                  Effect.gen(function* () {
+                    yield* boundary(
+                      "Failed to persist OMP history navigation",
+                      entry.settleHistory,
+                    );
+                    yield* drainSessionEvents(entry);
+                    publishEvent(entry.key, {
+                      chatId: input.chatId,
+                      event: { type: "history-replaced" },
+                      origin: "session",
+                    });
+                  }).pipe(
+                    Effect.tapCause(() =>
+                      Effect.sync(() => {
+                        runtime.healthy = false;
+                      }),
+                    ),
+                  ),
+                ),
+              ),
+            ).pipe(
+              Effect.ensuring(
+                Effect.sync(() => {
+                  runtime.mutations--;
+                  runtime.structural++;
+                }),
+              ),
+            );
+            if (result.kind === "busy") return yield* conflict("busy");
+            if (result.kind === "cancelled") return { kind: "cancelled" } as const;
+            yield* boundary("Failed to persist OMP history navigation", entry.settleHistory);
+            yield* drainSessionEvents(entry);
+            while (true) {
+              const snapshot = yield* observeTranscript(entry);
+              if (snapshot !== undefined)
+                return {
+                  kind: "applied",
+                  snapshot,
+                  draft: result.draft,
+                } as const;
+            }
+          }).pipe(Effect.uninterruptible),
+        );
+        return Option.isSome(admitted) ? admitted.value : yield* conflict("busy");
+      }),
     );
   });
 
@@ -1349,6 +1546,9 @@ export const makeSessionPool = Effect.fn("SessionPool.make")(function* (
     ),
     drain,
     transcript,
+    history,
+    previewHistory,
+    navigateHistory,
     send,
     askBtw,
     sendCaptured,

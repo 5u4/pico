@@ -184,6 +184,32 @@ describe("live chat transitions", () => {
     assert.deepStrictEqual(lateSettlement.run, { kind: "finished", outcome: "completed" });
   });
 
+  it("clears stale run, assistant, and tool state on history replacement while preserving notices", () => {
+    const withDraft = reduceLiveChat(emptyLiveChat(), {
+      type: "text-delta",
+      messageId: firstId,
+      contentIndex: 0,
+      text: "draft",
+    });
+    const withTool = reduceLiveChat(withDraft, {
+      type: "tool-started",
+      toolCallId: "tool",
+      toolName: "read",
+      argumentsJson: "{}",
+    });
+    const withNotice = reduceLiveChat(withTool, {
+      type: "notice",
+      level: "warning",
+      message: "Keep this notice",
+    });
+    const replaced = reduceLiveChat(withNotice, { type: "history-replaced" });
+    assert.strictEqual(replaced.run.kind, "unknown");
+    assert.strictEqual(replaced.assistant.size, 0);
+    assert.strictEqual(replaced.snapshotIds.size, 0);
+    assert.strictEqual(replaced.tools.size, 0);
+    assert.deepStrictEqual(replaced.notices, withNotice.notices);
+  });
+
   for (const boundary of ["run-finished", "run-started"] as const) {
     it(`retains an orphan draft across ${boundary} until its own ID is acknowledged`, () => {
       const partial = reduceLiveChat(emptyLiveChat(), {

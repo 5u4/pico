@@ -108,6 +108,9 @@ const installThreadInput = Effect.fn("test.installThreadInput")(function* (optio
     },
   };
   const application = Application.of({
+    history: () => Effect.die("unexpected history read"),
+    previewHistory: () => Effect.die("unexpected history preview"),
+    navigateHistory: () => Effect.die("unexpected history navigation"),
     deleteWorkspace: () => Effect.die("unexpected workspace deletion"),
     updateWorkspace: () => Effect.die("unexpected workspace update"),
     availableWorkspaceModels:
@@ -1078,6 +1081,9 @@ describe("discord interactions", () => {
           },
         } satisfies DiscordInputBot;
         const application = Application.of({
+          history: () => Effect.die("unexpected history read"),
+          previewHistory: () => Effect.die("unexpected history preview"),
+          navigateHistory: () => Effect.die("unexpected history navigation"),
           deleteWorkspace: () => Effect.die("unexpected workspace deletion"),
           updateWorkspace: () => Effect.die("unexpected workspace update"),
           availableWorkspaceModels: () => Effect.die("unexpected workspace model discovery"),
@@ -1304,6 +1310,9 @@ describe("discord interactions", () => {
         };
         const failedChat = { ...chat, id: failingChatId, externalId: "22" };
         const application = Application.of({
+          history: () => Effect.die("unexpected history read"),
+          previewHistory: () => Effect.die("unexpected history preview"),
+          navigateHistory: () => Effect.die("unexpected history navigation"),
           deleteWorkspace: () => Effect.die("unexpected workspace deletion"),
           updateWorkspace: () => Effect.die("unexpected workspace update"),
           availableWorkspaceModels: () => Effect.die("unexpected workspace model discovery"),
@@ -1501,6 +1510,9 @@ describe("discord interactions", () => {
           archivedAt: null,
         });
         const application = Application.of({
+          history: () => Effect.die("unexpected history read"),
+          previewHistory: () => Effect.die("unexpected history preview"),
+          navigateHistory: () => Effect.die("unexpected history navigation"),
           deleteWorkspace: () => Effect.die("unexpected workspace deletion"),
           updateWorkspace: () => Effect.die("unexpected workspace update"),
           availableWorkspaceModels: () => Effect.die("unexpected workspace model discovery"),
@@ -1655,6 +1667,9 @@ describe("discord interactions", () => {
           },
         } satisfies DiscordInputBot;
         const application = Application.of({
+          history: () => Effect.die("unexpected history read"),
+          previewHistory: () => Effect.die("unexpected history preview"),
+          navigateHistory: () => Effect.die("unexpected history navigation"),
           deleteWorkspace: () => Effect.die("unexpected workspace deletion"),
           updateWorkspace: () => Effect.die("unexpected workspace update"),
           availableWorkspaceModels: () => Effect.die("unexpected workspace model discovery"),
@@ -1814,6 +1829,9 @@ describe("discord interactions", () => {
           archivedAt: null,
         };
         const application = Application.of({
+          history: () => Effect.die("unexpected history read"),
+          previewHistory: () => Effect.die("unexpected history preview"),
+          navigateHistory: () => Effect.die("unexpected history navigation"),
           deleteWorkspace: () => Effect.die("unexpected workspace deletion"),
           updateWorkspace: () => Effect.die("unexpected workspace update"),
           availableWorkspaceModels: () => Effect.die("unexpected workspace model discovery"),

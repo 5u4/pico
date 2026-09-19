@@ -59,6 +59,10 @@ export const AgentContextInvalidated = Schema.Struct({
   type: Schema.Literal("context-invalidated"),
 });
 
+export const AgentHistoryReplaced = Schema.Struct({
+  type: Schema.Literal("history-replaced"),
+});
+
 export const AgentEvent = Schema.Union([
   AgentRunStarted,
   AgentTextDelta,
@@ -70,6 +74,7 @@ export const AgentEvent = Schema.Union([
   AgentRunFinished,
   AgentTitleChanged,
   AgentContextInvalidated,
+  AgentHistoryReplaced,
 ]);
 export type AgentEvent = typeof AgentEvent.Type;
 

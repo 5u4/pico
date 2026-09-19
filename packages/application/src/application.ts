@@ -1,4 +1,5 @@
 import type * as AgentEvent from "@pico/contract/agent-event";
+import type * as History from "@pico/contract/agent-history";
 import type * as AgentMessage from "@pico/contract/agent-message";
 import {
   AgentRuntime,
@@ -645,6 +646,48 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
     Effect.mapError(failure("Failed to read transcript")),
   );
 
+  const history = Effect.fn("Application.history")(function* (input: History.ChatHistoryRequest) {
+    yield* ensureChatOpen(input.chatId, "Failed to read chat history");
+    const snapshot = yield* runtime
+      .history(input)
+      .pipe(Effect.mapError(failure("Failed to read chat history")));
+    return (activeOperations.get(input.chatId)?.size ?? 0) > 0
+      ? { ...snapshot, canContinue: false }
+      : snapshot;
+  });
+
+  const previewHistory = Effect.fn("Application.previewHistory")(function* (
+    input: History.PreviewChatHistoryRequest,
+  ) {
+    yield* ensureChatOpen(input.chatId, "Failed to preview chat history");
+    return yield* runtime
+      .previewHistory(input)
+      .pipe(Effect.mapError(failure("Failed to preview chat history")));
+  });
+
+  const navigateHistory = Effect.fn("Application.navigateHistory")(function* (
+    input: History.NavigateChatHistoryRequest,
+  ) {
+    return yield* serialized(
+      input.chatId,
+      Effect.gen(function* () {
+        yield* ensureChatOpen(input.chatId, "Failed to navigate chat history");
+        if ((activeOperations.get(input.chatId)?.size ?? 0) > 0) {
+          const snapshot = yield* history({ chatId: input.chatId, query: "" });
+          return {
+            kind: "conflict",
+            reason: "busy",
+            version: snapshot.version,
+            history: snapshot,
+          } as const;
+        }
+        return yield* runtime
+          .navigateHistory(input)
+          .pipe(Effect.mapError(failure("Failed to navigate chat history")));
+      }),
+    );
+  });
+
   const closeChat = Effect.fn("Application.closeChat")(function* (
     chatId: Chat.ChatId,
     options: CloseChatOptions,
@@ -958,6 +1001,9 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
     findChatByPlatformId,
     findChatPlatformBinding,
     transcript,
+    history,
+    previewHistory,
+    navigateHistory,
     closeChat,
     sendMessage,
     askBtw,

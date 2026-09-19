@@ -9,6 +9,12 @@ import type { AssistantMessage, Context, ToolCall } from "@oh-my-pi/pi-ai";
 import type { ExtensionFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type * as AgentEvent from "@pico/contract/agent-event";
+import {
+  HistoryEntryId,
+  HistoryPreview,
+  HistoryRevision,
+  HistoryVersion,
+} from "@pico/contract/agent-history";
 import * as AgentMessage from "@pico/contract/agent-message";
 import * as Chat from "@pico/contract/chat-model";
 import { AgentError } from "@pico/contract/errors";
@@ -22,6 +28,7 @@ import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
@@ -93,6 +100,9 @@ const importNative = async () => {
     makeBtw: adapter.makeBtw,
     makeShake: adapter.makeShake,
     makeSwitchModel: adapter.makeSwitchModel,
+    makeNavigateHistory: adapter.makeNavigateHistory,
+    projectHistoryPreview: adapter.projectHistoryPreview,
+    normalizeHistory: adapter.normalizeHistory,
   };
 };
 
@@ -371,6 +381,7 @@ const makePool = Effect.fn("NativePoolTest.make")(function* (
               await currentSession.sessionManager.ensureOnDisk();
               await currentSession.sessionManager.flush();
             },
+            navigateHistory: native.makeNavigateHistory(currentSession),
             ...native.makeSessionObservation(currentSession, emit, (cause) => {
               throw cause;
             }),
@@ -382,10 +393,33 @@ const makePool = Effect.fn("NativePoolTest.make")(function* (
           };
         }),
     },
+    loadHistory: (_chatId, query) =>
+      Effect.promise(async () => {
+        const file = session.sessionManager.getSessionFile();
+        if (file === undefined) throw new Error("Expected native history journal");
+        const journal = await native.loadSessionHistoryReadOnly(file);
+        return {
+          ...native.normalizeHistory(journal.entries, query),
+          activeLeafId:
+            journal.activeLeafId === null ? null : HistoryEntryId.make(journal.activeLeafId),
+          revision: HistoryRevision.make(journal.revision),
+          version: HistoryVersion.make(journal.version),
+        };
+      }),
+    loadHistoryPreview: ({ targetId }) =>
+      Effect.promise(async () => {
+        const file = session.sessionManager.getSessionFile();
+        if (file === undefined) throw new Error("Expected native history journal");
+        return native.projectHistoryPreview(
+          await native.loadSessionHistoryReadOnly(file),
+          targetId,
+        );
+      }),
     loadCurrentModel: () => Effect.succeed(session.model ?? null),
     loadTranscript: () =>
       Effect.succeed({
         messages: native.normalizeTranscript(session.messages),
+        historyRevision: HistoryRevision.make(session.sessionManager.getHistoryRevision()),
         todo: { kind: "ready", phases: [] },
       }),
   });
@@ -421,6 +455,816 @@ const seedShake = async (session: AgentSession) => {
 };
 
 describe("native SessionPool ownership", () => {
+  it("finds full prompt, label and summary text without exposing journal payloads", async () => {
+    await withSession([], async (session) => {
+      const manager = session.sessionManager;
+      const rootId = manager.appendMessage({ role: "user", content: "Root", timestamp: 1 });
+      const longPrompt = `${"Intro ".repeat(100)}needle-at-prompt-tail`;
+      const targetId = manager.appendMessage({ role: "user", content: longPrompt, timestamp: 2 });
+      manager.appendLabelChange(targetId, `${"Label ".repeat(100)}needle-at-label-tail`);
+      manager.appendCustomEntry("private", { credential: "hidden-journal-credential" });
+      const summaryId = manager.branchWithSummary(
+        targetId,
+        `${"Summary ".repeat(100)}needle-at-summary-tail`,
+        { credential: "hidden-journal-credential" },
+      );
+      await manager.ensureOnDisk();
+      await manager.flush();
+      await Effect.runPromise(
+        Effect.scoped(
+          Effect.gen(function* () {
+            const pool = yield* makePool(session);
+            for (const query of ["  NEEDLE-AT-PROMPT-TAIL  ", "needle-at-label-tail"]) {
+              const result = yield* pool.history({ chatId, query });
+              expect(result.matches).toEqual([targetId]);
+              expect(result.nodes.map(({ entryId, parentId }) => ({ entryId, parentId }))).toEqual([
+                { entryId: rootId, parentId: null },
+                { entryId: targetId, parentId: rootId },
+              ]);
+              expect(result.nodes[1]).toMatchObject({
+                kind: "user",
+                excerpt: "Intro ".repeat(40),
+                label: "Label ".repeat(40),
+              });
+              expect(JSON.stringify(result)).not.toContain("needle-at-");
+            }
+            const summary = yield* pool.history({ chatId, query: "needle-at-summary-tail" });
+            expect(summary.matches).toEqual([summaryId]);
+            expect(summary.nodes.map((node) => node.entryId)).toEqual([
+              rootId,
+              targetId,
+              summaryId,
+            ]);
+            expect(summary.nodes[2]).toMatchObject({
+              kind: "summary",
+              excerpt: "Summary ".repeat(30),
+            });
+            expect(JSON.stringify(yield* pool.history({ chatId, query: "" }))).not.toContain(
+              "hidden-journal-credential",
+            );
+            expect(
+              (yield* pool.history({ chatId, query: "hidden-journal-credential" })).matches,
+            ).toEqual([]);
+          }).pipe(Effect.provide(platform)),
+        ),
+      );
+    });
+  });
+
+  it("finds visible thinking beyond the excerpt without exposing thinking metadata", async () => {
+    await withSession([], async (session) => {
+      const manager = session.sessionManager;
+      const rootId = manager.appendMessage({ role: "user", content: "Question", timestamp: 1 });
+      const thoughtId = manager.appendMessage({
+        role: "assistant",
+        content: [
+          {
+            type: "thinking",
+            thinking: `${"Thought\n\t".repeat(60)}needle-in-thinking-tail`,
+            thinkingSignature: "hidden-thinking-signature",
+          },
+          { type: "text", text: "Final answer" },
+        ],
+        api: "openai-responses",
+        provider: "openai",
+        model: "gpt-4.1",
+        stopReason: "stop",
+        usage: {
+          input: 1,
+          output: 1,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 2,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        },
+        timestamp: 2,
+      });
+      await manager.ensureOnDisk();
+      await manager.flush();
+      await Effect.runPromise(
+        Effect.scoped(
+          Effect.gen(function* () {
+            const pool = yield* makePool(session);
+            const result = yield* pool.history({ chatId, query: "  NEEDLE-IN-THINKING-TAIL  " });
+            expect(result.matches).toEqual([thoughtId]);
+            expect(result.activeLeafId).toBe(thoughtId);
+            expect(result.nodes.map((node) => node.entryId)).toEqual([rootId, thoughtId]);
+            expect(result.nodes[1]).toMatchObject({
+              kind: "assistant",
+              excerpt: "Thought ".repeat(30),
+              visibleByDefault: true,
+            });
+            expect(JSON.stringify(result)).not.toContain("needle-in-thinking-tail");
+            const metadata = yield* pool.history({ chatId, query: "hidden-thinking-signature" });
+            expect(metadata.matches).toEqual([]);
+            expect(JSON.stringify(metadata)).not.toContain("hidden-thinking-signature");
+            expect((yield* pool.history({ chatId, query: "final answer" })).matches).toEqual([
+              thoughtId,
+            ]);
+          }).pipe(Effect.provide(platform)),
+        ),
+      );
+    });
+  });
+
+  it("groups tool results only until a native history fork", async () => {
+    const call = providerTurn("Calling echo", "aborted", {
+      toolCall: { type: "toolCall", id: "echo-call", name: "echo", arguments: {} },
+    });
+    const answer = providerTurn("Echo complete");
+    call.release.resolve();
+    answer.release.resolve();
+    await withSession([call, answer], (session) =>
+      Effect.runPromise(
+        Effect.scoped(
+          Effect.gen(function* () {
+            session.agent.setTools([
+              {
+                name: "echo",
+                label: "Echo",
+                description: "Return a local result",
+                parameters: { type: "object", properties: {}, additionalProperties: false },
+                execute: async () => ({
+                  content: [{ type: "text", text: "Original result" }],
+                  details: {},
+                }),
+              },
+            ]);
+            const pool = yield* makePool(session);
+            const delivery = yield* pool.send(chatId, prompt("Run echo"));
+            if (delivery.kind !== "started") throw new Error("Expected native run admission");
+            yield* delivery.completed;
+            const manager = session.sessionManager;
+            const entries = manager.getEntries();
+            const assistant = entries.find(
+              (entry) => entry.type === "message" && entry.message.role === "assistant",
+            );
+            const tool = entries.find(
+              (entry) => entry.type === "message" && entry.message.role === "toolResult",
+            );
+            if (
+              assistant === undefined ||
+              tool?.type !== "message" ||
+              tool.message.role !== "toolResult"
+            ) {
+              throw new Error("Expected persisted assistant and tool result");
+            }
+            const grouped = yield* pool.history({ chatId, query: "" });
+            expect(
+              grouped.nodes.find((node) => node.entryId === assistant.id)?.defaultTargetId,
+            ).toBe(tool.id);
+            const forkId = manager.appendMessageToBranch(
+              {
+                ...tool.message,
+                content: [{ type: "text", text: "Forked result" }],
+              },
+              assistant.id,
+            );
+            const forked = yield* pool.history({ chatId, query: "" });
+            expect(
+              forked.nodes
+                .filter((node) => node.parentId === assistant.id)
+                .map((node) => node.entryId),
+            ).toEqual([tool.id, forkId]);
+            const target = forked.nodes.find((node) => node.entryId === assistant.id);
+            if (target === undefined) throw new Error("Expected assistant history node");
+            expect(target.defaultTargetId).toBe(assistant.id);
+            const result = yield* pool.navigateHistory({
+              chatId,
+              targetId: target.defaultTargetId,
+              expectedVersion: forked.version,
+            });
+            if (result.kind !== "applied") throw new Error("Expected grouped navigation to apply");
+            expect(
+              result.snapshot.messages.flatMap((message) =>
+                message.content.flatMap((block) => (block.type === "text" ? [block.text] : [])),
+              ),
+            ).toEqual(["Run echo", "Calling echo"]);
+            expect((yield* pool.history({ chatId, query: "" })).activeLeafId).toBe(assistant.id);
+          }).pipe(Effect.provide(platform)),
+        ),
+      ),
+    );
+  });
+
+  it("rejects busy, stale and missing navigation, then publishes the persisted replacement", async () => {
+    const side = providerTurn("Side answer");
+    await withSession([side], async (session) => {
+      const manager = session.sessionManager;
+      const rootId = manager.appendMessage({ role: "user", content: "Root", timestamp: 1 });
+      const targetId = manager.appendMessage({
+        role: "user",
+        content: "Saved prompt",
+        timestamp: 2,
+      });
+      await manager.ensureOnDisk();
+      await manager.flush();
+      const file = manager.getSessionFile();
+      if (file === undefined) throw new Error("Expected native history journal");
+      const flushing = Promise.withResolvers<void>();
+      const releaseFlush = Promise.withResolvers<void>();
+      let blocked = false;
+      const flush = manager.flush.bind(manager);
+      const intercepted = vi.spyOn(manager, "flush").mockImplementation(async () => {
+        if (manager.getLeafId() === rootId && !blocked) {
+          blocked = true;
+          flushing.resolve();
+          await releaseFlush.promise;
+        }
+        await flush();
+      });
+      try {
+        await Effect.runPromise(
+          Effect.scoped(
+            Effect.gen(function* () {
+              const pool = yield* makePool(session);
+              const stale = yield* pool.history({ chatId, query: "" });
+              const currentId = manager.appendMessage({
+                role: "user",
+                content: "Current",
+                timestamp: 3,
+              });
+              session.agent.replaceMessages(manager.buildSessionContext().messages);
+              yield* Effect.promise(() => manager.flush());
+              const before = yield* pool.transcript(chatId);
+              const aside = yield* pool.askBtw(chatId, "Explain the branch").pipe(Effect.forkChild);
+              yield* Effect.promise(() => side.entered.promise);
+              expect(session.isStreaming).toBe(false);
+              const current = yield* pool.history({ chatId, query: "" });
+              const request = {
+                chatId,
+                targetId: HistoryEntryId.make(targetId),
+                expectedVersion: current.version,
+              };
+              expect(yield* pool.navigateHistory(request)).toMatchObject({
+                kind: "conflict",
+                reason: "busy",
+                history: { activeLeafId: currentId, canContinue: false },
+              });
+              expect((yield* pool.transcript(chatId)).messages).toEqual(before.messages);
+              side.release.resolve();
+              expect(yield* Fiber.join(aside)).toBe("Side answer");
+              const journalBefore = yield* Effect.promise(() =>
+                NodeFileSystem.readFile(file, "utf8"),
+              );
+              expect(
+                yield* pool.navigateHistory({ ...request, expectedVersion: stale.version }),
+              ).toMatchObject({
+                kind: "conflict",
+                reason: "version-mismatch",
+                history: { activeLeafId: currentId },
+              });
+              expect(
+                yield* pool.navigateHistory({
+                  ...request,
+                  targetId: HistoryEntryId.make("missing"),
+                }),
+              ).toMatchObject({
+                kind: "conflict",
+                reason: "target-missing",
+                history: { activeLeafId: currentId },
+              });
+              expect((yield* pool.transcript(chatId)).messages).toEqual(before.messages);
+              expect(yield* Effect.promise(() => NodeFileSystem.readFile(file, "utf8"))).toBe(
+                journalBefore,
+              );
+              const replacements: { publication: number; contents: unknown[] }[] = [];
+              yield* pool.events.pipe(
+                Stream.runForEach((envelope) =>
+                  envelope.event.type === "history-replaced"
+                    ? Effect.promise(async () => {
+                        const persisted = await native.loadSessionSnapshotReadOnly(file);
+                        replacements.push({
+                          publication: envelope.publication,
+                          contents: native
+                            .normalizeTranscript(persisted.messages)
+                            .map((message) => message.content),
+                        });
+                      })
+                    : Effect.void,
+                ),
+                Effect.forkChild,
+              );
+              const navigation = yield* pool.navigateHistory(request).pipe(Effect.forkChild);
+              yield* Effect.promise(() => flushing.promise);
+              expect(replacements).toEqual([]);
+              releaseFlush.resolve();
+              const result = yield* Fiber.join(navigation);
+              if (result.kind !== "applied") throw new Error("Expected idle navigation to apply");
+              yield* pool.drain();
+              expect(result.snapshot.messages.map(({ content }) => content)).toEqual([
+                [{ type: "text", text: "Root" }],
+              ]);
+              expect(result.draft).toEqual({ text: "Saved prompt", attachments: [] });
+              expect(result.snapshot.runtime).toMatchObject({
+                run: { kind: "idle" },
+                assistant: [],
+                tools: [],
+              });
+              expect(replacements).toEqual([
+                {
+                  publication: result.snapshot.runtime.publication,
+                  contents: [[{ type: "text", text: "Root" }]],
+                },
+              ]);
+              expect((yield* pool.history({ chatId, query: "" })).activeLeafId).toBe(rootId);
+            }).pipe(
+              Effect.ensuring(
+                Effect.sync(() => {
+                  side.release.resolve();
+                  releaseFlush.resolve();
+                }),
+              ),
+              Effect.provide(platform),
+            ),
+          ),
+        );
+      } finally {
+        intercepted.mockRestore();
+      }
+    });
+  }, 10_000);
+
+  it.each([
+    [
+      "unsupported MIME",
+      () => [{ type: "image" as const, data: "aW1hZ2U=", mimeType: "image/svg+xml" }],
+    ],
+    [
+      "malformed base64",
+      () => [{ type: "image" as const, data: "private-invalid-image", mimeType: "image/png" }],
+    ],
+    [
+      "too many images",
+      () =>
+        Array.from({ length: AgentMessage.MAX_AGENT_IMAGE_ATTACHMENTS + 1 }, () => ({
+          type: "image" as const,
+          data: "aW1hZ2U=",
+          mimeType: "image/png",
+        })),
+    ],
+    [
+      "oversized image",
+      () => [
+        {
+          type: "image" as const,
+          data: Buffer.alloc(AgentMessage.MAX_AGENT_IMAGE_ATTACHMENT_BYTES + 1).toString("base64"),
+          mimeType: "image/png",
+        },
+      ],
+    ],
+    [
+      "oversized batch",
+      () => {
+        const data = Buffer.alloc(AgentMessage.MAX_AGENT_IMAGE_BYTES / 2).toString("base64");
+        return [data, data, "AA=="].map((data) => ({
+          type: "image" as const,
+          data,
+          mimeType: "image/png",
+        }));
+      },
+    ],
+  ] as const)(
+    "rejects recovery with %s before changing the native branch",
+    async (_name, images) => {
+      await withSession([], async (session) => {
+        const manager = session.sessionManager;
+        const attachments = images();
+        const rootId = manager.appendMessage({ role: "user", content: "Root", timestamp: 1 });
+        const targetId = HistoryEntryId.make(
+          manager.appendMessage({
+            role: "user",
+            content: [{ type: "text", text: "private recovered prompt" }, ...attachments],
+            timestamp: 2,
+          }),
+        );
+        manager.branch(rootId);
+        const activeId = manager.appendMessage({
+          role: "user",
+          content: "Keep this branch",
+          timestamp: 3,
+        });
+        session.agent.replaceMessages(manager.buildSessionContext().messages);
+        await manager.ensureOnDisk();
+        await manager.flush();
+        const file = manager.getSessionFile();
+        if (file === undefined) throw new Error("Expected native history journal");
+        const journalBefore = await NodeFileSystem.readFile(file, "utf8");
+        await Effect.runPromise(
+          Effect.scoped(
+            Effect.gen(function* () {
+              const pool = yield* makePool(session);
+              const before = yield* pool.transcript(chatId);
+              const history = yield* pool.history({ chatId, query: "private recovered prompt" });
+              expect(history.matches).toEqual([targetId]);
+              const preview = yield* pool.previewHistory({ chatId, targetId });
+              expect(preview.blocks).toEqual([
+                { label: "User", text: "Root" },
+                {
+                  label: "User",
+                  text: ["private recovered prompt", ...attachments.map(() => "[Image]")].join(
+                    "\n",
+                  ),
+                },
+              ]);
+              const error = yield* pool
+                .navigateHistory({ chatId, targetId, expectedVersion: history.version })
+                .pipe(Effect.flip);
+              expect(error).toBeInstanceOf(AgentError);
+              expect(error.message).toMatch(/images/);
+              expect(error.message).not.toContain("private");
+              expect(yield* pool.transcript(chatId)).toEqual(before);
+              expect(manager.getLeafId()).toBe(activeId);
+              expect(yield* pool.history({ chatId, query: "private recovered prompt" })).toEqual(
+                history,
+              );
+              expect(session.messages).toEqual(manager.buildSessionContext().messages);
+              expect(yield* Effect.promise(() => NodeFileSystem.readFile(file, "utf8"))).toBe(
+                journalBefore,
+              );
+            }).pipe(Effect.provide(platform)),
+          ),
+        );
+      });
+    },
+    30_000,
+  );
+
+  it("recovers an externalized image-only prompt after native session initialization", async () => {
+    const turn = providerTurn("Image received");
+    await withSession([turn], async (session, reopen) => {
+      let manager = session.sessionManager;
+      const pixel = Buffer.from(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+        "base64",
+      );
+      const image = {
+        type: "image" as const,
+        mimeType: "image/png" as const,
+        data: await new Bun.Image(pixel).resize(32, 32).png({ compressionLevel: 0 }).toBase64(),
+      };
+      const rootId = manager.appendMessage({ role: "user", content: "Root", timestamp: 1 });
+      const targetId = HistoryEntryId.make(
+        manager.appendMessage({ role: "user", content: [image], timestamp: 2 }),
+      );
+      await manager.ensureOnDisk();
+      await manager.flush();
+      const file = manager.getSessionFile();
+      if (file === undefined) throw new Error("Expected native history journal");
+      const journal = await NodeFileSystem.readFile(file, "utf8");
+      expect(journal).toContain("blob:sha256:");
+      expect(journal).not.toContain(image.data);
+      await session.dispose();
+      session = await reopen();
+      manager = session.sessionManager;
+      expect(manager.getEntry(targetId)).toMatchObject({ message: { content: [image] } });
+      expect(await NodeFileSystem.readFile(file, "utf8")).toBe(journal);
+      await Effect.runPromise(
+        Effect.scoped(
+          Effect.gen(function* () {
+            const pool = yield* makePool(session);
+            const history = yield* pool.history({ chatId, query: "" });
+            const result = yield* pool.navigateHistory({
+              chatId,
+              targetId,
+              expectedVersion: history.version,
+            });
+            if (result.kind !== "applied" || result.draft === null)
+              throw new Error("Expected recovered image prompt");
+            expect(result.draft).toEqual({
+              text: "",
+              attachments: [{ ...image, name: "restored-image-1" }],
+            });
+            expect(Schema.decodeUnknownSync(AgentMessage.AgentPrompt)(result.draft)).toEqual(
+              result.draft,
+            );
+            expect(manager.getLeafId()).toBe(rootId);
+            const delivery = yield* pool.send(chatId, result.draft);
+            const context = yield* Effect.promise(() => turn.entered.promise);
+            const sent = context.messages.findLast((message) => message.role === "user");
+            const sentImage = Array.isArray(sent?.content)
+              ? sent.content.find((content) => content.type === "image")
+              : undefined;
+            if (!sentImage) throw new Error("Expected image content at the provider");
+            const imageBytes = Buffer.from(sentImage.data, "base64");
+            const metadata = yield* Effect.promise(() => new Bun.Image(imageBytes).metadata());
+            expect(sentImage.mimeType).toBe(`image/${metadata.format}`);
+            turn.release.resolve();
+            if (delivery.kind !== "handled") yield* delivery.completed;
+            expect((yield* pool.transcript(chatId)).messages.at(-1)?.content).toEqual([
+              { type: "text", text: "Image received" },
+            ]);
+          }).pipe(Effect.provide(platform)),
+        ),
+      );
+    });
+  }, 30_000);
+
+  it.each(["", " \n\t "])(
+    "applies empty recovered text %j without creating an unsendable draft",
+    async (text) => {
+      await withSession([], async (session) => {
+        const manager = session.sessionManager;
+        const rootId = manager.appendMessage({ role: "user", content: "Root", timestamp: 1 });
+        const targetId = HistoryEntryId.make(
+          manager.appendMessage({ role: "user", content: text, timestamp: 2 }),
+        );
+        await manager.ensureOnDisk();
+        await manager.flush();
+        await Effect.runPromise(
+          Effect.scoped(
+            Effect.gen(function* () {
+              const pool = yield* makePool(session);
+              const history = yield* pool.history({ chatId, query: "" });
+              const result = yield* pool.navigateHistory({
+                chatId,
+                targetId,
+                expectedVersion: history.version,
+              });
+              expect(result).toMatchObject({
+                kind: "applied",
+                draft: null,
+                snapshot: {
+                  messages: [{ role: "user", content: [{ type: "text", text: "Root" }] }],
+                },
+              });
+              expect(manager.getLeafId()).toBe(rootId);
+            }).pipe(Effect.provide(platform)),
+          ),
+        );
+      });
+    },
+  );
+
+  it("keeps native cancellation and no-draft navigation from replacing the composer", async () => {
+    let cancel = true;
+    await withSession(
+      [],
+      async (session) => {
+        const manager = session.sessionManager;
+        const rootId = manager.appendMessage({ role: "user", content: "Root", timestamp: 1 });
+        const targetId = HistoryEntryId.make(
+          manager.appendMessage({ role: "user", content: "Saved prompt", timestamp: 2 }),
+        );
+        const activeId = HistoryEntryId.make(
+          manager.appendCustomMessageEntry("extension-note", "No draft", true),
+        );
+        session.agent.replaceMessages(manager.buildSessionContext().messages);
+        await manager.ensureOnDisk();
+        await manager.flush();
+        const file = manager.getSessionFile();
+        if (file === undefined) throw new Error("Expected native history journal");
+        const journalBefore = await NodeFileSystem.readFile(file, "utf8");
+        await Effect.runPromise(
+          Effect.scoped(
+            Effect.gen(function* () {
+              const pool = yield* makePool(session);
+              const before = yield* pool.transcript(chatId);
+              const history = yield* pool.history({ chatId, query: "" });
+              expect(
+                yield* pool.navigateHistory({ chatId, targetId, expectedVersion: history.version }),
+              ).toEqual({ kind: "cancelled" });
+              expect(yield* pool.transcript(chatId)).toEqual(before);
+              expect(manager.getLeafId()).toBe(activeId);
+              expect(
+                yield* pool.navigateHistory({
+                  chatId,
+                  targetId: activeId,
+                  expectedVersion: history.version,
+                }),
+              ).toMatchObject({ kind: "applied", draft: null });
+              expect(yield* Effect.promise(() => NodeFileSystem.readFile(file, "utf8"))).toBe(
+                journalBefore,
+              );
+              cancel = false;
+              const applied = yield* pool.navigateHistory({
+                chatId,
+                targetId,
+                expectedVersion: history.version,
+              });
+              expect(applied).toMatchObject({
+                kind: "applied",
+                draft: { text: "Saved prompt", attachments: [] },
+              });
+              expect(manager.getLeafId()).toBe(rootId);
+            }).pipe(Effect.provide(platform)),
+          ),
+        );
+      },
+      (api) => {
+        api.on("session_before_tree", async () => ({ cancel }));
+      },
+    );
+  });
+
+  it.each([
+    [
+      "maximum count",
+      () => Array.from({ length: AgentMessage.MAX_AGENT_IMAGE_ATTACHMENTS }, () => "aW1hZ2U="),
+    ],
+    [
+      "maximum individual and total bytes",
+      () => {
+        const data = Buffer.alloc(AgentMessage.MAX_AGENT_IMAGE_ATTACHMENT_BYTES).toString("base64");
+        return [data, data];
+      },
+    ],
+  ] as const)(
+    "preserves recovered images at the %s boundary",
+    async (_name, data) => {
+      await withSession([], async (session) => {
+        const manager = session.sessionManager;
+        const attachments = data().map((data) => ({
+          type: "image" as const,
+          data,
+          mimeType: "image/png",
+        }));
+        const rootId = manager.appendMessage({ role: "user", content: "Root", timestamp: 1 });
+        const targetId = HistoryEntryId.make(
+          manager.appendMessage({
+            role: "user",
+            content: [{ type: "text", text: "  Preserve spacing.\n" }, ...attachments],
+            timestamp: 2,
+          }),
+        );
+        await manager.ensureOnDisk();
+        await manager.flush();
+        await Effect.runPromise(
+          Effect.scoped(
+            Effect.gen(function* () {
+              const pool = yield* makePool(session);
+              const history = yield* pool.history({ chatId, query: "" });
+              const result = yield* pool.navigateHistory({
+                chatId,
+                targetId,
+                expectedVersion: history.version,
+              });
+              if (result.kind !== "applied") throw new Error("Expected valid images to recover");
+              expect(result.draft).toEqual({
+                text: "  Preserve spacing.\n",
+                attachments: attachments.map((image, index) => ({
+                  ...image,
+                  name: `restored-image-${index + 1}`,
+                })),
+              });
+              expect(manager.getLeafId()).toBe(rootId);
+              expect(result.snapshot.messages).toEqual([
+                { role: "user", content: [{ type: "text", text: "Root" }], timestamp: 1 },
+              ]);
+            }).pipe(Effect.provide(platform)),
+          ),
+        );
+      });
+    },
+    30_000,
+  );
+
+  it("previews visible native content without transmitting image bytes or tool arguments", async () => {
+    await withSession([], async (session) => {
+      const manager = session.sessionManager;
+      const data = Buffer.alloc(2 * 1024 * 1024, 1).toString("base64");
+      const image = { type: "image" as const, data, mimeType: "image/png" };
+      manager.appendMessage({
+        role: "user",
+        content: [{ type: "text", text: "  User text\n" }, image],
+        timestamp: 1,
+      });
+      const assistant = {
+        role: "assistant" as const,
+        content: [
+          {
+            type: "thinking" as const,
+            thinking: "  Visible thought\n",
+            thinkingSignature: "private-signature",
+          },
+          { type: "text" as const, text: "Answer" },
+          image,
+          {
+            type: "toolCall" as const,
+            id: "read-call",
+            name: "read",
+            arguments: { privateArguments: "x".repeat(2 * 1024 * 1024) },
+          },
+        ],
+        api: "openai-responses" as const,
+        provider: "openai",
+        model: "gpt-4.1",
+        stopReason: "toolUse" as const,
+        usage: {
+          input: 1,
+          output: 1,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 2,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        },
+        timestamp: 2,
+      };
+      manager.appendMessage(assistant);
+      manager.appendMessage({
+        role: "toolResult",
+        toolCallId: "read-call",
+        toolName: "read",
+        content: [{ type: "text", text: "Tool text" }, image],
+        isError: false,
+        timestamp: 3,
+      });
+      manager.appendCustomMessageEntry(
+        "skill-prompt",
+        "Private expanded skill",
+        true,
+        { prompt: "/skill:review  Keep spacing.\n" },
+        "user",
+      );
+      const targetId = HistoryEntryId.make(
+        manager.appendCustomMessageEntry("extension-note", "Private note", true),
+      );
+      await manager.ensureOnDisk();
+      await manager.flush();
+      await Effect.runPromise(
+        Effect.scoped(
+          Effect.gen(function* () {
+            const pool = yield* makePool(session);
+            const preview = yield* pool.previewHistory({ chatId, targetId });
+            const blocks = [
+              { label: "User", text: "  User text\n\n[Image]" },
+              {
+                label: "Assistant",
+                text: "  Visible thought\n\nAnswer\n[Image]\n[Tool call] read",
+              },
+              { label: "Tool · read", text: "Tool text\n[Image result]" },
+              { label: "User", text: "/skill:review  Keep spacing.\n" },
+            ];
+            expect(preview.blocks).toEqual(blocks);
+            const wire = JSON.stringify(Schema.encodeSync(HistoryPreview)(preview));
+            expect(JSON.parse(wire)).toEqual({
+              targetId,
+              version: preview.version,
+              destinationLeafId: targetId,
+              blocks,
+            });
+            expect(wire.length).toBeLessThan(1_024);
+            expect(
+              native.normalizeHistoryPreview([
+                {
+                  ...assistant,
+                  content: [
+                    {
+                      type: "image",
+                      mimeType: "image/png",
+                      get data(): string {
+                        throw new Error("Preview read image bytes");
+                      },
+                    },
+                    {
+                      type: "toolCall",
+                      id: "read-call",
+                      name: "read",
+                      get arguments(): Record<string, unknown> {
+                        throw new Error("Preview read tool arguments");
+                      },
+                    },
+                  ],
+                },
+              ]),
+            ).toEqual([{ label: "Assistant", text: "[Image]\n[Tool call] read" }]);
+          }).pipe(Effect.provide(platform)),
+        ),
+      );
+    });
+  });
+
+  it("retains native branch and compaction summaries in preview text", async () => {
+    await withSession([], async (session) => {
+      const manager = session.sessionManager;
+      const rootId = manager.appendMessage({ role: "user", content: "Root", timestamp: 1 });
+      const summaryId = HistoryEntryId.make(
+        manager.branchWithSummary(rootId, "Branch summary\n  Details"),
+      );
+      const keptId = manager.appendMessage({ role: "user", content: "Kept prompt", timestamp: 2 });
+      const compactedId = HistoryEntryId.make(
+        manager.appendCompaction("Compaction summary\n  Details", undefined, keptId, 100),
+      );
+      await manager.ensureOnDisk();
+      await manager.flush();
+      await Effect.runPromise(
+        Effect.scoped(
+          Effect.gen(function* () {
+            const pool = yield* makePool(session);
+            expect((yield* pool.previewHistory({ chatId, targetId: summaryId })).blocks).toEqual([
+              { label: "User", text: "Root" },
+              { label: "Branch summary", text: "Branch summary\n  Details" },
+            ]);
+            expect((yield* pool.previewHistory({ chatId, targetId: compactedId })).blocks).toEqual([
+              { label: "User", text: "Kept prompt" },
+              { label: "Compaction summary", text: "Compaction summary\n  Details" },
+            ]);
+          }).pipe(Effect.provide(platform)),
+        ),
+      );
+    });
+  });
+
   it("confirms obfuscated assistant persistence by lifecycle ID before and after its append", async () => {
     const secret = "native-observation-secret-value";
     const obfuscator = new native.SecretObfuscator(

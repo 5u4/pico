@@ -66,6 +66,9 @@ describe("AgentSessionStore", () => {
         yield* fileSystem.makeDirectory(cwd);
         const unused = () => Effect.die("Unexpected live session operation");
         const runtime = AgentRuntime.of({
+          history: () => Effect.die("unexpected history read"),
+          previewHistory: () => Effect.die("unexpected history preview"),
+          navigateHistory: () => Effect.die("unexpected history navigation"),
           events: Stream.empty,
           drain: () => Effect.void,
           transcript: unused,
@@ -236,6 +239,9 @@ describe("AgentSessionStore", () => {
       const secondModel = { provider: "native", id: "second", name: "Second" };
       const unused = () => Effect.die("Unexpected live session operation");
       const runtime = AgentRuntime.of({
+        history: () => Effect.die("unexpected history read"),
+        previewHistory: () => Effect.die("unexpected history preview"),
+        navigateHistory: () => Effect.die("unexpected history navigation"),
         events: Stream.empty,
         drain: () => Effect.void,
         transcript: unused,

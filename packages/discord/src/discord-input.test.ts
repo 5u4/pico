@@ -161,6 +161,9 @@ describe("discord input", () => {
           let registrations = 0;
           const unused = () => Effect.die("Unexpected application operation");
           const application = Application.of({
+            history: () => Effect.die("unexpected history read"),
+            previewHistory: () => Effect.die("unexpected history preview"),
+            navigateHistory: () => Effect.die("unexpected history navigation"),
             deleteWorkspace: () => Effect.die("unexpected workspace deletion"),
             updateWorkspace: unused,
             listWorkspaces: unused,
@@ -306,6 +309,9 @@ describe("discord input", () => {
         } satisfies DiscordInputBot;
 
         const application = Application.of({
+          history: () => Effect.die("unexpected history read"),
+          previewHistory: () => Effect.die("unexpected history preview"),
+          navigateHistory: () => Effect.die("unexpected history navigation"),
           deleteWorkspace: () => Effect.die("unexpected workspace deletion"),
           updateWorkspace: () => Effect.die("unexpected workspace update"),
           availableWorkspaceModels: () => Effect.die("unexpected workspace model discovery"),
@@ -464,6 +470,9 @@ describe("discord input", () => {
             },
           } satisfies DiscordInputBot;
           const application = Application.of({
+            history: () => Effect.die("unexpected history read"),
+            previewHistory: () => Effect.die("unexpected history preview"),
+            navigateHistory: () => Effect.die("unexpected history navigation"),
             deleteWorkspace: () => Effect.die("unexpected workspace deletion"),
             updateWorkspace: () => Effect.die("unexpected workspace update"),
             availableWorkspaceModels: () => Effect.die("unexpected workspace model discovery"),
@@ -706,6 +715,9 @@ describe("discord input", () => {
           },
         } satisfies DiscordInputBot;
         const application = Application.of({
+          history: () => Effect.die("unexpected history read"),
+          previewHistory: () => Effect.die("unexpected history preview"),
+          navigateHistory: () => Effect.die("unexpected history navigation"),
           deleteWorkspace: () => Effect.die("unexpected workspace deletion"),
           updateWorkspace: () => Effect.die("unexpected workspace update"),
           availableWorkspaceModels: () => Effect.die("unexpected workspace model discovery"),
@@ -864,6 +876,9 @@ describe("discord input", () => {
           },
         } satisfies DiscordInputBot;
         const application = Application.of({
+          history: () => Effect.die("unexpected history read"),
+          previewHistory: () => Effect.die("unexpected history preview"),
+          navigateHistory: () => Effect.die("unexpected history navigation"),
           deleteWorkspace: () => Effect.die("unexpected workspace deletion"),
           updateWorkspace: () => Effect.die("unexpected workspace update"),
           availableWorkspaceModels: () => Effect.die("unexpected workspace model discovery"),
@@ -973,6 +988,9 @@ describe("discord input", () => {
           },
         } satisfies DiscordInputBot;
         const application = Application.of({
+          history: () => Effect.die("unexpected history read"),
+          previewHistory: () => Effect.die("unexpected history preview"),
+          navigateHistory: () => Effect.die("unexpected history navigation"),
           deleteWorkspace: () => Effect.die("unexpected workspace deletion"),
           updateWorkspace: () => Effect.die("unexpected workspace update"),
           availableWorkspaceModels: () => Effect.die("unexpected workspace model discovery"),
@@ -1083,6 +1101,9 @@ describe("discord input", () => {
           },
         } satisfies DiscordInputBot;
         const application = Application.of({
+          history: () => Effect.die("unexpected history read"),
+          previewHistory: () => Effect.die("unexpected history preview"),
+          navigateHistory: () => Effect.die("unexpected history navigation"),
           deleteWorkspace: () => Effect.die("unexpected workspace deletion"),
           updateWorkspace: () => Effect.die("unexpected workspace update"),
           availableWorkspaceModels: () => Effect.die("unexpected workspace model discovery"),
@@ -1222,6 +1243,9 @@ describe("discord input", () => {
           },
         } satisfies DiscordInputBot;
         const application = Application.of({
+          history: () => Effect.die("unexpected history read"),
+          previewHistory: () => Effect.die("unexpected history preview"),
+          navigateHistory: () => Effect.die("unexpected history navigation"),
           deleteWorkspace: () => Effect.die("unexpected workspace deletion"),
           updateWorkspace: () => Effect.die("unexpected workspace update"),
           availableWorkspaceModels: () => Effect.die("unexpected workspace model discovery"),
@@ -1344,6 +1368,9 @@ describe("discord input", () => {
           },
         } satisfies DiscordInputBot;
         const application = Application.of({
+          history: () => Effect.die("unexpected history read"),
+          previewHistory: () => Effect.die("unexpected history preview"),
+          navigateHistory: () => Effect.die("unexpected history navigation"),
           deleteWorkspace: () => Effect.die("unexpected workspace deletion"),
           updateWorkspace: () => Effect.die("unexpected workspace update"),
           availableWorkspaceModels: () => Effect.die("unexpected workspace model discovery"),
@@ -1449,6 +1476,9 @@ describe("discord input", () => {
           },
         } satisfies DiscordInputBot;
         const application = Application.of({
+          history: () => Effect.die("unexpected history read"),
+          previewHistory: () => Effect.die("unexpected history preview"),
+          navigateHistory: () => Effect.die("unexpected history navigation"),
           deleteWorkspace: () => Effect.die("unexpected workspace deletion"),
           updateWorkspace: () => Effect.die("unexpected workspace update"),
           availableWorkspaceModels: () => Effect.die("unexpected workspace model discovery"),
@@ -1589,6 +1619,9 @@ describe("discord input", () => {
             },
           } satisfies DiscordInputBot;
           const application = Application.of({
+            history: () => Effect.die("unexpected history read"),
+            previewHistory: () => Effect.die("unexpected history preview"),
+            navigateHistory: () => Effect.die("unexpected history navigation"),
             deleteWorkspace: () => Effect.die("unexpected workspace deletion"),
             updateWorkspace: () => Effect.die("unexpected workspace update"),
             availableWorkspaceModels: () => Effect.die("unexpected workspace model discovery"),
@@ -1740,6 +1773,9 @@ describe("discord input", () => {
           },
         };
         const application = Application.of({
+          history: () => Effect.die("unexpected history read"),
+          previewHistory: () => Effect.die("unexpected history preview"),
+          navigateHistory: () => Effect.die("unexpected history navigation"),
           deleteWorkspace: () => Effect.die("unexpected workspace deletion"),
           updateWorkspace: () => Effect.die("unexpected workspace update"),
           availableWorkspaceModels: () => Effect.die("unexpected workspace model discovery"),
@@ -1893,6 +1929,9 @@ describe("discord input", () => {
           },
         };
         const application = Application.of({
+          history: () => Effect.die("unexpected history read"),
+          previewHistory: () => Effect.die("unexpected history preview"),
+          navigateHistory: () => Effect.die("unexpected history navigation"),
           deleteWorkspace: () => Effect.die("unexpected workspace deletion"),
           updateWorkspace: () => Effect.die("unexpected workspace update"),
           availableWorkspaceModels: () => Effect.die("unexpected workspace model discovery"),
@@ -2038,6 +2077,9 @@ describe("discord input", () => {
           },
         };
         const application = Application.of({
+          history: () => Effect.die("unexpected history read"),
+          previewHistory: () => Effect.die("unexpected history preview"),
+          navigateHistory: () => Effect.die("unexpected history navigation"),
           deleteWorkspace: () => Effect.die("unexpected workspace deletion"),
           updateWorkspace: () => Effect.die("unexpected workspace update"),
           availableWorkspaceModels: () => Effect.die("unexpected workspace model discovery"),

@@ -28,8 +28,29 @@ export const AgentImageAttachment = Schema.Struct({
   type: Schema.Literal("image"),
   name: Schema.NonEmptyString,
   data: Schema.NonEmptyString.check(
-    Schema.isBase64(),
-    Schema.isMaxLength(maximumBase64Length(MAX_AGENT_IMAGE_ATTACHMENT_BYTES)),
+    Schema.isMaxLength(maximumBase64Length(MAX_AGENT_IMAGE_ATTACHMENT_BYTES)).abort(),
+    Schema.makeFilter(
+      (data) => {
+        if (data.length % 4 !== 0) return false;
+        const padding = data.endsWith("==") ? 2 : data.endsWith("=") ? 1 : 0;
+        const contentLength = data.length - padding;
+        for (let index = 0; index < contentLength; index++) {
+          const character = data.charCodeAt(index);
+          if (
+            (character >= 65 && character <= 90) ||
+            (character >= 97 && character <= 122) ||
+            (character >= 48 && character <= 57) ||
+            character === 43 ||
+            character === 47
+          ) {
+            continue;
+          }
+          return false;
+        }
+        return true;
+      },
+      { expected: "a base64 encoded string" },
+    ),
   ),
   mimeType: AgentImageMimeType,
 }).check(
