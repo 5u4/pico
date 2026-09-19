@@ -73,6 +73,7 @@
     "vitest": "catalog:"
   },
   "patchedDependencies": {
-    "@oh-my-pi/pi-coding-agent@18.2.3": "patches/@oh-my-pi%2Fpi-coding-agent@18.2.3.patch"
+    "@oh-my-pi/pi-coding-agent@18.2.3": "patches/@oh-my-pi%2Fpi-coding-agent@18.2.3.patch",
+    "@discordeno/types@21.0.0": "patches/@discordeno%2Ftypes@21.0.0.patch"
   }
 }

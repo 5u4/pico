@@ -98,13 +98,12 @@ export interface DiscordInputBot<
     readonly startThreadWithMessage: (
       channelId: bigint,
       messageId: bigint,
-      options: { readonly name: string; readonly autoArchiveDuration: 1_440 },
+      options: { readonly name: string },
     ) => Promise<{ readonly id: bigint }>;
     readonly startThreadWithoutMessage: (
       channelId: bigint,
       options: {
         readonly name: string;
-        readonly autoArchiveDuration: 1_440;
         readonly type: ChannelTypes.PublicThread;
       },
     ) => Promise<{ readonly id: bigint }>;
@@ -352,7 +351,6 @@ export const install = Effect.fn("DiscordInput.install")(function* <
       const thread = yield* promiseBoundary("create-schedule-thread", () =>
         bot.helpers.startThreadWithoutMessage(channel.id, {
           name: threadName(input.title) || "Scheduled task",
-          autoArchiveDuration: 1_440,
           type: ChannelTypes.PublicThread,
         }),
       );
@@ -585,7 +583,6 @@ export const install = Effect.fn("DiscordInput.install")(function* <
           threadName(message.content) ||
           threadName(prompt.attachments[0]?.name ?? "") ||
           "Image attachment",
-        autoArchiveDuration: 1_440,
       }),
     );
     yield* Effect.annotateLogsScoped({ phase: "create-chat", threadId: thread.id.toString() });
