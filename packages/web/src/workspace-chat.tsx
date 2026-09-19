@@ -20,7 +20,7 @@ import type { Chat, ChatId } from "@pico/contract/chat-model";
 import { GitError, WorkspaceBindingInvalid } from "@pico/contract/errors";
 import type { ScheduleOverviewResponse } from "@pico/contract/rpc";
 import type * as Schedule from "@pico/contract/schedule";
-import type { Workspace, WorkspaceId } from "@pico/contract/workspace-model";
+import { type Workspace, WorkspaceId } from "@pico/contract/workspace-model";
 import type * as FrontendState from "@pico/frontend-state/client";
 import { useRouter, useRouterState } from "@tanstack/react-router";
 import * as Cause from "effect/Cause";
@@ -181,8 +181,10 @@ const emptyHistory = AsyncResult.initial<HistorySnapshot>();
 const emptyHistoryPreview = AsyncResult.initial<HistoryPreview>();
 const emptyDraft: DraftValue = { text: "", images: [] };
 const workspaceStorageKey = "pico-last-workspace";
+const expandedWorkspaceStorageKey = "pico-expanded-workspaces";
 const openingConnection = Atom.make<FrontendState.Connection>({ kind: "opening" });
 const decodeWorkspace = Schema.decodeUnknownOption(CreateWorkspace);
+const decodeExpandedWorkspaceIds = Schema.decodeUnknownOption(Schema.Array(WorkspaceId));
 const tokenFormat = new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 });
 const percentageFormat = new Intl.NumberFormat("en-US", { maximumFractionDigits: 1 });
 
@@ -346,8 +348,12 @@ function removeWorkspace(current: TabState, workspaceId: WorkspaceId): TabState 
   const entries = new Map(
     [...current.entries].filter(([, entry]) => entry.workspace.id !== workspaceId),
   );
-  const expanded = new Set(current.expanded);
-  expanded.delete(workspaceId);
+  let expanded = current.expanded;
+  if (expanded.has(workspaceId)) {
+    const next = new Set(expanded);
+    next.delete(workspaceId);
+    expanded = next;
+  }
   return {
     entries,
     expanded,
@@ -390,6 +396,16 @@ function readWorkspacePreference(): string | null {
     return window.localStorage.getItem(workspaceStorageKey);
   } catch {
     return null;
+  }
+}
+function readExpandedWorkspacePreference(): ReadonlySet<WorkspaceId> {
+  try {
+    const value = window.localStorage.getItem(expandedWorkspaceStorageKey);
+    if (value === null) return new Set();
+    const decoded = decodeExpandedWorkspaceIds(JSON.parse(value));
+    return Option.isSome(decoded) ? new Set(decoded.value) : new Set();
+  } catch {
+    return new Set();
   }
 }
 
@@ -460,7 +476,7 @@ export function WorkspaceChat({
   const [navigation, setNavigation] = useState<TabState>(() => ({
     openKeys: [],
     entries: new Map(),
-    expanded: new Set(),
+    expanded: readExpandedWorkspacePreference(),
   }));
   const navigationRef = useRef(navigation);
   const removedWorkspaceIds = useRef(new Set<WorkspaceId>());
@@ -791,9 +807,18 @@ export function WorkspaceChat({
   const updateNavigation = (change: (current: TabState) => TabState) => {
     const current = navigationRef.current;
     const next = change(current);
+    const expandedChanged = current.expanded !== next.expanded;
     navigationRef.current = next;
     setNavigation(next);
-    if (state && current.expanded !== next.expanded) {
+    if (expandedChanged) {
+      try {
+        window.localStorage.setItem(
+          expandedWorkspaceStorageKey,
+          JSON.stringify([...next.expanded]),
+        );
+      } catch {}
+    }
+    if (state && expandedChanged) {
       for (const id of next.expanded) {
         if (current.expanded.has(id)) continue;
         const chats = state.chats(id);
@@ -1012,10 +1037,6 @@ export function WorkspaceChat({
         ...value,
         entries: existing ? value.entries : new Map(value.entries).set(entry.key, entry),
         openKeys: opening ? [...value.openKeys, entry.key] : value.openKeys,
-        expanded:
-          opening && entry.target.kind === "new" && !value.expanded.has(workspace.id)
-            ? new Set(value.expanded).add(workspace.id)
-            : value.expanded,
       }));
     }
     return entry;
@@ -2072,6 +2093,7 @@ export function WorkspaceChat({
         title: titles.get(chat.id) ?? `Chat ${chat.id.slice(-8)}`,
       }));
       const matchesWorkspace = workspace.name.toLocaleLowerCase().includes(query);
+      const isVisibleChat = workspace.id === routeWorkspaceId && visibleChatId !== null;
       return {
         workspace: {
           id: workspace.id,
@@ -2082,7 +2104,11 @@ export function WorkspaceChat({
         expanded: search.kind === "open" || navigation.expanded.has(workspace.id),
         chats:
           search.kind === "open" && !matchesWorkspace
-            ? summaries.filter((chat) => chat.title.toLocaleLowerCase().includes(query))
+            ? summaries.filter(
+                (chat) =>
+                  chat.title.toLocaleLowerCase().includes(query) ||
+                  (isVisibleChat && chat.id === visibleChatId),
+              )
             : summaries,
         status:
           chats?._tag === "Failure"
@@ -2104,7 +2130,7 @@ export function WorkspaceChat({
     );
   const presentation: NavigationPresentation = {
     activeWorkspaceId: routeWorkspaceId,
-    activeChatId: selected?.target.kind === "chat" ? selected.target.chat.id : null,
+    activeChatId: visibleChatId,
     status:
       workspaces._tag === "Failure"
         ? { kind: "error", label: errorMessage(workspaces.cause) }
