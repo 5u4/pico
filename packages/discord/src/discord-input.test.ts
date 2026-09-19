@@ -252,7 +252,6 @@ describe("discord input", () => {
               10n,
               {
                 name: "x".repeat(100),
-                autoArchiveDuration: 1_440,
                 type: ChannelTypes.PublicThread,
               },
             ],
@@ -300,7 +299,7 @@ describe("discord input", () => {
             },
             startThreadWithMessage: async (_channelId, _messageId, options) => {
               order.push("create-thread");
-              assert.strictEqual(options.name, "hello from pico");
+              assert.deepStrictEqual(options, { name: "hello from pico" });
               return { id: 20n };
             },
           },
