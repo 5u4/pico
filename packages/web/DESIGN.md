@@ -29,6 +29,8 @@ History navigation stays inside one chat because OMP owns its branches. Preview 
 
 Returning to a user entry recovers its text and images only for the initiating tab. Automatic recovery requires an empty draft that stayed unchanged during the request. Otherwise the tab retains both drafts until the user explicitly replaces the current one. Other clients retain their own drafts. A history revision change clears abandoned assistant and tool state, including after reconnect. Submission stays disabled until the authoritative replacement arrives. Notices survive replacement, but delivery events at or before its publication cut do not.
 
+Draft recovery requires the navigation response's snapshot to pass the current publication cutoff. If a newer branch has already replaced it, frontend state publishes a cancelled command result instead of exposing the obsolete draft. A delayed response matching its own accepted replacement still restores the draft.
+
 Recovered drafts use the same `AgentPrompt` attachment constraints as sending. The adapter validates before moving the native cursor. Unsupported MIME types, malformed Base64, and excessive image counts or bytes reject continuation without changing history or the current draft. Historical entries remain available for preview. Preview RPCs carry only display labels and text, including image and tool-call markers; image bodies, tool arguments, and signatures stay in the journal.
 
 History search, preview, and cold model discovery read journal metadata without resolving image blobs. Native transcript and session loading retain their own hydration lifecycle for conversation rendering and prompt recovery. Missing images on an unrelated branch cannot trigger blob reads while browsing history.

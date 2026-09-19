@@ -74,6 +74,12 @@ const webWorkspace: Workspace = {
 };
 const message = { role: "user", content: [{ type: "text", text: "same" }], timestamp: 1 } as const;
 const prompt = (text: string) => AgentPrompt.make({ text, attachments: [] });
+const recoveredImage = {
+  type: "image",
+  name: "recovered.gif",
+  data: "R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7",
+  mimeType: "image/gif",
+} as const;
 let publication = 0;
 const snapshot = (
   messages: AgentTranscript = [],
@@ -1241,71 +1247,87 @@ describe("frontend state over WebSocket", () => {
       }),
   );
 
-  it.live("replays newer events when a navigation reply arrives after its replacement event", () =>
-    Effect.gen(function* () {
-      const navigation = yield* Deferred.make<NavigateHistoryResult>();
-      const started = yield* Deferred.make<void>();
-      const server = yield* snapshotFixture({
-        navigateHistory: () =>
-          Deferred.succeed(started, undefined).pipe(Effect.andThen(Deferred.await(navigation))),
-      });
-      yield* Effect.gen(function* () {
-        yield* Effect.addFinalizer(() => server.release);
-        const registry = yield* registryInScope;
-        const state = make({ url: yield* endpoint });
-        registry.mount(state.live(firstChat));
-        const route = yield* Queue.take(server.opened);
-        yield* Deferred.succeed((yield* Queue.take(server.requests)).reply, snapshot());
-        yield* waitFor(registry, state.connection, (value) => value.kind === "active");
-        registry.set(state.navigateHistory(firstChat), {
-          targetId: HistoryEntryId.make("destination"),
-          expectedVersion: HistoryVersion.make("before-navigation"),
+  it.live(
+    "preserves a matching navigation draft and newer events after its replacement snapshot is accepted",
+    () =>
+      Effect.gen(function* () {
+        const navigation = yield* Deferred.make<NavigateHistoryResult>();
+        const started = yield* Deferred.make<void>();
+        const server = yield* snapshotFixture({
+          navigateHistory: () =>
+            Deferred.succeed(started, undefined).pipe(Effect.andThen(Deferred.await(navigation))),
         });
-        yield* Deferred.await(started);
-        yield* Queue.offer(route.queue, {
-          chatId: firstChat,
-          publication: Publication.make(10),
-          event: { type: "history-replaced" },
-        });
-        const refresh = yield* Queue.take(server.requests);
-        assert.isTrue(registry.get(state.historyReplacing(firstChat)));
-        yield* Queue.offer(route.queue, {
-          chatId: firstChat,
-          publication: Publication.make(11),
-          event: {
-            type: "text-delta",
-            messageId: nextMessageId,
-            contentIndex: 0,
-            text: "New run after navigation",
-          },
-        });
-        yield* waitFor(
-          registry,
-          state.live(firstChat),
-          (value) => draftBlock(value, nextMessageId, 0)?.text === "New run after navigation",
-        );
-        const selected = snapshot(
-          [assistant(firstMessageId, "Selected response")],
-          undefined,
-          { publication: Publication.make(10), run: { kind: "idle" }, assistant: [], tools: [] },
-          HistoryRevision.make("destination"),
-        );
-        yield* Deferred.succeed(navigation, { kind: "applied", snapshot: selected, draft: null });
-        yield* AtomRegistry.getResult(registry, state.navigateHistory(firstChat), {
-          suspendOnWaiting: true,
-        });
-        assert.isFalse(registry.get(state.historyReplacing(firstChat)));
-        assert.deepStrictEqual(AsyncResult.getOrThrow(registry.get(state.transcript(firstChat))), [
-          assistant(firstMessageId, "Selected response"),
-        ]);
-        assert.strictEqual(
-          draftBlock(registry.get(state.live(firstChat)), nextMessageId, 0)?.text,
-          "New run after navigation",
-        );
-        assert.deepStrictEqual(registry.get(state.live(firstChat)).run, { kind: "running" });
-        yield* Deferred.succeed(refresh.reply, selected);
-      }).pipe(Effect.scoped, Effect.provide(server.layer));
-    }),
+        yield* Effect.gen(function* () {
+          yield* Effect.addFinalizer(() => server.release);
+          const registry = yield* registryInScope;
+          const state = make({ url: yield* endpoint });
+          registry.mount(state.live(firstChat));
+          const route = yield* Queue.take(server.opened);
+          yield* Deferred.succeed((yield* Queue.take(server.requests)).reply, snapshot());
+          yield* waitFor(registry, state.connection, (value) => value.kind === "active");
+          registry.set(state.navigateHistory(firstChat), {
+            targetId: HistoryEntryId.make("destination"),
+            expectedVersion: HistoryVersion.make("before-navigation"),
+          });
+          yield* Deferred.await(started);
+          yield* Queue.offer(route.queue, {
+            chatId: firstChat,
+            publication: Publication.make(10),
+            event: { type: "history-replaced" },
+          });
+          const refresh = yield* Queue.take(server.requests);
+          assert.isTrue(registry.get(state.historyReplacing(firstChat)));
+          const selected = snapshot(
+            [assistant(firstMessageId, "Selected response")],
+            undefined,
+            { publication: Publication.make(10), run: { kind: "idle" }, assistant: [], tools: [] },
+            HistoryRevision.make("destination"),
+          );
+          yield* Deferred.succeed(refresh.reply, selected);
+          yield* waitFor(registry, state.historyReplacing(firstChat), (value) => !value);
+          yield* Queue.offer(route.queue, {
+            chatId: firstChat,
+            publication: Publication.make(11),
+            event: {
+              type: "text-delta",
+              messageId: nextMessageId,
+              contentIndex: 0,
+              text: "New run after navigation",
+            },
+          });
+          yield* waitFor(
+            registry,
+            state.live(firstChat),
+            (value) => draftBlock(value, nextMessageId, 0)?.text === "New run after navigation",
+          );
+          yield* Deferred.succeed(navigation, {
+            kind: "applied",
+            snapshot: selected,
+            draft: AgentPrompt.make({
+              text: "Recovered selected prompt",
+              attachments: [recoveredImage],
+            }),
+          });
+          const result = yield* AtomRegistry.getResult(registry, state.navigateHistory(firstChat), {
+            suspendOnWaiting: true,
+          });
+          assert.deepStrictEqual(result, {
+            kind: "applied",
+            snapshot: selected,
+            draft: { text: "Recovered selected prompt", attachments: [recoveredImage] },
+          });
+          assert.isFalse(registry.get(state.historyReplacing(firstChat)));
+          assert.deepStrictEqual(
+            AsyncResult.getOrThrow(registry.get(state.transcript(firstChat))),
+            [assistant(firstMessageId, "Selected response")],
+          );
+          assert.strictEqual(
+            draftBlock(registry.get(state.live(firstChat)), nextMessageId, 0)?.text,
+            "New run after navigation",
+          );
+          assert.deepStrictEqual(registry.get(state.live(firstChat)).run, { kind: "running" });
+        }).pipe(Effect.scoped, Effect.provide(server.layer));
+      }),
   );
 
   it.live(
@@ -1348,7 +1370,10 @@ describe("frontend state over WebSocket", () => {
           assert.isTrue(registry.get(state.historyReplacing(firstChat)));
           yield* Deferred.succeed(navigation, {
             kind: "applied",
-            draft: null,
+            draft: AgentPrompt.make({
+              text: "Obsolete recovered prompt",
+              attachments: [recoveredImage],
+            }),
             snapshot: snapshot(
               [assistant(firstMessageId, "Older destination")],
               undefined,
@@ -1361,12 +1386,11 @@ describe("frontend state over WebSocket", () => {
               HistoryRevision.make("older-destination"),
             ),
           });
-          yield* AtomRegistry.getResult(registry, state.navigateHistory(firstChat), {
+          const result = yield* AtomRegistry.getResult(registry, state.navigateHistory(firstChat), {
             suspendOnWaiting: true,
           });
+          assert.deepStrictEqual(result, { kind: "cancelled" });
           assert.isTrue(registry.get(state.historyReplacing(firstChat)));
-          registry.refresh(state.transcript(firstChat));
-          const recovery = yield* Queue.take(server.requests);
           yield* Queue.offerAll(route.queue, [
             {
               chatId: firstChat,
@@ -1398,6 +1422,7 @@ describe("frontend state over WebSocket", () => {
               },
             },
           ]);
+          const recovery = yield* Queue.take(server.requests);
           yield* waitFor(
             registry,
             state.live(firstChat),
@@ -1435,6 +1460,98 @@ describe("frontend state over WebSocket", () => {
           );
         }).pipe(Effect.scoped, Effect.provide(server.layer));
       }),
+  );
+
+  it.live("discards an older navigation draft after a newer replacement snapshot is accepted", () =>
+    Effect.gen(function* () {
+      const navigation = yield* Deferred.make<NavigateHistoryResult>();
+      const started = yield* Deferred.make<void>();
+      const server = yield* snapshotFixture({
+        navigateHistory: () =>
+          Deferred.succeed(started, undefined).pipe(Effect.andThen(Deferred.await(navigation))),
+      });
+      yield* Effect.gen(function* () {
+        yield* Effect.addFinalizer(() => server.release);
+        const registry = yield* registryInScope;
+        const state = make({ url: yield* endpoint });
+        registry.mount(state.live(firstChat));
+        const route = yield* Queue.take(server.opened);
+        yield* Deferred.succeed((yield* Queue.take(server.requests)).reply, snapshot());
+        yield* waitFor(registry, state.connection, (value) => value.kind === "active");
+        registry.set(state.navigateHistory(firstChat), {
+          targetId: HistoryEntryId.make("older-destination"),
+          expectedVersion: HistoryVersion.make("initial"),
+        });
+        yield* Deferred.await(started);
+        yield* Queue.offer(route.queue, {
+          chatId: firstChat,
+          publication: Publication.make(30),
+          event: { type: "history-replaced" },
+        });
+        const refresh = yield* Queue.take(server.requests);
+        yield* Deferred.succeed(
+          refresh.reply,
+          snapshot(
+            [assistant(secondMessageId, "Newer destination")],
+            undefined,
+            {
+              publication: Publication.make(30),
+              run: { kind: "idle" },
+              assistant: [],
+              tools: [],
+            },
+            HistoryRevision.make("newer-destination"),
+          ),
+        );
+        yield* waitFor(registry, state.historyReplacing(firstChat), (value) => !value);
+        yield* Queue.offer(route.queue, {
+          chatId: firstChat,
+          publication: Publication.make(31),
+          event: {
+            type: "text-delta",
+            messageId: nextMessageId,
+            contentIndex: 0,
+            text: "Current branch delta",
+          },
+        });
+        yield* waitFor(
+          registry,
+          state.live(firstChat),
+          (value) => draftBlock(value, nextMessageId, 0)?.text === "Current branch delta",
+        );
+        yield* Deferred.succeed(navigation, {
+          kind: "applied",
+          draft: AgentPrompt.make({
+            text: "Obsolete recovered prompt",
+            attachments: [recoveredImage],
+          }),
+          snapshot: snapshot(
+            [assistant(firstMessageId, "Older destination")],
+            undefined,
+            {
+              publication: Publication.make(20),
+              run: { kind: "idle" },
+              assistant: [],
+              tools: [],
+            },
+            HistoryRevision.make("older-destination"),
+          ),
+        });
+        const result = yield* AtomRegistry.getResult(registry, state.navigateHistory(firstChat), {
+          suspendOnWaiting: true,
+        });
+        assert.deepStrictEqual(result, { kind: "cancelled" });
+        assert.isFalse(registry.get(state.historyReplacing(firstChat)));
+        assert.deepStrictEqual(AsyncResult.getOrThrow(registry.get(state.transcript(firstChat))), [
+          assistant(secondMessageId, "Newer destination"),
+        ]);
+        assert.strictEqual(
+          draftBlock(registry.get(state.live(firstChat)), nextMessageId, 0)?.text,
+          "Current branch delta",
+        );
+        assert.deepStrictEqual(registry.get(state.live(firstChat)).run, { kind: "running" });
+      }).pipe(Effect.scoped, Effect.provide(server.layer));
+    }),
   );
 
   it.live(

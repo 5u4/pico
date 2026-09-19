@@ -82,7 +82,7 @@ interface ChatRead extends ReadRecord {
   readonly chatId: ChatId;
   readonly accept: (envelope: AgentEventEnvelope, generation: Generation) => void;
   readonly buffer: (generation: Generation) => void;
-  readonly replaceSnapshot: (generation: Generation, snapshot: TranscriptSnapshot) => void;
+  readonly replaceSnapshot: (generation: Generation, snapshot: TranscriptSnapshot) => boolean;
 }
 const decodePrompt = Schema.decodeUnknownEffect(AgentPrompt);
 const unavailableError = () =>
@@ -360,12 +360,12 @@ export const make = ({ url }: { readonly url: string }) => {
           settled?.();
           return exit.value;
         });
-      const applyHistorySnapshot = (chatId: ChatId, snapshot: TranscriptSnapshot) => {
+      const applyHistorySnapshot = (chatId: ChatId, snapshot: TranscriptSnapshot): boolean => {
         const generation = current;
-        if (generation?.phase !== "active" || !isCurrent(generation)) return;
+        if (generation?.phase !== "active" || !isCurrent(generation)) return false;
         const record = chatReads.get(chatId);
-        if (record === undefined) return;
-        record.replaceSnapshot(generation, snapshot);
+        if (record === undefined) return false;
+        return record.replaceSnapshot(generation, snapshot);
       };
       yield* ensure().pipe(Effect.ignore, Effect.forkIn(pageScope));
       return {
@@ -494,9 +494,9 @@ export const make = ({ url }: { readonly url: string }) => {
         generation: Generation,
         snapshot: TranscriptSnapshot,
         replacement = false,
-      ) => {
+      ): boolean => {
         const publication = snapshot.runtime.publication;
-        if (cut?.generation === generation && publication < cut.publication) return;
+        if (cut?.generation === generation && publication < cut.publication) return false;
         const pending = buffered?.generation === generation ? buffered : undefined;
         Atom.batch(() =>
           get.registry.update(cell, (state) => {
@@ -543,6 +543,7 @@ export const make = ({ url }: { readonly url: string }) => {
             };
           }),
         );
+        return true;
       };
       return {
         kind: "transcript",
@@ -1052,16 +1053,21 @@ export const make = ({ url }: { readonly url: string }) => {
       (input, get) =>
         Effect.gen(function* () {
           const manager = yield* get.result(owner);
+          let accepted = false;
           yield* manager
             .write(
               (client) => client.NavigateChatHistory({ chatId, ...input }),
               (result) => {
                 if (result.kind === "applied") {
-                  manager.applyHistorySnapshot(chatId, result.snapshot);
+                  accepted = manager.applyHistorySnapshot(chatId, result.snapshot);
                 }
               },
             )
             .pipe(
+              Effect.map(
+                (result): NavigateHistoryResult =>
+                  result.kind === "applied" && !accepted ? { kind: "cancelled" } : result,
+              ),
               Effect.onExit((exit) =>
                 Effect.sync(() =>
                   manager.update(lane, (current) => {
