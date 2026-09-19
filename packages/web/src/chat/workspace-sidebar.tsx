@@ -370,6 +370,26 @@ export function WorkspaceSidebar({
             {navigation.groups.map(({ workspace, expanded, chats, status }) => {
               const active = workspace.id === navigation.activeWorkspaceId;
               const listId = `${id}-${workspace.id}`;
+              const renderChat = (chat: (typeof chats)[number]) => {
+                const selected = active && chat.id === navigation.activeChatId;
+                return (
+                  <li key={chat.id}>
+                    <ChatRow
+                      chat={chat}
+                      chatCloseDisabled={chatCloseDisabled}
+                      contextMenuContainer={contextMenuContainer}
+                      onChatClose={onChatClose}
+                      onChatSelect={onChatSelect}
+                      selected={selected}
+                      workspaceId={workspace.id}
+                    />
+                  </li>
+                );
+              };
+              const activeChat =
+                !expanded && active && navigation.activeChatId
+                  ? chats.find((chat) => chat.id === navigation.activeChatId)
+                  : undefined;
               return (
                 <li key={workspace.id}>
                   <div className="sidebar-row flex items-center gap-0.5" data-sidebar-row="">
@@ -409,7 +429,7 @@ export function WorkspaceSidebar({
                     </button>
                   </div>
                   <div hidden={!expanded} id={listId}>
-                    {status && (
+                    {expanded && status && (
                       <div className="py-2 pl-7 pr-2 text-meta text-muted">
                         <p
                           className="break-words"
@@ -429,25 +449,11 @@ export function WorkspaceSidebar({
                         )}
                       </div>
                     )}
-                    <ul className="space-y-px">
-                      {chats.map((chat) => {
-                        const selected = active && chat.id === navigation.activeChatId;
-                        return (
-                          <li key={chat.id}>
-                            <ChatRow
-                              chat={chat}
-                              chatCloseDisabled={chatCloseDisabled}
-                              contextMenuContainer={contextMenuContainer}
-                              onChatClose={onChatClose}
-                              onChatSelect={onChatSelect}
-                              selected={selected}
-                              workspaceId={workspace.id}
-                            />
-                          </li>
-                        );
-                      })}
-                    </ul>
+                    {expanded && <ul className="space-y-px">{chats.map(renderChat)}</ul>}
                   </div>
+                  {!expanded && activeChat && (
+                    <ul className="space-y-px">{renderChat(activeChat)}</ul>
+                  )}
                 </li>
               );
             })}
