@@ -3,22 +3,35 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { UserMessage } from "@oh-my-pi/pi-ai";
 import type { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { HistoryEntryId } from "@pico/contract/agent-history";
 import { AbsolutePath } from "@pico/contract/path";
 import * as Effect from "effect/Effect";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 const importNative = async () => {
-  const [managers, loaders, contexts, titles, auth, registries, settings, sessionSettings] =
-    await Promise.all([
-      import("@oh-my-pi/pi-coding-agent/session/session-manager"),
-      import("@oh-my-pi/pi-coding-agent/session/session-loader"),
-      import("@oh-my-pi/pi-coding-agent/session/session-context"),
-      import("@oh-my-pi/pi-coding-agent/session/session-title-slot"),
-      import("@oh-my-pi/pi-coding-agent/session/auth-storage"),
-      import("@oh-my-pi/pi-coding-agent/config/model-registry"),
-      import("@oh-my-pi/pi-coding-agent/config/settings"),
-      import("./session-settings.ts"),
-    ]);
+  const [
+    managers,
+    loaders,
+    contexts,
+    titles,
+    auth,
+    registries,
+    settings,
+    sessionSettings,
+    blobs,
+    adapter,
+  ] = await Promise.all([
+    import("@oh-my-pi/pi-coding-agent/session/session-manager"),
+    import("@oh-my-pi/pi-coding-agent/session/session-loader"),
+    import("@oh-my-pi/pi-coding-agent/session/session-context"),
+    import("@oh-my-pi/pi-coding-agent/session/session-title-slot"),
+    import("@oh-my-pi/pi-coding-agent/session/auth-storage"),
+    import("@oh-my-pi/pi-coding-agent/config/model-registry"),
+    import("@oh-my-pi/pi-coding-agent/config/settings"),
+    import("./session-settings.ts"),
+    import("@oh-my-pi/pi-coding-agent/session/blob-store"),
+    import("./layer.ts"),
+  ]);
   return {
     ...managers,
     ...loaders,
@@ -28,6 +41,9 @@ const importNative = async () => {
     ...registries,
     ...settings,
     ...sessionSettings,
+    ...blobs,
+    normalizeHistory: adapter.normalizeHistory,
+    projectHistoryPreview: adapter.projectHistoryPreview,
   };
 };
 
@@ -307,4 +323,221 @@ describe("native history cursor persistence", () => {
       }
     });
   });
+
+  it("repairs truncated legacy frames before projecting metadata context without rewriting", async () => {
+    const file = join(root, "legacy-archive.jsonl");
+    const timestamp = "2026-09-18T00:00:00.000Z";
+    const content = [
+      { type: "session", version: 2, id: "legacy-session", timestamp, cwd: root },
+      {
+        type: "message",
+        id: "legacy-note",
+        parentId: null,
+        timestamp,
+        message: {
+          role: "hookMessage",
+          customType: "legacy-note",
+          content: "Legacy note",
+          display: true,
+          timestamp: 1,
+        },
+      },
+      {
+        type: "compaction",
+        id: "compacted",
+        parentId: "legacy-note",
+        timestamp,
+        summary: "Recovered archive",
+        firstKeptEntryId: "kept",
+        tokensBefore: 100,
+        preserveData: {
+          snapcompact: {
+            text: "Archived source text",
+            frames: [
+              {
+                data: "invalid\n\n[Session persistence truncated large content]",
+                mimeType: "image/png",
+                cols: 1,
+                rows: 1,
+                chars: 20,
+              },
+            ],
+          },
+        },
+      },
+      {
+        type: "message",
+        id: "kept",
+        parentId: "compacted",
+        timestamp,
+        message: userMessage("Kept prompt"),
+      },
+    ]
+      .map((entry) => JSON.stringify(entry))
+      .join("\n");
+    await NodeFileSystem.writeFile(file, content);
+    const history = await native.loadSessionHistoryReadOnly(file);
+    expect(history.entries[0]).toMatchObject({
+      message: { role: "custom", content: "Legacy note" },
+    });
+    expect(history.entries[1]).toMatchObject({
+      preserveData: {
+        snapcompact: {
+          frames: [],
+          text: "Archived source text",
+          textHead: "Archived source text",
+          textTail: "",
+        },
+      },
+    });
+    const context = native.buildSessionContext(history.entries, history.activeLeafId);
+    expect(JSON.stringify(context.messages)).toContain("Archived source text");
+    expect(JSON.stringify(context.messages)).not.toContain("Session persistence truncated");
+    expect(await NodeFileSystem.readFile(file, "utf8")).toBe(content);
+  });
+
+  it.each(["buffered", "streamed"] as const)(
+    "keeps %s history images externalized across search, preview, and cold model reads",
+    async (mode) => {
+      const cwd = await NodeFileSystem.mkdtemp(join(root, "metadata-"));
+      const file = join(cwd, "history.jsonl");
+      const blobs = new native.BlobStore(join(root, "agent", "blobs"));
+      const payloads = [Buffer.alloc(2048, 1), Buffer.alloc(3072, 2), Buffer.alloc(4096, 3)];
+      const stored = await Promise.all(payloads.map((data) => blobs.put(data)));
+      const image = (index: number) => {
+        const blob = stored[index];
+        if (blob === undefined) throw new Error(`Missing fixture image ${index}`);
+        return { type: "image", mimeType: "image/png", data: blob.ref };
+      };
+      const visibleText = `  Full selected prompt\n${"visible text ".repeat(100)}needle-at-tail`;
+      const timestamp = "2026-09-18T00:00:00.000Z";
+      const records = [
+        { type: "session", version: 3, id: "metadata-session", cwd, timestamp },
+        {
+          type: "model_change",
+          id: "model",
+          parentId: null,
+          timestamp,
+          model: "openai/gpt-4.1",
+          role: "default",
+        },
+        { type: "message", id: "root", parentId: "model", timestamp, message: userMessage("Root") },
+        {
+          type: "message",
+          id: "selected",
+          parentId: "root",
+          timestamp,
+          message: {
+            role: "user",
+            content: [{ type: "text", text: visibleText }, image(0), image(1)],
+            timestamp: 2,
+          },
+        },
+        {
+          type: "message",
+          id: "side",
+          parentId: "root",
+          timestamp,
+          message: {
+            role: "user",
+            content: [{ type: "text", text: "Off-branch image" }, image(2)],
+            timestamp: 3,
+          },
+        },
+        {
+          type: "message",
+          id: "missing",
+          parentId: "side",
+          timestamp,
+          message: {
+            role: "user",
+            content: [
+              { type: "image", mimeType: "image/png", data: `blob:sha256:${"f".repeat(64)}` },
+            ],
+            timestamp: 4,
+          },
+        },
+        ...(mode === "streamed"
+          ? [
+              {
+                type: "custom",
+                id: "padding",
+                parentId: "side",
+                timestamp,
+                customType: "padding",
+                data: "x".repeat(8 * 1024 * 1024),
+              },
+            ]
+          : []),
+        { type: "session_cursor", leafId: "selected", revision: "metadata-revision" },
+      ];
+      const original = `${records.map((record) => JSON.stringify(record)).join("\n")}\n`;
+      await NodeFileSystem.writeFile(file, original);
+      const auth = await native.AuthStorage.create(join(cwd, "auth.db"));
+      auth.setRuntimeApiKey("openai", "local-history-test");
+      const registry = new native.ModelRegistry(auth, join(cwd, "models.yml"), {
+        settings: native.Settings.isolated({}),
+        ignoreLocalModelConfig: true,
+      });
+      const blobFiles = await NodeFileSystem.readdir(blobs.dir);
+      const get = vi.spyOn(native.BlobStore.prototype, "get");
+      const getSync = vi.spyOn(native.BlobStore.prototype, "getSync");
+      try {
+        let version: string | undefined;
+        for (let attempt = 0; attempt < 3; attempt++) {
+          const history = await native.loadSessionHistoryReadOnly(file);
+          expect(history).toMatchObject({
+            sessionId: "metadata-session",
+            activeLeafId: "selected",
+            revision: "metadata-revision",
+          });
+          if (version !== undefined) expect(history.version).toBe(version);
+          version = history.version;
+          const selected = history.entries.find((entry) => entry.id === "selected");
+          expect(selected).toMatchObject({
+            message: { content: [{ type: "text", text: visibleText }, image(0), image(1)] },
+          });
+          expect(history.entries.find((entry) => entry.id === "side")).toMatchObject({
+            message: { content: [{ type: "text", text: "Off-branch image" }, image(2)] },
+          });
+          expect(native.normalizeHistory(history.entries, "needle-at-tail").matches).toEqual([
+            "selected",
+          ]);
+          expect(native.normalizeHistory(history.entries, "off-branch image").matches).toEqual([
+            "side",
+          ]);
+          const preview = native.projectHistoryPreview(
+            await native.loadSessionHistoryReadOnly(file),
+            HistoryEntryId.make("selected"),
+          );
+          expect(preview).toEqual({
+            targetId: "selected",
+            version,
+            destinationLeafId: "root",
+            blocks: [
+              { label: "User", text: "Root" },
+              { label: "User", text: `${visibleText}\n[Image]\n[Image]` },
+            ],
+          });
+          expect(
+            await Effect.runPromise(
+              native.loadCurrentModel(registry, AbsolutePath.make(cwd), file),
+            ),
+          ).toMatchObject({ provider: "openai", id: "gpt-4.1" });
+        }
+        expect(get.mock.calls).toEqual([]);
+        expect(getSync.mock.calls).toEqual([]);
+        expect(await NodeFileSystem.readFile(file, "utf8")).toBe(original);
+        expect(await NodeFileSystem.readdir(blobs.dir)).toEqual(blobFiles);
+        for (const [index, blob] of stored.entries()) {
+          expect(await NodeFileSystem.readFile(blob.path)).toEqual(payloads[index]);
+        }
+      } finally {
+        get.mockRestore();
+        getSync.mockRestore();
+        auth.close();
+      }
+    },
+    30_000,
+  );
 });

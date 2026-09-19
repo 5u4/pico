@@ -1993,7 +1993,7 @@ index d8be66daf349918222d1984b756e61c752f93d0a..03a2ef6dbc7863b4dd088db0f8b59e72
  /** Tree node for getTree() - defensive copy of session structure */
  export interface SessionTreeNode {
 diff --git a/src/session/session-loader.ts b/src/session/session-loader.ts
-index 732fc693457fc464ad5b4d4b6f620d96aa6177ce..b7c82d295038e1da3248c3a6080ae0f8aca2d6c2 100644
+index 732fc693457fc464ad5b4d4b6f620d96aa6177ce..da57313f58c4b2ddf83453a90022fed6fae1d464 100644
 --- a/src/session/session-loader.ts
 +++ b/src/session/session-loader.ts
 @@ -1,10 +1,12 @@
@@ -2217,7 +2217,7 @@ index 732fc693457fc464ad5b4d4b6f620d96aa6177ce..b7c82d295038e1da3248c3a6080ae0f8
 +	const header = loaded.entries[0];
 +	if (!header || header.type !== "session") throw new Error("Session header is missing or malformed.");
 +	migrateToCurrentVersion(loaded.entries);
-+	await resolveBlobRefsInEntries(loaded.entries, new BlobStore(getBlobsDir()));
++	for (const entry of loaded.entries) repairTruncatedSnapcompactFrames(entry);
 +	const entries = loaded.entries.slice(1) as SessionEntry[];
 +	const activeLeafId = loaded.cursor ? loaded.cursor.leafId : (entries.at(-1)?.id ?? null);
 +	const revision = loaded.cursor?.revision ?? header.id;

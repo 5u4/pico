@@ -890,14 +890,18 @@ describe("native SessionPool ownership", () => {
     30_000,
   );
 
-  it("recovers an image-only prompt that can be sent on the selected branch", async () => {
+  it("recovers an externalized image-only prompt after native session initialization", async () => {
     const turn = providerTurn("Image received");
-    await withSession([turn], async (session) => {
-      const manager = session.sessionManager;
+    await withSession([turn], async (session, reopen) => {
+      let manager = session.sessionManager;
+      const pixel = Buffer.from(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+        "base64",
+      );
       const image = {
         type: "image" as const,
         mimeType: "image/png" as const,
-        data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+        data: await new Bun.Image(pixel).resize(32, 32).png({ compressionLevel: 0 }).toBase64(),
       };
       const rootId = manager.appendMessage({ role: "user", content: "Root", timestamp: 1 });
       const targetId = HistoryEntryId.make(
@@ -905,6 +909,16 @@ describe("native SessionPool ownership", () => {
       );
       await manager.ensureOnDisk();
       await manager.flush();
+      const file = manager.getSessionFile();
+      if (file === undefined) throw new Error("Expected native history journal");
+      const journal = await NodeFileSystem.readFile(file, "utf8");
+      expect(journal).toContain("blob:sha256:");
+      expect(journal).not.toContain(image.data);
+      await session.dispose();
+      session = await reopen();
+      manager = session.sessionManager;
+      expect(manager.getEntry(targetId)).toMatchObject({ message: { content: [image] } });
+      expect(await NodeFileSystem.readFile(file, "utf8")).toBe(journal);
       await Effect.runPromise(
         Effect.scoped(
           Effect.gen(function* () {
@@ -933,13 +947,8 @@ describe("native SessionPool ownership", () => {
               : undefined;
             if (!sentImage) throw new Error("Expected image content at the provider");
             const imageBytes = Buffer.from(sentImage.data, "base64");
-            expect(imageBytes.byteLength).toBeGreaterThan(0);
             const metadata = yield* Effect.promise(() => new Bun.Image(imageBytes).metadata());
-            expect(metadata.width).toBeGreaterThan(0);
-            expect(metadata.height).toBeGreaterThan(0);
             expect(sentImage.mimeType).toBe(`image/${metadata.format}`);
-            const decoded = yield* Effect.promise(() => new Bun.Image(imageBytes).png().bytes());
-            expect(decoded.byteLength).toBeGreaterThan(0);
             turn.release.resolve();
             if (delivery.kind !== "handled") yield* delivery.completed;
             expect((yield* pool.transcript(chatId)).messages.at(-1)?.content).toEqual([

@@ -122,10 +122,13 @@ export class AgentRuntime extends Context.Service<
     /** Application reads persisted chat snapshots without initializing an absent session. */
     readonly transcript: (chatId: ChatId) => Effect.Effect<TranscriptSnapshot, AgentError>;
 
+    /** Application reads this when the history panel opens or its search changes. */
     readonly history: (input: ChatHistoryRequest) => Effect.Effect<HistorySnapshot, AgentError>;
+    /** Application reads this when a historical node is selected for preview. */
     readonly previewHistory: (
       input: PreviewChatHistoryRequest,
     ) => Effect.Effect<HistoryPreview, AgentError>;
+    /** Application calls this after an explicit request to continue from a historical node. */
     readonly navigateHistory: (
       input: NavigateChatHistoryRequest,
     ) => Effect.Effect<NavigateHistoryResult, AgentError>;

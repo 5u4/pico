@@ -138,14 +138,17 @@ export class Application extends Context.Service<
     /** Platform adapters read persisted chat snapshots and the retained session's context estimate. */
     readonly transcript: (chatId: ChatId) => Effect.Effect<TranscriptSnapshot, ApplicationError>;
 
+    /** Web RPC handlers call this when the history panel opens or its search changes. */
     readonly history: (
       input: ChatHistoryRequest,
     ) => Effect.Effect<HistorySnapshot, ApplicationError | ChatClosed>;
 
+    /** Web RPC handlers call this when a historical node is selected for preview. */
     readonly previewHistory: (
       input: PreviewChatHistoryRequest,
     ) => Effect.Effect<HistoryPreview, ApplicationError | ChatClosed>;
 
+    /** Web RPC handlers call this after an explicit request to continue from a historical node. */
     readonly navigateHistory: (
       input: NavigateChatHistoryRequest,
     ) => Effect.Effect<NavigateHistoryResult, ApplicationError | ChatClosed>;
