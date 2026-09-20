@@ -419,7 +419,7 @@ export const make = Effect.fn("TelegramClient.make")(function* (
   const webhook = yield* getWebhookInfo();
   if ((webhook.url?.trim().length ?? 0) > 0) {
     return yield* new TelegramError({
-      message: "Telegram get-webhook-info failed",
+      message: "A Telegram webhook is already configured. Remove it before starting long polling.",
       operation: "get-webhook-info",
       category: "webhook",
     });

@@ -33,7 +33,7 @@ const bindFailure = "Binding failed. Use a readable absolute directory path.";
 const unknownCommand = "Unsupported command. Available commands are /bind and /abort.";
 const useTopic = "Use a named topic for prompts. General messages do not create chats.";
 const noActiveChat = "No active topic chat is available.";
-const abortComplete = "Stopped active work for this topic.";
+const abortProcessed = "Stop request processed. Any queued messages may still run.";
 const failedNotice = "The request failed.";
 const abortedNotice = "The request was stopped.";
 
@@ -46,6 +46,15 @@ const isExpectedApplicationError = (error: unknown) =>
   error instanceof WorkspaceBindingInvalid ||
   error instanceof ChatClosed ||
   (error instanceof ApplicationError && error.reason !== "operation");
+
+const applicationFailureNotice = (error: unknown): string | null => {
+  if (error instanceof ChatClosed) return noActiveChat;
+  if (error instanceof WorkspaceBindingInvalid) return bindFailure;
+  if (isExpectedApplicationError(error)) {
+    return "The request could not be accepted. Check the workspace binding and topic state.";
+  }
+  return null;
+};
 
 const logTelegramError = (
   operation: string,
@@ -72,11 +81,12 @@ const reportUnexpectedCause = (operation: string, cause: Cause.Cause<unknown>) =
   if (Cause.hasInterruptsOnly(cause)) return Effect.void;
   const failure = cause.reasons.find(
     (reason): reason is Extract<Cause.Reason<unknown>, { readonly _tag: "Fail" }> =>
-      reason._tag === "Fail",
+      reason._tag === "Fail" && !isExpectedApplicationError(reason.error),
   );
-  const error = failure?._tag === "Fail" ? failure.error : undefined;
-  if (error instanceof TelegramError) return logTelegramError(operation, error);
-  if (isExpectedApplicationError(error)) return Effect.void;
+  if (!Cause.hasDies(cause)) {
+    if (failure === undefined) return Effect.void;
+    if (failure.error instanceof TelegramError) return logTelegramError(operation, failure.error);
+  }
   return Effect.logError("Telegram operation failed").pipe(
     Effect.annotateLogs({
       component: "telegram",
@@ -127,13 +137,19 @@ const start = Effect.fn("Telegram.start")(function* (
   const allowedUsers = new Set(config.allowedUserIds);
   const operatorsEnabled = allowedChats.size > 0 && allowedUsers.size > 0;
 
-  const reply = (
-    input: Extract<TelegramInput, { readonly kind: "forum-topic" | "forum-general" }>,
-    message: string,
-  ) =>
-    input.kind === "forum-topic"
-      ? client.sendText(input.address, message)
-      : client.sendGeneral(input.chatId, message);
+  const reply = Effect.fn("Telegram.reply")(
+    function* (
+      input: Extract<TelegramInput, { readonly kind: "forum-topic" | "forum-general" }>,
+      message: string,
+    ) {
+      if (input.kind === "forum-topic") {
+        yield* client.sendText(input.address, message);
+      } else {
+        yield* client.sendGeneral(input.chatId, message);
+      }
+    },
+    Effect.catchCause((cause) => reportUnexpectedCause("reply", cause)),
+  );
 
   const findTopicChat = Effect.fn("Telegram.findTopicChat")(function* (
     input: Extract<TelegramInput, { readonly kind: "forum-topic" }>,
@@ -154,28 +170,11 @@ const start = Effect.fn("Telegram.start")(function* (
       yield* reply(input, bindUsage);
       return;
     }
-    const bound = yield* application
-      .bindWorkspace({
-        binding: { platform: "telegram", externalId: input.chatId },
-        workspaceName: input.chatTitle ?? `Telegram chat ${input.chatId}`,
-        configuration: { kind: "direct", cwd },
-      })
-      .pipe(
-        Effect.match({
-          onSuccess: () => ({ ok: true as const }),
-          onFailure: (error) => ({ ok: false as const, error }),
-        }),
-      );
-    if (!bound.ok) {
-      if (
-        bound.error instanceof WorkspaceBindingInvalid ||
-        isExpectedApplicationError(bound.error)
-      ) {
-        yield* reply(input, bindFailure);
-        return;
-      }
-      return yield* Effect.fail(bound.error);
-    }
+    yield* application.bindWorkspace({
+      binding: { platform: "telegram", externalId: input.chatId },
+      workspaceName: input.chatTitle ?? `Telegram chat ${input.chatId}`,
+      configuration: { kind: "direct", cwd },
+    });
     yield* reply(input, bindSuccess);
   });
 
@@ -241,28 +240,16 @@ const start = Effect.fn("Telegram.start")(function* (
       yield* reply(input, noActiveChat);
       return;
     }
-    const aborted = yield* application.abort(topic.value.chatId).pipe(
-      Effect.match({
-        onSuccess: () => ({ ok: true as const }),
-        onFailure: (error) => ({ ok: false as const, error }),
-      }),
-    );
-    if (!aborted.ok) {
-      if (isExpectedApplicationError(aborted.error)) {
-        yield* reply(input, noActiveChat);
-        return;
-      }
-      return yield* Effect.fail(aborted.error);
-    }
-    yield* reply(input, abortComplete);
+    yield* application.abort(topic.value.chatId);
+    yield* reply(input, abortProcessed);
   });
 
-  const consumeInput = (input: TelegramInput) =>
-    Effect.gen(function* () {
-      if (input.kind === "unsupported") return;
-      if (!operatorsEnabled || !allowedChats.has(input.chatId)) return;
-      if (!allowedUsers.has(input.userId)) return;
-      if (input.command?.target === "other") return;
+  const consumeInput = Effect.fn("Telegram.consumeInput")(function* (input: TelegramInput) {
+    if (input.kind === "unsupported") return;
+    if (!operatorsEnabled || !allowedChats.has(input.chatId)) return;
+    if (!allowedUsers.has(input.userId)) return;
+    if (input.command?.target === "other") return;
+    yield* Effect.gen(function* () {
       if (input.command !== null) {
         switch (input.command.name) {
           case "bind": {
@@ -280,7 +267,24 @@ const start = Effect.fn("Telegram.start")(function* (
         }
       }
       yield* handlePrompt(input);
-    }).pipe(Effect.catchCause((cause) => reportUnexpectedCause("consume-input", cause)));
+    }).pipe(
+      Effect.catchCause((cause) =>
+        Effect.gen(function* () {
+          if (Cause.hasInterruptsOnly(cause)) return;
+          const failure = Cause.findErrorOption(cause);
+          const expectedOnly =
+            !Cause.hasDies(cause) &&
+            cause.reasons.every(
+              (reason) => reason._tag !== "Fail" || isExpectedApplicationError(reason.error),
+            );
+          const notice =
+            expectedOnly && Option.isSome(failure) ? applicationFailureNotice(failure.value) : null;
+          yield* reportUnexpectedCause("consume-input", cause);
+          yield* reply(input, notice ?? failedNotice);
+        }),
+      ),
+    );
+  });
 
   const deliverOutput = (envelope: AgentEventEnvelope) =>
     Effect.gen(function* () {

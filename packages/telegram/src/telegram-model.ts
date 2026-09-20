@@ -107,17 +107,31 @@ export const parseChatId = Effect.fn("TelegramModel.parseChatId")(function* (cha
   return numeric;
 });
 
+const telegramTextLimit = 4096;
+const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+
 export const splitTelegramText = (text: string): ReadonlyArray<string> => {
+  if (text.length <= telegramTextLimit) return text.length === 0 ? [] : [text];
+
   const chunks: string[] = [];
-  for (let offset = 0; offset < text.length; ) {
-    let end = Math.min(offset + 4096, text.length);
-    if (end < text.length) {
+  let offset = 0;
+  for (const { index, segment } of graphemeSegmenter.segment(text)) {
+    const segmentEnd = index + segment.length;
+    if (segmentEnd - offset <= telegramTextLimit) continue;
+
+    if (index > offset) {
+      chunks.push(text.slice(offset, index));
+      offset = index;
+    }
+    while (segmentEnd - offset > telegramTextLimit) {
+      let end = offset + telegramTextLimit;
       const last = text.charCodeAt(end - 1);
       const next = text.charCodeAt(end);
       if (last >= 0xd800 && last <= 0xdbff && next >= 0xdc00 && next <= 0xdfff) end -= 1;
+      chunks.push(text.slice(offset, end));
+      offset = end;
     }
-    chunks.push(text.slice(offset, end));
-    offset = end;
   }
+  if (offset < text.length) chunks.push(text.slice(offset));
   return chunks;
 };

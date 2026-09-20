@@ -8,9 +8,11 @@ import { ApplicationError } from "@pico/contract/errors";
 import { EventRouter } from "@pico/contract/event-router";
 import { AbsolutePath } from "@pico/contract/path";
 import * as Workspace from "@pico/contract/workspace-model";
+import * as Cause from "effect/Cause";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Redacted from "effect/Redacted";
@@ -194,11 +196,12 @@ describe("telegram layer", () => {
   );
 
   it.effect.each([
-    { operation: "createChat", reason: "invalid-state" },
-    { operation: "sendMessage", reason: "operation" },
+    { operation: "createChat", reason: "invalid-state", withDefect: false },
+    { operation: "sendMessage", reason: "operation", withDefect: false },
+    { operation: "createChat", reason: "invalid-state", withDefect: true },
   ] as const)(
-    "replies safely in the authorized topic when $operation fails with $reason",
-    ({ operation, reason }) =>
+    "replies safely when $operation fails with $reason and a co-present defect is $withDefect",
+    ({ operation, reason, withDefect }) =>
       Effect.scoped(
         Effect.gen(function* () {
           const inputs = yield* Queue.unbounded<TelegramInput, never>();
@@ -206,6 +209,7 @@ describe("telegram layer", () => {
           const processed = yield* Deferred.make<void>();
           const replies: { readonly address: TelegramAddress; readonly text: string }[] = [];
           const generalReplies: string[] = [];
+          const logs: Array<ReturnType<typeof Logger.formatStructured.log>> = [];
           const sensitiveDetails = [
             "/private/telegram-secret-workspace",
             "https://provider.invalid/private-request",
@@ -215,6 +219,11 @@ describe("telegram layer", () => {
             reason,
             message: sensitiveDetails.join(" "),
           });
+          const admissionFailure = withDefect
+            ? Effect.failCause(
+                Cause.combine(Cause.fail(failure), Cause.die(sensitiveDetails.join(" "))),
+              )
+            : Effect.fail(failure);
           const workspace: Workspace.Workspace = {
             id: baseWorkspaceId,
             name: "Workspace",
@@ -238,8 +247,8 @@ describe("telegram layer", () => {
             findWorkspaceByPlatformId: () => Effect.succeed(Option.some(workspace)),
             findChatByPlatformId: () =>
               Effect.succeed(operation === "createChat" ? Option.none() : Option.some(chat)),
-            createChat: () => Effect.fail(failure),
-            sendMessage: () => Effect.fail(failure),
+            createChat: () => admissionFailure,
+            sendMessage: () => admissionFailure,
           });
           const client: TelegramClient = {
             identity: { id: "1", username: "pico_bot" },
@@ -260,7 +269,13 @@ describe("telegram layer", () => {
               }),
           };
 
-          yield* startLayer(baseConfig, client, application, makeRouter(events));
+          yield* startLayer(baseConfig, client, application, makeRouter(events)).pipe(
+            Effect.provide(
+              Logger.layer([
+                Logger.make((options) => logs.push(Logger.formatStructured.log(options))),
+              ]),
+            ),
+          );
           yield* Queue.offer(
             inputs,
             topicInput({
@@ -283,109 +298,122 @@ describe("telegram layer", () => {
             assert.notStrictEqual(reply.text.trim(), "");
             for (const detail of sensitiveDetails) assert.notInclude(reply.text, detail);
           }
+          assert.deepStrictEqual(
+            logs
+              .filter((entry) => entry.annotations.operation === "consume-input")
+              .map((entry) => entry.annotations.category),
+            withDefect || reason === "operation" ? ["unexpected"] : [],
+          );
+          for (const detail of sensitiveDetails) assert.notInclude(JSON.stringify(logs), detail);
         }),
       ),
   );
 
-  it.effect("attempts a failed error reply once and continues processing later inputs", () =>
-    Effect.scoped(
-      Effect.gen(function* () {
-        const inputs = yield* Queue.unbounded<TelegramInput, never>();
-        const events = yield* Queue.unbounded<AgentEventEnvelope, never>();
-        const processed = yield* Deferred.make<void>();
-        let handled = 0;
-        const attempts: { readonly address: TelegramAddress; readonly text: string }[] = [];
-        const delivered: { readonly address: TelegramAddress; readonly text: string }[] = [];
-        const workspace: Workspace.Workspace = {
-          id: baseWorkspaceId,
-          name: "Workspace",
-          platform: "telegram",
-          externalId: "-1001",
-          defaultCwd: AbsolutePath.make("/tmp/workspace"),
-          worktree: null,
-          modelOverride: null,
-          createdAt: 0,
-        };
-        const application = Application.of({
-          ...applicationBase,
-          findWorkspaceByPlatformId: () => Effect.succeed(Option.some(workspace)),
-          findChatByPlatformId: () => Effect.succeed(Option.none()),
-          createChat: () =>
-            Effect.fail(
-              new ApplicationError({
-                reason: "invalid-state",
-                message: "/private/telegram-secret-workspace no longer exists",
-              }),
-            ),
-        });
-        const client: TelegramClient = {
-          identity: { id: "1", username: "pico_bot" },
-          consume: (handle) =>
-            Effect.forever(
-              Queue.take(inputs).pipe(
-                Effect.flatMap(handle),
-                Effect.flatMap(() => {
-                  handled += 1;
-                  return handled === 2 ? Deferred.succeed(processed, undefined) : Effect.void;
+  it.effect.each(["typed failure", "synchronous defect"] as const)(
+    "attempts an error reply once after a %s and continues processing later inputs",
+    (failureKind) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const inputs = yield* Queue.unbounded<TelegramInput, never>();
+          const events = yield* Queue.unbounded<AgentEventEnvelope, never>();
+          const processed = yield* Deferred.make<void>();
+          let handled = 0;
+          const attempts: { readonly address: TelegramAddress; readonly text: string }[] = [];
+          const delivered: { readonly address: TelegramAddress; readonly text: string }[] = [];
+          const workspace: Workspace.Workspace = {
+            id: baseWorkspaceId,
+            name: "Workspace",
+            platform: "telegram",
+            externalId: "-1001",
+            defaultCwd: AbsolutePath.make("/tmp/workspace"),
+            worktree: null,
+            modelOverride: null,
+            createdAt: 0,
+          };
+          const application = Application.of({
+            ...applicationBase,
+            findWorkspaceByPlatformId: () => Effect.succeed(Option.some(workspace)),
+            findChatByPlatformId: () => Effect.succeed(Option.none()),
+            createChat: () =>
+              Effect.fail(
+                new ApplicationError({
+                  reason: "invalid-state",
+                  message: "/private/telegram-secret-workspace no longer exists",
                 }),
               ),
-            ),
-          sendText: (address, text) =>
-            Effect.gen(function* () {
-              attempts.push({ address, text });
-              if (address.topicId === 77) {
-                return yield* Effect.fail(
-                  new TelegramError({
-                    message: "error reply delivery failed",
-                    operation: "send-message",
-                    category: "network",
+          });
+          const client: TelegramClient = {
+            identity: { id: "1", username: "pico_bot" },
+            consume: (handle) =>
+              Effect.forever(
+                Queue.take(inputs).pipe(
+                  Effect.flatMap(handle),
+                  Effect.flatMap(() => {
+                    handled += 1;
+                    return handled === 2 ? Deferred.succeed(processed, undefined) : Effect.void;
                   }),
-                );
+                ),
+              ),
+            sendText: (address, text) => {
+              attempts.push({ address, text });
+              if (address.topicId === 77 && failureKind === "synchronous defect") {
+                throw new Error("sendText threw before returning an Effect");
               }
-              delivered.push({ address, text });
+              return Effect.gen(function* () {
+                if (address.topicId === 77) {
+                  return yield* Effect.fail(
+                    new TelegramError({
+                      message: "error reply delivery failed",
+                      operation: "send-message",
+                      category: "network",
+                    }),
+                  );
+                }
+                delivered.push({ address, text });
+              });
+            },
+            sendGeneral: () => Effect.void,
+          };
+
+          yield* startLayer(baseConfig, client, application, makeRouter(events));
+          yield* Queue.offer(
+            inputs,
+            topicInput({
+              chatId: "-1001",
+              userId: "42",
+              text: "hello",
+              chatTitle: "Engineering",
+              command: null,
+              address: { chatId: "-1001", topicId: 77 },
             }),
-          sendGeneral: () => Effect.void,
-        };
+          );
+          yield* Queue.offer(
+            inputs,
+            topicInput({
+              chatId: "-1001",
+              userId: "42",
+              text: "/bind",
+              chatTitle: "Engineering",
+              command: { name: "bind", target: "self", argument: "" },
+              address: { chatId: "-1001", topicId: 88 },
+            }),
+          );
 
-        yield* startLayer(baseConfig, client, application, makeRouter(events));
-        yield* Queue.offer(
-          inputs,
-          topicInput({
-            chatId: "-1001",
-            userId: "42",
-            text: "hello",
-            chatTitle: "Engineering",
-            command: null,
-            address: { chatId: "-1001", topicId: 77 },
-          }),
-        );
-        yield* Queue.offer(
-          inputs,
-          topicInput({
-            chatId: "-1001",
-            userId: "42",
-            text: "/bind",
-            chatTitle: "Engineering",
-            command: { name: "bind", target: "self", argument: "" },
-            address: { chatId: "-1001", topicId: 88 },
-          }),
-        );
-
-        yield* Deferred.await(processed);
-        assert.deepStrictEqual(
-          attempts.map(({ address }) => address),
-          [
-            { chatId: "-1001", topicId: 77 },
-            { chatId: "-1001", topicId: 88 },
-          ],
-        );
-        assert.deepStrictEqual(
-          delivered.map(({ address }) => address),
-          [{ chatId: "-1001", topicId: 88 }],
-        );
-        for (const reply of attempts) assert.notStrictEqual(reply.text.trim(), "");
-      }),
-    ),
+          yield* Deferred.await(processed);
+          assert.deepStrictEqual(
+            attempts.map(({ address }) => address),
+            [
+              { chatId: "-1001", topicId: 77 },
+              { chatId: "-1001", topicId: 88 },
+            ],
+          );
+          assert.deepStrictEqual(
+            delivered.map(({ address }) => address),
+            [{ chatId: "-1001", topicId: 88 }],
+          );
+          for (const reply of attempts) assert.notStrictEqual(reply.text.trim(), "");
+        }),
+      ),
   );
 
   it.effect("keeps /abort responsive while completion remains pending", () =>
