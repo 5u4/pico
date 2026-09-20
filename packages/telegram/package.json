@@ -1,0 +1,17 @@
+{
+  "name": "@pico/telegram",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./layer": "./src/layer.ts"
+  },
+  "dependencies": {
+    "@pico/config": "workspace:*",
+    "@pico/contract": "workspace:*",
+    "effect": "catalog:"
+  },
+  "devDependencies": {
+    "@effect/vitest": "catalog:",
+    "vitest": "catalog:"
+  }
+}

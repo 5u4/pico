@@ -88,6 +88,7 @@
         "@pico/persistence": "workspace:*",
         "@pico/rpc": "workspace:*",
         "@pico/schedule": "workspace:*",
+        "@pico/telegram": "workspace:*",
         "@pico/web": "workspace:*",
         "effect": "catalog:",
       },
@@ -206,6 +207,18 @@
       "devDependencies": {
         "@effect/platform-bun": "catalog:",
         "@effect/vitest": "catalog:",
+      },
+    },
+    "packages/telegram": {
+      "name": "@pico/telegram",
+      "dependencies": {
+        "@pico/config": "workspace:*",
+        "@pico/contract": "workspace:*",
+        "effect": "catalog:",
+      },
+      "devDependencies": {
+        "@effect/vitest": "catalog:",
+        "vitest": "catalog:",
       },
     },
     "packages/web": {
@@ -667,6 +680,8 @@
     "@pico/rpc": ["@pico/rpc@workspace:packages/rpc"],
 
     "@pico/schedule": ["@pico/schedule@workspace:packages/schedule"],
+
+    "@pico/telegram": ["@pico/telegram@workspace:packages/telegram"],
 
     "@pico/web": ["@pico/web@workspace:packages/web"],
 

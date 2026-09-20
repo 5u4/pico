@@ -29,6 +29,7 @@ import * as AgentSessionStoreLayer from "@pico/omp/agent-session-store";
 import * as AgentRuntimeLayer from "@pico/omp/layer";
 import * as PersistenceLayer from "@pico/persistence/layer";
 import * as ScheduleLayer from "@pico/schedule/layer";
+import * as TelegramLayer from "@pico/telegram/layer";
 import { AssetBuildError } from "@pico/web/assets";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
@@ -122,6 +123,7 @@ const openComponents = Effect.fn("Daemon.openComponents")(function* (
     Effect.annotateLogs({
       phase: "ready",
       discord: Option.isSome(config.discord) ? "enabled" : "disabled",
+      telegram: Option.isSome(config.telegram) ? "enabled" : "disabled",
       rpc: "enabled",
       webUrl: web.webUrl,
     }),
@@ -145,7 +147,8 @@ const reportFailure = (cause: Cause.Cause<unknown>, phase: string) => {
         error instanceof ScheduleError ||
         error instanceof ScheduleHostError ||
         error instanceof AssetBuildError ||
-        error instanceof DiscordLayer.DiscordError
+        error instanceof DiscordLayer.DiscordError ||
+        error instanceof TelegramLayer.TelegramError
       )
         return reason;
       const safeError = new Error(
@@ -213,14 +216,18 @@ const daemonLayer = (paths: PicoPaths, config: Config.PicoConfig) =>
       const core = Layer.merge(application, EventRouterLayer.layer).pipe(
         Layer.provide(agentRuntime),
       );
-      const surfaces =
+      const discordSurface =
         discord === null
-          ? core
+          ? Layer.empty
           : DiscordLayer.layer(discord.config, {
               onAuthenticated: (id) => {
                 Deferred.doneUnsafe(discord.authenticated, Effect.succeed(id));
               },
-            }).pipe(Layer.provideMerge(core));
+            });
+      const telegramSurface = Option.isNone(config.telegram)
+        ? Layer.empty
+        : TelegramLayer.layer(config.telegram.value);
+      const surfaces = Layer.merge(discordSurface, telegramSurface).pipe(Layer.provideMerge(core));
       const scheduler = Layer.effectDiscard(
         Effect.gen(function* () {
           const makeHost = yield* ScheduleRunHostFactory;
