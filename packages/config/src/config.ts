@@ -18,8 +18,14 @@ const DiscordSection = Schema.Struct({
   show_thinking: Schema.optionalKey(Schema.Boolean),
 });
 
+const TelegramSection = Schema.Struct({
+  allowed_chat: Schema.Array(Schema.NonEmptyString),
+  allowed_user: Schema.Array(Schema.NonEmptyString),
+});
+
 const PicoConfigFile = Schema.Struct({
   discord: Schema.optionalKey(DiscordSection),
+  telegram: Schema.optionalKey(TelegramSection),
   browser: Schema.optionalKey(
     Schema.Struct({
       external_browser: Schema.optionalKey(ExternalBrowser),
@@ -43,11 +49,21 @@ export interface DiscordConfig {
   readonly showThinking: boolean;
 }
 
+export interface TelegramConfig {
+  readonly token: Redacted.Redacted<string>;
+  readonly allowedChatIds: ReadonlyArray<string>;
+  readonly allowedUserIds: ReadonlyArray<string>;
+}
+
 export interface PicoConfig {
   readonly discord: Option.Option<DiscordConfig>;
+  readonly telegram: Option.Option<TelegramConfig>;
   readonly browser: BrowserConfig;
   readonly web: { readonly port: number };
 }
+
+const canonicalSignedId = /^-?(?:0|[1-9][0-9]*)$/u;
+const canonicalPositiveId = /^[1-9][0-9]*$/u;
 
 const platformError = (operation: string) => (error: PlatformError.PlatformError) =>
   new ConfigError({ message: `${operation} failed (${error.reason._tag})` });
@@ -68,8 +84,116 @@ const disabled = (
   web: PicoConfig["web"] = defaultWeb,
 ): PicoConfig => ({
   discord: Option.none(),
+  telegram: Option.none(),
   browser,
   web,
+});
+
+const readSecret = Effect.fn("PicoConfig.readSecret")(function* (
+  fileSystem: FileSystem.FileSystem,
+  path: Path.Path,
+  paths: PicoPaths,
+  name: string,
+  inspectOperation: string,
+  readOperation: string,
+) {
+  const secretPath = path.join(paths.secretsDir, name);
+  const exists = yield* fileSystem
+    .exists(secretPath)
+    .pipe(Effect.mapError(platformError(inspectOperation)));
+  if (!exists) return Option.none<string>();
+  const value = (yield* fileSystem
+    .readFileString(secretPath)
+    .pipe(Effect.mapError(platformError(readOperation)))).trim();
+  return value.length === 0 ? Option.none<string>() : Option.some(value);
+});
+
+const loadDiscord = Effect.fn("PicoConfig.loadDiscord")(function* (
+  fileSystem: FileSystem.FileSystem,
+  path: Path.Path,
+  paths: PicoPaths,
+  section: typeof DiscordSection.Type | undefined,
+) {
+  if (section === undefined) return Option.none<DiscordConfig>();
+
+  const token = yield* readSecret(
+    fileSystem,
+    path,
+    paths,
+    "discord_bot_token",
+    "Inspect Discord token file",
+    "Read Discord token file",
+  );
+  if (Option.isNone(token)) return Option.none<DiscordConfig>();
+
+  const defaultCwd = section.default_cwd.trim();
+  const allowedGuildIds = section.allowed_guild.map((guildId) => guildId.trim());
+  if (defaultCwd.length === 0 || !path.isAbsolute(defaultCwd)) {
+    return yield* fieldError("discord.default_cwd", "expected an absolute, nonblank path");
+  }
+  const blankGuildIndex = allowedGuildIds.findIndex((guildId) => guildId.length === 0);
+  if (blankGuildIndex !== -1) {
+    return yield* fieldError(
+      `discord.allowed_guild.${blankGuildIndex}`,
+      "expected a nonblank guild ID",
+    );
+  }
+
+  return Option.some<DiscordConfig>({
+    token: Redacted.make(token.value, { label: "discord_bot_token" }),
+    allowedGuildIds,
+    defaultCwd: AbsolutePath.make(path.normalize(defaultCwd)),
+    showToolCalls: section.show_tool_calls ?? false,
+    showThinking: section.show_thinking ?? false,
+  });
+});
+
+const loadTelegram = Effect.fn("PicoConfig.loadTelegram")(function* (
+  fileSystem: FileSystem.FileSystem,
+  path: Path.Path,
+  paths: PicoPaths,
+  section: typeof TelegramSection.Type | undefined,
+) {
+  if (section === undefined) return Option.none<TelegramConfig>();
+
+  const token = yield* readSecret(
+    fileSystem,
+    path,
+    paths,
+    "telegram_bot_token",
+    "Inspect Telegram token file",
+    "Read Telegram token file",
+  );
+  if (Option.isNone(token)) return Option.none<TelegramConfig>();
+
+  const allowedChatIds = section.allowed_chat.map((chatId) => chatId.trim());
+  const allowedUserIds = section.allowed_user.map((userId) => userId.trim());
+
+  for (let index = 0; index < allowedChatIds.length; index += 1) {
+    const value = allowedChatIds[index] ?? "";
+    if (value.length === 0 || value === "-0" || !canonicalSignedId.test(value)) {
+      return yield* fieldError(
+        `telegram.allowed_chat.${index}`,
+        "expected a canonical signed decimal chat ID",
+      );
+    }
+  }
+
+  for (let index = 0; index < allowedUserIds.length; index += 1) {
+    const value = allowedUserIds[index] ?? "";
+    if (!canonicalPositiveId.test(value)) {
+      return yield* fieldError(
+        `telegram.allowed_user.${index}`,
+        "expected a canonical positive decimal user ID",
+      );
+    }
+  }
+
+  return Option.some<TelegramConfig>({
+    token: Redacted.make(token.value, { label: "telegram_bot_token" }),
+    allowedChatIds,
+    allowedUserIds,
+  });
 });
 
 export const load = Effect.fn("PicoConfig.load")(function* (paths: PicoPaths) {
@@ -97,10 +221,11 @@ export const load = Effect.fn("PicoConfig.load")(function* (paths: PicoPaths) {
       const field =
         issue?.path
           ?.map((segment) => (typeof segment === "object" ? String(segment.key) : String(segment)))
-          .join(".") || "discord";
+          .join(".") || "config";
       return fieldError(field, issue?.message ?? "invalid configuration");
     }),
   );
+
   const idleTimeoutMs =
     config.browser?.idle_timeout === undefined
       ? 10_800_000
@@ -111,49 +236,20 @@ export const load = Effect.fn("PicoConfig.load")(function* (paths: PicoPaths) {
       "expected a positive duration in whole milliseconds",
     );
   }
+
   const browser: BrowserConfig = {
     externalBrowser: config.browser?.external_browser ?? "off",
     idleTimeoutMs,
   };
   const web = { port: config.web?.port ?? defaultWeb.port };
-  if (config.discord === undefined) return disabled(browser, web);
 
-  const tokenPath = path.join(paths.secretsDir, "discord_bot_token");
-  if (
-    !(yield* fileSystem
-      .exists(tokenPath)
-      .pipe(Effect.mapError(platformError("Inspect Discord token file"))))
-  ) {
-    return disabled(browser, web);
-  }
-
-  const tokenValue = (yield* fileSystem
-    .readFileString(tokenPath)
-    .pipe(Effect.mapError(platformError("Read Discord token file")))).trim();
-  const defaultCwd = config.discord.default_cwd.trim();
-  const allowedGuildIds = config.discord.allowed_guild.map((guildId) => guildId.trim());
-
-  if (tokenValue.length === 0) return disabled(browser, web);
-  if (defaultCwd.length === 0 || !path.isAbsolute(defaultCwd)) {
-    return yield* fieldError("discord.default_cwd", "expected an absolute, nonblank path");
-  }
-  const blankGuildIndex = allowedGuildIds.findIndex((guildId) => guildId.length === 0);
-  if (blankGuildIndex !== -1) {
-    return yield* fieldError(
-      `discord.allowed_guild.${blankGuildIndex}`,
-      "expected a nonblank guild ID",
-    );
-  }
+  const discord = yield* loadDiscord(fileSystem, path, paths, config.discord);
+  const telegram = yield* loadTelegram(fileSystem, path, paths, config.telegram);
 
   return {
     browser,
     web,
-    discord: Option.some<DiscordConfig>({
-      token: Redacted.make(tokenValue, { label: "discord_bot_token" }),
-      allowedGuildIds,
-      defaultCwd: AbsolutePath.make(path.normalize(defaultCwd)),
-      showToolCalls: config.discord.show_tool_calls ?? false,
-      showThinking: config.discord.show_thinking ?? false,
-    }),
+    discord,
+    telegram,
   } satisfies PicoConfig;
 });

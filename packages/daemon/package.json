@@ -18,6 +18,7 @@
     "@pico/persistence": "workspace:*",
     "@pico/rpc": "workspace:*",
     "@pico/schedule": "workspace:*",
+    "@pico/telegram": "workspace:*",
     "@pico/web": "workspace:*",
     "effect": "catalog:"
   }

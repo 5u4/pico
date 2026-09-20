@@ -20,6 +20,11 @@ allowed_guild = ${allowedGuild}
 default_cwd = ${JSON.stringify(defaultCwd)}
 `;
 
+const telegramConfig = (allowedChat: string, allowedUser: string) => `[telegram]
+allowed_chat = ${allowedChat}
+allowed_user = ${allowedUser}
+`;
+
 describe("PicoConfig.load", () => {
   it.effect("loads Pico config and resolves Discord secrets", () =>
     Effect.gen(function* () {
@@ -125,6 +130,67 @@ describe("PicoConfig.load", () => {
     }).pipe(Effect.provide(platformLayer)),
   );
 
+  it.effect("loads Telegram config independently from Discord", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = PicoRoot.make(
+        yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-telegram-config-" }),
+      );
+      const paths = yield* open(root);
+      yield* fileSystem.makeDirectory(paths.secretsDir, { recursive: true });
+      const telegramToken = path.join(paths.secretsDir, "telegram_bot_token");
+      const discordToken = path.join(paths.secretsDir, "discord_bot_token");
+      const defaultCwd = path.join(String(root), "workspace");
+
+      yield* fileSystem.writeFileString(paths.configFile, telegramConfig('["-1001"]', '["42"]'));
+      const withoutToken = yield* load(paths);
+      assert.isTrue(Option.isNone(withoutToken.telegram));
+      assert.isTrue(Option.isNone(withoutToken.discord));
+
+      yield* fileSystem.writeFileString(telegramToken, "  tg-token\n", { mode: 0o600 });
+      const telegram = Option.getOrThrow((yield* load(paths)).telegram);
+      assert.strictEqual(Redacted.value(telegram.token), "tg-token");
+      assert.strictEqual(String(telegram.token), "<redacted:telegram_bot_token>");
+      assert.deepStrictEqual(telegram.allowedChatIds, ["-1001"]);
+      assert.deepStrictEqual(telegram.allowedUserIds, ["42"]);
+      assert.isTrue(Option.isNone((yield* load(paths)).discord));
+
+      yield* fileSystem.writeFileString(
+        paths.configFile,
+        `${config('["guild-1"]', defaultCwd)}\n${telegramConfig('["-1001"]', '["42"]')}`,
+      );
+      assert.isTrue(Option.isNone((yield* load(paths)).discord));
+      assert.isTrue(Option.isSome((yield* load(paths)).telegram));
+
+      yield* fileSystem.writeFileString(discordToken, "discord-token", { mode: 0o600 });
+      const both = yield* load(paths);
+      assert.isTrue(Option.isSome(both.discord));
+      assert.isTrue(Option.isSome(both.telegram));
+
+      yield* fileSystem.writeFileString(paths.configFile, telegramConfig('["-1001"]', '["0042"]'));
+      const invalidUserId = yield* load(paths).pipe(Effect.flip);
+      assert.instanceOf(invalidUserId, ConfigError);
+      assert.include(invalidUserId.message, "telegram.allowed_user.0");
+
+      yield* fileSystem.writeFileString(
+        paths.configFile,
+        telegramConfig('["private-chat"]', '["42"]'),
+      );
+      const invalidChatId = yield* load(paths).pipe(Effect.flip);
+      assert.instanceOf(invalidChatId, ConfigError);
+      assert.include(invalidChatId.message, "telegram.allowed_chat.0");
+
+      yield* fileSystem.writeFileString(
+        paths.configFile,
+        `${config('["guild-1"]', defaultCwd)}\n${telegramConfig('["-1001"]', '["42"]')}`,
+      );
+      yield* fileSystem.writeFileString(telegramToken, "\n", { mode: 0o600 });
+      const discordOnly = yield* load(paths);
+      assert.isTrue(Option.isSome(discordOnly.discord));
+      assert.isTrue(Option.isNone(discordOnly.telegram));
+    }).pipe(Effect.scoped, Effect.provide(platformLayer)),
+  );
   it.effect("preserves port zero across Discord credential states", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
