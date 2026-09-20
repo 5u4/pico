@@ -4,6 +4,7 @@ import { type AgentEventEnvelope, Publication } from "@pico/contract/agent-event
 import * as AgentMessage from "@pico/contract/agent-message";
 import { Application } from "@pico/contract/application";
 import * as Chat from "@pico/contract/chat-model";
+import { ApplicationError } from "@pico/contract/errors";
 import { EventRouter } from "@pico/contract/event-router";
 import { AbsolutePath } from "@pico/contract/path";
 import * as Workspace from "@pico/contract/workspace-model";
@@ -16,7 +17,7 @@ import * as Redacted from "effect/Redacted";
 import * as Stream from "effect/Stream";
 import { type TelegramClient, TelegramError } from "./client.ts";
 import { layer } from "./layer.ts";
-import type { TelegramInput } from "./telegram-model.ts";
+import type { TelegramAddress, TelegramInput } from "./telegram-model.ts";
 
 const baseChatId = Chat.ChatId.make("018f47a0-0000-7000-8000-000000000222");
 const baseWorkspaceId = Workspace.WorkspaceId.make("018f47a0-0000-7000-8000-000000000111");
@@ -188,6 +189,201 @@ describe("telegram layer", () => {
         assert.strictEqual(applicationCalls, 0);
         assert.deepStrictEqual(topicReplies, []);
         assert.deepStrictEqual(generalReplies, []);
+      }),
+    ),
+  );
+
+  it.effect.each([
+    { operation: "createChat", reason: "invalid-state" },
+    { operation: "sendMessage", reason: "operation" },
+  ] as const)(
+    "replies safely in the authorized topic when $operation fails with $reason",
+    ({ operation, reason }) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const inputs = yield* Queue.unbounded<TelegramInput, never>();
+          const events = yield* Queue.unbounded<AgentEventEnvelope, never>();
+          const processed = yield* Deferred.make<void>();
+          const replies: { readonly address: TelegramAddress; readonly text: string }[] = [];
+          const generalReplies: string[] = [];
+          const sensitiveDetails = [
+            "/private/telegram-secret-workspace",
+            "https://provider.invalid/private-request",
+            "secret-provider-token",
+          ];
+          const failure = new ApplicationError({
+            reason,
+            message: sensitiveDetails.join(" "),
+          });
+          const workspace: Workspace.Workspace = {
+            id: baseWorkspaceId,
+            name: "Workspace",
+            platform: "telegram",
+            externalId: "-1001",
+            defaultCwd: AbsolutePath.make("/tmp/workspace"),
+            worktree: null,
+            modelOverride: null,
+            createdAt: 0,
+          };
+          const chat: Chat.Chat = {
+            id: baseChatId,
+            workspaceId: baseWorkspaceId,
+            cwd: AbsolutePath.make("/tmp/chat"),
+            externalId: "-1001.77",
+            createdAt: 0,
+            archivedAt: null,
+          };
+          const application = Application.of({
+            ...applicationBase,
+            findWorkspaceByPlatformId: () => Effect.succeed(Option.some(workspace)),
+            findChatByPlatformId: () =>
+              Effect.succeed(operation === "createChat" ? Option.none() : Option.some(chat)),
+            createChat: () => Effect.fail(failure),
+            sendMessage: () => Effect.fail(failure),
+          });
+          const client: TelegramClient = {
+            identity: { id: "1", username: "pico_bot" },
+            consume: (handle) =>
+              Effect.forever(
+                Queue.take(inputs).pipe(
+                  Effect.flatMap(handle),
+                  Effect.andThen(Deferred.succeed(processed, undefined)),
+                ),
+              ),
+            sendText: (address, text) =>
+              Effect.sync(() => {
+                replies.push({ address, text });
+              }),
+            sendGeneral: (_chatId, text) =>
+              Effect.sync(() => {
+                generalReplies.push(text);
+              }),
+          };
+
+          yield* startLayer(baseConfig, client, application, makeRouter(events));
+          yield* Queue.offer(
+            inputs,
+            topicInput({
+              chatId: "-1001",
+              userId: "42",
+              text: "hello",
+              chatTitle: "Engineering",
+              command: null,
+              address: { chatId: "-1001", topicId: 77 },
+            }),
+          );
+
+          yield* Deferred.await(processed);
+          assert.deepStrictEqual(
+            replies.map(({ address }) => address),
+            [{ chatId: "-1001", topicId: 77 }],
+          );
+          assert.deepStrictEqual(generalReplies, []);
+          for (const reply of replies) {
+            assert.notStrictEqual(reply.text.trim(), "");
+            for (const detail of sensitiveDetails) assert.notInclude(reply.text, detail);
+          }
+        }),
+      ),
+  );
+
+  it.effect("attempts a failed error reply once and continues processing later inputs", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const inputs = yield* Queue.unbounded<TelegramInput, never>();
+        const events = yield* Queue.unbounded<AgentEventEnvelope, never>();
+        const processed = yield* Deferred.make<void>();
+        let handled = 0;
+        const attempts: { readonly address: TelegramAddress; readonly text: string }[] = [];
+        const delivered: { readonly address: TelegramAddress; readonly text: string }[] = [];
+        const workspace: Workspace.Workspace = {
+          id: baseWorkspaceId,
+          name: "Workspace",
+          platform: "telegram",
+          externalId: "-1001",
+          defaultCwd: AbsolutePath.make("/tmp/workspace"),
+          worktree: null,
+          modelOverride: null,
+          createdAt: 0,
+        };
+        const application = Application.of({
+          ...applicationBase,
+          findWorkspaceByPlatformId: () => Effect.succeed(Option.some(workspace)),
+          findChatByPlatformId: () => Effect.succeed(Option.none()),
+          createChat: () =>
+            Effect.fail(
+              new ApplicationError({
+                reason: "invalid-state",
+                message: "/private/telegram-secret-workspace no longer exists",
+              }),
+            ),
+        });
+        const client: TelegramClient = {
+          identity: { id: "1", username: "pico_bot" },
+          consume: (handle) =>
+            Effect.forever(
+              Queue.take(inputs).pipe(
+                Effect.flatMap(handle),
+                Effect.flatMap(() => {
+                  handled += 1;
+                  return handled === 2 ? Deferred.succeed(processed, undefined) : Effect.void;
+                }),
+              ),
+            ),
+          sendText: (address, text) =>
+            Effect.gen(function* () {
+              attempts.push({ address, text });
+              if (address.topicId === 77) {
+                return yield* Effect.fail(
+                  new TelegramError({
+                    message: "error reply delivery failed",
+                    operation: "send-message",
+                    category: "network",
+                  }),
+                );
+              }
+              delivered.push({ address, text });
+            }),
+          sendGeneral: () => Effect.void,
+        };
+
+        yield* startLayer(baseConfig, client, application, makeRouter(events));
+        yield* Queue.offer(
+          inputs,
+          topicInput({
+            chatId: "-1001",
+            userId: "42",
+            text: "hello",
+            chatTitle: "Engineering",
+            command: null,
+            address: { chatId: "-1001", topicId: 77 },
+          }),
+        );
+        yield* Queue.offer(
+          inputs,
+          topicInput({
+            chatId: "-1001",
+            userId: "42",
+            text: "/bind",
+            chatTitle: "Engineering",
+            command: { name: "bind", target: "self", argument: "" },
+            address: { chatId: "-1001", topicId: 88 },
+          }),
+        );
+
+        yield* Deferred.await(processed);
+        assert.deepStrictEqual(
+          attempts.map(({ address }) => address),
+          [
+            { chatId: "-1001", topicId: 77 },
+            { chatId: "-1001", topicId: 88 },
+          ],
+        );
+        assert.deepStrictEqual(
+          delivered.map(({ address }) => address),
+          [{ chatId: "-1001", topicId: 88 }],
+        );
+        for (const reply of attempts) assert.notStrictEqual(reply.text.trim(), "");
       }),
     ),
   );
