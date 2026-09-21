@@ -42,6 +42,7 @@ import {
   normalizeMessage,
   normalizeTodo,
   normalizeTranscript,
+  skillPromptText,
 } from "./agent-event.ts";
 import { makeExchangeTitleFlow } from "./exchange-title.ts";
 import { makeOmpPromptSender } from "./omp-prompt-sender.ts";
@@ -429,15 +430,17 @@ export const makeSessionObservation = (
   const manager = session.sessionManager;
   const pendingPersistence = new Set<OmpAgentSession.AgentSession["messages"][number]>();
   let observationFailure: unknown;
-  const previousAppendObserver = manager.onEntryAppended;
-  const observeAppend: NonNullable<OmpSessionManager.SessionManager["onEntryAppended"]> = (
-    entry,
+  const confirmPersistence = (
+    entry: SessionEntry,
+    messages: Iterable<OmpAgentSession.AgentSession["messages"][number]>,
   ) => {
+    if (pendingPersistence.size === 0) return;
     if (entry.type === "message") {
       const key = sessionMessagePersistenceKey(entry.message);
-      for (const message of pendingPersistence) {
+      if (key === undefined) return;
+      for (const message of messages) {
+        if (!pendingPersistence.has(message)) continue;
         if (
-          key !== undefined &&
           key === sessionMessagePersistenceKey(message) &&
           ((message.role === "assistant" &&
             "messageId" in message &&
@@ -448,7 +451,29 @@ export const makeSessionObservation = (
           pendingPersistence.delete(message);
         }
       }
+    } else if (entry.type === "custom_message") {
+      const persisted = OmpSessionContext.customMessageEntryMessage(entry);
+      if (persisted === undefined) return;
+      const prompt = skillPromptText(persisted);
+      if (prompt === undefined) return;
+      for (const message of messages) {
+        if (!pendingPersistence.has(message)) continue;
+        if (
+          message.role === "custom" &&
+          message.timestamp === persisted.timestamp &&
+          skillPromptText(message) === prompt &&
+          sameMessageContent(persisted, message)
+        ) {
+          pendingPersistence.delete(message);
+        }
+      }
     }
+  };
+  const previousAppendObserver = manager.onEntryAppended;
+  const observeAppend: NonNullable<OmpSessionManager.SessionManager["onEntryAppended"]> = (
+    entry,
+  ) => {
+    confirmPersistence(entry, pendingPersistence);
     previousAppendObserver?.(entry);
   };
   manager.onEntryAppended = observeAppend;
@@ -460,25 +485,14 @@ export const makeSessionObservation = (
     await manager.flush();
     if (pending.length === 0 || pendingPersistence.size === 0) return;
     const entries = manager.getEntries();
+    for (const entry of entries) {
+      confirmPersistence(entry, pending);
+      if (pendingPersistence.size === 0) break;
+    }
     for (const message of pending) {
-      if (!pendingPersistence.has(message)) continue;
-      const key = sessionMessagePersistenceKey(message);
-      if (
-        key === undefined ||
-        !entries.some(
-          (entry) =>
-            entry.type === "message" &&
-            sessionMessagePersistenceKey(entry.message) === key &&
-            ((message.role === "assistant" &&
-              "messageId" in message &&
-              typeof message.messageId === "string" &&
-              message.messageId.length > 0) ||
-              sameMessageContent(entry.message, message)),
-        )
-      ) {
+      if (pendingPersistence.has(message)) {
         throw new Error("Published OMP message persistence is not confirmed");
       }
-      pendingPersistence.delete(message);
     }
   };
   const unsubscribe = session.subscribe((event) => {
