@@ -202,6 +202,7 @@ const fixture = Effect.fnUntraced(function* (
     findChatPlatformBinding: () => Effect.die("unexpected chat binding lookup"),
     contextUsage: () => Effect.die("unexpected context read"),
     availableWorkspaceModels: () => Effect.die("unexpected workspace model discovery"),
+    availableWorkspaceSkills: () => Effect.die("unexpected workspace model discovery"),
     setWorkspaceModel: () => Effect.die("unexpected workspace model update"),
     availableModels: () => Effect.die("unexpected model discovery"),
     availableSkills: () => Effect.die("unexpected skill command discovery"),

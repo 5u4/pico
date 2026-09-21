@@ -95,6 +95,7 @@ const makeScheduledDeliveryFixture = Effect.fn("makeScheduledDeliveryFixture")(f
         previewHistory: () => Effect.die("unexpected history preview"),
         navigateHistory: () => Effect.die("unexpected history navigation"),
         availableModels: () => Effect.die("unexpected model catalog read"),
+        discoverSkills: () => Effect.die("unexpected workspace skill command discovery"),
         switchModel: () => Effect.die("unexpected model switch"),
         askBtw: () => Effect.die("unexpected side question"),
         events: Stream.empty,
@@ -186,6 +187,7 @@ const makeScheduledDeliveryFixture = Effect.fn("makeScheduledDeliveryFixture")(f
   const chat = yield* application.createChat({
     workspaceId: workspace.id,
     externalId: "thread-1",
+    modelOverride: null,
   });
   return { application, chats, host, workspace, chat, order, sendStarted, releaseSend };
 });
@@ -200,6 +202,7 @@ describe("Chat close", () => {
         const otherChat = yield* application.createChat({
           workspaceId: workspace.id,
           externalId: "thread-2",
+          modelOverride: null,
         });
         const publishing = yield* host
           .publish(chat.id, "A")
@@ -330,6 +333,7 @@ describe("Chat close", () => {
             previewHistory: () => Effect.die("unexpected history preview"),
             navigateHistory: () => Effect.die("unexpected history navigation"),
             availableModels: () => Effect.die("unexpected model catalog read"),
+            discoverSkills: () => Effect.die("unexpected workspace skill command discovery"),
             switchModel: () => Effect.die("unexpected model switch"),
             events: Stream.empty,
             drain: () => Effect.void,
@@ -409,6 +413,7 @@ describe("Chat close", () => {
           const chat = yield* application.createChat({
             workspaceId: workspace.id,
             externalId: null,
+            modelOverride: null,
           });
           assertApplicationError(
             yield* application.askBtw(missingChatId, "missing").pipe(Effect.flip),
@@ -514,6 +519,7 @@ describe("Chat close", () => {
             previewHistory: () => Effect.die("unexpected history preview"),
             navigateHistory: () => Effect.die("unexpected history navigation"),
             availableModels: () => Effect.die("unexpected model catalog read"),
+            discoverSkills: () => Effect.die("unexpected workspace skill command discovery"),
             switchModel: () => Effect.die("unexpected model switch"),
             askBtw: () => Effect.die("unexpected side question"),
             events: Stream.empty,
@@ -598,7 +604,11 @@ describe("Chat close", () => {
           worktree: null,
         });
         yield* TestClock.setTime(2_000);
-        const chat = yield* application.createChat({ workspaceId: workspace.id, externalId: null });
+        const chat = yield* application.createChat({
+          workspaceId: workspace.id,
+          externalId: null,
+          modelOverride: null,
+        });
 
         const scheduled = yield* scheduleHost
           .runPrompt(
@@ -722,6 +732,7 @@ describe("Chat close", () => {
           previewHistory: () => Effect.die("unexpected history preview"),
           navigateHistory: () => Effect.die("unexpected history navigation"),
           availableModels: () => Effect.die("unexpected model catalog read"),
+          discoverSkills: () => Effect.die("unexpected workspace skill command discovery"),
           switchModel: () => Effect.die("unexpected model switch"),
           askBtw: () => Effect.die("unexpected side question"),
           events: Stream.empty,
@@ -794,7 +805,11 @@ describe("Chat close", () => {
           defaultCwd,
           worktree: { branch: "main", prefix: "chat/" },
         });
-        const chat = yield* application.createChat({ workspaceId: workspace.id, externalId: null });
+        const chat = yield* application.createChat({
+          workspaceId: workspace.id,
+          externalId: null,
+          modelOverride: null,
+        });
         yield* Effect.gen(function* () {
           const scheduled = yield* host
             .runPrompt(
@@ -876,6 +891,7 @@ describe("Chat close", () => {
             previewHistory: () => Effect.die("unexpected history preview"),
             navigateHistory: () => Effect.die("unexpected history navigation"),
             availableModels: () => Effect.die("unexpected model catalog read"),
+            discoverSkills: () => Effect.die("unexpected workspace skill command discovery"),
             switchModel: () => Effect.die("unexpected model switch"),
             askBtw: () => Effect.die("unexpected side question"),
             events: Stream.empty,
@@ -950,6 +966,7 @@ describe("Chat close", () => {
         const dirtyChat = yield* application.createChat({
           workspaceId: workspace.id,
           externalId: null,
+          modelOverride: null,
         });
 
         assert.deepStrictEqual(
@@ -973,6 +990,7 @@ describe("Chat close", () => {
         const racedChat = yield* application.createChat({
           workspaceId: workspace.id,
           externalId: null,
+          modelOverride: null,
         });
         inspectionState = "clean";
         removalResult = "force-required";
@@ -986,6 +1004,7 @@ describe("Chat close", () => {
         const failedChat = yield* application.createChat({
           workspaceId: workspace.id,
           externalId: null,
+          modelOverride: null,
         });
         runtimeFails = true;
         removalResult = "removed";

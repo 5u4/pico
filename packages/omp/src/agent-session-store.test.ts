@@ -81,6 +81,7 @@ describe("AgentSessionStore", () => {
           abort: unused,
           contextUsage: unused,
           availableModels: unused,
+          discoverSkills: () => Effect.die("unexpected workspace skill command discovery"),
           switchModel: unused,
           shake: unused,
           availableSkills: () => Effect.die("unexpected skill command discovery"),
@@ -115,16 +116,19 @@ describe("AgentSessionStore", () => {
           const titled = yield* application.createChat({
             workspaceId: workspace.id,
             externalId: null,
+            modelOverride: null,
           });
           yield* TestClock.setTime(2_000);
           const untitled = yield* application.createChat({
             workspaceId: workspace.id,
             externalId: null,
+            modelOverride: null,
           });
           yield* TestClock.setTime(3_000);
           const missing = yield* application.createChat({
             workspaceId: workspace.id,
             externalId: null,
+            modelOverride: null,
           });
           return { workspace, titled, untitled, missing };
         }).pipe(Effect.provide(applicationLayer), Effect.scoped);
@@ -254,6 +258,7 @@ describe("AgentSessionStore", () => {
         abort: unused,
         contextUsage: unused,
         availableModels: (cwd) => Effect.succeed(cwd === firstCwd ? [firstModel] : [secondModel]),
+        discoverSkills: () => Effect.die("unexpected workspace skill command discovery"),
         switchModel: unused,
         shake: unused,
         availableSkills: () => Effect.die("unexpected skill command discovery"),
@@ -296,7 +301,11 @@ describe("AgentSessionStore", () => {
           externalId: "1.10",
         });
         assert.deepStrictEqual(
-          yield* application.availableWorkspaceModels({ binding, defaultCwd: firstCwd }),
+          yield* application.availableWorkspaceModels({
+            kind: "binding",
+            binding,
+            defaultCwd: firstCwd,
+          }),
           [firstModel],
         );
         assert.deepStrictEqual(yield* application.listWorkspaces(), []);
@@ -307,15 +316,26 @@ describe("AgentSessionStore", () => {
           defaultCwd: firstCwd,
           worktree: null,
         });
-        const old = yield* application.createChat({ workspaceId: workspace.id, externalId: null });
+        const old = yield* application.createChat({
+          workspaceId: workspace.id,
+          externalId: null,
+          modelOverride: null,
+        });
         const oldJournal = yield* fileSystem.readFile(journalFile(old.id));
         yield* application.setWorkspaceModel(workspace.id, firstModel);
         const first = yield* application.createChat({
           workspaceId: workspace.id,
           externalId: null,
+          modelOverride: null,
         });
         const firstJournal = yield* fileSystem.readFile(journalFile(first.id));
         yield* application.setWorkspaceModel(workspace.id, secondModel);
+        const explicit = yield* application.createChat({
+          workspaceId: workspace.id,
+          externalId: null,
+          modelOverride: firstModel,
+        });
+        assert.deepStrictEqual(yield* restoredModels(explicit.id), ["native/first"]);
         yield* application.bindWorkspace({
           binding,
           workspaceName: "channel",
@@ -326,18 +346,42 @@ describe("AgentSessionStore", () => {
           },
         });
         assert.deepStrictEqual(
-          yield* application.availableWorkspaceModels({ binding, defaultCwd: firstCwd }),
+          yield* application.availableWorkspaceModels({
+            kind: "binding",
+            binding,
+            defaultCwd: firstCwd,
+          }),
           [secondModel],
         );
         assert.deepStrictEqual(yield* application.availableModels(old.id), [firstModel]);
+        const journalsBefore = yield* fileSystem.readDirectory(sessionsDir);
+        const rejected = yield* application
+          .createChat({
+            workspaceId: workspace.id,
+            externalId: null,
+            modelOverride: firstModel,
+          })
+          .pipe(Effect.flip);
+        assert.instanceOf(rejected, ApplicationError);
+        assert.strictEqual(rejected.reason, "invalid-state");
+        assert.deepStrictEqual(
+          (yield* application.listChats(workspace.id)).map((chat) => chat.id).sort(),
+          [old.id, first.id, explicit.id].sort(),
+        );
+        assert.deepStrictEqual(
+          (yield* fileSystem.readDirectory(sessionsDir)).sort(),
+          journalsBefore.sort(),
+        );
         const second = yield* application.createChat({
           workspaceId: workspace.id,
           externalId: null,
+          modelOverride: null,
         });
         yield* application.setWorkspaceModel(workspace.id, null);
         const cleared = yield* application.createChat({
           workspaceId: workspace.id,
           externalId: null,
+          modelOverride: null,
         });
         assert.deepStrictEqual(yield* fileSystem.readFile(journalFile(old.id)), oldJournal);
         assert.deepStrictEqual(yield* fileSystem.readFile(journalFile(first.id)), firstJournal);

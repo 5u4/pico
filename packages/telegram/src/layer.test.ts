@@ -70,6 +70,7 @@ const applicationBase = {
   getOrCreateWorkspaceByBinding: unexpected,
   bindWorkspace: unexpected,
   availableWorkspaceModels: unexpected,
+  availableWorkspaceSkills: unexpected,
   setWorkspaceModel: unexpected,
   listChats: unexpected,
   createChat: unexpected,

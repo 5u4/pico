@@ -122,6 +122,7 @@ describe("Application", () => {
           previewHistory: () => Effect.die("unexpected history preview"),
           navigateHistory: () => Effect.die("unexpected history navigation"),
           availableModels: () => Effect.die("unexpected model catalog read"),
+          discoverSkills: () => Effect.die("unexpected workspace skill command discovery"),
           switchModel: () => Effect.die("unexpected model switch"),
           askBtw: () => Effect.die("unexpected side question"),
           events: Stream.empty,
@@ -267,6 +268,7 @@ describe("Application", () => {
         const regularChat = yield* application.createChat({
           workspaceId: regularWorkspace.id,
           externalId: null,
+          modelOverride: null,
         });
         assert.match(regularChat.id, uuidV7);
         assert.strictEqual(regularChat.cwd, defaultCwd);
@@ -286,6 +288,7 @@ describe("Application", () => {
         const worktreeChat = yield* application.createChat({
           workspaceId: worktreeWorkspace.id,
           externalId: null,
+          modelOverride: null,
         });
         assert.match(worktreeChat.id, uuidV7);
         assert.strictEqual(worktreeChat.cwd, worktreeCwd);
@@ -310,10 +313,12 @@ describe("Application", () => {
         const discordChat = yield* application.createChat({
           workspaceId: discordWorkspace.id,
           externalId: "thread-1",
+          modelOverride: null,
         });
         const unboundChat = yield* application.createChat({
           workspaceId: regularWorkspace.id,
           externalId: "local-thread",
+          modelOverride: null,
         });
         assert.deepStrictEqual(yield* application.listWorkspaces(), [
           discordWorkspace,
@@ -423,7 +428,7 @@ describe("Application", () => {
 
         assertApplicationError(
           yield* application
-            .createChat({ workspaceId: missingWorkspaceId, externalId: null })
+            .createChat({ workspaceId: missingWorkspaceId, externalId: null, modelOverride: null })
             .pipe(Effect.flip),
           "not-found",
         );
@@ -685,6 +690,7 @@ describe("Application", () => {
         const originalChat = yield* application.createChat({
           workspaceId: editableWorkspace.id,
           externalId: null,
+          modelOverride: null,
         });
         assert.strictEqual(originalChat.cwd, defaultCwd);
 
@@ -712,6 +718,7 @@ describe("Application", () => {
         const updatedWorktreeChat = yield* application.createChat({
           workspaceId: editableWorkspace.id,
           externalId: null,
+          modelOverride: null,
         });
         assert.strictEqual(updatedWorktreeChat.cwd, worktreeCwd);
 
@@ -790,13 +797,18 @@ describe("Application", () => {
         const updatedDirectChat = yield* application.createChat({
           workspaceId: editableWorkspace.id,
           externalId: null,
+          modelOverride: null,
         });
         assert.strictEqual(updatedDirectChat.cwd, defaultCwd);
 
         yield* fileSystem.remove(defaultCwd, { recursive: true });
         assertApplicationError(
           yield* application
-            .createChat({ workspaceId: regularWorkspace.id, externalId: "missing-cwd" })
+            .createChat({
+              workspaceId: regularWorkspace.id,
+              externalId: "missing-cwd",
+              modelOverride: null,
+            })
             .pipe(Effect.flip),
           "invalid-state",
         );
@@ -881,6 +893,7 @@ describe("Application", () => {
           previewHistory: () => Effect.die("unexpected history preview"),
           navigateHistory: () => Effect.die("unexpected history navigation"),
           availableModels: () => Effect.die("unexpected model catalog read"),
+          discoverSkills: () => Effect.die("unexpected workspace skill command discovery"),
           switchModel: () => Effect.die("unexpected model switch"),
           askBtw: () => Effect.die("unexpected side question"),
           events: Stream.empty,
@@ -931,7 +944,7 @@ describe("Application", () => {
           worktree: null,
         });
         const directError = yield* application
-          .createChat({ workspaceId: direct.id, externalId: null })
+          .createChat({ workspaceId: direct.id, externalId: null, modelOverride: null })
           .pipe(Effect.flip);
         assertApplicationError(directError, "operation");
         assert.include(directError.message, insertionFailure.message);
@@ -952,7 +965,7 @@ describe("Application", () => {
           worktree: { branch: "main", prefix: "chat/" },
         });
         const worktreeError = yield* application
-          .createChat({ workspaceId: worktree.id, externalId: null })
+          .createChat({ workspaceId: worktree.id, externalId: null, modelOverride: null })
           .pipe(Effect.flip);
         assertApplicationError(worktreeError, "operation");
         const worktreeSessionId = createdSessionIds[1];
@@ -968,7 +981,7 @@ describe("Application", () => {
 
         removalFails = true;
         const rollbackError = yield* application
-          .createChat({ workspaceId: worktree.id, externalId: null })
+          .createChat({ workspaceId: worktree.id, externalId: null, modelOverride: null })
           .pipe(Effect.flip);
         assertApplicationError(rollbackError, "operation");
         assert.include(rollbackError.message, insertionFailure.message);

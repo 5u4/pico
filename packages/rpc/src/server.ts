@@ -193,6 +193,30 @@ const handlers = PicoRpcs.toLayer(
             requestId: String(requestId),
           }),
         ),
+      AvailableWorkspaceModels: ({ workspaceId }, { requestId }) =>
+        requireWebWorkspace(workspaces, workspaceId).pipe(
+          Effect.andThen(() =>
+            application.availableWorkspaceModels({ kind: "workspace", workspaceId }),
+          ),
+          Effect.tapCause(reportFailure),
+          Effect.annotateLogs({
+            component: "rpc",
+            procedure: "AvailableWorkspaceModels",
+            workspaceId,
+            requestId: String(requestId),
+          }),
+        ),
+      AvailableWorkspaceSkills: ({ workspaceId }, { requestId }) =>
+        requireWebWorkspace(workspaces, workspaceId).pipe(
+          Effect.andThen(() => application.availableWorkspaceSkills(workspaceId)),
+          Effect.tapCause(reportFailure),
+          Effect.annotateLogs({
+            component: "rpc",
+            procedure: "AvailableWorkspaceSkills",
+            workspaceId,
+            requestId: String(requestId),
+          }),
+        ),
       AvailableModels: ({ chatId }, { requestId }) =>
         requireWebChat(workspaces, chats, chatId).pipe(
           Effect.andThen(() => application.availableModels(chatId)),

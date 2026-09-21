@@ -743,6 +743,27 @@ export const make = ({ url }: { readonly url: string }) => {
       }),
     ).pipe(Atom.setIdleTTL(0)),
   );
+  const availableWorkspaceModels = Atom.family((workspaceId: WorkspaceId) =>
+    list<readonly ModelInfo[]>((client) => client.AvailableWorkspaceModels({ workspaceId })),
+  );
+  const availableWorkspaceSkills = Atom.family((workspaceId: WorkspaceId) =>
+    list<readonly SkillCommand[]>(
+      (client) =>
+        client.AvailableWorkspaceSkills({ workspaceId }).pipe(
+          Effect.timeout("30 seconds"),
+          Effect.catchTag("TimeoutError", () =>
+            Effect.fail(
+              new ApplicationError({
+                reason: "operation",
+                message: "Skill catalog timed out.",
+              }),
+            ),
+          ),
+        ),
+      "list",
+      { fastTimeout: false },
+    ),
+  );
   const availableModels = Atom.family((chatId: ChatId) =>
     list<readonly ModelInfo[], ChatClosed>((client) => client.AvailableModels({ chatId })),
   );
@@ -885,10 +906,16 @@ export const make = ({ url }: { readonly url: string }) => {
       const manager = yield* get.result(owner);
       return yield* manager.write(
         (client) => client.UpdateWorkspace(input),
-        (workspace) =>
+        (workspace) => {
           get.set(workspaces, (current) =>
             current.map((existing) => (existing.id === workspace.id ? workspace : existing)),
-          ),
+          );
+          const nodes = get.registry.getNodes();
+          const models = availableWorkspaceModels(workspace.id);
+          const skills = availableWorkspaceSkills(workspace.id);
+          if (nodes.has(models)) get.registry.refresh(models);
+          if (nodes.has(skills)) get.registry.refresh(skills);
+        },
         () => get.registry.refresh(workspaces),
       );
     }),
@@ -1202,6 +1229,8 @@ export const make = ({ url }: { readonly url: string }) => {
     todo,
     observeContext,
     contextUsage,
+    availableWorkspaceModels,
+    availableWorkspaceSkills,
     availableModels,
     availableSkills,
     switchModel,
