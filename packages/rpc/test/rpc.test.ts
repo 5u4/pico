@@ -160,6 +160,7 @@ const unusedApplication = Application.of({
   abort: () => Effect.die("unexpected abort"),
   contextUsage: () => Effect.die("unexpected context read"),
   availableWorkspaceModels: () => Effect.die("unexpected workspace model discovery"),
+  availableWorkspaceSkills: () => Effect.die("unexpected workspace model discovery"),
   setWorkspaceModel: () => Effect.die("unexpected workspace model update"),
   availableModels: () => Effect.die("unexpected model discovery"),
   availableSkills: () => Effect.die("unexpected skill command discovery"),
@@ -593,7 +594,9 @@ describe("RPC", () => {
           const before = yield* ownership.workspaces.findById(id);
           for (const request of [
             client.ListChats({ workspaceId: id }).pipe(Effect.asVoid),
-            client.CreateChat({ workspaceId: id, externalId: null }).pipe(Effect.asVoid),
+            client
+              .CreateChat({ workspaceId: id, externalId: null, modelOverride: null })
+              .pipe(Effect.asVoid),
             client.DeleteWorkspace({ workspaceId: id }),
             client
               .UpdateWorkspace({
@@ -768,6 +771,7 @@ describe("RPC", () => {
         const created = yield* client.CreateChat({
           workspaceId: webWorkspace.id,
           externalId: null,
+          modelOverride: null,
         });
         assert.strictEqual(created.id, newChatId);
         const createdEvent: AgentEvent.AgentEventEnvelope = {

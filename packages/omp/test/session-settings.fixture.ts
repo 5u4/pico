@@ -1,10 +1,25 @@
 import assert from "node:assert/strict";
-import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import * as BunCrypto from "@effect/platform-bun/BunCrypto";
+import * as BunFileSystem from "@effect/platform-bun/BunFileSystem";
+import * as BunPath from "@effect/platform-bun/BunPath";
+import {
+  getDisabledProviders,
+  getEnabledProviders,
+  initializeWithSettings,
+} from "@oh-my-pi/pi-coding-agent/capability";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { loadSkills } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
+import { BranchNaming } from "@pico/contract/branch-naming";
+import { ChatSessionContext } from "@pico/contract/chat-session-context";
+import { PicoRoot } from "@pico/contract/config";
 import { AbsolutePath } from "@pico/contract/path";
+import * as Schedule from "@pico/contract/schedule";
 import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import { make } from "../src/layer.ts";
 import { prepareSessionSettings } from "../src/session-settings.ts";
 
 const root = process.cwd();
@@ -12,7 +27,10 @@ assert.equal(homedir(), join(root, "home"));
 const agentDir = join(homedir(), ".omp", "agent");
 await mkdir(agentDir, { recursive: true });
 const globalConfigPath = join(agentDir, "config.yml");
-const globalConfig = "{}\n";
+const globalConfig =
+  process.argv[2] === "runtime"
+    ? "skills:\n  includeSkills: [native-project, claude-user, codex-user]\n"
+    : "{}\n";
 await writeFile(globalConfigPath, globalConfig);
 
 const bundledSchedulePath = Bun.fileURLToPath(
@@ -25,10 +43,9 @@ const bundledBrowserPath = Bun.fileURLToPath(
   new URL("../src/agent-browser/skills/pico-browser/SKILL.md", import.meta.url),
 );
 
-for (const customNames of [
-  ["user-skill"],
-  ["user-skill", "pico-schedule", "pico-instructions", "pico-browser"],
-]) {
+for (const customNames of process.argv[2] === "runtime"
+  ? []
+  : [["user-skill"], ["user-skill", "pico-schedule", "pico-instructions", "pico-browser"]]) {
   const cwd = AbsolutePath.make(join(root, `project-${customNames.length}`));
   const customDir = join(cwd, "custom-skills");
   await mkdir(join(cwd, ".omp"), { recursive: true });
@@ -94,4 +111,123 @@ for (const customNames of [
     assert.equal(await readFile(configPath, "utf8"), config);
     assert.equal(await readFile(globalConfigPath, "utf8"), globalConfig);
   }
+}
+
+if (process.argv[2] === "runtime") {
+  const sessions = AbsolutePath.make(join(root, "sessions"));
+  const foreignExpected = ["claude-user", "codex-user"];
+  const nativeExpected = ["native-project"];
+  const cases = [
+    {
+      name: "native",
+      config: "disabledProviders: [claude, codex]\nenabledProviders: []\n",
+      expected: nativeExpected,
+    },
+    {
+      name: "foreign",
+      config: "disabledProviders: [native]\nenabledProviders: [claude, codex]\n",
+      expected: foreignExpected,
+    },
+    {
+      name: "legacy",
+      config:
+        "disabledProviders: [native]\nenabledProviders: []\nskills:\n  enableClaudeUser: true\n  enableCodexUser: true\n",
+      expected: foreignExpected,
+    },
+    {
+      name: "disabled",
+      config: "skills:\n  enabled: false\n",
+      expected: [],
+    },
+    {
+      name: "commands-disabled",
+      config: "skills:\n  enableSkillCommands: false\n",
+      expected: [],
+    },
+  ].map((scenario) => ({ ...scenario, cwd: AbsolutePath.make(join(root, scenario.name)) }));
+  for (const provider of ["claude", "codex"]) {
+    const name = `${provider}-user`;
+    const directory = join(homedir(), `.${provider}`, "skills", name);
+    await mkdir(directory, { recursive: true });
+    await writeFile(
+      join(directory, "SKILL.md"),
+      `---\nname: ${name}\ndescription: Shared ${provider} instructions.\n---\n\nShared instructions.\n`,
+    );
+  }
+  for (const scenario of cases) {
+    const directory = join(scenario.cwd, ".omp", "skills", "native-project");
+    await mkdir(directory, { recursive: true });
+    await writeFile(
+      join(directory, "SKILL.md"),
+      "---\nname: native-project\ndescription: Native workspace instructions.\n---\n\nWorkspace instructions.\n",
+    );
+    await writeFile(join(scenario.cwd, ".omp", "config.yml"), scenario.config);
+  }
+
+  const unexpected = () => Effect.die("Skill discovery must not open a chat or use schedules");
+  const schedules = Schedule.Schedules.of({
+    withCurrentTargets: unexpected,
+    create: unexpected,
+    list: unexpected,
+    overview: unexpected,
+    get: unexpected,
+    update: unexpected,
+    remove: unexpected,
+    start: unexpected,
+  });
+  const platform = Layer.mergeAll(
+    BunCrypto.layer,
+    BunFileSystem.layer,
+    BunPath.layer,
+    Layer.succeed(ChatSessionContext, { resolve: unexpected }),
+    Layer.succeed(BranchNaming, {
+      handle: () => {
+        throw new Error("Skill discovery must not generate a title");
+      },
+    }),
+  );
+  await Effect.runPromise(
+    Effect.scoped(
+      Effect.gen(function* () {
+        const runtime = yield* make({
+          paths: { root: PicoRoot.make(root), sessionsDir: sessions },
+          schedules,
+          browser: { externalBrowser: "off", idleTimeoutMs: 10_800_000 },
+        });
+        const filesBefore = yield* Effect.promise(() => readdir(root, { recursive: true }));
+        for (const initializedWorkspace of [undefined, "foreign", "native"]) {
+          if (initializedWorkspace !== undefined) {
+            const settings = yield* Effect.promise(() =>
+              Settings.loadReadOnly({ cwd: join(root, initializedWorkspace) }),
+            );
+            initializeWithSettings(settings);
+          }
+          const disabledProviders = getDisabledProviders();
+          const enabledProviders = getEnabledProviders();
+          const discovered = yield* Effect.all(
+            cases.map((scenario) => runtime.discoverSkills(scenario.cwd)),
+            { concurrency: "unbounded" },
+          );
+          assert.deepEqual(
+            discovered.map((skills) => skills.map((skill) => skill.name).sort()),
+            cases.map((scenario) => scenario.expected),
+          );
+          assert.deepEqual(getDisabledProviders(), disabledProviders);
+          assert.deepEqual(getEnabledProviders(), enabledProviders);
+        }
+        assert.deepEqual(yield* Effect.promise(() => readdir(sessions)), []);
+        assert.deepEqual(
+          (yield* Effect.promise(() => readdir(root, { recursive: true }))).sort(),
+          filesBefore.sort(),
+        );
+        for (const scenario of cases) {
+          assert.equal(
+            yield* Effect.promise(() => readFile(join(scenario.cwd, ".omp", "config.yml"), "utf8")),
+            scenario.config,
+          );
+        }
+        assert.equal(yield* Effect.promise(() => readFile(globalConfigPath, "utf8")), globalConfig);
+      }),
+    ).pipe(Effect.provide(platform)),
+  );
 }

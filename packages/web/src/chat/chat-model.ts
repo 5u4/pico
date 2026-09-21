@@ -323,7 +323,6 @@ export type SkillCompletionPresentation =
 export interface ModelPickerPresentation {
   readonly label: string;
   readonly control:
-    | { readonly kind: "draft" }
     | { readonly kind: "disabled"; readonly reason: string }
     | {
         readonly kind: "select";

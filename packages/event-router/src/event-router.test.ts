@@ -41,6 +41,7 @@ describe("EventRouter", () => {
           previewHistory: () => Effect.die("unexpected history preview"),
           navigateHistory: () => Effect.die("unexpected history navigation"),
           availableModels: () => Effect.die("unused"),
+          discoverSkills: () => Effect.die("unexpected workspace skill command discovery"),
           switchModel: () => Effect.die("unused"),
           askBtw: () => Effect.die("unexpected side question"),
           events: Stream.fromQueue(source).pipe(
@@ -183,6 +184,7 @@ describe("EventRouter", () => {
             previewHistory: () => Effect.die("unexpected history preview"),
             navigateHistory: () => Effect.die("unexpected history navigation"),
             availableModels: () => Effect.die("unused"),
+            discoverSkills: () => Effect.die("unexpected workspace skill command discovery"),
             switchModel: () => Effect.die("unused"),
             askBtw: () => Effect.die("unexpected side question"),
             events: Stream.fromQueue(source).pipe(

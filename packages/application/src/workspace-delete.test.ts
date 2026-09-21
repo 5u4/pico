@@ -105,6 +105,7 @@ const fixture = Effect.fn("WorkspaceDelete.test.fixture")(function* (
             abort: unused,
             contextUsage: unused,
             availableModels: unused,
+            discoverSkills: () => Effect.die("unexpected workspace skill command discovery"),
             switchModel: unused,
             shake: unused,
             ...options.runtime,
@@ -195,10 +196,12 @@ describe("Workspace deletion", () => {
         const archived = yield* test.application.createChat({
           workspaceId: test.workspace.id,
           externalId: null,
+          modelOverride: null,
         });
         const empty = yield* test.application.createChat({
           workspaceId: test.workspace.id,
           externalId: null,
+          modelOverride: null,
         });
         transcripts.set(archived.id, populatedTranscript);
         assert.strictEqual(
@@ -240,7 +243,7 @@ describe("Workspace deletion", () => {
         );
         assert.strictEqual(
           (yield* test.application
-            .createChat({ workspaceId: test.workspace.id, externalId: null })
+            .createChat({ workspaceId: test.workspace.id, externalId: null, modelOverride: null })
             .pipe(Effect.flip)).reason,
           "not-found",
         );
@@ -263,6 +266,7 @@ describe("Workspace deletion", () => {
       const chat = yield* test.application.createChat({
         workspaceId: test.workspace.id,
         externalId: null,
+        modelOverride: null,
       });
       const owner = yield* test.application.createWorkspace({
         ...test.workspace,
@@ -365,6 +369,7 @@ describe("Workspace deletion", () => {
         const chat = yield* test.application.createChat({
           workspaceId: test.workspace.id,
           externalId: null,
+          modelOverride: null,
         });
         const shaking = yield* test.application.shake(chat.id, "elide").pipe(Effect.forkScoped);
         yield* Effect.addFinalizer(() => Deferred.succeed(releaseCleanup, undefined));
@@ -402,6 +407,7 @@ describe("Workspace deletion", () => {
       const chat = yield* test.application.createChat({
         workspaceId: test.workspace.id,
         externalId: null,
+        modelOverride: null,
       });
       const sending = yield* test.application
         .sendMessage(chat.id, { text: "hello", attachments: [] })
@@ -479,6 +485,7 @@ describe("Workspace deletion", () => {
         const first = yield* test.application.createChat({
           workspaceId: test.workspace.id,
           externalId: null,
+          modelOverride: null,
         });
         const deleting = yield* test.application
           .deleteWorkspace(test.workspace.id)
@@ -487,6 +494,7 @@ describe("Workspace deletion", () => {
         const second = yield* test.application.createChat({
           workspaceId: test.workspace.id,
           externalId: null,
+          modelOverride: null,
         });
         yield* Deferred.succeed(release, undefined);
         const result = yield* Fiber.join(deleting);
@@ -514,7 +522,7 @@ describe("Workspace deletion", () => {
           }),
       });
       const creating = yield* test.application
-        .createChat({ workspaceId: test.workspace.id, externalId: null })
+        .createChat({ workspaceId: test.workspace.id, externalId: null, modelOverride: null })
         .pipe(Effect.result, Effect.forkChild);
       const chatId = yield* Deferred.await(started);
       yield* test.application.deleteWorkspace(test.workspace.id);

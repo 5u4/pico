@@ -1,4 +1,9 @@
 import * as OmpModelRegistry from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import * as OmpSettings from "@oh-my-pi/pi-coding-agent/config/settings";
+import {
+  setInvocationConfiguredExtensions,
+  withOmpExtensionRootScope,
+} from "@oh-my-pi/pi-coding-agent/discovery/omp-extension-roots";
 import { getSkillSlashCommandName } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { loadAllMCPConfigs } from "@oh-my-pi/pi-coding-agent/mcp/config";
 import * as OmpRuntimeInit from "@oh-my-pi/pi-coding-agent/modes/runtime-init";
@@ -58,6 +63,7 @@ import {
   loadAvailableModels,
   loadCurrentModel,
   prepareSessionSettings,
+  resolveSessionSkillDirectories,
 } from "./session-settings.ts";
 
 interface RuntimeOptions {
@@ -65,6 +71,11 @@ interface RuntimeOptions {
   readonly schedules: Schedule.Schedules["Service"];
   readonly browser: BrowserConfig;
 }
+
+const toSkillCommand = (skill: { readonly name: string; readonly description: string }) => ({
+  name: getSkillSlashCommandName(skill).slice("skill:".length),
+  description: skill.description || `Run ${skill.name} skill`,
+});
 
 export const make = Effect.fn("AgentRuntime.make")(function* ({
   paths,
@@ -109,6 +120,35 @@ export const make = Effect.fn("AgentRuntime.make")(function* ({
   });
 
   const availableModels = (cwd: AbsolutePath) => loadAvailableModels(modelRegistry, cwd);
+  const discoverSkills = Effect.fn("OmpSession.discoverSkills")(function* (cwd: AbsolutePath) {
+    return yield* Effect.tryPromise({
+      try: async () => {
+        const settings = await OmpSettings.Settings.loadReadOnly({ cwd });
+        const skillsSettings = settings.getGroup("skills");
+        if (!skillsSettings.enableSkillCommands) return [];
+        const customDirectories = resolveSessionSkillDirectories(
+          settings.get("skills.customDirectories"),
+          browser.externalBrowser,
+        );
+        const disabledExtensions = settings.get("disabledExtensions") ?? [];
+        const discovered = await withOmpExtensionRootScope([], "merge", async () => {
+          setInvocationConfiguredExtensions(
+            settings.get("extensions") ?? [],
+            settings.extensionsSourceLevel(),
+          );
+          return await OmpSettings.withActiveSettings(settings, () =>
+            OmpSdk.discoverSkills(cwd, undefined, {
+              ...skillsSettings,
+              customDirectories,
+              disabledExtensions,
+            }),
+          );
+        });
+        return discovered.skills.map(toSkillCommand);
+      },
+      catch: (cause) => agentError("Failed to list available OMP skill commands", cause),
+    });
+  });
   let browsers: AgentBrowserManager | undefined;
   switch (browser.externalBrowser) {
     case "off":
@@ -201,10 +241,11 @@ export const make = Effect.fn("AgentRuntime.make")(function* ({
     }, Effect.uninterruptible),
     abort: pool.abort,
     contextUsage: pool.contextUsage,
+    shake: pool.shake,
     availableModels,
+    discoverSkills,
     availableSkills: pool.availableSkills,
     switchModel: pool.switchModel,
-    shake: pool.shake,
   });
 });
 
@@ -728,10 +769,7 @@ const makeFactory = (
       contextUsage: () => normalizeContextUsage(created.session.getContextBreakdown()),
       availableSkills: () => {
         if (!created.session.skillsSettings?.enableSkillCommands) return [];
-        return created.session.skills.map((skill) => ({
-          name: getSkillSlashCommandName(skill).slice("skill:".length),
-          description: skill.description || `Run ${skill.name} skill`,
-        }));
+        return created.session.skills.map(toSkillCommand);
       },
       ...observation,
       appendAssistantMessage: async (message) => {

@@ -15,12 +15,12 @@ import type {
   ContextUsage,
   MessageDelivery,
   ModelInfo,
-  ModelRef,
   ModelSwitchResult,
   ShakeMode,
   ShakeResult,
   SkillCommand,
 } from "./agent-runtime.ts";
+import { ModelRef } from "./agent-runtime.ts";
 import type { NavigateHistoryResult, TranscriptSnapshot } from "./agent-snapshot.ts";
 import type { Chat, ChatId, ChatListEntry } from "./chat-model.ts";
 import type { ApplicationError, ChatClosed, GitError, WorkspaceBindingInvalid } from "./errors.ts";
@@ -59,6 +59,7 @@ export type BindWorkspace = typeof BindWorkspace.Type;
 export const CreateChat = Schema.Struct({
   workspaceId: WorkspaceId,
   externalId: Schema.NullOr(Schema.NonEmptyString),
+  modelOverride: Schema.NullOr(ModelRef),
 });
 export type CreateChat = typeof CreateChat.Type;
 
@@ -101,11 +102,23 @@ export class Application extends Context.Service<
       input: BindWorkspace,
     ) => Effect.Effect<Workspace, ApplicationError | GitError | WorkspaceBindingInvalid>;
 
-    /** Platform adapters call this before showing a channel workspace's model picker. */
-    readonly availableWorkspaceModels: (input: {
-      readonly binding: WorkspaceBinding;
-      readonly defaultCwd: AbsolutePath;
-    }) => Effect.Effect<readonly ModelInfo[], ApplicationError>;
+    /** Web and platform clients call this before showing a workspace or draft model picker. */
+    readonly availableWorkspaceModels: (
+      input:
+        | {
+            readonly kind: "binding";
+            readonly binding: WorkspaceBinding;
+            readonly defaultCwd: AbsolutePath;
+          }
+        | {
+            readonly kind: "workspace";
+            readonly workspaceId: WorkspaceId;
+          },
+    ) => Effect.Effect<readonly ModelInfo[], ApplicationError>;
+    /** Web clients call this when opening draft skill completion before first send. */
+    readonly availableWorkspaceSkills: (
+      workspaceId: WorkspaceId,
+    ) => Effect.Effect<readonly SkillCommand[], ApplicationError>;
 
     /** Platform adapters call this after resolving a workspace model selection. */
     readonly setWorkspaceModel: (

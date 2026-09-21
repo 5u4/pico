@@ -84,7 +84,9 @@ interface DraftEntry {
   readonly value: DraftValue;
   readonly recoveredDraft: DraftValue | null;
   readonly disclosures: ReadonlyMap<string, boolean>;
-  readonly target: { readonly kind: "new" } | { readonly kind: "chat"; readonly chat: Chat };
+  readonly target:
+    | { readonly kind: "new"; readonly modelOverride: ModelRef | null }
+    | { readonly kind: "chat"; readonly chat: Chat };
   readonly submission:
     | { readonly kind: "idle" }
     | { readonly kind: "creating" }
@@ -188,8 +190,10 @@ const decodeExpandedWorkspaceIds = Schema.decodeUnknownOption(Schema.Array(Works
 const tokenFormat = new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 });
 const percentageFormat = new Intl.NumberFormat("en-US", { maximumFractionDigits: 1 });
 
+const workspaceDefaultModelValue = "workspace-default";
 const modelValue = (model: ModelRef) => JSON.stringify([model.provider, model.id]);
 const modelLabel = (model: ModelInfo) => `${model.name || model.id} · ${model.provider}`;
+const modelRefLabel = (model: ModelRef) => `${model.id} · ${model.provider}`;
 const isDraftEmpty = (draft: DraftValue) => draft.text.length === 0 && draft.images.length === 0;
 const isDraftSendable = (draft: DraftValue) =>
   draft.text.trim().length > 0 || draft.images.length > 0;
@@ -658,7 +662,8 @@ export function WorkspaceChat({
     if (page.kind === "settings" && workspaceSaving && workspaceEditor?.session !== visit) {
       return { kind: "loading", label: "Finishing the previous workspace save..." };
     }
-    if (page.kind !== "chat") return { kind: "ready", workspace, target: { kind: "new" } };
+    if (page.kind !== "chat")
+      return { kind: "ready", workspace, target: { kind: "new", modelOverride: null } };
     const chats = group?.chats;
     if (chats?._tag === "Success" && !chats.waiting) {
       const chat = chats.value.find((chat) => chat.id === page.chatId);
@@ -693,6 +698,8 @@ export function WorkspaceChat({
   const conversationEntry = page.kind === "schedules" ? returnEntry : selected;
   const chatId =
     conversationEntry?.target.kind === "chat" ? conversationEntry.target.chat.id : null;
+  const draftWorkspaceId =
+    conversationEntry?.target.kind === "new" ? conversationEntry.workspace.id : null;
   const schedulesHref = router.buildLocation({ to: "/schedules" }).href;
   const visibleChatId =
     page.kind === "chat" &&
@@ -747,6 +754,21 @@ export function WorkspaceChat({
     [state, chatId, skillsVisible, historyVisible, historyPreviewVisible],
   );
   const conversation = useAtomValue(conversationAtom);
+  const draftCatalogAtom = useMemo(
+    () =>
+      Atom.make((get) =>
+        state && draftWorkspaceId
+          ? {
+              models: get(state.availableWorkspaceModels(draftWorkspaceId)),
+              skills: skillsVisible
+                ? get(state.availableWorkspaceSkills(draftWorkspaceId))
+                : undefined,
+            }
+          : null,
+      ),
+    [state, draftWorkspaceId, skillsVisible],
+  );
+  const draftCatalog = useAtomValue(draftCatalogAtom);
 
   useEffect(() => {
     setContextDetailsKey(undefined);
@@ -894,9 +916,8 @@ export function WorkspaceChat({
     const tokenKey = menuTokenKey(token);
     const selectedIndex = tabState.tokenKey === tokenKey ? tabState.selectedIndex : 0;
     const skillsResult =
-      conversationEntry.target.kind === "chat" ? conversation?.skills : undefined;
+      conversationEntry.target.kind === "chat" ? conversation?.skills : draftCatalog?.skills;
     if (
-      conversationEntry.target.kind === "new" ||
       conversationEntry.submission.kind === "creating" ||
       skillsResult === undefined ||
       skillsResult._tag === "Initial" ||
@@ -1014,6 +1035,7 @@ export function WorkspaceChat({
           (target.kind === "chat"
             ? entry.target.kind === "chat" && entry.target.chat.id === target.chat.id
             : entry.target.kind === "new" &&
+              entry.target.modelOverride === null &&
               isDraftEmpty(entry.value) &&
               entry.submission.kind === "idle")
         ) {
@@ -1210,7 +1232,7 @@ export function WorkspaceChat({
     const exit = await runCommand(registry, state.createWorkspace, decoded.value);
     workspacePending.current = false;
     const entry = Exit.isSuccess(exit)
-      ? retainEntry(exit.value, { kind: "new" }, false)
+      ? retainEntry(exit.value, { kind: "new", modelOverride: null }, false)
       : undefined;
     if (!ownsVisit()) {
       setWorkspaceSubmission({ session: visit, value: { kind: "ready" } });
@@ -1425,7 +1447,8 @@ export function WorkspaceChat({
       : (groups.find((group) => group.workspace.id === routeWorkspaceId)?.workspace ??
         groups.find((group) => group.workspace.id === preferredWorkspace.current)?.workspace ??
         groups[0]?.workspace);
-    if (workspace) navigatePage(entryPage(retainEntry(workspace, { kind: "new" }, true)));
+    if (workspace)
+      navigatePage(entryPage(retainEntry(workspace, { kind: "new", modelOverride: null }, true)));
     else if (!workspaceId) addWorkspace();
   };
   const selectChat = (workspaceId: string, id: string) => {
@@ -1608,6 +1631,7 @@ export function WorkspaceChat({
     updateEntry(entry.key, (value) => ({ ...value, submission: { kind: "creating" } }));
     const exit = await runCommand(registry, state.createChat(entry.workspace.id), {
       externalId: null,
+      modelOverride: entry.target.modelOverride,
     });
     creatingChats.current.delete(entry.workspace.id);
     if (Exit.isFailure(exit)) {
@@ -1632,28 +1656,28 @@ export function WorkspaceChat({
     return chat;
   };
 
-  const openSkillCatalog = async (entryKey: string) => {
+  const openSkillCatalog = (entryKey: string) => {
     if (!state || registry.get(state.connection).kind !== "active") return;
     const entry = navigationRef.current.entries.get(entryKey);
     if (!entry || isCreationUnconfirmed(entry)) return;
-    const chat = entry.target.kind === "chat" ? entry.target.chat : await ensureChat(entry);
-    if (!chat) return;
-    const catalog = registry.get(state.availableSkills(chat.id));
+    if (entry.target.kind === "chat") {
+      const catalog = registry.get(state.availableSkills(entry.target.chat.id));
+      if (catalog._tag !== "Initial" && !catalog.waiting) {
+        registry.refresh(state.availableSkills(entry.target.chat.id));
+      }
+      return;
+    }
+    const catalog = registry.get(state.availableWorkspaceSkills(entry.workspace.id));
     if (catalog._tag !== "Initial" && !catalog.waiting) {
-      registry.refresh(state.availableSkills(chat.id));
+      registry.refresh(state.availableWorkspaceSkills(entry.workspace.id));
     }
   };
 
   useEffect(() => {
     if (!conversationEntry || skillMenuResolved === null) return;
     if (skillMenuOpenTokens.current.get(conversationEntry.key) === "open") return;
-    if (
-      conversationEntry.target.kind === "new" &&
-      creatingChats.current.has(conversationEntry.workspace.id)
-    )
-      return;
     skillMenuOpenTokens.current.set(conversationEntry.key, "open");
-    void openSkillCatalog(conversationEntry.key);
+    openSkillCatalog(conversationEntry.key);
   }, [conversationEntry, skillMenuResolved, state]);
   const modelEntry = () => {
     if (!state || !ownsVisit() || registry.get(state.connection).kind !== "active") return;
@@ -1676,9 +1700,16 @@ export function WorkspaceChat({
     }
     return entry;
   };
-  const openModelPicker = async () => {
+  const openModelPicker = () => {
+    if (!state) return;
     const entry = modelEntry();
-    if (entry) await ensureChat(entry);
+    if (!entry) return;
+    if (entry.target.kind === "new") {
+      const catalog = registry.get(state.availableWorkspaceModels(entry.workspace.id));
+      if (catalog._tag !== "Initial" && !catalog.waiting) {
+        registry.refresh(state.availableWorkspaceModels(entry.workspace.id));
+      }
+    }
   };
   const switchModel = async (model: ModelRef) => {
     const entry = modelEntry();
@@ -1687,7 +1718,35 @@ export function WorkspaceChat({
   };
   const selectModel = (value: string) => {
     const entry = modelEntry();
-    if (!state || entry?.target.kind !== "chat") return;
+    if (!state || !entry) return;
+    if (entry.target.kind === "new") {
+      if (value === workspaceDefaultModelValue) {
+        updateEntry(entry.key, (current) => ({
+          ...current,
+          target:
+            current.target.kind === "new"
+              ? { ...current.target, modelOverride: null }
+              : current.target,
+        }));
+        return;
+      }
+      const models = draftCatalog
+        ? Option.getOrElse(AsyncResult.value(draftCatalog.models), () => [])
+        : [];
+      const model = models.find((candidate) => modelValue(candidate) === value);
+      if (!model) return;
+      updateEntry(entry.key, (current) => ({
+        ...current,
+        target:
+          current.target.kind === "new"
+            ? {
+                ...current.target,
+                modelOverride: { provider: model.provider, id: model.id },
+              }
+            : current.target,
+      }));
+      return;
+    }
     const models = AsyncResult.value(registry.get(state.availableModels(entry.target.chat.id)));
     if (Option.isNone(models)) return;
     const model = models.value.find((model) => modelValue(model) === value);
@@ -1697,7 +1756,7 @@ export function WorkspaceChat({
     const entry = modelEntry();
     if (!state || !entry) return;
     if (entry.target.kind === "new") {
-      void openModelPicker();
+      registry.refresh(state.availableWorkspaceModels(entry.workspace.id));
       return;
     }
     const id = entry.target.chat.id;
@@ -1763,9 +1822,14 @@ export function WorkspaceChat({
 
   const retrySkillCatalog = () => {
     if (!state || !conversationEntry || skillMenuResolved?.visibility !== "error") return;
-    if (!available || conversationEntry.target.kind !== "chat") return;
-    if (conversation?.skills?.waiting) return;
-    registry.refresh(state.availableSkills(conversationEntry.target.chat.id));
+    if (!available) return;
+    if (conversationEntry.target.kind === "chat") {
+      if (conversation?.skills?.waiting) return;
+      registry.refresh(state.availableSkills(conversationEntry.target.chat.id));
+      return;
+    }
+    if (draftCatalog?.skills?.waiting) return;
+    registry.refresh(state.availableWorkspaceSkills(conversationEntry.workspace.id));
   };
 
   const recordComposerCaret = (selection: { readonly start: number; readonly end: number }) => {
@@ -2242,14 +2306,35 @@ export function WorkspaceChat({
     const current = conversation
       ? Option.getOrUndefined(AsyncResult.value(conversation.currentModel))
       : undefined;
-    const label = current ? modelLabel(current) : "Choose model";
+    const draftSelected =
+      conversationEntry?.target.kind === "new" ? conversationEntry.target.modelOverride : null;
+    const draftCatalogModels = draftCatalog
+      ? Option.getOrElse(AsyncResult.value(draftCatalog.models), () => [])
+      : [];
+    const draftSelectedInfo =
+      draftSelected === null
+        ? undefined
+        : draftCatalogModels.find(
+            (model) => model.provider === draftSelected.provider && model.id === draftSelected.id,
+          );
+    const label =
+      conversationEntry?.target.kind === "new"
+        ? draftSelectedInfo
+          ? modelLabel(draftSelectedInfo)
+          : draftSelected
+            ? modelRefLabel(draftSelected)
+            : "Workspace default"
+        : current
+          ? modelLabel(current)
+          : "Choose model";
     const busy = creating || switching;
     const retry =
       available &&
       !busy &&
       !creationUnconfirmed &&
       !conversation?.models.waiting &&
-      !conversation?.currentModel.waiting
+      !conversation?.currentModel.waiting &&
+      !draftCatalog?.models.waiting
         ? "enabled"
         : "disabled";
     const switched = conversation
@@ -2273,12 +2358,24 @@ export function WorkspaceChat({
                 retry,
                 warning,
               }
-            : conversationEntry?.target.kind === "new" &&
-                conversationEntry.submission.kind === "error"
-              ? { kind: "error", message: conversationEntry.submission.message, retry, warning }
-              : warning !== null
-                ? { kind: "warning", message: warning }
-                : { kind: "none" };
+            : draftCatalog?.models._tag === "Failure"
+              ? {
+                  kind: "error",
+                  message: errorMessage(draftCatalog.models.cause),
+                  retry,
+                  warning: null,
+                }
+              : conversationEntry?.target.kind === "new" &&
+                  conversationEntry.submission.kind === "error"
+                ? {
+                    kind: "error",
+                    message: conversationEntry.submission.message,
+                    retry,
+                    warning: null,
+                  }
+                : warning !== null
+                  ? { kind: "warning", message: warning }
+                  : { kind: "none" };
     if (!conversationEntry) {
       return { label, control: { kind: "disabled", reason: "Choose a chat first." }, feedback };
     }
@@ -2300,7 +2397,42 @@ export function WorkspaceChat({
       return { label, control: { kind: "disabled", reason }, feedback };
     }
     if (conversationEntry.target.kind === "new") {
-      return { label, control: { kind: "draft" }, feedback };
+      if (!draftCatalog || draftCatalog.models._tag === "Initial") {
+        return { label, control: { kind: "disabled", reason: "Loading models..." }, feedback };
+      }
+      if (draftCatalogModels.length === 0) {
+        return {
+          label,
+          control: {
+            kind: "disabled",
+            reason:
+              draftCatalog.models._tag === "Failure"
+                ? "Models unavailable."
+                : "No models available.",
+          },
+          feedback,
+        };
+      }
+      const selectedValue =
+        conversationEntry.target.modelOverride === null
+          ? workspaceDefaultModelValue
+          : modelValue(conversationEntry.target.modelOverride);
+      const options = [
+        { value: workspaceDefaultModelValue, label: "Workspace default" },
+        ...draftCatalogModels.map((model) => ({
+          value: modelValue(model),
+          label: `${modelLabel(model)} · ${model.id}`,
+        })),
+      ];
+      return {
+        label,
+        control: {
+          kind: "select",
+          value: selectedValue,
+          options,
+        },
+        feedback,
+      };
     }
     if (
       !conversation ||
@@ -2439,11 +2571,14 @@ export function WorkspaceChat({
         message:
           conversation?.skills?._tag === "Failure"
             ? errorMessage(conversation.skills.cause)
-            : "Could not load skill commands.",
+            : draftCatalog?.skills?._tag === "Failure"
+              ? errorMessage(draftCatalog.skills.cause)
+              : "Could not load skill commands.",
         retry:
-          conversationEntry.target.kind === "chat" &&
-          conversation?.skills?.waiting !== true &&
-          available
+          available &&
+          (conversationEntry.target.kind === "chat"
+            ? conversation?.skills?.waiting !== true
+            : draftCatalog?.skills?.waiting !== true)
             ? "enabled"
             : "disabled",
       };

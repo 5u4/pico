@@ -450,6 +450,7 @@ export const install = Effect.fn("DiscordInput.install")(function* <
         if (Option.isNone(target)) return [];
         const { guildId, channel } = target.value;
         const models = yield* application.availableWorkspaceModels({
+          kind: "binding",
           binding: { platform: "discord", externalId: workspaceExternalId(guildId, channel.id) },
           defaultCwd: config.defaultCwd,
         });
@@ -593,6 +594,7 @@ export const install = Effect.fn("DiscordInput.install")(function* <
           const chat = yield* application.createChat({
             workspaceId,
             externalId: thread.id.toString(),
+            modelOverride: null,
           });
           cacheChat(thread.id, chat.id);
           failureMessage = "pico could not submit your opening message.";
@@ -758,6 +760,7 @@ export const install = Effect.fn("DiscordInput.install")(function* <
       return "New chats will inherit the OMP default model. Only new chats are affected.";
     }
     const models = yield* application.availableWorkspaceModels({
+      kind: "binding",
       binding: { platform: "discord", externalId: workspaceExternalId(guildId, channel.id) },
       defaultCwd: config.defaultCwd,
     });

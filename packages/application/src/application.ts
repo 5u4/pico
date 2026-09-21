@@ -438,12 +438,43 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
   const availableWorkspaceModels = Effect.fn("Application.availableWorkspaceModels")(function* (
     input: Parameters<Application["Service"]["availableWorkspaceModels"]>[0],
   ) {
+    if (input.kind === "binding") {
+      const workspace = yield* workspaces
+        .findByBinding(input.binding)
+        .pipe(Effect.mapError(failure("Failed to find workspace")));
+      return yield* runtime
+        .availableModels(Option.isSome(workspace) ? workspace.value.defaultCwd : input.defaultCwd)
+        .pipe(Effect.mapError(failure("Failed to list available models")));
+    }
     const workspace = yield* workspaces
-      .findByBinding(input.binding)
+      .findById(input.workspaceId)
       .pipe(Effect.mapError(failure("Failed to find workspace")));
+    if (Option.isNone(workspace)) {
+      return yield* new ApplicationError({
+        reason: "not-found",
+        message: "Workspace not found",
+      });
+    }
     return yield* runtime
-      .availableModels(Option.isSome(workspace) ? workspace.value.defaultCwd : input.defaultCwd)
+      .availableModels(workspace.value.defaultCwd)
       .pipe(Effect.mapError(failure("Failed to list available models")));
+  });
+
+  const availableWorkspaceSkills = Effect.fn("Application.availableWorkspaceSkills")(function* (
+    workspaceId: Workspace.WorkspaceId,
+  ) {
+    const workspace = yield* workspaces
+      .findById(workspaceId)
+      .pipe(Effect.mapError(failure("Failed to find workspace")));
+    if (Option.isNone(workspace)) {
+      return yield* new ApplicationError({
+        reason: "not-found",
+        message: "Workspace not found",
+      });
+    }
+    return yield* runtime
+      .discoverSkills(workspace.value.defaultCwd)
+      .pipe(Effect.mapError(failure("Failed to list workspace skill commands")));
   });
 
   const setWorkspaceModel = Effect.fn("Application.setWorkspaceModel")(function* (
@@ -461,6 +492,32 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
       .pipe(Effect.mapError(failure("Failed to set workspace model")));
   });
 
+  const resolveInitialModelOverride = Effect.fn("Application.resolveInitialModelOverride")(
+    function* (
+      cwd: AbsolutePath,
+      workspaceModelOverride: ModelRef | null,
+      requestedModelOverride: ModelRef | null,
+    ) {
+      if (requestedModelOverride === null) return workspaceModelOverride;
+      const available = yield* runtime
+        .availableModels(cwd)
+        .pipe(Effect.mapError(failure("Failed to validate the selected draft model")));
+      if (
+        !available.some(
+          (model) =>
+            model.provider === requestedModelOverride.provider &&
+            model.id === requestedModelOverride.id,
+        )
+      ) {
+        return yield* new ApplicationError({
+          reason: "invalid-state",
+          message: "Selected model is no longer available for this workspace",
+        });
+      }
+      return requestedModelOverride;
+    },
+  );
+
   const persistChat = Effect.fn("Application.persistChat")(function* (
     input: CreateChat,
     id: Chat.ChatId,
@@ -470,7 +527,14 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
   ) {
     return yield* Effect.acquireUseRelease(
       sessions.create({ chatId: id, cwd, modelOverride }),
-      () => chats.create({ ...input, id, cwd, createdAt }),
+      () =>
+        chats.create({
+          workspaceId: input.workspaceId,
+          externalId: input.externalId,
+          id,
+          cwd,
+          createdAt,
+        }),
       (_, exit) =>
         Exit.isFailure(exit)
           ? sessions.remove(id).pipe(
@@ -506,7 +570,12 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
       const workspace = maybeWorkspace.value;
       if (workspace.worktree === null) {
         const cwd = yield* resolveWorkspacePath("cwd", workspace.defaultCwd);
-        return yield* persistChat(input, id, cwd, createdAt, workspace.modelOverride);
+        const modelOverride = yield* resolveInitialModelOverride(
+          cwd,
+          workspace.modelOverride,
+          input.modelOverride,
+        );
+        return yield* persistChat(input, id, cwd, createdAt, modelOverride);
       }
 
       return yield* gitWorktree.create(
@@ -515,7 +584,15 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
           repositoryCwd: workspace.defaultCwd,
           settings: workspace.worktree,
         },
-        (cwd) => persistChat(input, id, cwd, createdAt, workspace.modelOverride),
+        (cwd) =>
+          Effect.gen(function* () {
+            const modelOverride = yield* resolveInitialModelOverride(
+              cwd,
+              workspace.modelOverride,
+              input.modelOverride,
+            );
+            return yield* persistChat(input, id, cwd, createdAt, modelOverride);
+          }),
       );
     },
     Effect.mapError(failure("Failed to create chat")),
@@ -578,7 +655,7 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
       return yield* ensureChatOpen(chatId, "Failed to create scheduled chat");
     }
     return yield* createChatWithId(
-      { workspaceId, externalId: null },
+      { workspaceId, externalId: null, modelOverride: null },
       chatId,
       yield* Clock.currentTimeMillis,
     );
@@ -948,7 +1025,6 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
       }),
     );
   });
-
   const switchModel = Effect.fn("Application.switchModel")(function* (
     chatId: Chat.ChatId,
     model: ModelRef,
@@ -994,6 +1070,7 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
     getOrCreateWorkspaceByBinding,
     bindWorkspace,
     availableWorkspaceModels,
+    availableWorkspaceSkills,
     setWorkspaceModel,
     listChats,
     createChat,

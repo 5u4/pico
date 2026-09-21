@@ -85,6 +85,7 @@ describe("Workspace binding", () => {
           previewHistory: () => Effect.die("unexpected history preview"),
           navigateHistory: () => Effect.die("unexpected history navigation"),
           availableModels: () => Effect.die("unexpected model catalog read"),
+          discoverSkills: () => Effect.die("unexpected workspace skill command discovery"),
           switchModel: () => Effect.die("unexpected model switch"),
           askBtw: () => Effect.die("unexpected side question"),
           events: Stream.empty,
@@ -157,6 +158,7 @@ describe("Workspace binding", () => {
         const oldChat = yield* application.createChat({
           workspaceId: created.id,
           externalId: "thread-old",
+          modelOverride: null,
         });
         const modelOverride = { provider: "native", id: "channel-model" };
         const configured = yield* application.setWorkspaceModel(created.id, modelOverride);
@@ -200,6 +202,7 @@ describe("Workspace binding", () => {
         const worktreeChat = yield* application.createChat({
           workspaceId: created.id,
           externalId: "thread-worktree",
+          modelOverride: null,
         });
         assert.strictEqual(worktreeChat.cwd, worktreeCwd);
 
@@ -224,6 +227,7 @@ describe("Workspace binding", () => {
         const newChat = yield* application.createChat({
           workspaceId: created.id,
           externalId: "thread-new",
+          modelOverride: null,
         });
         assert.strictEqual(oldChat.cwd, firstCwd);
         assert.strictEqual(
@@ -343,6 +347,7 @@ describe("Workspace binding", () => {
           previewHistory: () => Effect.die("unexpected history preview"),
           navigateHistory: () => Effect.die("unexpected history navigation"),
           availableModels: () => Effect.die("unexpected model catalog read"),
+          discoverSkills: () => Effect.die("unexpected workspace skill command discovery"),
           switchModel: () => Effect.die("unexpected model switch"),
           askBtw: () => Effect.die("unexpected side question"),
           events: Stream.empty,
@@ -430,6 +435,7 @@ describe("Workspace binding", () => {
           const initialChat = yield* application.createChat({
             workspaceId: first.id,
             externalId: "before-release",
+            modelOverride: null,
           });
           assert.strictEqual(initialChat.cwd, winner === "message" ? defaultCwd : worktreeCwd);
 
@@ -450,6 +456,7 @@ describe("Workspace binding", () => {
           const nextChat = yield* application.createChat({
             workspaceId: second.id,
             externalId: "after-release",
+            modelOverride: null,
           });
           assert.strictEqual(nextChat.cwd, worktreeCwd);
           assert.strictEqual(

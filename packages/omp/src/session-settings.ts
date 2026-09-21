@@ -29,6 +29,25 @@ const agentBrowserSkillsDirectory = Bun.fileURLToPath(
   new URL("./agent-browser/skills", import.meta.url),
 );
 
+export const resolveSessionSkillDirectories = (
+  customDirectories: readonly string[],
+  externalBrowser: ExternalBrowser,
+): string[] => {
+  const skillDirectories = [...customDirectories, bundledSkillsDirectory];
+  switch (externalBrowser) {
+    case "off":
+      break;
+    case "agent-browser":
+      skillDirectories.push(agentBrowserSkillsDirectory);
+      break;
+    default: {
+      const exhaustive: never = externalBrowser;
+      return exhaustive;
+    }
+  }
+  return skillDirectories;
+};
+
 export const findRestorableModelChange = (
   entries: readonly SessionEntry[],
 ): ModelChangeEntry | undefined => {
@@ -129,21 +148,12 @@ export const prepareSessionSettings = Effect.fn("OmpSession.prepareSettings")(fu
     try: () => {
       settings.override("async.enabled", false);
       settings.override("title.refreshOnReplan", false);
-      const skillDirectories = [
-        ...settings.get("skills.customDirectories"),
-        bundledSkillsDirectory,
-      ];
-      switch (externalBrowser) {
-        case "off":
-          break;
-        case "agent-browser":
-          settings.override("browser.enabled", false);
-          skillDirectories.push(agentBrowserSkillsDirectory);
-          break;
-        default: {
-          const exhaustive: never = externalBrowser;
-          return exhaustive;
-        }
+      const skillDirectories = resolveSessionSkillDirectories(
+        settings.get("skills.customDirectories"),
+        externalBrowser,
+      );
+      if (externalBrowser === "agent-browser") {
+        settings.override("browser.enabled", false);
       }
       settings.override("skills.customDirectories", skillDirectories);
       settings.override("secrets.enabled", true);

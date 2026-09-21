@@ -173,6 +173,11 @@ export class AgentRuntime extends Context.Service<
       cwd: AbsolutePath,
     ) => Effect.Effect<readonly ModelInfo[], AgentError>;
 
+    /** Application calls this for skill discovery without opening a session. */
+    readonly discoverSkills: (
+      cwd: AbsolutePath,
+    ) => Effect.Effect<readonly SkillCommand[], AgentError>;
+
     /** Application calls this to switch one chat and report whether persistence was confirmed. */
     readonly switchModel: (
       chatId: ChatId,

@@ -210,6 +210,7 @@ const start = Effect.fn("Telegram.start")(function* (
       : yield* application.createChat({
           workspaceId: workspace.value.id,
           externalId,
+          modelOverride: null,
         });
     if (current.archivedAt !== null) {
       yield* reply(input, noActiveChat);

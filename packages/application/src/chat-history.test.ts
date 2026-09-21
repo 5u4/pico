@@ -134,6 +134,7 @@ const makeFixture = Effect.fn("HistoryTest.makeFixture")(function* () {
       publish: () => Effect.die("unexpected publication"),
       contextUsage: () => Effect.die("unexpected context read"),
       availableModels: () => Effect.die("unexpected model catalog"),
+      discoverSkills: () => Effect.die("unexpected workspace skill command discovery"),
       availableSkills: () => Effect.die("unexpected skill catalog"),
       switchModel: () => Effect.die("unexpected model switch"),
       shake: () => Effect.die("unexpected shake"),
@@ -174,7 +175,11 @@ const makeFixture = Effect.fn("HistoryTest.makeFixture")(function* () {
     defaultCwd: cwd,
     worktree: null,
   });
-  const chat = yield* application.createChat({ workspaceId: workspace.id, externalId: null });
+  const chat = yield* application.createChat({
+    workspaceId: workspace.id,
+    externalId: null,
+    modelOverride: null,
+  });
   const request = {
     chatId: chat.id,
     targetId: rootId,

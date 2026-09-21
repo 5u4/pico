@@ -103,6 +103,16 @@ export const PicoRpcs = RpcGroup.make(
     success: ContextUsage,
     error: Schema.Union([Errors.ApplicationError, Errors.ChatClosed]),
   }),
+  Rpc.make("AvailableWorkspaceModels", {
+    payload: { workspaceId: Workspace.WorkspaceId },
+    success: Schema.Array(ModelInfo),
+    error: Errors.ApplicationError,
+  }),
+  Rpc.make("AvailableWorkspaceSkills", {
+    payload: { workspaceId: Workspace.WorkspaceId },
+    success: Schema.Array(SkillCommand),
+    error: Errors.ApplicationError,
+  }),
   Rpc.make("AvailableModels", {
     payload: { chatId: Chat.ChatId },
     success: Schema.Array(ModelInfo),
