@@ -43,7 +43,7 @@ export function Composer({
   const completionOpen = completion.kind !== "closed";
   const statusLabel =
     completion.kind === "ready"
-      ? "Enter to complete · Esc to close"
+      ? "Tab to complete · Esc to close"
       : completionOpen
         ? "Esc to close"
         : presentation.statusLabel;
@@ -74,7 +74,15 @@ export function Composer({
 
   const handleKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     const composingEvent = composing.current || event.nativeEvent.isComposing;
-    if (event.key === "Enter" && !event.shiftKey && !composingEvent && completionOpen) {
+    if (
+      event.key === "Tab" &&
+      !event.shiftKey &&
+      !event.ctrlKey &&
+      !event.metaKey &&
+      !event.altKey &&
+      !composingEvent &&
+      completion.kind === "ready"
+    ) {
       event.preventDefault();
       onCompletionCommit();
       return;
@@ -103,6 +111,9 @@ export function Composer({
     }
 
     event.preventDefault();
+    if (completionOpen) {
+      return;
+    }
     if (presentation.mode === "send" && presentation.canSubmit) {
       onSubmit();
     }
