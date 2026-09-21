@@ -1,5 +1,18 @@
-import { type ComponentProps, createContext, memo, useContext } from "react";
+import { CheckIcon, CodeIcon, CopyIcon } from "@phosphor-icons/react";
+import {
+  type ComponentProps,
+  createContext,
+  memo,
+  type ReactNode,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import ReactMarkdown, { type Components, type ExtraProps } from "react-markdown";
+import rehypeHighlight from "rehype-highlight";
 import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
 import { MermaidBlock, type MermaidFence } from "./mermaid-block.tsx";
@@ -15,7 +28,7 @@ type MarkdownCompileContext = {
 };
 
 type HastElement = NonNullable<ExtraProps["node"]>;
-type HastText = Extract<HastElement["children"][number], { type: "text" }>;
+type HastChild = HastElement["children"][number];
 
 type CodeNode = {
   readonly type: "code";
@@ -26,7 +39,19 @@ type CodeNode = {
   };
 };
 
+type CopyState =
+  | { readonly kind: "idle" }
+  | {
+      readonly kind: "copying" | "copied" | "failed";
+      readonly source: string;
+    };
+
 const remarkPlugins = [remarkGfm, remarkBreaks, remarkMermaidFenceMetadata];
+const rehypeCodeHighlightTransformer = rehypeHighlight({
+  detect: false,
+  plainText: ["mermaid"],
+});
+const rehypePlugins = [rehypeCodeHighlightPlugin];
 
 const components = {
   a({ node: _node, children, href, ...props }) {
@@ -62,11 +87,7 @@ const components = {
       return <MermaidBlock fence={fence} />;
     }
 
-    return (
-      <pre aria-label="Code block" tabIndex={0}>
-        {children}
-      </pre>
-    );
+    return <MarkdownCodeBlock node={node}>{children}</MarkdownCodeBlock>;
   },
   table({ children }) {
     return (
@@ -131,7 +152,11 @@ export const Markdown = memo(function Markdown({
       className={className ? `chat-markdown ${className}` : "chat-markdown"}
       data-streaming={streaming || undefined}
     >
-      <ReactMarkdown components={components} remarkPlugins={remarkPlugins}>
+      <ReactMarkdown
+        components={components}
+        rehypePlugins={rehypePlugins}
+        remarkPlugins={remarkPlugins}
+      >
         {text}
       </ReactMarkdown>
     </div>
@@ -158,6 +183,100 @@ export const MarkdownLabel = memo(function MarkdownLabel({
     </span>
   );
 });
+
+function MarkdownCodeBlock({
+  node,
+  children,
+}: {
+  readonly node: HastElement | undefined;
+  readonly children: ReactNode;
+}) {
+  const codeElement = node?.tagName === "pre" ? node.children.find(isCodeElement) : undefined;
+  const source = codeElement ? readCodeValue(codeElement.children) : "";
+  const languageLabel = readLanguageLabel(codeElement);
+  const lineCount = countCodeLines(source);
+  const lineNumbers = useMemo(
+    () => Array.from({ length: lineCount }, (_, lineNumber) => lineNumber + 1),
+    [lineCount],
+  );
+  const [copyState, setCopyState] = useState<CopyState>({ kind: "idle" });
+  const current =
+    copyState.kind !== "idle" && copyState.source === source ? copyState.kind : "idle";
+  const requestIdRef = useRef(0);
+  const sourceRef = useRef(source);
+  sourceRef.current = source;
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  const copy = useCallback(async () => {
+    if (current === "copying") return;
+    const sourceAtRequest = sourceRef.current;
+    const requestId = requestIdRef.current + 1;
+    requestIdRef.current = requestId;
+    setCopyState({ kind: "copying", source: sourceAtRequest });
+    try {
+      await navigator.clipboard.writeText(sourceAtRequest);
+      if (!mountedRef.current) return;
+      if (requestIdRef.current !== requestId) return;
+      if (sourceRef.current !== sourceAtRequest) return;
+      setCopyState({ kind: "copied", source: sourceAtRequest });
+    } catch {
+      if (!mountedRef.current) return;
+      if (requestIdRef.current !== requestId) return;
+      if (sourceRef.current !== sourceAtRequest) return;
+      setCopyState({ kind: "failed", source: sourceAtRequest });
+    }
+  }, [current]);
+
+  return (
+    <figure className="chat-code-block">
+      <figcaption className="chat-code-block-header">
+        <span className="chat-code-block-language">
+          <CodeIcon aria-hidden="true" size={13} weight="duotone" />
+          <span title={languageLabel}>{languageLabel}</span>
+        </span>
+        <button
+          aria-label={`Copy ${languageLabel.toLowerCase()} code`}
+          className={`chat-code-block-copy ${current === "copied" ? "chat-code-block-copy-copied" : ""}`}
+          disabled={current === "copying"}
+          onClick={copy}
+          type="button"
+        >
+          {current === "copied" ? (
+            <CheckIcon aria-hidden="true" size={12} />
+          ) : (
+            <CopyIcon aria-hidden="true" size={12} />
+          )}
+          {current === "copying" ? "Copying" : current === "copied" ? "Copied" : "Copy"}
+        </button>
+      </figcaption>
+      <div aria-label="Code block" className="chat-code-block-scroll" role="region" tabIndex={0}>
+        <div className="chat-code-block-frame">
+          <span aria-hidden="true" className="chat-code-block-gutter">
+            {lineNumbers.map((lineNumber) => (
+              <span key={lineNumber}>{lineNumber}</span>
+            ))}
+          </span>
+          <pre className="chat-code-block-pre">{children}</pre>
+        </div>
+      </div>
+      <p aria-live="polite" className="sr-only">
+        {current === "copied" ? "Code copied" : ""}
+      </p>
+      {current === "failed" && (
+        <p className="chat-code-block-copy-error" role="alert">
+          Could not copy code. Select the text and copy it manually.
+        </p>
+      )}
+    </figure>
+  );
+}
 
 function MarkdownLabelBoundary({ children }: ComponentProps<"span">) {
   return <span>{children} </span>;
@@ -238,7 +357,11 @@ function findNearestCodeNode(stack: MarkdownCompileContext["stack"]): CodeNode |
   }
 }
 
-function isCodeElement(node: HastElement["children"][number]): node is HastElement {
+function rehypeCodeHighlightPlugin() {
+  return rehypeCodeHighlightTransformer;
+}
+
+function isCodeElement(node: HastChild): node is HastElement {
   return node.type === "element" && node.tagName === "code";
 }
 
@@ -252,10 +375,49 @@ function readClassNames(value: unknown): string[] {
   return [];
 }
 
+function readLanguageLabel(codeElement: HastElement | undefined): string {
+  if (!codeElement) return "Plain text";
+  const classNames = readClassNames(codeElement.properties?.className);
+  for (const className of classNames) {
+    if (className.startsWith("language-")) {
+      return formatLanguageLabel(className.slice(9));
+    }
+    if (className.startsWith("lang-")) {
+      return formatLanguageLabel(className.slice(5));
+    }
+  }
+  return "Plain text";
+}
+
+function formatLanguageLabel(language: string): string {
+  const trimmed = language.trim();
+  if (!trimmed) return "Plain text";
+  return trimmed.replace(/[-_]+/gu, " ");
+}
+
+function countCodeLines(source: string): number {
+  let lines = 1;
+  for (let index = 0; index < source.length; index++) {
+    if (source.charCodeAt(index) === 10) lines++;
+  }
+  return lines;
+}
+
 function readCodeValue(children: HastElement["children"]): string {
-  const text = children
-    .filter((node): node is HastText => node.type === "text")
-    .map((node) => node.value)
-    .join("");
+  const text = readTextNodes(children);
   return text.endsWith("\n") ? text.slice(0, -1) : text;
+}
+
+function readTextNodes(children: HastElement["children"]): string {
+  return children.map(readTextNode).join("");
+}
+
+function readTextNode(node: HastChild): string {
+  if (node.type === "text") {
+    return node.value;
+  }
+  if (node.type === "element") {
+    return readTextNodes(node.children);
+  }
+  return "";
 }
