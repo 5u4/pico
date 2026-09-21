@@ -106,7 +106,7 @@ const normalizeToolResultContent = (
     }
   });
 
-const skillPromptText = (message: Extract<SessionMessage, { readonly role: "custom" }>) =>
+export const skillPromptText = (message: Extract<SessionMessage, { readonly role: "custom" }>) =>
   message.customType === "skill-prompt" &&
   message.attribution === "user" &&
   message.display === true &&

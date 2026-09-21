@@ -158,6 +158,7 @@ const withSession = async (
   run: (session: AgentSession, reopen: () => Promise<AgentSession>) => Promise<void>,
   extensionFactory?: ExtensionFactory,
   obfuscator?: AgentSession["obfuscator"],
+  skills: AgentSession["skills"][number][] = [],
 ) => {
   const directory = await NodeFileSystem.mkdtemp(join(root, "session-"));
   const auth = new native.AuthStorage(
@@ -305,7 +306,7 @@ const withSession = async (
       sideStreamFn: streamFn,
       ...(obfuscator === undefined ? {} : { obfuscator }),
       ...(extensionRunner === undefined ? {} : { extensionRunner }),
-      skills: [],
+      skills,
       skillsSettings: { enableSkillCommands: true },
       memoryAgentDir: join(directory, "agent"),
       disableExtensionDiscovery: true,
@@ -1264,6 +1265,188 @@ describe("native SessionPool ownership", () => {
       );
     });
   });
+
+  it("retains a completed skill command in live and reopened transcripts", async () => {
+    const filePath = join(root, "review-SKILL.md");
+    await NodeFileSystem.writeFile(filePath, "Read the private review instructions.\n");
+    const turn = providerTurn("Review complete");
+    await withSession(
+      [turn],
+      (session, reopen) =>
+        Effect.runPromise(
+          Effect.scoped(
+            Effect.gen(function* () {
+              const pool = yield* makePool(session);
+              const events: AgentEvent.AgentEvent[] = [];
+              const finished = Promise.withResolvers<void>();
+              yield* pool.events.pipe(
+                Stream.runForEach(({ event }) =>
+                  Effect.sync(() => {
+                    events.push(event);
+                    if (event.type === "run-finished") finished.resolve();
+                  }),
+                ),
+                Effect.forkChild,
+              );
+              const delivery = yield* pool.send(chatId, prompt("/skill:review  Keep spacing."));
+              const context = yield* Effect.promise(() => turn.entered.promise);
+              expect(JSON.stringify(context.messages)).toContain(
+                "Read the private review instructions.",
+              );
+              turn.release.resolve();
+              if (delivery.kind !== "started") throw new Error("Expected skill turn admission");
+              yield* delivery.completed;
+              yield* Effect.promise(() => finished.promise);
+              yield* pool.drain();
+              const transcript = yield* pool.transcript(chatId);
+              const expected = [
+                {
+                  role: "user",
+                  content: [{ type: "text", text: "/skill:review  Keep spacing." }],
+                },
+                { role: "assistant", content: [{ type: "text", text: "Review complete" }] },
+              ];
+              expect(transcript.messages.map(({ role, content }) => ({ role, content }))).toEqual(
+                expected,
+              );
+              expect(
+                events.flatMap((event) =>
+                  event.type === "message-settled"
+                    ? [{ role: event.message.role, content: event.message.content }]
+                    : [],
+                ),
+              ).toEqual(expected);
+              yield* pool.close(chatId);
+              const restored = yield* Effect.promise(reopen);
+              expect(
+                native
+                  .normalizeTranscript(restored.sessionManager.buildSessionContext().messages)
+                  .map(({ role, content }) => ({ role, content })),
+              ).toEqual(expected);
+            }).pipe(Effect.provide(platform)),
+          ),
+        ),
+      undefined,
+      undefined,
+      [{ name: "review", description: "Review locally", filePath, baseDir: root, source: "test" }],
+    );
+  }, 30_000);
+
+  it.each([
+    { name: "append before publication", appendFirst: true, stored: {}, confirmed: true },
+    { name: "publication before append", appendFirst: false, stored: {}, confirmed: true },
+    { name: "missing record", appendFirst: false, stored: null, confirmed: false },
+    {
+      name: "different original prompt",
+      appendFirst: false,
+      stored: { details: { prompt: "/skill:review Other request" } },
+      confirmed: false,
+    },
+    {
+      name: "missing original prompt",
+      appendFirst: false,
+      stored: { details: {} },
+      confirmed: false,
+    },
+    {
+      name: "different expanded content",
+      appendFirst: false,
+      stored: { content: "Another expansion" },
+      confirmed: false,
+    },
+    { name: "different timestamp", appendFirst: false, stored: { timestamp: 2 }, confirmed: false },
+    {
+      name: "different custom type",
+      appendFirst: false,
+      stored: { customType: "extension-note" },
+      confirmed: false,
+    },
+    { name: "hidden record", appendFirst: false, stored: { display: false }, confirmed: false },
+    {
+      name: "agent attribution",
+      appendFirst: false,
+      stored: { attribution: "agent" },
+      confirmed: false,
+    },
+  ] as const)(
+    "confirms only replayable skill persistence with $name",
+    async ({ appendFirst, stored, confirmed }) => {
+      await withSession([], async (session) => {
+        const message = {
+          role: "custom" as const,
+          customType: "skill-prompt",
+          content: "Private expanded skill instructions",
+          display: true,
+          attribution: "user" as const,
+          timestamp: 1,
+          details: { prompt: "/skill:review  Keep spacing.\n", __queueChipText: "Review" },
+        };
+        const events: AgentEvent.AgentEvent[] = [];
+        let publish: Parameters<AgentSession["subscribe"]>[0] = () => {
+          throw new Error("Observation has not subscribed");
+        };
+        const observation = native.makeSessionObservation(
+          {
+            sessionManager: session.sessionManager,
+            settleInFlightMessagePersistence: () => session.settleInFlightMessagePersistence(),
+            subscribe: (listener) => {
+              publish = listener;
+              return () => {};
+            },
+          },
+          (event) => events.push(event),
+          (cause) => {
+            throw cause;
+          },
+        );
+        const append = () => {
+          if (stored === null) return;
+          const persisted = { ...message, ...stored };
+          session.sessionManager.appendCustomMessageEntry(
+            persisted.customType,
+            persisted.content,
+            persisted.display,
+            persisted.details,
+            persisted.attribution,
+            persisted.timestamp,
+          );
+        };
+        try {
+          if (appendFirst) append();
+          publish({ type: "message_end", message });
+          if (!appendFirst) append();
+          expect(events).toEqual([
+            {
+              type: "message-settled",
+              message: {
+                role: "user",
+                content: [{ type: "text", text: "/skill:review  Keep spacing.\n" }],
+                timestamp: 1,
+              },
+            },
+          ]);
+          if (!confirmed) {
+            await expect(observation.settleHistory()).rejects.toThrow();
+            return;
+          }
+          await observation.settleHistory();
+          const file = session.sessionManager.getSessionFile();
+          if (file === undefined) throw new Error("Expected skill journal");
+          expect(
+            native.normalizeTranscript(await native.loadSessionMessagesReadOnly(file)),
+          ).toEqual([
+            {
+              role: "user",
+              content: [{ type: "text", text: "/skill:review  Keep spacing.\n" }],
+              timestamp: 1,
+            },
+          ]);
+        } finally {
+          observation.unsubscribe();
+        }
+      });
+    },
+  );
 
   it("confirms obfuscated assistant persistence by lifecycle ID before and after its append", async () => {
     const secret = "native-observation-secret-value";
