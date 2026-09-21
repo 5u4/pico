@@ -55,6 +55,8 @@ Both themes use the same semantic token vocabulary. `WorkspaceChat` owns theme s
 
 User, assistant, thinking, and notice bodies share Markdown formatting. Streaming parses each complete accumulated block, because splitting the animated tail can break Markdown syntax. Code and tables scroll within their containers rather than widening the conversation. Raw HTML stays escaped, unsafe URLs are not links, and Markdown images require an explicit click instead of fetching remote resources automatically.
 
+Markdown code blocks adapt [Beautiful UI's Code Block](https://www.beautifului.dev/#code-block) with a language label, line numbers, and a copy action. Language labels come from the fence rather than inferred filenames. `rehype-highlight` handles known languages without auto-detection. Unknown and unlabelled fences stay plain text, and Mermaid keeps its separate preview path. Line numbers remain outside the code so selection and copying preserve code whitespace without including the gutter. Both themes use root syntax-color tokens.
+
 The todo dock renders task bodies and blocker notes as Markdown. Its summary and phase headings use noninteractive inline formatting to preserve button and heading semantics. Nested Markdown lists within a task are display content, not separately tracked subtasks, and do not change completion counts.
 
 Tool arguments remain literal. Tool output has no format metadata, so both inline disclosures and the detail pane default to Source with an explicit Markdown view. Do not guess from tool names or payload text. Copy always preserves the original payload, including whitespace, regardless of the selected view. Tool names, summaries, and truncated hover previews remain literal.
