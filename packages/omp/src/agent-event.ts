@@ -372,6 +372,7 @@ export const normalizeAgentEvent = (event: AgentSessionEvent): AgentEvent | unde
         status: event.isError === true ? "failed" : "succeeded",
       };
     case "notice":
+      if (event.level === "info" && event.source === "xdev") return undefined;
       return { type: "notice", level: event.level, message: event.message };
     case "auto_compaction_end":
     case "model_changed":

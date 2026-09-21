@@ -224,6 +224,30 @@ describe("AgentRuntime", () => {
     );
   });
 
+  it("omits internal device info notices without hiding diagnostics", () => {
+    const notices = [
+      { level: "info", source: "xdev", message: "xd://: mounted lsp" },
+      { level: "info", source: "xdev", message: "Device inventory changed" },
+      { level: "info", source: "project", message: "xd://: mounted lsp" },
+      { level: "info", message: "xd://: mounted lsp" },
+      { level: "warning", source: "xdev", message: "Device unavailable" },
+      { level: "error", source: "xdev", message: "Device failed" },
+    ] as const;
+
+    assert.deepStrictEqual(
+      notices.flatMap((notice) => {
+        const event = normalizeAgentEvent({ type: "notice", ...notice });
+        return event === undefined ? [] : [event];
+      }),
+      [
+        { type: "notice", level: "info", message: "xd://: mounted lsp" },
+        { type: "notice", level: "info", message: "xd://: mounted lsp" },
+        { type: "notice", level: "warning", message: "Device unavailable" },
+        { type: "notice", level: "error", message: "Device failed" },
+      ],
+    );
+  });
+
   it("invalidates context snapshots after model and compaction changes", () => {
     assert.deepStrictEqual(normalizeAgentEvent({ type: "model_changed" }), {
       type: "context-invalidated",
