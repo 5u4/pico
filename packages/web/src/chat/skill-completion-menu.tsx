@@ -59,7 +59,7 @@ export function SkillCompletionMenu({ presentation, onSelect, onRetry }: SkillCo
         {presentation.kind === "closed"
           ? ""
           : presentation.kind === "ready"
-            ? `${presentation.options.length} skills available. Use arrow keys to choose, Enter to complete, Escape to dismiss.`
+            ? `${presentation.options.length} skills available. Use arrow keys to choose, Tab to complete, Escape to dismiss.`
             : presentation.message}
       </span>
       {presentation.kind !== "closed" && (
@@ -133,7 +133,7 @@ export function SkillCompletionMenu({ presentation, onSelect, onRetry }: SkillCo
             aria-hidden="true"
             className="shrink-0 border-t border-border px-3 py-1.5 text-meta text-muted"
           >
-            {presentation.kind === "ready" ? "↑↓ Choose · Enter Complete · Esc Close" : "Esc Close"}
+            {presentation.kind === "ready" ? "↑↓ Choose · Tab Complete · Esc Close" : "Esc Close"}
           </p>
         </div>
       )}
