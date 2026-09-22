@@ -475,7 +475,7 @@ textarea:disabled {
 .chat-code-block-scroll {
   max-width: 100%;
   overflow-x: auto;
-  overscroll-behavior: contain;
+  overscroll-behavior-x: contain;
 }
 
 .chat-code-block-frame {
@@ -609,7 +609,7 @@ textarea:disabled {
 .chat-mermaid-source {
   max-width: 100%;
   overflow-x: auto;
-  overscroll-behavior: contain;
+  overscroll-behavior-x: contain;
   border: 1px solid var(--raw-border-strong);
   border-radius: var(--raw-radius-control);
   background: var(--raw-surface);
@@ -624,7 +624,7 @@ textarea:disabled {
 .chat-mermaid-preview {
   max-width: 100%;
   overflow-x: auto;
-  overscroll-behavior: contain;
+  overscroll-behavior-x: contain;
   border: 1px solid var(--raw-border-strong);
   border-radius: var(--raw-radius-control);
   background: var(--raw-surface);
@@ -653,7 +653,7 @@ textarea:disabled {
   max-width: 100%;
   margin-block: 1em;
   overflow-x: auto;
-  overscroll-behavior: contain;
+  overscroll-behavior-x: contain;
   border: 1px solid var(--raw-border-strong);
   border-radius: var(--raw-radius-control);
 }
