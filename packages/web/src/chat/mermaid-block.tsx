@@ -166,7 +166,7 @@ export function MermaidBlock({ fence }: { readonly fence: MermaidFence }) {
             role="region"
             tabIndex={0}
           >
-            <pre>
+            <pre className="chat-code-block-pre">
               <code>{fence.source}</code>
             </pre>
           </div>
