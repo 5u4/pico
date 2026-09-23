@@ -507,7 +507,6 @@ function ChatRow({
   const [menuOpen, setMenuOpen] = useState(false);
   const [copyStatus, setCopyStatus] = useState<ClipboardStatus>("idle");
   const openMenu = (origin: HTMLElement) => {
-    setCopyStatus("idle");
     const bounds = origin.getBoundingClientRect();
     trigger.current?.dispatchEvent(
       new MouseEvent("contextmenu", {
@@ -543,7 +542,7 @@ function ChatRow({
             className="sidebar-row flex min-w-0 flex-1 items-center py-1 pl-7 pr-1 text-left text-[14px] font-medium"
             onClick={() => onChatSelect(workspaceId, chat.id)}
             onContextMenu={(event) => {
-              setCopyStatus("idle");
+              setCopyStatus((status) => (status === "copying" ? status : "idle"));
               menuOrigin.current = event.currentTarget;
               event.currentTarget.focus({ preventScroll: true });
             }}
@@ -660,7 +659,6 @@ function WorkspaceToggle({
   const editable = workspace.canEditConfiguration && onEditWorkspace !== undefined;
   const deletable = onDeleteWorkspace !== undefined;
   const openMenu = (button: HTMLButtonElement) => {
-    setCopyStatus("idle");
     const bounds = button.getBoundingClientRect();
     button.dispatchEvent(
       new MouseEvent("contextmenu", {
@@ -693,7 +691,7 @@ function WorkspaceToggle({
         else onWorkspaceToggle(workspace.id);
       }}
       onContextMenu={(event) => {
-        setCopyStatus("idle");
+        setCopyStatus((status) => (status === "copying" ? status : "idle"));
         event.currentTarget.focus({ preventScroll: true });
       }}
       onKeyDown={(event) => {
