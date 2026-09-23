@@ -3,6 +3,7 @@ import {
   CalendarBlankIcon,
   CaretDownIcon,
   CaretRightIcon,
+  CopyIcon,
   DotsThreeIcon,
   FolderSimpleIcon,
   MagnifyingGlassIcon,
@@ -482,6 +483,8 @@ export function WorkspaceSidebar({
   );
 }
 
+type ClipboardStatus = "idle" | "copying" | "copied" | "failed";
+
 function ChatRow({
   chat,
   workspaceId,
@@ -502,7 +505,9 @@ function ChatRow({
   const menuOrigin = useRef<HTMLElement | null>(null);
   const pendingClose = useRef<HTMLElement | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [copyStatus, setCopyStatus] = useState<ClipboardStatus>("idle");
   const openMenu = (origin: HTMLElement) => {
+    setCopyStatus("idle");
     const bounds = origin.getBoundingClientRect();
     trigger.current?.dispatchEvent(
       new MouseEvent("contextmenu", {
@@ -514,6 +519,16 @@ function ChatRow({
       }),
     );
     menuOrigin.current = origin;
+  };
+  const copyChatId = async () => {
+    if (copyStatus === "copying") return;
+    setCopyStatus("copying");
+    try {
+      await navigator.clipboard.writeText(chat.id);
+      setCopyStatus("copied");
+    } catch {
+      setCopyStatus("failed");
+    }
   };
 
   return (
@@ -528,6 +543,7 @@ function ChatRow({
             className="sidebar-row flex min-w-0 flex-1 items-center py-1 pl-7 pr-1 text-left text-[14px] font-medium"
             onClick={() => onChatSelect(workspaceId, chat.id)}
             onContextMenu={(event) => {
+              setCopyStatus("idle");
               menuOrigin.current = event.currentTarget;
               event.currentTarget.focus({ preventScroll: true });
             }}
@@ -582,6 +598,14 @@ function ChatRow({
         }}
       >
         <ContextMenuItem
+          onSelect={() => {
+            void copyChatId();
+          }}
+        >
+          <CopyIcon aria-hidden="true" size={17} />
+          Copy chat ID
+        </ContextMenuItem>
+        <ContextMenuItem
           disabled={chatCloseDisabled}
           onSelect={() => {
             pendingClose.current = menuOrigin.current ?? trigger.current;
@@ -591,6 +615,14 @@ function ChatRow({
           Close chat
         </ContextMenuItem>
       </ContextMenuContent>
+      <p aria-live="polite" className="sr-only">
+        {copyStatus === "copied" ? "Chat ID copied" : ""}
+      </p>
+      {copyStatus === "failed" && (
+        <p className="py-1 pl-7 pr-2 text-[12px] text-danger" role="alert">
+          Could not copy chat ID.
+        </p>
+      )}
     </ContextMenu>
   );
 }
@@ -624,10 +656,11 @@ function WorkspaceToggle({
 }) {
   const trigger = useRef<HTMLButtonElement>(null);
   const pendingAction = useRef<"edit" | "delete" | null>(null);
+  const [copyStatus, setCopyStatus] = useState<ClipboardStatus>("idle");
   const editable = workspace.canEditConfiguration && onEditWorkspace !== undefined;
   const deletable = onDeleteWorkspace !== undefined;
-  const hasMenu = editable || deletable;
   const openMenu = (button: HTMLButtonElement) => {
+    setCopyStatus("idle");
     const bounds = button.getBoundingClientRect();
     button.dispatchEvent(
       new MouseEvent("contextmenu", {
@@ -639,22 +672,32 @@ function WorkspaceToggle({
       }),
     );
   };
+  const copyWorkspaceId = async () => {
+    if (copyStatus === "copying") return;
+    setCopyStatus("copying");
+    try {
+      await navigator.clipboard.writeText(workspace.id);
+      setCopyStatus("copied");
+    } catch {
+      setCopyStatus("failed");
+    }
+  };
   const toggle = (
     <button
       aria-controls={searching ? undefined : listId}
       aria-expanded={searching ? undefined : expanded}
-      aria-haspopup={searching && hasMenu ? "menu" : undefined}
+      aria-haspopup={searching ? "menu" : undefined}
       className={`sidebar-row flex min-w-0 flex-1 items-center gap-2 px-2 text-left text-label ${active ? "font-medium text-foreground" : "text-muted"}`}
       onClick={(event) => {
-        if (searching && hasMenu) openMenu(event.currentTarget);
-        else if (!searching) onWorkspaceToggle(workspace.id);
+        if (searching) openMenu(event.currentTarget);
+        else onWorkspaceToggle(workspace.id);
       }}
-      onContextMenu={
-        hasMenu ? (event) => event.currentTarget.focus({ preventScroll: true }) : undefined
-      }
+      onContextMenu={(event) => {
+        setCopyStatus("idle");
+        event.currentTarget.focus({ preventScroll: true });
+      }}
       onKeyDown={(event) => {
-        if (!hasMenu || (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")))
-          return;
+        if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) return;
         event.preventDefault();
         openMenu(event.currentTarget);
       }}
@@ -672,48 +715,65 @@ function WorkspaceToggle({
       <span className="truncate">{workspace.name}</span>
     </button>
   );
-  if (!hasMenu) return toggle;
   return (
     <ContextMenu>
-      <ContextMenuTrigger asChild>{toggle}</ContextMenuTrigger>
-      <ContextMenuContent
-        container={contextMenuContainer}
-        onCloseAutoFocus={(event) => {
-          const action = pendingAction.current;
-          const origin = trigger.current;
-          if (!action || !origin) return;
-          pendingAction.current = null;
-          event.preventDefault();
-          // Radix must release its focus scope before the native dialog opens.
-          queueMicrotask(() => {
-            if (action === "edit") onEditWorkspace?.(workspace.id, origin);
-            else onDeleteWorkspace?.(workspace.id, origin);
-          });
-        }}
-      >
-        {editable && (
+      <div className="flex min-w-0 flex-1 flex-col">
+        <ContextMenuTrigger asChild>{toggle}</ContextMenuTrigger>
+        <ContextMenuContent
+          container={contextMenuContainer}
+          onCloseAutoFocus={(event) => {
+            const action = pendingAction.current;
+            const origin = trigger.current;
+            if (!action || !origin) return;
+            pendingAction.current = null;
+            event.preventDefault();
+            // Radix must release its focus scope before the native dialog opens.
+            queueMicrotask(() => {
+              if (action === "edit") onEditWorkspace?.(workspace.id, origin);
+              else onDeleteWorkspace?.(workspace.id, origin);
+            });
+          }}
+        >
           <ContextMenuItem
-            disabled={workspaceEditPending ?? false}
             onSelect={() => {
-              pendingAction.current = "edit";
+              void copyWorkspaceId();
             }}
           >
-            <PencilSimpleLineIcon aria-hidden="true" size={17} />
-            Edit workspace
+            <CopyIcon aria-hidden="true" size={17} />
+            Copy workspace ID
           </ContextMenuItem>
+          {editable && (
+            <ContextMenuItem
+              disabled={workspaceEditPending ?? false}
+              onSelect={() => {
+                pendingAction.current = "edit";
+              }}
+            >
+              <PencilSimpleLineIcon aria-hidden="true" size={17} />
+              Edit workspace
+            </ContextMenuItem>
+          )}
+          {deletable && (
+            <ContextMenuItem
+              disabled={workspaceDeleteDisabled ?? false}
+              onSelect={() => {
+                pendingAction.current = "delete";
+              }}
+            >
+              <TrashIcon aria-hidden="true" size={17} />
+              Delete workspace
+            </ContextMenuItem>
+          )}
+        </ContextMenuContent>
+        <p aria-live="polite" className="sr-only">
+          {copyStatus === "copied" ? "Workspace ID copied" : ""}
+        </p>
+        {copyStatus === "failed" && (
+          <p className="px-2 py-1 text-[12px] text-danger" role="alert">
+            Could not copy workspace ID.
+          </p>
         )}
-        {deletable && (
-          <ContextMenuItem
-            disabled={workspaceDeleteDisabled ?? false}
-            onSelect={() => {
-              pendingAction.current = "delete";
-            }}
-          >
-            <TrashIcon aria-hidden="true" size={17} />
-            Delete workspace
-          </ContextMenuItem>
-        )}
-      </ContextMenuContent>
+      </div>
     </ContextMenu>
   );
 }
