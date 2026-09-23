@@ -1,10 +1,6 @@
 import {
-  ArrowClockwiseIcon,
   ArrowLeftIcon,
-  BookOpenIcon,
-  BugIcon,
   GitBranchIcon,
-  MagnifyingGlassIcon,
   MoonIcon,
   PlusIcon,
   SidebarSimpleIcon,
@@ -22,7 +18,6 @@ import type {
   DeleteWorkspacePresentation,
   HistoryPanelPresentation,
   ModelPickerPresentation,
-  PromptSuggestion,
   ShakeFeedback,
   SkillCompletionPresentation,
   TodoPresentation,
@@ -49,12 +44,6 @@ import {
 } from "./workspace-settings-dialog.tsx";
 import { WorkspaceSidebar, type WorkspaceSidebarProps } from "./workspace-sidebar.tsx";
 
-const suggestionIcons = {
-  explain: BookOpenIcon,
-  review: MagnifyingGlassIcon,
-  fix: BugIcon,
-} satisfies Record<PromptSuggestion["kind"], typeof BookOpenIcon>;
-
 export interface ChatScreenProps
   extends Omit<
     WorkspaceSidebarProps,
@@ -65,8 +54,6 @@ export interface ChatScreenProps
   readonly title: string;
   readonly contextLabel: string;
   readonly tabs: readonly ChatTabPresentation[];
-  readonly suggestions: readonly PromptSuggestion[];
-  readonly suggestionsEnabled: boolean;
   readonly toolPane: ToolCallPresentation | null;
   readonly historyPane: HistoryPanelPresentation | null;
   readonly transcript: TranscriptPresentation;
@@ -117,8 +104,6 @@ export interface ChatScreenProps
   readonly onComposerValueChange: (value: string) => void;
   readonly onComposerImageRemove: (id: string) => void;
   readonly onComposerSubmit: () => void;
-  readonly onSuggestionsShuffle: () => void;
-  readonly onSuggestionSelect: (text: string) => void;
   readonly onComposerCaretChange: (selection: {
     readonly start: number;
     readonly end: number;
@@ -141,8 +126,6 @@ export function ChatScreen({
   title,
   contextLabel,
   tabs,
-  suggestions,
-  suggestionsEnabled,
   search,
   toolPane,
   historyPane,
@@ -209,8 +192,6 @@ export function ChatScreen({
   onSkillCompletionDismiss,
   onSkillCompletionSelect,
   onSkillCompletionRetry,
-  onSuggestionsShuffle,
-  onSuggestionSelect,
   onStop,
   onTranscriptRetry,
   onDisclosuresChange,
@@ -261,13 +242,6 @@ export function ChatScreen({
     target?.focus({ preventScroll: true });
   }, [chatVisible, conversationKey, tabButtons]);
   const welcome = transcript.state === "empty" && todo === null;
-  const showSuggestions =
-    welcome &&
-    conversationKey !== null &&
-    composer.editable &&
-    composer.mode === "send" &&
-    suggestionsEnabled &&
-    suggestions.length > 0;
   const onboarding =
     search.kind === "closed" &&
     navigation.groups.length === 0 &&
@@ -822,41 +796,7 @@ export function ChatScreen({
                   </div>
                   {welcome && transcript.state === "empty" && (
                     <div className="home-reveal home-reveal-recommendations mt-6 flex flex-col text-subtle">
-                      <p className={showSuggestions ? "sr-only" : "text-[13px]"}>
-                        {transcript.description}
-                      </p>
-                      {showSuggestions && (
-                        <>
-                          {suggestions.map((suggestion) => {
-                            const Icon = suggestionIcons[suggestion.kind];
-                            return (
-                              <button
-                                className="-mx-2 flex h-[41px] items-center gap-3 rounded-control px-2 py-2.5 text-left text-[14px] text-foreground transition-colors duration-150 hover:bg-surface-hover active:bg-surface-hover-strong"
-                                key={suggestion.text}
-                                onClick={() => onSuggestionSelect(suggestion.text)}
-                                type="button"
-                              >
-                                <Icon
-                                  aria-hidden="true"
-                                  className="shrink-0 text-subtle"
-                                  size={15}
-                                />
-                                <span className="min-w-0 truncate">{suggestion.label}</span>
-                              </button>
-                            );
-                          })}
-                          <div className="mt-1 flex items-center gap-5 pl-0.5 text-[13px] text-subtle">
-                            <button
-                              className="flex items-center gap-2 py-1 transition-colors duration-150 hover:text-foreground active:text-foreground"
-                              onClick={onSuggestionsShuffle}
-                              type="button"
-                            >
-                              <ArrowClockwiseIcon aria-hidden="true" size={14} />
-                              Shuffle suggestions
-                            </button>
-                          </div>
-                        </>
-                      )}
+                      <p className="text-[13px]">{transcript.description}</p>
                       {onboarding && (
                         <Button className="mt-4" onClick={onAddWorkspace} tone="primary">
                           <PlusIcon aria-hidden="true" size={17} />

@@ -42,7 +42,6 @@ import type {
   HistoryPreviewBlockPresentation,
   ModelPickerPresentation,
   NavigationPresentation,
-  PromptSuggestion,
   ScheduleListPresentation,
   ShakeFeedback,
   SidebarSearchPresentation,
@@ -286,39 +285,6 @@ function presentContextUsage(
   };
 }
 
-const suggestionPool: readonly PromptSuggestion[] = [
-  {
-    kind: "explain",
-    label: "Explain how this project is organized",
-    text: "Inspect this project and explain its structure, main components, and entry points. Cite the relevant files. Do not change any files.",
-  },
-  {
-    kind: "review",
-    label: "Review recent changes for potential bugs",
-    text: "Review this project's uncommitted changes, or its latest commit if there are none. Look for correctness issues and missing edge cases. Cite the relevant files and lines, and do not change any files.",
-  },
-  {
-    kind: "fix",
-    label: "Find a bug worth investigating",
-    text: "Inspect this project's code for a concrete bug worth investigating. Explain the evidence, a safe way to reproduce it, and a possible fix. Do not invent an issue if none is supported, and do not change any files.",
-  },
-  {
-    kind: "explain",
-    label: "Trace the main application flow",
-    text: "Inspect this project and trace a main user action from its entry point through the application. Explain the key functions and data flow with file references. Do not change any files.",
-  },
-  {
-    kind: "review",
-    label: "Review how this project handles errors",
-    text: "Review error handling in this project's main execution paths. Identify concrete risks involving lost errors, incomplete cleanup, or misleading recovery behavior, with file references. Do not change any files.",
-  },
-  {
-    kind: "fix",
-    label: "Investigate gaps in the test coverage",
-    text: "Inspect this project's tests and the code they cover. Identify an important behavior or edge case that may be untested, explain the evidence, and suggest a focused regression test. Do not change any files.",
-  },
-];
-
 function reconcileWorkspaceSnapshots(
   current: TabState,
   workspaces: readonly Workspace[],
@@ -518,11 +484,6 @@ export function WorkspaceChat({
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [search, setSearch] = useState<SidebarSearchPresentation>({ kind: "closed" });
-  const [suggestionOffset, setSuggestionOffset] = useState(0);
-  const suggestions = useMemo(
-    () => suggestionPool.slice(suggestionOffset, suggestionOffset + 3),
-    [suggestionOffset],
-  );
   const [skillMenuByKey, setSkillMenuByKey] = useState<ReadonlyMap<string, SkillMenuTabState>>(
     () => new Map(),
   );
@@ -1907,31 +1868,6 @@ export function WorkspaceChat({
           },
     }));
   };
-  const selectSuggestion = (text: string) => {
-    if (!state || !ownsVisit() || registry.get(state.connection).kind !== "active") return;
-    const entry = findPageEntry(page, navigationRef.current.entries);
-    if (
-      !entry ||
-      entry.key !== selected?.key ||
-      entry.submission.kind === "creating" ||
-      entry.submission.kind === "sending" ||
-      isCreationUnconfirmed(entry)
-    )
-      return;
-    if (entry.target.kind === "new") {
-      if (creatingChats.current.has(entry.workspace.id)) return;
-    } else if (
-      registry.get(state.send(entry.target.chat.id)).waiting ||
-      registry.get(state.switchModel(entry.target.chat.id)).waiting ||
-      registry.get(state.navigateHistory(entry.target.chat.id)).waiting ||
-      registry.get(state.historyReplacing(entry.target.chat.id)) ||
-      registry.get(state.live(entry.target.chat.id)).run.kind === "running"
-    ) {
-      return;
-    }
-    updateEntry(entry.key, (value) => ({ ...value, value: { ...value.value, text } }));
-    void submitDraft();
-  };
   const removeComposerImage = (id: string) => {
     if (!ownsVisit() || !selected) return;
     const entry = findPageEntry(page, navigationRef.current.entries);
@@ -2230,7 +2166,7 @@ export function WorkspaceChat({
   const switching = conversation?.switching.waiting === true;
   const historyPending =
     conversation?.navigateHistory.waiting === true || conversation?.historyReplacing === true;
-  const suggestionsEnabled =
+  const composerSendEnabled =
     available &&
     !!selected &&
     !creating &&
@@ -2294,7 +2230,7 @@ export function WorkspaceChat({
               ? "Choose a chat or start a new one"
               : "Add a workspace to start",
           editable: !!conversationEntry,
-          canSubmit: suggestionsEnabled && !!selected && isDraftSendable(selected.value),
+          canSubmit: composerSendEnabled && !!selected && isDraftSendable(selected.value),
           statusLabel,
         };
   const todo = conversation
@@ -2863,10 +2799,6 @@ export function WorkspaceChat({
           onSearchChange={changeSearch}
           onSidebarOpenChange={setSidebarOpen}
           onStop={stop}
-          onSuggestionSelect={selectSuggestion}
-          onSuggestionsShuffle={() =>
-            setSuggestionOffset((offset) => (offset + 3) % suggestionPool.length)
-          }
           onTabClose={closeTab}
           onTabSelect={selectTab}
           onThemeChange={(next) => {
@@ -2917,8 +2849,6 @@ export function WorkspaceChat({
           }}
           search={search}
           sidebarOpen={sidebarOpen}
-          suggestions={suggestions}
-          suggestionsEnabled={suggestionsEnabled}
           tabs={tabs}
           theme={theme}
           title={chatId ? (titles.get(chatId) ?? `Chat ${chatId.slice(-8)}`) : "New chat"}
