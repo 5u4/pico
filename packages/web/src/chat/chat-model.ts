@@ -45,12 +45,6 @@ export interface DeleteWorkspacePresentation {
   readonly canConfirm: boolean;
 }
 
-export interface PromptSuggestion {
-  readonly label: string;
-  readonly text: string;
-  readonly kind: "explain" | "review" | "fix";
-}
-
 export type SidebarSearchPresentation =
   | { readonly kind: "closed" }
   | { readonly kind: "open"; readonly query: string };
