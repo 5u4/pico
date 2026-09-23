@@ -39,7 +39,7 @@ export function Transcript({
           <p aria-live="polite" className="sr-only">
             {presentation.liveLabel}
           </p>
-          <div className="transcript-flow mx-auto w-full max-w-[720px]">
+          <div className="transcript-flow mx-auto w-full max-w-[960px]">
             {presentation.items.map((item) => (
               <div
                 className="min-w-0"
@@ -89,7 +89,7 @@ function LoadingTranscript({ label }: { readonly label: string }) {
     <section
       aria-busy="true"
       aria-label={label}
-      className="mx-auto w-full max-w-[816px] px-4 pt-8 sm:px-8 lg:px-12"
+      className="mx-auto w-full max-w-[1056px] px-4 pt-8 sm:px-8 lg:px-12"
     >
       <div className="space-y-8">
         <div className="ml-auto w-3/5 rounded-xl bg-field px-3.5 py-2 shadow-hairline">

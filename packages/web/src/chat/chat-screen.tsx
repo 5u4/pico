@@ -725,8 +725,8 @@ export function ChatScreen({
                 <div
                   className={
                     welcome
-                      ? "mx-auto flex min-h-full max-w-[720px] flex-col justify-center px-4 py-10 sm:px-8"
-                      : "mx-auto max-w-[720px]"
+                      ? "mx-auto flex min-h-full max-w-[960px] flex-col justify-center px-4 py-10 sm:px-8"
+                      : "mx-auto max-w-[960px]"
                   }
                 >
                   {welcome && transcript.state === "empty" && (

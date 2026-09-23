@@ -44,7 +44,7 @@ function AssistantBlockView({
       return (
         <div data-transcript-end="prose" data-transcript-start="prose">
           <Markdown
-            className="max-w-[620px] text-[13.5px] leading-[1.65] text-foreground"
+            className="max-w-[860px] text-[13.5px] leading-[1.65] text-foreground"
             streaming={live}
             text={block.text}
           />
