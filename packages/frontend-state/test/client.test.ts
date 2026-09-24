@@ -340,25 +340,287 @@ const snapshotFixture = Effect.fnUntraced(function* (
   };
 });
 
-const resultsFixture = Effect.fnUntraced(function* () {
+const resultsFixture = Effect.fnUntraced(function* (
+  beforeReady: Effect.Effect<void> = Effect.void,
+  procedures: Partial<Pick<Application["Service"], "transcript" | "sendMessage">> = {},
+) {
   const requests = yield* Queue.unbounded<{
     readonly input: ChatResultsRequest;
-    readonly reply: Deferred.Deferred<ChatResultsResponse>;
+    readonly reply: Deferred.Deferred<ChatResultsResponse, ApplicationError>;
+    readonly interrupted: Deferred.Deferred<void>;
   }>();
-  const server = yield* fixture({
-    transcript: () => Effect.die("unexpected transcript read"),
-    sendMessage: () => Effect.succeed({ kind: "handled" }),
-    abort: () => Effect.void,
-    chatResults: Effect.fnUntraced(function* (input: ChatResultsRequest) {
-      const reply = yield* Deferred.make<ChatResultsResponse>();
-      yield* Queue.offer(requests, { input, reply });
-      return yield* Deferred.await(reply);
-    }),
-  });
+  const server = yield* fixture(
+    {
+      transcript: () => Effect.die("unexpected transcript read"),
+      sendMessage: () => Effect.succeed({ kind: "handled" }),
+      abort: () => Effect.void,
+      ...procedures,
+      chatResults: Effect.fnUntraced(function* (input: ChatResultsRequest) {
+        const reply = yield* Deferred.make<ChatResultsResponse, ApplicationError>();
+        const interrupted = yield* Deferred.make<void>();
+        yield* Queue.offer(requests, { input, reply, interrupted });
+        return yield* Deferred.await(reply).pipe(
+          Effect.onInterrupt(() => Deferred.succeed(interrupted, undefined)),
+        );
+      }),
+    },
+    beforeReady,
+  );
   return { ...server, requests };
 });
 
 describe("frontend state over WebSocket", () => {
+  it.live("keeps an active connection usable while the results catalog is delayed", () =>
+    Effect.gen(function* () {
+      const server = yield* resultsFixture(Effect.void, {
+        transcript: () => Effect.succeed(snapshot()),
+      });
+      yield* Effect.gen(function* () {
+        const registry = yield* registryInScope;
+        const state = make({ url: yield* endpoint });
+        registry.mount(state.workspaces);
+        const route = yield* Queue.take(server.opened);
+        yield* waitFor(registry, state.connection, (value) => value.kind === "active");
+
+        yield* Effect.acquireRelease(
+          Effect.sync(() => vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })),
+          () => Effect.sync(() => vi.useRealTimers()),
+        );
+        registry.mount(state.chatResults);
+        const catalog = yield* Queue.take(server.requests);
+        yield* Effect.promise(() => vi.advanceTimersByTimeAsync(13_000));
+        assert.deepStrictEqual(registry.get(state.connection), { kind: "active" });
+        assert.strictEqual(registry.get(state.chatResults)._tag, "Initial");
+        assert.isTrue(registry.get(state.chatResults).waiting);
+        assert.isFalse(yield* Deferred.isDone(catalog.interrupted));
+        assert.isFalse(yield* Deferred.isDone(route.closed));
+
+        registry.refresh(state.workspaces);
+        assert.deepStrictEqual(
+          yield* AtomRegistry.getResult(registry, state.workspaces, { suspendOnWaiting: true }),
+          [webWorkspace],
+        );
+        registry.set(state.ensure, undefined);
+        yield* AtomRegistry.getResult(registry, state.ensure, { suspendOnWaiting: true });
+        registry.set(state.send(firstChat), prompt("keep working"));
+        yield* AtomRegistry.getResult(registry, state.send(firstChat), { suspendOnWaiting: true });
+        assert.strictEqual(server.openCount(), 1);
+
+        yield* Deferred.succeed(catalog.reply, [
+          {
+            chatId: firstChat,
+            seenRevision: 0,
+            summary: { kind: "ready", latest: null, relation: "none" },
+          },
+          { chatId: secondChat, seenRevision: 0, summary: { kind: "unavailable" } },
+        ]);
+        const results = yield* AtomRegistry.getResult(registry, state.chatResults, {
+          suspendOnWaiting: true,
+        });
+        assert.deepStrictEqual(
+          [...results.values()],
+          [
+            {
+              chatId: firstChat,
+              seenRevision: 0,
+              summary: { kind: "ready", latest: null, relation: "none" },
+            },
+            { chatId: secondChat, seenRevision: 0, summary: { kind: "unavailable" } },
+          ],
+        );
+        assert.deepStrictEqual(registry.get(state.connection), { kind: "active" });
+        assert.isFalse(yield* Deferred.isDone(route.closed));
+      }).pipe(Effect.scoped, Effect.provide(server.layer));
+    }),
+  );
+
+  it.live("readies primary reads before slow catalogs and cancels catalogs on Events loss", () =>
+    Effect.gen(function* () {
+      const readyRequests = yield* Queue.unbounded<Deferred.Deferred<void>>();
+      const sent = yield* Queue.unbounded<string>();
+      const server = yield* resultsFixture(
+        Effect.gen(function* () {
+          const ready = yield* Deferred.make<void>();
+          yield* Queue.offer(readyRequests, ready);
+          yield* Deferred.await(ready);
+        }),
+        {
+          transcript: () => Effect.succeed(snapshot([message])),
+          sendMessage: (_chatId, input) =>
+            Queue.offer(sent, input.text).pipe(Effect.as({ kind: "handled" as const })),
+        },
+      );
+      yield* Effect.gen(function* () {
+        const registry = yield* registryInScope;
+        const state = make({ url: yield* endpoint });
+        registry.mount(state.chatResults);
+        registry.mount(state.workspaces);
+        registry.mount(state.live(firstChat));
+        const first = yield* Queue.take(server.opened);
+        const firstReady = yield* Queue.take(readyRequests);
+        registry.set(state.ensure, undefined);
+
+        yield* Effect.gen(function* () {
+          yield* Effect.acquireRelease(
+            Effect.sync(() => vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })),
+            () => Effect.sync(() => vi.useRealTimers()),
+          );
+          yield* Deferred.succeed(firstReady, undefined);
+          const catalog = yield* Queue.take(server.requests);
+          yield* Effect.promise(() => vi.advanceTimersByTimeAsync(13_000));
+          assert.deepStrictEqual(registry.get(state.connection), { kind: "active" });
+          assert.strictEqual(registry.get(state.ensure)._tag, "Success");
+          assert.isFalse(registry.get(state.ensure).waiting);
+          assert.isTrue(registry.get(state.chatResults).waiting);
+          assert.deepStrictEqual(AsyncResult.getOrThrow(registry.get(state.workspaces)), [
+            webWorkspace,
+          ]);
+          assert.deepStrictEqual(
+            AsyncResult.getOrThrow(registry.get(state.transcript(firstChat))),
+            [message],
+          );
+          assert.deepStrictEqual(registry.get(state.live(firstChat)).run, { kind: "idle" });
+          registry.set(state.send(firstChat), prompt("during initial catalog"));
+          assert.strictEqual(yield* Queue.take(sent), "during initial catalog");
+          yield* AtomRegistry.getResult(registry, state.send(firstChat), {
+            suspendOnWaiting: true,
+          });
+          assert.isFalse(yield* Deferred.isDone(first.closed));
+          assert.deepStrictEqual(catalog.input, { chats: [], includeAllOpenChats: true });
+          yield* Deferred.succeed(catalog.reply, [
+            {
+              chatId: firstChat,
+              seenRevision: 0,
+              summary: { kind: "ready", latest: null, relation: "none" },
+            },
+          ]);
+          const results = yield* AtomRegistry.getResult(registry, state.chatResults, {
+            suspendOnWaiting: true,
+          });
+          assert.deepStrictEqual(
+            [...results.values()],
+            [
+              {
+                chatId: firstChat,
+                seenRevision: 0,
+                summary: { kind: "ready", latest: null, relation: "none" },
+              },
+            ],
+          );
+        }).pipe(Effect.scoped);
+
+        yield* Queue.offer(first.queue, {
+          chatId: firstChat,
+          event: { type: "run-finished", outcome: "completed" },
+        });
+        const interrupted = yield* Queue.take(server.requests);
+        assert.deepStrictEqual(interrupted.input, {
+          chats: [{ chatId: firstChat, seen: null, seenRevision: 0 }],
+          includeAllOpenChats: false,
+        });
+        yield* Queue.end(first.queue);
+        yield* waitFor(registry, state.connection, (value) => value.kind === "unavailable");
+        yield* Deferred.await(interrupted.interrupted);
+        yield* Deferred.await(first.closed);
+
+        registry.set(state.ensure, undefined);
+        const replacement = yield* Queue.take(server.opened);
+        const replacementReady = yield* Queue.take(readyRequests);
+        yield* Effect.gen(function* () {
+          yield* Effect.acquireRelease(
+            Effect.sync(() => vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })),
+            () => Effect.sync(() => vi.useRealTimers()),
+          );
+          yield* Deferred.succeed(replacementReady, undefined);
+          const catalog = yield* Queue.take(server.requests);
+          yield* Effect.promise(() => vi.advanceTimersByTimeAsync(13_000));
+          assert.deepStrictEqual(registry.get(state.connection), { kind: "active" });
+          assert.strictEqual(registry.get(state.ensure)._tag, "Success");
+          assert.isFalse(registry.get(state.ensure).waiting);
+          assert.isTrue(registry.get(state.chatResults).waiting);
+          assert.deepStrictEqual(registry.get(state.live(firstChat)).run, { kind: "idle" });
+          assert.deepStrictEqual(catalog.input, { chats: [], includeAllOpenChats: true });
+          registry.set(state.send(firstChat), prompt("during reconnect catalog"));
+          assert.strictEqual(yield* Queue.take(sent), "during reconnect catalog");
+          yield* AtomRegistry.getResult(registry, state.send(firstChat), {
+            suspendOnWaiting: true,
+          });
+          yield* Deferred.succeed(catalog.reply, [
+            {
+              chatId: secondChat,
+              seenRevision: 0,
+              summary: { kind: "ready", latest: null, relation: "none" },
+            },
+          ]);
+          const results = yield* AtomRegistry.getResult(registry, state.chatResults, {
+            suspendOnWaiting: true,
+          });
+          assert.deepStrictEqual(
+            [...results.values()],
+            [
+              {
+                chatId: secondChat,
+                seenRevision: 0,
+                summary: { kind: "ready", latest: null, relation: "none" },
+              },
+            ],
+          );
+          assert.deepStrictEqual(registry.get(state.connection), { kind: "active" });
+          assert.strictEqual(server.openCount(), 2);
+          assert.isFalse(yield* Deferred.isDone(replacement.closed));
+        }).pipe(Effect.scoped);
+      }).pipe(Effect.scoped, Effect.provide(server.layer));
+    }),
+  );
+
+  it.live("keeps a results rejection local and accepts a later catalog refresh", () =>
+    Effect.gen(function* () {
+      const server = yield* resultsFixture();
+      yield* Effect.gen(function* () {
+        const registry = yield* registryInScope;
+        const state = make({ url: yield* endpoint });
+        registry.mount(state.chatResults);
+        const route = yield* Queue.take(server.opened);
+        const catalog = yield* Queue.take(server.requests);
+        yield* Deferred.fail(
+          catalog.reply,
+          new ApplicationError({ reason: "operation", message: "Catalog read failed" }),
+        );
+        yield* waitFor(
+          registry,
+          state.chatResults,
+          (value) => value._tag === "Failure" && !value.waiting,
+        );
+        assert.deepStrictEqual(registry.get(state.connection), { kind: "active" });
+        registry.refresh(state.chatResults);
+        const retry = yield* Queue.take(server.requests);
+        yield* Deferred.succeed(retry.reply, [
+          {
+            chatId: firstChat,
+            seenRevision: 0,
+            summary: { kind: "ready", latest: null, relation: "none" },
+          },
+        ]);
+        const results = yield* AtomRegistry.getResult(registry, state.chatResults, {
+          suspendOnWaiting: true,
+        });
+        assert.deepStrictEqual(
+          [...results.values()],
+          [
+            {
+              chatId: firstChat,
+              seenRevision: 0,
+              summary: { kind: "ready", latest: null, relation: "none" },
+            },
+          ],
+        );
+        assert.deepStrictEqual(registry.get(state.connection), { kind: "active" });
+        assert.strictEqual(server.openCount(), 1);
+        assert.isFalse(yield* Deferred.isDone(route.closed));
+      }).pipe(Effect.scoped, Effect.provide(server.layer));
+    }),
+  );
+
   it.live("loads the complete results catalog without opening chat transcripts", () =>
     Effect.gen(function* () {
       const server = yield* resultsFixture();

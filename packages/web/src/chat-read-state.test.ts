@@ -324,6 +324,86 @@ describe("chat read state", () => {
     assert.strictEqual(state.unread(chatId, summaryEntry("covered", 2, "entry-2")), false);
   });
 
+  it("clears a reminder explicitly with stale READY data but rejects the same passive confirmation", async () => {
+    const state = new ChatReadState();
+    await state.reconcileCatalog(catalog(summaryEntry("none", 0, "first")));
+    await state.markUnread(chatId);
+    const stale = summaryEntry("behind", 1, "second");
+    const other = new ChatReadState();
+    assert.strictEqual(await other.confirm(chatId, stale, null), true);
+    state.syncFromStorage();
+    assert.strictEqual(await state.confirm(chatId, stale, state.captureOpen(chatId)), false);
+    assert.strictEqual(state.unread(chatId, stale), true);
+    assert.deepStrictEqual(state.buildRequest().chats, [
+      { chatId, seen: cursor("second"), seenRevision: 2 },
+    ]);
+    assert.strictEqual(await state.markRead(chatId, stale), true);
+    assert.strictEqual(state.unread(chatId, stale), false);
+    assert.deepStrictEqual(state.buildRequest().chats, [
+      { chatId, seen: cursor("second"), seenRevision: 2 },
+    ]);
+    const restored = new ChatReadState();
+    assert.strictEqual(restored.unread(chatId, stale), false);
+    assert.deepStrictEqual(restored.buildRequest().chats, [
+      { chatId, seen: cursor("second"), seenRevision: 2 },
+    ]);
+  });
+
+  it("preserves a newer reminder and seen cursor when reset data becomes stale while mark read waits", async () => {
+    const state = new ChatReadState();
+    await state.reconcileCatalog(catalog(summaryEntry("none", 0)));
+    await state.markUnread(chatId);
+    const reset: ChatResultSummaryEntry = {
+      chatId,
+      seenRevision: 1,
+      summary: {
+        kind: "reset",
+        latest: {
+          cursor: { sessionId: "session-2", entryId: "entry-1" },
+          messageId: AgentMessageId.make("new-result"),
+        },
+      },
+    };
+    const other = new ChatReadState();
+    const advancing = other.confirm(chatId, summaryEntry("behind", 1, "entry-2"), null);
+    const replacing = other.markUnread(chatId);
+    const marking = state.markRead(chatId, reset);
+    assert.strictEqual(await advancing, true);
+    assert.strictEqual(await replacing, true);
+    assert.strictEqual(await marking, false);
+    assert.strictEqual(state.unread(chatId, reset), true);
+    assert.deepStrictEqual(state.buildRequest().chats, [
+      { chatId, seen: cursor("entry-2"), seenRevision: 2 },
+    ]);
+    const restored = new ChatReadState();
+    assert.strictEqual(restored.unread(chatId, reset), true);
+    assert.strictEqual(await restored.markRead(chatId, reset), true);
+    assert.strictEqual(restored.unread(chatId, reset), false);
+    assert.deepStrictEqual(restored.buildRequest().chats, [
+      { chatId, seen: cursor("entry-2"), seenRevision: 2 },
+    ]);
+  });
+
+  it("clears an absent-summary reminder without overwriting seen state advanced before the lock", async () => {
+    const state = new ChatReadState();
+    await state.reconcileCatalog(catalog(summaryEntry("none", 0)));
+    await state.markUnread(chatId);
+    const other = new ChatReadState();
+    const advancing = other.confirm(chatId, summaryEntry("behind", 1, "entry-2"), null);
+    const marking = state.markRead(chatId, undefined);
+    assert.strictEqual(await advancing, true);
+    assert.strictEqual(await marking, true);
+    assert.strictEqual(state.unread(chatId, undefined), false);
+    assert.deepStrictEqual(state.buildRequest().chats, [
+      { chatId, seen: cursor("entry-2"), seenRevision: 2 },
+    ]);
+    const restored = new ChatReadState();
+    assert.strictEqual(restored.unread(chatId, undefined), false);
+    assert.deepStrictEqual(restored.buildRequest().chats, [
+      { chatId, seen: cursor("entry-2"), seenRevision: 2 },
+    ]);
+  });
+
   it("rejects stale acknowledgements and stale covered responses after another page advances", async () => {
     const state = new ChatReadState();
     await state.reconcileCatalog(catalog(summaryEntry("none", 0)));
