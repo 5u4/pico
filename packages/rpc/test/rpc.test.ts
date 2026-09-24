@@ -143,6 +143,7 @@ const unusedApplication = Application.of({
   history: () => Effect.die("unexpected history read"),
   previewHistory: () => Effect.die("unexpected history preview"),
   navigateHistory: () => Effect.die("unexpected history navigation"),
+  chatResults: (_input) => Effect.succeed([]),
   deleteWorkspace: () => Effect.die("unexpected workspace deletion"),
   updateWorkspace: () => Effect.die("unexpected workspace update"),
   listWorkspaces: () => Effect.die("unexpected workspace list"),

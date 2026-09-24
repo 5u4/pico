@@ -137,6 +137,7 @@ describe("Application", () => {
                   : Effect.succeed(runtimeTranscript),
               ),
             ),
+          resultSummary: () => Effect.die("unexpected chat results read"),
           send: (chatId, content) =>
             Effect.sync(() => {
               sentMessages.push({ chatId, content });
@@ -908,6 +909,7 @@ describe("Application", () => {
           events: Stream.empty,
           drain: () => Effect.void,
           transcript: () => Effect.die("unexpected transcript read"),
+          resultSummary: () => Effect.die("unexpected chat results read"),
           send: () => Effect.die("unexpected runtime send"),
           sendCaptured: () => Effect.die("unexpected captured runtime send"),
           deliver: () => Effect.die("unexpected scheduled delivery"),

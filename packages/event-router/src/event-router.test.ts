@@ -52,6 +52,7 @@ describe("EventRouter", () => {
               runtimeDrains += 1;
             }),
           transcript: () => Effect.die("unused"),
+          resultSummary: () => Effect.die("unexpected chat results read"),
           send: () => Effect.die("unused"),
           sendCaptured: () => Effect.die("unused"),
           deliver: () => Effect.die("unused"),
@@ -196,6 +197,7 @@ describe("EventRouter", () => {
             ),
             drain: () => Effect.void,
             transcript: () => Effect.die("unused"),
+            resultSummary: () => Effect.die("unexpected chat results read"),
             send: () => Effect.die("unused"),
             sendCaptured: () => Effect.die("unused"),
             deliver: () => Effect.die("unused"),

@@ -74,6 +74,7 @@ const makeFixture = Effect.fn("HistoryTest.makeFixture")(function* () {
       events: Stream.empty,
       drain: () => Effect.void,
       transcript: () => Effect.sync(snapshot),
+      resultSummary: () => Effect.die("unexpected chat results read"),
       history: () =>
         Effect.sync(() => ({
           nodes: [

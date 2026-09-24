@@ -212,6 +212,7 @@ const fixture = Effect.fnUntraced(function* (
     history: () => Effect.die("unexpected history read"),
     previewHistory: () => Effect.die("unexpected history preview"),
     navigateHistory: () => Effect.die("unexpected history navigation"),
+    chatResults: (_input) => Effect.succeed([]),
     ...procedures,
   });
   const router = EventRouter.of({

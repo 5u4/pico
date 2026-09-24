@@ -46,6 +46,15 @@ const handlers = PicoRpcs.toLayer(
             requestId: String(requestId),
           }),
         ),
+      ChatResults: (input, { requestId }) =>
+        application.chatResults(input).pipe(
+          Effect.tapCause(reportFailure),
+          Effect.annotateLogs({
+            component: "rpc",
+            procedure: "ChatResults",
+            requestId: String(requestId),
+          }),
+        ),
       ListSchedules: (_, { requestId }) =>
         Effect.gen(function* () {
           const snapshot = yield* schedules.overview();

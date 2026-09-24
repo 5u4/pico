@@ -96,6 +96,7 @@ const fixture = Effect.fn("WorkspaceDelete.test.fixture")(function* (
             events: Stream.empty,
             drain: () => Effect.void,
             transcript: () => Effect.succeed(emptyTranscript),
+            resultSummary: () => Effect.die("unexpected chat results read"),
             send: unused,
             sendCaptured: unused,
             askBtw: unused,

@@ -25,6 +25,7 @@ import {
   transcriptEntryMessage,
 } from "@oh-my-pi/pi-tui/chat/transcript-entry";
 import * as History from "@pico/contract/agent-history";
+import type * as Agent from "@pico/contract/agent-message";
 import { AgentPrompt } from "@pico/contract/agent-message";
 import { AgentRuntime, type ContextUsage, type ShakeResult } from "@pico/contract/agent-runtime";
 import { BranchNaming, type BranchNamingHandler } from "@pico/contract/branch-naming";
@@ -189,6 +190,14 @@ export const make = Effect.fn("AgentRuntime.make")(function* ({
       browsers,
     ),
     loadTranscript,
+    loadResultSummary: Effect.fn("OmpSession.loadResultSummary")(function* (chatId, seen) {
+      const journal = yield* promiseBoundary("Failed to read OMP history", () =>
+        OmpSessionLoader.loadSessionHistoryReadOnly(path.join(sessionsDir, `${chatId}.jsonl`)),
+      );
+      return yield* syncBoundary("Failed to project OMP chat results", () =>
+        projectResultSummary(journal, seen),
+      );
+    }),
     loadHistory: Effect.fn("OmpSession.loadHistory")(function* (chatId, query) {
       const journal = yield* promiseBoundary("Failed to read OMP history", () =>
         OmpSessionLoader.loadSessionHistoryReadOnly(path.join(sessionsDir, `${chatId}.jsonl`)),
@@ -225,6 +234,7 @@ export const make = Effect.fn("AgentRuntime.make")(function* ({
     events: pool.events,
     drain: pool.drain,
     transcript: pool.transcript,
+    resultSummary: pool.resultSummary,
     history: pool.history,
     previewHistory: pool.previewHistory,
     navigateHistory: pool.navigateHistory,
@@ -801,6 +811,58 @@ const historyText = (text: string): string =>
     .replace(/\s+/g, " ")
     .trim();
 
+const hasVisibleAssistantOutput = (content: ReadonlyArray<Agent.AgentAssistantContent>): boolean =>
+  content.some(
+    (block) => (block.type === "text" && block.text.trim().length > 0) || block.type === "image",
+  );
+
+const isQualifyingResult = (message: Agent.AgentAssistantMessage): boolean => {
+  if (message.status === "completed") {
+    return (
+      message.stopReason !== "tool-use" &&
+      !message.content.some((block) => block.type === "tool-call") &&
+      hasVisibleAssistantOutput(message.content)
+    );
+  }
+  if (message.stopReason === "error") return true;
+  return hasVisibleAssistantOutput(message.content);
+};
+
+const projectQualifyingResults = (
+  journal: Awaited<ReturnType<typeof OmpSessionLoader.loadSessionHistoryReadOnly>>,
+): Chat.ChatResultHead[] => {
+  const results: Chat.ChatResultHead[] = [];
+  for (const entry of journal.entries) {
+    if (!OmpSessionContext.isTranscriptEntry(entry)) continue;
+    const source = transcriptEntryMessage(entry);
+    if (source?.role !== "assistant") continue;
+    const normalized = normalizeMessage(source);
+    if (normalized === undefined || normalized.role !== "assistant") continue;
+    if (!isQualifyingResult(normalized)) continue;
+    results.push({
+      cursor: { sessionId: journal.sessionId, entryId: entry.id },
+      messageId: normalized.id,
+    });
+  }
+  return results;
+};
+
+export const projectResultSummary = (
+  journal: Awaited<ReturnType<typeof OmpSessionLoader.loadSessionHistoryReadOnly>>,
+  seen: Chat.ResultCursor | null,
+): Chat.ChatResultSummary => {
+  const results = projectQualifyingResults(journal);
+  const latest = results.at(-1) ?? null;
+  if (seen === null) return { kind: "ready", latest, relation: "none" };
+  if (seen.sessionId !== journal.sessionId) return { kind: "reset", latest };
+  const seenIndex = results.findIndex((result) => result.cursor.entryId === seen.entryId);
+  if (seenIndex === -1) return { kind: "reset", latest };
+  return {
+    kind: "ready",
+    latest,
+    relation: seenIndex < results.length - 1 ? "behind" : "covered",
+  };
+};
 export const normalizeHistory = (
   entries: ReadonlyArray<SessionEntry>,
   search: string,

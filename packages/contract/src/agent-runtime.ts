@@ -12,7 +12,7 @@ import type {
 } from "./agent-history.ts";
 import type { AgentAssistantMessage, AgentPrompt } from "./agent-message.ts";
 import type { NavigateHistoryResult, TranscriptSnapshot } from "./agent-snapshot.ts";
-import type { ChatId } from "./chat-model.ts";
+import type { ChatId, ChatResultSummary, ResultCursor } from "./chat-model.ts";
 import type { AgentError } from "./errors.ts";
 import type { AbsolutePath } from "./path.ts";
 import type { ScheduleRunId } from "./schedule.ts";
@@ -122,6 +122,12 @@ export class AgentRuntime extends Context.Service<
     /** Application reads persisted chat snapshots without initializing an absent session. */
     readonly transcript: (chatId: ChatId) => Effect.Effect<TranscriptSnapshot, AgentError>;
 
+    /** Application reads durable unread summaries from settled history metadata. */
+    readonly resultSummary: (
+      chatId: ChatId,
+      seen: ResultCursor | null,
+    ) => Effect.Effect<ChatResultSummary, AgentError>;
+
     /** Application reads this when the history panel opens or its search changes. */
     readonly history: (input: ChatHistoryRequest) => Effect.Effect<HistorySnapshot, AgentError>;
     /** Application reads this when a historical node is selected for preview. */
@@ -132,7 +138,6 @@ export class AgentRuntime extends Context.Service<
     readonly navigateHistory: (
       input: NavigateChatHistoryRequest,
     ) => Effect.Effect<NavigateHistoryResult, AgentError>;
-
     readonly send: (
       chatId: ChatId,
       prompt: AgentPrompt,

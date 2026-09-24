@@ -417,6 +417,8 @@ const makePool = Effect.fn("NativePoolTest.make")(function* (
         );
       }),
     loadCurrentModel: () => Effect.succeed(session.model ?? null),
+    loadResultSummary: (_chatId, _seen) =>
+      Effect.succeed({ kind: "ready", latest: null, relation: "none" }),
     loadTranscript: () =>
       Effect.succeed({
         messages: native.normalizeTranscript(session.messages),

@@ -92,6 +92,10 @@ export interface SessionPool {
   readonly events: Stream.Stream<AgentEvent.AgentEventEnvelope>;
   readonly drain: () => Effect.Effect<void>;
   readonly transcript: (chatId: Chat.ChatId) => Effect.Effect<TranscriptSnapshot, AgentError>;
+  readonly resultSummary: (
+    chatId: Chat.ChatId,
+    seen: Chat.ResultCursor | null,
+  ) => Effect.Effect<Chat.ChatResultSummary, AgentError>;
   readonly history: (
     input: History.ChatHistoryRequest,
   ) => Effect.Effect<History.HistorySnapshot, AgentError>;
@@ -340,11 +344,14 @@ interface MakeOptions {
     Pick<History.HistorySnapshot, "nodes" | "activeLeafId" | "revision" | "version" | "matches">,
     AgentError
   >;
+  readonly loadResultSummary: (
+    chatId: Chat.ChatId,
+    seen: Chat.ResultCursor | null,
+  ) => Effect.Effect<Chat.ChatResultSummary, AgentError>;
   readonly loadHistoryPreview: (
     input: History.PreviewChatHistoryRequest,
   ) => Effect.Effect<History.HistoryPreview, AgentError>;
 }
-
 type OutputItem =
   | { readonly kind: "event"; readonly envelope: AgentEvent.AgentEventEnvelope }
   | { readonly kind: "drain"; readonly completed: Deferred.Deferred<void> };
@@ -827,6 +834,23 @@ export const makeSessionPool = Effect.fn("SessionPool.make")(function* (
       Effect.catchTag("TimeoutError", () =>
         Effect.fail(new AgentError({ message: "OMP history did not reach a stable observation" })),
       ),
+    );
+  });
+  const resultSummary = Effect.fn("AgentRuntime.resultSummary")(function* (
+    chatId: Chat.ChatId,
+    seen: Chat.ResultCursor | null,
+  ) {
+    return yield* Effect.scoped(
+      Effect.gen(function* () {
+        const retained = yield* retainOption(sessions, chatId);
+        if (Option.isNone(retained)) return yield* options.loadResultSummary(chatId, seen);
+        const entry = retained.value;
+        return yield* entry.admission.withPermit(
+          boundary("Failed to settle OMP history", entry.settleHistory).pipe(
+            Effect.andThen(options.loadResultSummary(chatId, seen)),
+          ),
+        );
+      }),
     );
   });
 
@@ -1546,6 +1570,7 @@ export const makeSessionPool = Effect.fn("SessionPool.make")(function* (
     ),
     drain,
     transcript,
+    resultSummary,
     history,
     previewHistory,
     navigateHistory,

@@ -16,7 +16,7 @@ import type {
   SkillCommand,
 } from "@pico/contract/agent-runtime";
 import { CreateWorkspace } from "@pico/contract/application";
-import type { Chat, ChatId } from "@pico/contract/chat-model";
+import type { Chat, ChatId, ChatResultSummaryEntry } from "@pico/contract/chat-model";
 import { GitError, WorkspaceBindingInvalid } from "@pico/contract/errors";
 import type { ScheduleOverviewResponse } from "@pico/contract/rpc";
 import type * as Schedule from "@pico/contract/schedule";
@@ -31,7 +31,7 @@ import * as Schema from "effect/Schema";
 import * as AsyncResult from "effect/unstable/reactivity/AsyncResult";
 import * as Atom from "effect/unstable/reactivity/Atom";
 import * as AtomRegistry from "effect/unstable/reactivity/AtomRegistry";
-import { useContext, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import type {
   ChatTabPresentation,
   CloseChatPresentation,
@@ -59,6 +59,7 @@ import {
 } from "./chat/skill-completion.ts";
 import type { WorkspaceFormProps } from "./chat/workspace-dialog.tsx";
 import type { WorkspaceSettingsEditor } from "./chat/workspace-settings-dialog.tsx";
+import { createChatReadState, type OpenCapture } from "./chat-read-state.ts";
 import { Button } from "./components/ui/button.tsx";
 import { presentHistoryItems } from "./history-presentation.ts";
 import { type ConversationPage, type Page, pageFromMatches } from "./routes.tsx";
@@ -178,6 +179,9 @@ type DeleteWorkspaceFlow =
     }
   | { readonly kind: "deleting"; readonly target: Pick<Workspace, "id" | "name"> };
 const emptySchedules = Atom.make(AsyncResult.initial<ScheduleOverviewResponse>());
+const emptyChatResults = Atom.make(
+  AsyncResult.initial<ReadonlyMap<ChatId, ChatResultSummaryEntry>>(),
+);
 const emptyHistory = AsyncResult.initial<HistorySnapshot>();
 const emptyHistoryPreview = AsyncResult.initial<HistoryPreview>();
 const emptyDraft: DraftValue = { text: "", images: [] };
@@ -443,6 +447,30 @@ export function WorkspaceChat({
   const registry = useContext(RegistryContext);
   const connection = useAtomValue(state?.connection ?? openingConnection);
   const available = connection.kind === "active";
+  const [chatReadState] = useState(() => createChatReadState());
+  const [chatReadRevision, setChatReadRevision] = useState(0);
+  const chatReadRequest = useMemo(
+    () => chatReadState.buildRequest(),
+    [chatReadState, chatReadRevision],
+  );
+  const openCapture = useRef<(OpenCapture & { pendingHref: string | null }) | null>(null);
+  const [conversationBottom, setConversationBottom] = useState<{
+    key: string | null;
+    visible: boolean;
+  }>({ key: null, visible: false });
+  const conversationBottomRef = useRef(conversationBottom);
+  const onConversationBottomChange = useCallback((key: string | null, visible: boolean) => {
+    const previous = conversationBottomRef.current;
+    if (previous.key === key && previous.visible === visible) return;
+    const next = { key, visible };
+    conversationBottomRef.current = next;
+    setConversationBottom(next);
+  }, []);
+  const chatResults = useAtomValue(state?.chatResults ?? emptyChatResults);
+  const chatResultEntries = Option.getOrElse(
+    AsyncResult.value(chatResults),
+    () => new Map<ChatId, ChatResultSummaryEntry>(),
+  );
   const [navigation, setNavigation] = useState<TabState>(() => ({
     openKeys: [],
     entries: new Map(),
@@ -569,6 +597,58 @@ export function WorkspaceChat({
     }
     return merged;
   }, [groups]);
+  useEffect(
+    () => chatReadState.subscribe(() => setChatReadRevision((value) => value + 1)),
+    [chatReadState],
+  );
+  useEffect(() => {
+    const onStorage = (event: StorageEvent) => {
+      chatReadState.syncFromStorageEvent(event);
+    };
+    const onFocus = () => {
+      chatReadState.syncFromStorage();
+    };
+    const onPageShow = () => chatReadState.syncFromStorage();
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") chatReadState.syncFromStorage();
+    };
+    window.addEventListener("storage", onStorage);
+    window.addEventListener("focus", onFocus);
+    window.addEventListener("pageshow", onPageShow);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      window.removeEventListener("storage", onStorage);
+      window.removeEventListener("focus", onFocus);
+      window.removeEventListener("pageshow", onPageShow);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, [chatReadState]);
+  useEffect(
+    () =>
+      router.subscribe("onBeforeNavigate", (event) => {
+        const capture = openCapture.current;
+        if (capture !== null && capture.pendingHref === event.toLocation.href) {
+          capture.pendingHref = null;
+        } else {
+          openCapture.current = null;
+        }
+      }),
+    [router],
+  );
+  useEffect(() => {
+    if (!state || connection.kind !== "active") return;
+    registry.set(state.chatResults, chatReadRequest);
+  }, [state, registry, connection.kind, chatReadRequest]);
+  useEffect(() => {
+    if (
+      !state ||
+      connection.kind !== "active" ||
+      chatResults._tag !== "Success" ||
+      chatResults.waiting
+    )
+      return;
+    void chatReadState.reconcileCatalog(chatResults.value);
+  }, [state, connection.kind, chatResults, chatReadState]);
   const content = ((): PageContent => {
     if (page.kind === "home" || page.kind === "new-workspace") return { kind: "home" };
     if (page.kind === "schedules") return { kind: "schedules" };
@@ -787,6 +867,66 @@ export function WorkspaceChat({
       unmount();
     };
   }, [state, registry, visibleChatId]);
+  useEffect(() => {
+    if (!state || connection.kind !== "active" || visibleChatId === null) return;
+    if (
+      chatId !== visibleChatId ||
+      conversationBottom.key !== selectedConversationKey ||
+      !conversationBottom.visible ||
+      !ownsVisit()
+    )
+      return;
+    if (document.visibilityState !== "visible" || !document.hasFocus()) return;
+    if (chatResults._tag !== "Success" || chatResults.waiting) return;
+    const summary = chatResults.value.get(visibleChatId);
+    if (!summary || summary.summary.latest === null) return;
+    if (
+      conversation?.snapshot._tag !== "Success" ||
+      conversation.snapshot.waiting ||
+      conversation.historyReplacing
+    )
+      return;
+    const latest = summary.summary.latest;
+    const rendered = conversation.snapshot.value.some(
+      (message) => message.role === "assistant" && message.id === latest.messageId,
+    );
+    if (!rendered) return;
+    const capture = openCapture.current;
+    let cancelled = false;
+    void chatReadState.confirm(
+      visibleChatId,
+      summary,
+      capture,
+      () =>
+        !cancelled &&
+        conversationBottomRef.current === conversationBottom &&
+        ownsVisit() &&
+        document.visibilityState === "visible" &&
+        document.hasFocus() &&
+        registry.get(state.connection).kind === "active" &&
+        registry.get(state.chatResults) === chatResults &&
+        registry.get(state.transcript(visibleChatId)) === conversation.snapshot,
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    state,
+    registry,
+    connection.kind,
+    chatId,
+    visibleChatId,
+    conversationBottom,
+    selectedConversationKey,
+    conversation?.snapshot,
+    conversation?.historyReplacing,
+    chatResults,
+    chatReadState,
+    chatReadRevision,
+    visit,
+    routeState.status,
+    routeState.location,
+  ]);
   const updateNavigation = (change: (current: TabState) => TabState) => {
     const current = navigationRef.current;
     const next = change(current);
@@ -1029,6 +1169,8 @@ export function WorkspaceChat({
     const livePage = pageFromMatches(router.state.matches);
     const selectedEntry = findPageEntry(livePage, current.entries);
     const next = removeClosedChat(current, chatId);
+    void chatReadState.forgetChat(chatId);
+    if (openCapture.current?.chatId === chatId) openCapture.current = null;
     if (
       livePage.kind === "chat" &&
       livePage.chatId === chatId &&
@@ -1052,6 +1194,20 @@ export function WorkspaceChat({
     const current = navigationRef.current;
     const livePage = pageFromMatches(router.state.matches);
     const next = removeWorkspace(current, workspaceId);
+    const removedChats = new Set<ChatId>();
+    for (const entry of current.entries.values()) {
+      if (entry.workspace.id !== workspaceId || entry.target.kind !== "chat") continue;
+      removedChats.add(entry.target.chat.id);
+    }
+    const groupChats = groups.find((group) => group.workspace.id === workspaceId)?.chats;
+    if (groupChats?._tag === "Success" && !groupChats.waiting) {
+      for (const chat of groupChats.value) removedChats.add(chat.id);
+    }
+    if (removedChats.size > 0) {
+      void chatReadState.forgetChats(removedChats);
+      if (openCapture.current !== null && removedChats.has(openCapture.current.chatId))
+        openCapture.current = null;
+    }
     if (
       (livePage.kind === "draft" || livePage.kind === "chat" || livePage.kind === "settings") &&
       livePage.workspaceId === workspaceId &&
@@ -1402,6 +1558,18 @@ export function WorkspaceChat({
                 ? { kind: "refreshing" }
                 : { kind: "current" },
         };
+
+  const markChatUnread = (_workspaceId: string, id: string) => {
+    if (openCapture.current?.chatId === id) openCapture.current = null;
+    void chatReadState.markUnread(id as ChatId);
+  };
+
+  const markChatRead = (_workspaceId: string, id: string) => {
+    const chatId = id as ChatId;
+    const summary = chatResultEntries.get(chatId);
+    void chatReadState.markRead(chatId, summary);
+  };
+
   const newChat = (workspaceId?: string) => {
     const workspace = workspaceId
       ? groups.find((group) => group.workspace.id === workspaceId)?.workspace
@@ -1411,6 +1579,18 @@ export function WorkspaceChat({
     if (workspace)
       navigatePage(entryPage(retainEntry(workspace, { kind: "new", modelOverride: null }, true)));
     else if (!workspaceId) addWorkspace();
+  };
+  const captureOpen = (workspaceId: string, chatId: ChatId, navigating: boolean) => {
+    openCapture.current = {
+      ...chatReadState.captureOpen(chatId),
+      pendingHref: navigating
+        ? router.buildLocation({
+            to: "/workspaces/$workspaceId/chats/$chatId",
+            params: { workspaceId, chatId },
+          }).href
+        : null,
+    };
+    setChatReadRevision((value) => value + 1);
   };
   const selectChat = (workspaceId: string, id: string) => {
     const group = groups.find((item) => item.workspace.id === workspaceId);
@@ -1426,12 +1606,19 @@ export function WorkspaceChat({
       group.chats &&
       Option.getOrElse(AsyncResult.value(group.chats), () => []).find((item) => item.id === id);
     const target = chat ?? (existing?.target.kind === "chat" ? existing.target.chat : undefined);
-    if (target) navigatePage({ kind: "chat", workspaceId: group.workspace.id, chatId: target.id });
+    if (target) {
+      captureOpen(group.workspace.id, target.id, true);
+      navigatePage({ kind: "chat", workspaceId: group.workspace.id, chatId: target.id });
+    }
   };
   const selectTab = (id: string) => {
     const current = navigationRef.current;
     const entry = current.openKeys.includes(id) ? current.entries.get(id) : undefined;
-    if (!entry || (id === selected?.key && page.kind !== "settings")) return;
+    if (!entry) return;
+    const sameTab = id === selected?.key && page.kind !== "settings";
+    if (entry.target.kind === "chat")
+      captureOpen(entry.workspace.id, entry.target.chat.id, !sameTab);
+    if (sameTab) return;
     navigatePage(entryPage(entry));
   };
   const closeTab = (id: string) => {
@@ -2091,6 +2278,7 @@ export function WorkspaceChat({
       const summaries = records.map((chat) => ({
         id: chat.id,
         title: titles.get(chat.id) ?? `Chat ${chat.id.slice(-8)}`,
+        unread: chatReadState.unread(chat.id, chatResultEntries.get(chat.id)),
       }));
       const matchesWorkspace = workspace.name.toLocaleLowerCase().includes(query);
       const isVisibleChat = workspace.id === routeWorkspaceId && visibleChatId !== null;
@@ -2154,6 +2342,10 @@ export function WorkspaceChat({
           ? (titles.get(entry.target.chat.id) ?? `Chat ${entry.target.chat.id.slice(-8)}`)
           : newChatTitle(entry.value.text),
       contextLabel: `${entry.workspace.name} · ${entry.target.kind === "chat" ? entry.target.chat.cwd : entry.workspace.defaultCwd}`,
+      unread:
+        entry.target.kind === "chat"
+          ? chatReadState.unread(entry.target.chat.id, chatResultEntries.get(entry.target.chat.id))
+          : false,
     });
   }
   const creating =
@@ -2735,6 +2927,8 @@ export function WorkspaceChat({
           desktopCollapse={{ collapsed: sidebarCollapsed, onCollapsedChange: setSidebarCollapsed }}
           navigation={presentation}
           onChatSelect={selectChat}
+          onChatMarkUnread={markChatUnread}
+          onChatMarkRead={markChatRead}
           onChatsRetry={(id) => {
             const workspace = groups.find((group) => group.workspace.id === id)?.workspace;
             if (state && workspace) registry.refresh(state.chats(workspace.id));
@@ -2805,6 +2999,7 @@ export function WorkspaceChat({
             applyThemePreference(next);
             setTheme(next);
           }}
+          onConversationBottomChange={onConversationBottomChange}
           onHistoryPaneOpenChange={(open) => {
             if (!ownsVisit() || selectedConversationKey === null) return;
             setHistoryOpen(open);

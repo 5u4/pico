@@ -627,6 +627,36 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
     },
     Effect.mapError(failure("Failed to list chats")),
   );
+  const chatResults = Effect.fn("Application.chatResults")(
+    function* (input: Chat.ChatResultsRequest) {
+      const seenByChat = new Map(input.chats.map((entry) => [entry.chatId, entry]));
+      const chatIds = new Set<Chat.ChatId>(input.chats.map((entry) => entry.chatId));
+      if (input.includeAllOpenChats === true) {
+        const allWorkspaces = yield* workspaces.list();
+        for (const workspace of allWorkspaces) {
+          if (workspace.platform !== "web") continue;
+          const open = yield* chats.listOpenByWorkspace(workspace.id);
+          for (const chat of open) chatIds.add(chat.id);
+        }
+      }
+      const summaries: Chat.ChatResultSummaryEntry[] = [];
+      for (const chatId of chatIds) {
+        const chat = yield* chats.findById(chatId);
+        if (Option.isNone(chat) || chat.value.archivedAt !== null) continue;
+        const workspace = yield* workspaces.findById(chat.value.workspaceId);
+        if (Option.isNone(workspace) || workspace.value.platform !== "web") continue;
+        const basis = seenByChat.get(chatId);
+        const summary = yield* runtime.resultSummary(chatId, basis?.seen ?? null);
+        summaries.push({
+          chatId,
+          seenRevision: basis?.seenRevision ?? 0,
+          summary,
+        });
+      }
+      return summaries;
+    },
+    Effect.mapError(failure("Failed to read chat results")),
+  );
 
   const createChat = Effect.fn("Application.createChat")(function* (input: CreateChat) {
     return yield* createChatWithId(
@@ -1073,6 +1103,7 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
     availableWorkspaceSkills,
     setWorkspaceModel,
     listChats,
+    chatResults,
     createChat,
     findWorkspaceByPlatformId,
     findChatByPlatformId,

@@ -8,12 +8,14 @@ export interface WorkspaceSummary {
 export interface ChatSummary {
   readonly id: string;
   readonly title: string;
+  readonly unread: boolean;
 }
 
 export interface ChatTabPresentation {
   readonly id: string;
   readonly title: string;
   readonly contextLabel: string;
+  readonly unread: boolean;
 }
 
 export type CloseChatPresentation =

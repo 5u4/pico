@@ -101,6 +101,7 @@ const makeScheduledDeliveryFixture = Effect.fn("makeScheduledDeliveryFixture")(f
         events: Stream.empty,
         drain: () => Effect.void,
         transcript: () => Effect.die("unexpected transcript read"),
+        resultSummary: () => Effect.die("unexpected chat results read"),
         send: () => Effect.die("unexpected ordinary send"),
         sendCaptured: () => Effect.die("unexpected captured run"),
         deliver: (_chatId, message) =>
@@ -338,6 +339,7 @@ describe("Chat close", () => {
             events: Stream.empty,
             drain: () => Effect.void,
             transcript: () => Effect.die("unexpected transcript read"),
+            resultSummary: () => Effect.die("unexpected chat results read"),
             send: (_id, prompt) =>
               Effect.sync(() => {
                 sent.push(prompt.text);
@@ -525,6 +527,7 @@ describe("Chat close", () => {
             events: Stream.empty,
             drain: () => Effect.void,
             transcript: () => Effect.succeed(runtimeTranscript),
+            resultSummary: () => Effect.die("unexpected chat results read"),
             send: (_chatId, value) =>
               Effect.gen(function* () {
                 if (value.text === "steer") {
@@ -751,6 +754,7 @@ describe("Chat close", () => {
               },
               currentModel: null,
             }),
+          resultSummary: () => Effect.die("unexpected chat results read"),
           send: () => Effect.die("unexpected ordinary send"),
           sendCaptured: (_chatId, runId) =>
             Deferred.succeed(started, undefined).pipe(
@@ -910,6 +914,7 @@ describe("Chat close", () => {
                 },
                 currentModel: null,
               }),
+            resultSummary: () => Effect.die("unexpected chat results read"),
             send: () => Effect.die("unexpected send"),
             sendCaptured: () => Effect.die("unexpected captured runtime send"),
             deliver: () => Effect.die("unexpected scheduled delivery"),

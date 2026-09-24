@@ -48,6 +48,11 @@ export const PicoRpcs = RpcGroup.make(
     success: Schema.Array(Chat.ChatListEntry),
     error: Errors.ApplicationError,
   }),
+  Rpc.make("ChatResults", {
+    payload: Chat.ChatResultsRequest,
+    success: Chat.ChatResultsResponse,
+    error: Errors.ApplicationError,
+  }),
   Rpc.make("ListSchedules", {
     payload: Schema.Void,
     success: ScheduleOverviewResponse,
