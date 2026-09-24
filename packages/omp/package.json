@@ -10,6 +10,7 @@
   "dependencies": {
     "@oh-my-pi/pi-coding-agent": "catalog:",
     "@oh-my-pi/pi-ai": "catalog:",
+    "@oh-my-pi/pi-tui": "catalog:",
     "@pico/contract": "workspace:*",
     "agent-browser": "0.37.1",
     "effect": "catalog:"

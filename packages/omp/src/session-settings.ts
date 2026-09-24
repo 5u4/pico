@@ -2,7 +2,6 @@ import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-regis
 import {
   filterAvailableModelsByEnabledPatterns,
   getModelMatchPreferences,
-  parseModelString,
   pickDefaultAvailableModel,
   resolveAllowedModels,
   resolveModelRoleValue,
@@ -17,6 +16,7 @@ import type {
   SessionEntry,
 } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { loadSessionHistoryReadOnly } from "@oh-my-pi/pi-coding-agent/session/session-loader";
+import { parseModelString } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import type { ModelInfo } from "@pico/contract/agent-runtime";
 import type { ExternalBrowser } from "@pico/contract/config";
 import type { AbsolutePath } from "@pico/contract/path";

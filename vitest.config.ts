@@ -28,8 +28,9 @@ export const ompSourceImports = () => ({
       transformed = transformed.replaceAll("import.meta.dir", JSON.stringify(file.slice(0, slash)));
     }
     transformed = transformed.replace(
-      /import\s+(\w+)\s+from\s+["']([^"']+)["']\s+with\s*\{\s*type:\s*["']file["']\s*\};?/g,
-      (_statement, name: string, relative: string) => {
+      /import\s+(\w+)\s+from\s+["']([^"']+)["']\s+with\s*\{\s*type:\s*["'](file|text)["']\s*\};?/g,
+      (_statement, name: string, relative: string, type: string) => {
+        if (type === "text") return `import ${name} from ${JSON.stringify(`${relative}?raw`)};`;
         const slash = file.lastIndexOf("/");
         const directory = `${file.slice(0, slash)}/`;
         const path = Bun.fileURLToPath(new URL(relative, Bun.pathToFileURL(directory)));

@@ -151,7 +151,7 @@ const withSession = async (
   const auth = new native.AuthStorage(
     await native.SqliteAuthCredentialStore.open(join(directory, "auth.db")),
   );
-  auth.setRuntimeApiKey("openai", "local-provider-only");
+  auth.keys.setRuntime("openai", "local-provider-only");
   const settings = native.Settings.isolated({
     "compaction.enabled": false,
     "retry.enabled": false,
