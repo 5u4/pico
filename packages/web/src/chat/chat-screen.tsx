@@ -7,7 +7,14 @@ import {
   SunIcon,
   XIcon,
 } from "@phosphor-icons/react";
-import { type KeyboardEvent, type RefObject, useLayoutEffect, useRef, useState } from "react";
+import {
+  type KeyboardEvent,
+  type RefObject,
+  useCallback,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import { Button } from "../components/ui/button.tsx";
 import type { Theme } from "../theme.ts";
 import type {
@@ -94,6 +101,7 @@ export interface ChatScreenProps
   readonly onSidebarOpenChange: (open: boolean) => void;
   readonly onTabSelect: (id: string) => void;
   readonly onTabClose: (id: string) => void;
+  readonly onConversationBottomChange: (conversationKey: string | null, atBottom: boolean) => void;
   readonly onToolSelect: (id: string | null) => void;
   readonly onHistoryPaneOpenChange: (open: boolean) => void;
   readonly onHistoryQueryChange: (query: string) => void;
@@ -169,11 +177,14 @@ export function ChatScreen({
   onWorkspaceRetry,
   onChatsRetry,
   onChatSelect,
+  onChatMarkUnread,
+  onChatMarkRead,
   onNewChat,
   schedulesHref,
   onOpenSchedules,
   onTabSelect,
   onTabClose,
+  onConversationBottomChange,
   onSearchChange,
   onToolSelect,
   onHistoryPaneOpenChange,
@@ -200,6 +211,7 @@ export function ChatScreen({
   const transcriptRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLDivElement>(null);
+  const bottomSentinel = useRef<HTMLDivElement>(null);
   const scroll = useRef({ key: conversationKey, following: true });
   const [showJump, setShowJump] = useState(false);
   const [composerHeight, setComposerHeight] = useState(150);
@@ -290,6 +302,51 @@ export function ChatScreen({
       cancelAnimationFrame(frame);
     };
   }, [chatVisible, welcome]);
+  const measureBottom = useCallback(() => {
+    const root = transcriptRef.current;
+    const sentinel = bottomSentinel.current;
+    if (!chatVisible || welcome || !root || !sentinel) {
+      onConversationBottomChange(conversationKey, false);
+      return;
+    }
+    const viewport = root.getBoundingClientRect();
+    const bottom = sentinel.getBoundingClientRect();
+    const top = viewport.top + root.clientTop;
+    const visibleBottom = Math.min(
+      top + root.clientHeight,
+      composerRef.current?.getBoundingClientRect().top ?? Infinity,
+    );
+    onConversationBottomChange(
+      conversationKey,
+      bottom.height > 0 && bottom.top >= top && bottom.bottom <= visibleBottom,
+    );
+  }, [chatVisible, welcome, conversationKey, onConversationBottomChange]);
+  useLayoutEffect(() => {
+    measureBottom();
+  }, [measureBottom, transcript, composerHeight]);
+  useLayoutEffect(() => {
+    const root = transcriptRef.current;
+    const sentinel = bottomSentinel.current;
+    if (!chatVisible || welcome || !root || !sentinel) return;
+    if (typeof IntersectionObserver !== "function") {
+      onConversationBottomChange(conversationKey, false);
+      return;
+    }
+    const observer = new IntersectionObserver(measureBottom, {
+      root,
+      rootMargin: `0px 0px -${composerHeight}px 0px`,
+      threshold: 1,
+    });
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [
+    chatVisible,
+    welcome,
+    conversationKey,
+    composerHeight,
+    measureBottom,
+    onConversationBottomChange,
+  ]);
 
   useLayoutEffect(() => {
     if (!chatVisible) return;
@@ -416,6 +473,14 @@ export function ChatScreen({
       onChatSelect(workspaceId, chatId);
       closeSidebar();
     },
+    onChatMarkUnread: (workspaceId, chatId) => {
+      onChatMarkUnread(workspaceId, chatId);
+      closeSidebar();
+    },
+    onChatMarkRead: (workspaceId, chatId) => {
+      onChatMarkRead(workspaceId, chatId);
+      closeSidebar();
+    },
     onNewChat: (workspaceId) => {
       onNewChat(workspaceId);
       closeSidebar();
@@ -494,7 +559,7 @@ export function ChatScreen({
                     <button
                       aria-controls="conversation-history"
                       aria-selected={active}
-                      className="min-w-0 flex-1 rounded-sm text-left"
+                      className="flex min-w-0 flex-1 items-center rounded-sm text-left"
                       onClick={() => onTabSelect(tab.id)}
                       onKeyDown={(event) => moveTabFocus(event, index)}
                       ref={(element) => {
@@ -506,7 +571,14 @@ export function ChatScreen({
                       title={`${tab.title}\n${tab.contextLabel}`}
                       type="button"
                     >
-                      <span className="block truncate">{tab.title}</span>
+                      <span className="min-w-0 flex-1 truncate">{tab.title}</span>
+                      {tab.unread && (
+                        <span
+                          aria-hidden="true"
+                          className="ml-1.5 inline-flex size-1.5 shrink-0 rounded-full bg-accent"
+                        />
+                      )}
+                      <span className="sr-only">{tab.unread ? "Unread" : "Read"}</span>
                     </button>
                     <button
                       aria-label={`Close ${tab.title} in ${tab.contextLabel}`}
@@ -672,6 +744,7 @@ export function ChatScreen({
                     element.scrollHeight - element.clientHeight - element.scrollTop < 120;
                   scroll.current.following = following;
                   setShowJump(!following);
+                  measureBottom();
                 }}
                 ref={transcriptRef}
                 role="tabpanel"
@@ -686,6 +759,7 @@ export function ChatScreen({
                       presentation={transcript}
                     />
                   )}
+                  <div aria-hidden="true" className="h-px w-full" ref={bottomSentinel} />
                 </div>
               </div>
               {!welcome && (

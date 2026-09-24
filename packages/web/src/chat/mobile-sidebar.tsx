@@ -75,6 +75,12 @@ export function MobileSidebar({
           onChatSelect={(workspaceId, chatId) =>
             afterClose(() => sidebar.onChatSelect(workspaceId, chatId))
           }
+          onChatMarkUnread={(workspaceId, chatId) =>
+            afterClose(() => sidebar.onChatMarkUnread(workspaceId, chatId))
+          }
+          onChatMarkRead={(workspaceId, chatId) =>
+            afterClose(() => sidebar.onChatMarkRead(workspaceId, chatId))
+          }
           onEditWorkspace={
             sidebar.onEditWorkspace
               ? (workspaceId, origin) => {

@@ -97,6 +97,8 @@ describe("AgentRuntime", () => {
         loadHistory: () => Effect.die("unexpected history read"),
         loadHistoryPreview: () => Effect.die("unexpected history preview"),
         loadCurrentModel: () => Effect.succeed(null),
+        loadResultSummary: (_chatId, _seen) =>
+          Effect.succeed({ kind: "ready", latest: null, relation: "none" }),
         loadTranscript: () =>
           Effect.succeed({
             historyRevision: HistoryRevision.make("test-history"),
@@ -179,6 +181,8 @@ describe("AgentRuntime", () => {
             loadHistory: () => Effect.die("unexpected history read"),
             loadHistoryPreview: () => Effect.die("unexpected history preview"),
             loadCurrentModel: () => Effect.succeed(null),
+            loadResultSummary: (_chatId, _seen) =>
+              Effect.succeed({ kind: "ready", latest: null, relation: "none" }),
             loadTranscript: () =>
               Effect.succeed({
                 historyRevision: HistoryRevision.make("test-history"),
@@ -591,6 +595,8 @@ describe("AgentRuntime", () => {
             loadHistory: () => Effect.die("unexpected history read"),
             loadHistoryPreview: () => Effect.die("unexpected history preview"),
             loadCurrentModel: () => Effect.succeed(null),
+            loadResultSummary: (_chatId, _seen) =>
+              Effect.succeed({ kind: "ready", latest: null, relation: "none" }),
             loadTranscript: () =>
               Effect.succeed({
                 historyRevision: HistoryRevision.make("test-history"),
@@ -740,6 +746,8 @@ describe("AgentRuntime", () => {
           loadHistory: () => Effect.die("unexpected history read"),
           loadHistoryPreview: () => Effect.die("unexpected history preview"),
           loadCurrentModel: () => Effect.succeed(null),
+          loadResultSummary: (_chatId, _seen) =>
+            Effect.succeed({ kind: "ready", latest: null, relation: "none" }),
           loadTranscript: () =>
             transcriptFailure === undefined
               ? Effect.succeed({
@@ -884,6 +892,8 @@ describe("AgentRuntime", () => {
           loadHistory: () => Effect.die("unexpected history read"),
           loadHistoryPreview: () => Effect.die("unexpected history preview"),
           loadCurrentModel: () => Effect.succeed(null),
+          loadResultSummary: (_chatId, _seen) =>
+            Effect.succeed({ kind: "ready", latest: null, relation: "none" }),
           loadTranscript: () =>
             Effect.succeed({
               historyRevision: HistoryRevision.make("test-history"),
@@ -949,6 +959,8 @@ describe("AgentRuntime", () => {
           loadHistory: () => Effect.die("unexpected history read"),
           loadHistoryPreview: () => Effect.die("unexpected history preview"),
           loadCurrentModel: () => Effect.succeed(null),
+          loadResultSummary: (_chatId, _seen) =>
+            Effect.succeed({ kind: "ready", latest: null, relation: "none" }),
           loadTranscript: () =>
             Effect.succeed({
               historyRevision: HistoryRevision.make("test-history"),
@@ -1037,6 +1049,8 @@ describe("AgentRuntime", () => {
               loadHistory: () => Effect.die("unexpected history read"),
               loadHistoryPreview: () => Effect.die("unexpected history preview"),
               loadCurrentModel: () => Effect.succeed(null),
+              loadResultSummary: (_chatId, _seen) =>
+                Effect.succeed({ kind: "ready", latest: null, relation: "none" }),
               loadTranscript: () =>
                 Effect.succeed({
                   historyRevision: HistoryRevision.make("test-history"),
@@ -1079,6 +1093,8 @@ describe("AgentRuntime", () => {
         loadHistory: () => Effect.die("unexpected history read"),
         loadHistoryPreview: () => Effect.die("unexpected history preview"),
         loadCurrentModel: () => Effect.succeed(null),
+        loadResultSummary: (_chatId, _seen) =>
+          Effect.succeed({ kind: "ready", latest: null, relation: "none" }),
         loadTranscript: () =>
           Effect.succeed({
             historyRevision: HistoryRevision.make("test-history"),
@@ -1131,6 +1147,8 @@ describe("AgentRuntime", () => {
           loadHistory: () => Effect.die("unexpected history read"),
           loadHistoryPreview: () => Effect.die("unexpected history preview"),
           loadCurrentModel: () => Effect.succeed(null),
+          loadResultSummary: (_chatId, _seen) =>
+            Effect.succeed({ kind: "ready", latest: null, relation: "none" }),
           loadTranscript: () =>
             Effect.succeed({
               historyRevision: HistoryRevision.make("test-history"),
@@ -1198,6 +1216,8 @@ describe("AgentRuntime", () => {
           loadHistory: () => Effect.die("unexpected history read"),
           loadHistoryPreview: () => Effect.die("unexpected history preview"),
           loadCurrentModel: () => Effect.succeed(null),
+          loadResultSummary: (_chatId, _seen) =>
+            Effect.succeed({ kind: "ready", latest: null, relation: "none" }),
           loadTranscript: () =>
             Effect.succeed({
               historyRevision: HistoryRevision.make("test-history"),
@@ -1284,6 +1304,8 @@ describe("AgentRuntime", () => {
             loadHistory: () => Effect.die("unexpected history read"),
             loadHistoryPreview: () => Effect.die("unexpected history preview"),
             loadCurrentModel: () => Effect.succeed(null),
+            loadResultSummary: (_chatId, _seen) =>
+              Effect.succeed({ kind: "ready", latest: null, relation: "none" }),
             loadTranscript: () =>
               Effect.gen(function* () {
                 historyReads++;

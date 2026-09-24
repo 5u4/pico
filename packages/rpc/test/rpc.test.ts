@@ -143,6 +143,7 @@ const unusedApplication = Application.of({
   history: () => Effect.die("unexpected history read"),
   previewHistory: () => Effect.die("unexpected history preview"),
   navigateHistory: () => Effect.die("unexpected history navigation"),
+  chatResults: (_input) => Effect.succeed([]),
   deleteWorkspace: () => Effect.die("unexpected workspace deletion"),
   updateWorkspace: () => Effect.die("unexpected workspace update"),
   listWorkspaces: () => Effect.die("unexpected workspace list"),
@@ -597,7 +598,7 @@ describe("RPC", () => {
             client
               .CreateChat({ workspaceId: id, externalId: null, modelOverride: null })
               .pipe(Effect.asVoid),
-            client.DeleteWorkspace({ workspaceId: id }),
+            client.DeleteWorkspace({ workspaceId: id }).pipe(Effect.asVoid),
             client
               .UpdateWorkspace({
                 workspaceId: id,

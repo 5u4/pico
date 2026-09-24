@@ -98,6 +98,13 @@ describe("Persistence.layer", () => {
             externalId: null,
             createdAt: 2,
           });
+          const retained = yield* chats.create({
+            id: chatId(4),
+            workspaceId: regularWorkspaceId,
+            cwd: cwdA,
+            externalId: null,
+            createdAt: 3,
+          });
           assert.strictEqual(
             yield* workspaces.softDelete({
               id: worktreeWorkspaceId,
@@ -109,14 +116,13 @@ describe("Persistence.layer", () => {
           assert.isTrue(Option.isSome(yield* workspaces.findById(worktreeWorkspaceId)));
           const archived = Option.getOrThrow(yield* chats.archive(second.id, 5));
           retainedChats = [first, archived];
-          assert.strictEqual(
-            yield* workspaces.softDelete({
-              id: worktreeWorkspaceId,
-              deletedAt: 10,
-              checkedChatIds: [first.id],
-            }),
-            "deleted",
-          );
+          const deletedChatIds = yield* workspaces.softDelete({
+            id: worktreeWorkspaceId,
+            deletedAt: 10,
+            checkedChatIds: [first.id],
+          });
+          assert.deepStrictEqual([...deletedChatIds].sort(), [first.id, archived.id].sort());
+          assert.deepStrictEqual(Option.getOrThrow(yield* chats.findById(retained.id)), retained);
           assert.strictEqual(
             yield* workspaces.softDelete({
               id: worktreeWorkspaceId,

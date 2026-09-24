@@ -48,6 +48,11 @@ export const PicoRpcs = RpcGroup.make(
     success: Schema.Array(Chat.ChatListEntry),
     error: Errors.ApplicationError,
   }),
+  Rpc.make("ChatResults", {
+    payload: Chat.ChatResultsRequest,
+    success: Chat.ChatResultsResponse,
+    error: Errors.ApplicationError,
+  }),
   Rpc.make("ListSchedules", {
     payload: Schema.Void,
     success: ScheduleOverviewResponse,
@@ -65,7 +70,7 @@ export const PicoRpcs = RpcGroup.make(
   }),
   Rpc.make("DeleteWorkspace", {
     payload: { workspaceId: Workspace.WorkspaceId },
-    success: Schema.Void,
+    success: Schema.Array(Chat.ChatId),
     error: Errors.ApplicationError,
   }),
   Rpc.make("CreateChat", {

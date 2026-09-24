@@ -88,6 +88,8 @@ describe("session pool publication", () => {
             loadHistory: () => Effect.die("unexpected history read"),
             loadHistoryPreview: () => Effect.die("unexpected history preview"),
             loadCurrentModel: () => Effect.succeed(null),
+            loadResultSummary: (_chatId, _seen) =>
+              Effect.succeed({ kind: "ready", latest: null, relation: "none" }),
             loadTranscript: () =>
               Effect.gen(function* () {
                 const current = messages;
@@ -234,6 +236,8 @@ describe("session pool publication", () => {
             loadHistory: () => Effect.die("unexpected history read"),
             loadHistoryPreview: () => Effect.die("unexpected history preview"),
             loadCurrentModel: () => Effect.succeed(null),
+            loadResultSummary: (_chatId, _seen) =>
+              Effect.succeed({ kind: "ready", latest: null, relation: "none" }),
             loadTranscript: () =>
               Effect.promise(() => OmpSessionLoader.loadSessionSnapshotReadOnly(sessionFile)).pipe(
                 Effect.map((snapshot) => ({
@@ -470,6 +474,8 @@ describe("session pool publication", () => {
           loadHistory: () => Effect.die("unexpected history read"),
           loadHistoryPreview: () => Effect.die("unexpected history preview"),
           loadCurrentModel: () => Effect.succeed(null),
+          loadResultSummary: (_chatId, _seen) =>
+            Effect.succeed({ kind: "ready", latest: null, relation: "none" }),
           loadTranscript: () =>
             Effect.promise(() => OmpSessionLoader.loadSessionSnapshotReadOnly(sessionFile)).pipe(
               Effect.map((snapshot) => ({

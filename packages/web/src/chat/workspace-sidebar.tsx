@@ -45,6 +45,8 @@ export interface WorkspaceSidebarProps {
   readonly onWorkspaceRetry: () => void;
   readonly onChatsRetry: (workspaceId: string) => void;
   readonly onChatSelect: (workspaceId: string, chatId: string) => void;
+  readonly onChatMarkUnread: (workspaceId: string, chatId: string) => void;
+  readonly onChatMarkRead: (workspaceId: string, chatId: string) => void;
   readonly onChatClose: (workspaceId: string, chatId: string, origin: HTMLElement) => void;
   readonly chatCloseDisabled: boolean;
   readonly onNewChat: (workspaceId?: string) => void;
@@ -69,6 +71,8 @@ export function WorkspaceSidebar({
   onWorkspaceRetry,
   onChatsRetry,
   onChatSelect,
+  onChatMarkUnread,
+  onChatMarkRead,
   onChatClose,
   chatCloseDisabled,
   onNewChat,
@@ -380,6 +384,8 @@ export function WorkspaceSidebar({
                       chatCloseDisabled={chatCloseDisabled}
                       contextMenuContainer={contextMenuContainer}
                       onChatClose={onChatClose}
+                      onChatMarkRead={onChatMarkRead}
+                      onChatMarkUnread={onChatMarkUnread}
                       onChatSelect={onChatSelect}
                       selected={selected}
                       workspaceId={workspace.id}
@@ -490,12 +496,19 @@ function ChatRow({
   workspaceId,
   selected,
   onChatSelect,
+  onChatMarkUnread,
+  onChatMarkRead,
   onChatClose,
   chatCloseDisabled,
   contextMenuContainer,
 }: Pick<
   WorkspaceSidebarProps,
-  "onChatSelect" | "onChatClose" | "chatCloseDisabled" | "contextMenuContainer"
+  | "onChatSelect"
+  | "onChatMarkUnread"
+  | "onChatMarkRead"
+  | "onChatClose"
+  | "chatCloseDisabled"
+  | "contextMenuContainer"
 > & {
   readonly chat: NavigationPresentation["groups"][number]["chats"][number];
   readonly workspaceId: string;
@@ -555,7 +568,14 @@ function ChatRow({
             title={chat.title}
             type="button"
           >
-            <span className="truncate">{chat.title}</span>
+            <span className="min-w-0 flex-1 truncate">{chat.title}</span>
+            {chat.unread && (
+              <span
+                aria-hidden="true"
+                className="ml-2 inline-flex size-2 shrink-0 rounded-full bg-accent"
+              />
+            )}
+            <span className="sr-only">{chat.unread ? "Unread" : "Read"}</span>
           </button>
         </ContextMenuTrigger>
         <button
@@ -603,6 +623,17 @@ function ChatRow({
         >
           <CopyIcon aria-hidden="true" size={17} />
           Copy chat ID
+        </ContextMenuItem>
+        <ContextMenuItem
+          onSelect={() => {
+            if (chat.unread) onChatMarkRead(workspaceId, chat.id);
+            else onChatMarkUnread(workspaceId, chat.id);
+          }}
+        >
+          <span aria-hidden="true" className="inline-flex size-[17px] items-center justify-center">
+            <span className="size-2 rounded-full bg-accent" />
+          </span>
+          {chat.unread ? "Mark as read" : "Mark as unread"}
         </ContextMenuItem>
         <ContextMenuItem
           disabled={chatCloseDisabled}

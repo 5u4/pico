@@ -15,7 +15,12 @@ import type {
   CreateWorkspace,
   UpdateWorkspace,
 } from "@pico/contract/application";
-import type { ChatId, ChatListEntry } from "@pico/contract/chat-model";
+import type {
+  ChatId,
+  ChatListEntry,
+  ChatResultSummaryEntry,
+  ChatResultsRequest,
+} from "@pico/contract/chat-model";
 import { ApplicationError, ChatClosed } from "@pico/contract/errors";
 import type { ScheduleOverviewResponse } from "@pico/contract/rpc";
 import type { ScheduleError } from "@pico/contract/schedule";
@@ -63,13 +68,17 @@ interface ReadFlight {
   dirty: boolean;
 }
 interface ReadRecord {
-  readonly kind: "list" | "chats" | "transcript";
+  readonly kind: "list" | "chats" | "results" | "transcript";
   readonly run: (flight: ReadFlight) => Effect.Effect<void>;
   generation: Generation | undefined;
   flight: ReadFlight | undefined;
 }
 type ContextReadError = ReadError | ChatClosed;
 type HistoryReadError = ReadError | ChatClosed;
+type ChatResultsValue = ReadonlyMap<ChatId, ChatResultSummaryEntry>;
+interface ResultsRead extends ReadRecord {
+  readonly markDirty: (chatId: ChatId) => void;
+}
 interface ChatRecord {
   readonly live: LiveChat;
   readonly transcriptResult: AsyncResult.AsyncResult<TranscriptSnapshot, ReadError>;
@@ -131,6 +140,7 @@ export const make = ({ url }: { readonly url: string }) => {
       const pageScope = yield* Effect.scope;
       const reads = new Set<ReadRecord>();
       const chatReads = new Map<ChatId, ChatRead>();
+      let resultsRead: ResultsRead | undefined;
       let current: Generation | undefined;
       let closing: Generation | undefined;
       let attempt: Deferred.Deferred<void, ApplicationError> | undefined;
@@ -212,6 +222,16 @@ export const make = ({ url }: { readonly url: string }) => {
             );
             return;
           }
+          if (
+            resultsRead !== undefined &&
+            ((envelope.event.type === "message-settled" &&
+              envelope.event.message.role === "assistant") ||
+              envelope.event.type === "run-finished" ||
+              envelope.event.type === "history-replaced")
+          ) {
+            resultsRead.markDirty(envelope.chatId);
+            yield* invalidate(resultsRead, generation);
+          }
           const record = chatReads.get(envelope.chatId);
           if (record === undefined) return;
           record.accept(envelope, generation);
@@ -260,7 +280,9 @@ export const make = ({ url }: { readonly url: string }) => {
         );
         yield* Deferred.await(generation.ready);
         while (isCurrent(generation)) {
-          const pending = [...reads].filter((record) => record.generation !== generation);
+          const pending = [...reads].filter(
+            (record) => record.kind !== "results" && record.generation !== generation,
+          );
           if (pending.length === 0) break;
           yield* Effect.forEach(pending, (record) => refresh(record, generation, false), {
             concurrency: "unbounded",
@@ -270,6 +292,8 @@ export const make = ({ url }: { readonly url: string }) => {
         if (!isCurrent(generation)) return yield* unavailableError();
         generation.phase = "active";
         registry.set(status, { kind: "active" });
+        if (resultsRead !== undefined)
+          yield* refresh(resultsRead, generation, false).pipe(Effect.forkIn(scope));
       });
       const ensure = (): Effect.Effect<void, ApplicationError> =>
         Effect.suspend(() => {
@@ -321,19 +345,23 @@ export const make = ({ url }: { readonly url: string }) => {
       const read = (record: ReadRecord) =>
         Effect.gen(function* () {
           reads.add(record);
-          const previous = current;
-          if (previous?.phase !== "active") {
+          const active = current?.phase === "active";
+          if (!active) {
             yield* ensure().pipe(Effect.ignore);
             if (record.generation === current) return;
           }
           const generation = current;
           if (generation === undefined) return;
-          yield* refresh(record, generation);
+          yield* refresh(record, generation, active);
         });
       const registerChat = (record: ChatRead) => {
         reads.add(record);
         chatReads.set(record.chatId, record);
         if (current !== undefined && record.generation !== current) record.buffer(current);
+      };
+      const registerResults = (record: ResultsRead) => {
+        reads.add(record);
+        resultsRead = record;
       };
       const write = <A, E>(
         execute: (client: Client) => Effect.Effect<A, E>,
@@ -372,6 +400,7 @@ export const make = ({ url }: { readonly url: string }) => {
         ensure,
         read,
         registerChat,
+        registerResults,
         applyHistorySnapshot,
         isCurrent,
         fail,
@@ -460,6 +489,124 @@ export const make = ({ url }: { readonly url: string }) => {
   const schedules = list<ScheduleOverviewResponse, ScheduleError>((client) =>
     client.ListSchedules(),
   );
+  const normalizeChatResultsRequest = (input: ChatResultsRequest): ChatResultsRequest => ({
+    chats: [...new Map(input.chats.map((entry) => [entry.chatId, entry])).values()],
+    includeAllOpenChats: input.includeAllOpenChats === true,
+  });
+  const chatResultsInput = Atom.make<ChatResultsRequest>({
+    chats: [],
+    includeAllOpenChats: true,
+  }).pipe(Atom.keepAlive);
+  const chatResultsState = Atom.make<AsyncResult.AsyncResult<ChatResultsValue, ReadError>>(
+    AsyncResult.initial(),
+  ).pipe(Atom.keepAlive);
+  const chatResultsRecord = Atom.make((get): ResultsRead => {
+    const dirty = new Set<ChatId>();
+    let catalogGeneration: Generation | undefined;
+    return {
+      kind: "results",
+      generation: undefined,
+      flight: undefined,
+      markDirty: (chatId) => {
+        dirty.add(chatId);
+      },
+      run: (flight) =>
+        Effect.gen(function* () {
+          const { generation } = flight;
+          const manager = yield* get.resultOnce(owner);
+          if (!manager.isCurrent(generation)) return;
+          const requested = get.registry.get(chatResultsInput);
+          const fullCatalog =
+            requested.includeAllOpenChats === true &&
+            (catalogGeneration !== generation || dirty.size === 0);
+          const byChat = new Map(requested.chats.map((entry) => [entry.chatId, entry]));
+          const filtered: ChatResultsRequest = {
+            includeAllOpenChats: fullCatalog,
+            chats:
+              fullCatalog || dirty.size === 0
+                ? requested.chats
+                : Array.from(
+                    dirty,
+                    (chatId) => byChat.get(chatId) ?? { chatId, seen: null, seenRevision: 0 },
+                  ),
+          };
+          dirty.clear();
+          if (!fullCatalog && filtered.chats.length === 0) {
+            get.registry.update(chatResultsState, clearWaiting);
+            return;
+          }
+          if (fullCatalog) catalogGeneration = undefined;
+          get.registry.update(chatResultsState, AsyncResult.waiting);
+          const exit = yield* generation.client.ChatResults(filtered).pipe(Effect.exit);
+          if (!manager.isCurrent(generation)) return;
+          if (Exit.isFailure(exit)) {
+            for (const entry of filtered.chats) dirty.add(entry.chatId);
+            get.registry.update(chatResultsState, (previous) =>
+              AsyncResult.failureWithPrevious(exit.cause, { previous: Option.some(previous) }),
+            );
+            if (!domainFailure(exit.cause)) yield* manager.fail(generation, exit.cause);
+            return;
+          }
+          if (flight.dirty || requested !== get.registry.get(chatResultsInput)) {
+            for (const entry of filtered.chats) dirty.add(entry.chatId);
+            return;
+          }
+          const previous = Option.getOrElse(
+            AsyncResult.value(get.registry.get(chatResultsState)),
+            () => new Map<ChatId, ChatResultSummaryEntry>(),
+          );
+          const next = fullCatalog ? new Map<ChatId, ChatResultSummaryEntry>() : new Map(previous);
+          if (!fullCatalog) {
+            for (const entry of filtered.chats) next.delete(entry.chatId);
+          }
+          for (const entry of exit.value) next.set(entry.chatId, entry);
+          if (fullCatalog) catalogGeneration = generation;
+          get.registry.set(chatResultsState, AsyncResult.success(next));
+        }),
+    };
+  }).pipe(Atom.keepAlive);
+  const chatResultsRead = Atom.make((get) => {
+    get(chatResultsInput);
+    return Effect.gen(function* () {
+      const manager = yield* get.resultOnce(owner);
+      const record = get.once(chatResultsRecord);
+      manager.registerResults(record);
+      yield* manager.read(record);
+    });
+  }).pipe(Atom.keepAlive, Atom.setLazy(false));
+  const chatResults = Atom.writable(
+    (get) => {
+      if (!get.registry.getNodes().has(chatResultsRead)) get.once(chatResultsRead);
+      return get(chatResultsState);
+    },
+    (get, input: ChatResultsRequest) => {
+      const previous = get.get(chatResultsInput);
+      const next = normalizeChatResultsRequest(input);
+      const before = new Map(previous.chats.map((entry) => [entry.chatId, entry]));
+      const changed = next.chats.filter((entry) => {
+        const old = before.get(entry.chatId);
+        before.delete(entry.chatId);
+        return (
+          old === undefined ||
+          old.seenRevision !== entry.seenRevision ||
+          old.seen?.sessionId !== entry.seen?.sessionId ||
+          old.seen?.entryId !== entry.seen?.entryId
+        );
+      });
+      if (
+        changed.length === 0 &&
+        before.size === 0 &&
+        previous.includeAllOpenChats === next.includeAllOpenChats
+      )
+        return;
+      const record = get.get(chatResultsRecord);
+      for (const entry of changed) record.markDirty(entry.chatId);
+      for (const chatId of before.keys()) record.markDirty(chatId);
+      if (record.flight !== undefined) record.flight.dirty = true;
+      get.set(chatResultsInput, next);
+    },
+    (refresh) => refresh(chatResultsRead),
+  ).pipe(Atom.keepAlive);
 
   const outsideSnapshot = (envelope: AgentEventEnvelope) =>
     envelope.event.type === "notice" ||
@@ -1215,6 +1362,7 @@ export const make = ({ url }: { readonly url: string }) => {
   });
 
   return {
+    chatResults,
     connection,
     ensure,
     workspaces,

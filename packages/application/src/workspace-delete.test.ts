@@ -96,6 +96,7 @@ const fixture = Effect.fn("WorkspaceDelete.test.fixture")(function* (
             events: Stream.empty,
             drain: () => Effect.void,
             transcript: () => Effect.succeed(emptyTranscript),
+            resultSummary: () => Effect.die("unexpected chat results read"),
             send: unused,
             sendCaptured: unused,
             askBtw: unused,
@@ -203,6 +204,15 @@ describe("Workspace deletion", () => {
           externalId: null,
           modelOverride: null,
         });
+        const retainedWorkspace = yield* test.application.createWorkspace({
+          ...test.workspace,
+          name: "Keep me",
+        });
+        const retainedChat = yield* test.application.createChat({
+          workspaceId: retainedWorkspace.id,
+          externalId: null,
+          modelOverride: null,
+        });
         transcripts.set(archived.id, populatedTranscript);
         assert.strictEqual(
           (yield* test.application.deleteWorkspace(test.workspace.id).pipe(Effect.flip)).reason,
@@ -215,9 +225,20 @@ describe("Workspace deletion", () => {
           "operation",
         );
         assert.isTrue(Option.isSome(yield* test.workspaces.findById(test.workspace.id)));
+        assert.deepStrictEqual(Option.getOrThrow(yield* test.chats.findById(empty.id)), empty);
+        assert.deepStrictEqual(
+          Option.getOrThrow(yield* test.chats.findById(archived.id)),
+          archivedRecord,
+        );
         unreadable = undefined;
-        yield* test.application.deleteWorkspace(test.workspace.id);
-        assert.deepStrictEqual(yield* test.application.listWorkspaces(), []);
+        const deletedChatIds = yield* test.application.deleteWorkspace(test.workspace.id);
+        assert.isArray(deletedChatIds);
+        assert.deepStrictEqual([...deletedChatIds].sort(), [archived.id, empty.id].sort());
+        assert.deepStrictEqual(yield* test.application.listWorkspaces(), [retainedWorkspace]);
+        assert.deepStrictEqual(
+          Option.getOrThrow(yield* test.chats.findById(retainedChat.id)),
+          retainedChat,
+        );
         for (const chat of [archivedRecord, empty]) {
           assert.deepStrictEqual(Option.getOrThrow(yield* test.chats.findById(chat.id)), chat);
           assert.strictEqual(

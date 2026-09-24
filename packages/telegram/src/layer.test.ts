@@ -81,6 +81,7 @@ const applicationBase = {
   history: unexpected,
   previewHistory: unexpected,
   navigateHistory: unexpected,
+  chatResults: (_input) => Effect.succeed([]),
   closeChat: unexpected,
   sendMessage: unexpected,
   askBtw: unexpected,

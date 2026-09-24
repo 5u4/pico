@@ -22,7 +22,13 @@ import type {
 } from "./agent-runtime.ts";
 import { ModelRef } from "./agent-runtime.ts";
 import type { NavigateHistoryResult, TranscriptSnapshot } from "./agent-snapshot.ts";
-import type { Chat, ChatId, ChatListEntry } from "./chat-model.ts";
+import type {
+  Chat,
+  ChatId,
+  ChatListEntry,
+  ChatResultsRequest,
+  ChatResultsResponse,
+} from "./chat-model.ts";
 import type { ApplicationError, ChatClosed, GitError, WorkspaceBindingInvalid } from "./errors.ts";
 import type { AbsolutePath } from "./path.ts";
 import { Workspace, WorkspaceBinding, WorkspaceId, WorktreeSettings } from "./workspace-model.ts";
@@ -91,7 +97,9 @@ export class Application extends Context.Service<
     ) => Effect.Effect<Workspace, ApplicationError | GitError | WorkspaceBindingInvalid>;
 
     /** Web clients call this after confirming workspace deletion. */
-    readonly deleteWorkspace: (workspaceId: WorkspaceId) => Effect.Effect<void, ApplicationError>;
+    readonly deleteWorkspace: (
+      workspaceId: WorkspaceId,
+    ) => Effect.Effect<readonly ChatId[], ApplicationError>;
 
     /** Platform adapters call this when first resolving a channel's workspace. */
     readonly getOrCreateWorkspaceByBinding: (
@@ -131,6 +139,10 @@ export class Application extends Context.Service<
       workspaceId: WorkspaceId,
     ) => Effect.Effect<readonly ChatListEntry[], ApplicationError>;
 
+    /** Web clients call this to read durable unread summaries without hydrating transcripts. */
+    readonly chatResults: (
+      input: ChatResultsRequest,
+    ) => Effect.Effect<ChatResultsResponse, ApplicationError>;
     readonly createChat: (input: CreateChat) => Effect.Effect<Chat, ApplicationError>;
     readonly findWorkspaceByPlatformId: (
       platform: WorkspaceBinding["platform"],

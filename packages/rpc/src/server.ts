@@ -46,6 +46,32 @@ const handlers = PicoRpcs.toLayer(
             requestId: String(requestId),
           }),
         ),
+      ChatResults: (input, { requestId }) =>
+        application.chatResults(input).pipe(
+          Effect.tap((entries) =>
+            Effect.forEach(
+              entries,
+              ({ chatId, summary }) =>
+                summary.kind === "unavailable"
+                  ? Effect.logWarning("pico.rpc.chat-result-unavailable").pipe(
+                      Effect.annotateLogs({
+                        operation: "read-chat-results",
+                        outcome: "failure",
+                        reason: "unavailable",
+                        chatId,
+                      }),
+                    )
+                  : Effect.void,
+              { discard: true },
+            ),
+          ),
+          Effect.tapCause(reportFailure),
+          Effect.annotateLogs({
+            component: "rpc",
+            procedure: "ChatResults",
+            requestId: String(requestId),
+          }),
+        ),
       ListSchedules: (_, { requestId }) =>
         Effect.gen(function* () {
           const snapshot = yield* schedules.overview();
