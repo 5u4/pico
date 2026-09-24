@@ -1195,20 +1195,6 @@ export function WorkspaceChat({
     const current = navigationRef.current;
     const livePage = pageFromMatches(router.state.matches);
     const next = removeWorkspace(current, workspaceId);
-    const removedChats = new Set<ChatId>();
-    for (const entry of current.entries.values()) {
-      if (entry.workspace.id !== workspaceId || entry.target.kind !== "chat") continue;
-      removedChats.add(entry.target.chat.id);
-    }
-    const groupChats = groups.find((group) => group.workspace.id === workspaceId)?.chats;
-    if (groupChats?._tag === "Success" && !groupChats.waiting) {
-      for (const chat of groupChats.value) removedChats.add(chat.id);
-    }
-    if (removedChats.size > 0) {
-      void chatReadState.forgetChats(removedChats);
-      if (openCapture.current !== null && removedChats.has(openCapture.current.chatId))
-        openCapture.current = null;
-    }
     if (
       (livePage.kind === "draft" || livePage.kind === "chat" || livePage.kind === "settings") &&
       livePage.workspaceId === workspaceId &&
@@ -1445,6 +1431,9 @@ export function WorkspaceChat({
       });
       return;
     }
+    void chatReadState.forgetChats(exit.value);
+    if (openCapture.current !== null && exit.value.includes(openCapture.current.chatId))
+      openCapture.current = null;
     pruneWorkspace(flow.target.id);
     updateDeleteFlow({ kind: "idle" });
   };

@@ -258,7 +258,7 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
             });
           }
         }
-        yield* schedules.withCurrentTargets((targets) =>
+        return yield* schedules.withCurrentTargets((targets) =>
           Effect.gen(function* () {
             for (const target of targets) {
               let targetWorkspaceId: Workspace.WorkspaceId;
@@ -300,6 +300,7 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
                 message: "Workspace chats changed while deleting. Try again.",
               });
             }
+            return outcome;
           }),
         );
       }).pipe(Effect.mapError(failure("Failed to delete workspace")));
@@ -307,7 +308,7 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
         const chatId = checkedChatIds[index];
         if (chatId !== undefined) deletion = serialized(chatId, deletion, false);
       }
-      yield* deletion;
+      return yield* deletion;
     },
     Effect.mapError(failure("Failed to delete workspace")),
   );

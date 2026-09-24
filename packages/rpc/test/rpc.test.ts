@@ -598,7 +598,7 @@ describe("RPC", () => {
             client
               .CreateChat({ workspaceId: id, externalId: null, modelOverride: null })
               .pipe(Effect.asVoid),
-            client.DeleteWorkspace({ workspaceId: id }),
+            client.DeleteWorkspace({ workspaceId: id }).pipe(Effect.asVoid),
             client
               .UpdateWorkspace({
                 workspaceId: id,

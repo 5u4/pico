@@ -225,6 +225,11 @@ describe("Workspace deletion", () => {
           "operation",
         );
         assert.isTrue(Option.isSome(yield* test.workspaces.findById(test.workspace.id)));
+        assert.deepStrictEqual(Option.getOrThrow(yield* test.chats.findById(empty.id)), empty);
+        assert.deepStrictEqual(
+          Option.getOrThrow(yield* test.chats.findById(archived.id)),
+          archivedRecord,
+        );
         unreadable = undefined;
         const deletedChatIds = yield* test.application.deleteWorkspace(test.workspace.id);
         assert.isArray(deletedChatIds);

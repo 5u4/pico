@@ -48,6 +48,6 @@ export class WorkspaceRepository extends Context.Service<
       readonly id: WorkspaceId;
       readonly deletedAt: number;
       readonly checkedChatIds: readonly ChatId[];
-    }) => Effect.Effect<"deleted" | "not-found" | "conflict", PersistenceError>;
+    }) => Effect.Effect<readonly ChatId[] | "not-found" | "conflict", PersistenceError>;
   }
 >()("@pico/contract/workspace/WorkspaceRepository") {}

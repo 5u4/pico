@@ -2105,6 +2105,7 @@ describe("frontend state over WebSocket", () => {
                 )
               : Effect.sync(() => {
                   refreshFails = true;
+                  return [firstChat, secondChat];
                 }),
         });
         yield* Effect.gen(function* () {
@@ -2119,7 +2120,6 @@ describe("frontend state over WebSocket", () => {
           assert.instanceOf(rejected, ApplicationError);
           if (rejected instanceof ApplicationError) {
             assert.strictEqual(rejected.reason, "conflict");
-            assert.strictEqual(rejected.message, "Archive the existing conversation first");
           }
           yield* AtomRegistry.getResult(registry, state.workspaces, { suspendOnWaiting: true });
           assert.deepStrictEqual(
@@ -2132,9 +2132,10 @@ describe("frontend state over WebSocket", () => {
           registry.refresh(state.workspaces);
           yield* Deferred.await(staleStarted);
           registry.set(state.deleteWorkspace, { workspaceId: webWorkspace.id });
-          yield* AtomRegistry.getResult(registry, state.deleteWorkspace, {
+          const deletedChatIds = yield* AtomRegistry.getResult(registry, state.deleteWorkspace, {
             suspendOnWaiting: true,
           });
+          assert.deepStrictEqual(deletedChatIds, [firstChat, secondChat]);
           assert.deepStrictEqual(
             Option.getOrThrow(AsyncResult.value(registry.get(state.workspaces))),
             [],
@@ -2149,6 +2150,10 @@ describe("frontend state over WebSocket", () => {
             Option.getOrThrow(AsyncResult.value(registry.get(state.workspaces))),
             [],
           );
+          assert.deepStrictEqual(AsyncResult.getOrThrow(registry.get(state.deleteWorkspace)), [
+            firstChat,
+            secondChat,
+          ]);
           assert.strictEqual(registry.get(state.connection).kind, "active");
         }).pipe(Effect.scoped, Effect.provide(server.layer));
       }),

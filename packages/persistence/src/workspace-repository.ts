@@ -1,4 +1,5 @@
 import { ModelRef } from "@pico/contract/agent-runtime";
+import * as Chat from "@pico/contract/chat-model";
 import { PersistenceError } from "@pico/contract/errors";
 import * as Workspace from "@pico/contract/workspace-model";
 import { WorkspaceRepository } from "@pico/contract/workspace-repository";
@@ -317,6 +318,12 @@ const make = Effect.fn("WorkspaceRepository.make")(function* () {
     Effect.mapError(failure("workspace.setModelOverride")),
   );
 
+  const selectChatIds = SqlSchema.findAll({
+    Request: Workspace.WorkspaceId,
+    Result: Schema.Struct({ id: Chat.ChatId }),
+    execute: (id) => sql`SELECT id FROM chats WHERE workspace_id = ${id}`,
+  });
+
   const softDelete = Effect.fn("WorkspaceRepository.softDelete")(
     function* (input: Parameters<WorkspaceRepository["Service"]["softDelete"]>[0]) {
       const updated = yield* sql`
@@ -331,7 +338,10 @@ const make = Effect.fn("WorkspaceRepository.make")(function* () {
           )
         RETURNING id
       `;
-      if (updated.length > 0) return "deleted" as const;
+      if (updated.length > 0) {
+        const chats = yield* selectChatIds(input.id);
+        return chats.map((chat) => chat.id);
+      }
       return Option.isNone(yield* selectById(input.id))
         ? ("not-found" as const)
         : ("conflict" as const);

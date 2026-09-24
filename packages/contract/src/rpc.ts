@@ -70,7 +70,7 @@ export const PicoRpcs = RpcGroup.make(
   }),
   Rpc.make("DeleteWorkspace", {
     payload: { workspaceId: Workspace.WorkspaceId },
-    success: Schema.Void,
+    success: Schema.Array(Chat.ChatId),
     error: Errors.ApplicationError,
   }),
   Rpc.make("CreateChat", {
