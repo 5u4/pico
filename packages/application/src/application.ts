@@ -646,7 +646,11 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
         const workspace = yield* workspaces.findById(chat.value.workspaceId);
         if (Option.isNone(workspace) || workspace.value.platform !== "web") continue;
         const basis = seenByChat.get(chatId);
-        const summary = yield* runtime.resultSummary(chatId, basis?.seen ?? null);
+        const summary = yield* runtime
+          .resultSummary(chatId, basis?.seen ?? null)
+          .pipe(
+            Effect.catchTag("AgentError", () => Effect.succeed({ kind: "unavailable" } as const)),
+          );
         summaries.push({
           chatId,
           seenRevision: basis?.seenRevision ?? 0,

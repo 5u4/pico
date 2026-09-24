@@ -11,8 +11,10 @@ import { AgentError } from "@pico/contract/errors";
 import { AbsolutePath } from "@pico/contract/path";
 import type { GitWorktree } from "@pico/contract/worktree";
 import * as Persistence from "@pico/persistence/layer";
+import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
@@ -142,7 +144,7 @@ describe("Application chat results", () => {
             kind: "ready",
             latest: {
               cursor: { sessionId: "healthy-session", entryId: "healthy-result" },
-              messageId: "healthy-message",
+              messageId: AgentMessageId.make("healthy-message"),
             },
             relation: "none",
           },
@@ -170,12 +172,25 @@ describe("Application chat results", () => {
             kind: "ready",
             latest: {
               cursor: { sessionId: "recovering-session", entryId: "recovered-result" },
-              messageId: "recovered-message",
+              messageId: AgentMessageId.make("recovered-message"),
             },
             relation: "behind",
           },
         },
       ]);
+    }).pipe(Effect.scoped, Effect.provide(platform)),
+  );
+
+  it.effect("preserves interruptions from a journal read", () =>
+    Effect.gen(function* () {
+      const { application, responses, failedChat } = yield* makeFixture();
+      responses.set(failedChat.id, Effect.interrupt);
+      const result = yield* application
+        .chatResults({
+          chats: [{ chatId: failedChat.id, seen: null, seenRevision: 0 }],
+        })
+        .pipe(Effect.exit);
+      assert.isTrue(Exit.isFailure(result) && Cause.hasInterruptsOnly(result.cause));
     }).pipe(Effect.scoped, Effect.provide(platform)),
   );
 });

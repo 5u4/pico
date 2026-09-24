@@ -48,6 +48,23 @@ const handlers = PicoRpcs.toLayer(
         ),
       ChatResults: (input, { requestId }) =>
         application.chatResults(input).pipe(
+          Effect.tap((entries) =>
+            Effect.forEach(
+              entries,
+              ({ chatId, summary }) =>
+                summary.kind === "unavailable"
+                  ? Effect.logWarning("pico.rpc.chat-result-unavailable").pipe(
+                      Effect.annotateLogs({
+                        operation: "read-chat-results",
+                        outcome: "failure",
+                        reason: "unavailable",
+                        chatId,
+                      }),
+                    )
+                  : Effect.void,
+              { discard: true },
+            ),
+          ),
           Effect.tapCause(reportFailure),
           Effect.annotateLogs({
             component: "rpc",

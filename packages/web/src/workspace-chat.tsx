@@ -879,7 +879,8 @@ export function WorkspaceChat({
     if (document.visibilityState !== "visible" || !document.hasFocus()) return;
     if (chatResults._tag !== "Success" || chatResults.waiting) return;
     const summary = chatResults.value.get(visibleChatId);
-    if (!summary || summary.summary.latest === null) return;
+    if (!summary || summary.summary.kind === "unavailable" || summary.summary.latest === null)
+      return;
     if (
       conversation?.snapshot._tag !== "Success" ||
       conversation.snapshot.waiting ||

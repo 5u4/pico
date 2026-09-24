@@ -29,6 +29,7 @@ const manualPrefix = `${storagePrefix}.manual.`;
 const probeKey = `${storagePrefix}.probe`;
 const seenKey = (chatId: ChatId) => `${seenPrefix}${chatId}`;
 const manualKey = (chatId: ChatId) => `${manualPrefix}${chatId}`;
+const chatLockKey = (chatId: ChatId) => `${storagePrefix}.${chatId}`;
 const decodeSeen = Schema.decodeUnknownOption(Schema.fromJsonString(SeenRecord));
 const decodeManual = Schema.decodeUnknownOption(Schema.fromJsonString(Schema.NonEmptyString));
 const decodeChatId = Schema.decodeUnknownOption(ChatId);
@@ -86,7 +87,7 @@ export class ChatReadState {
 
   unread(chatId: ChatId, entry: ChatResultSummaryEntry | undefined): boolean {
     if (this.manual.has(chatId)) return true;
-    if (!entry || entry.summary.kind === "reset" || entry.summary.latest === null) return false;
+    if (entry?.summary.kind !== "ready" || entry.summary.latest === null) return false;
     const seen = this.seen.get(chatId);
     if (equalCursor(seen?.seen ?? null, entry.summary.latest.cursor)) return false;
     if ((seen?.revision ?? 0) !== entry.seenRevision) return false;
@@ -96,7 +97,7 @@ export class ChatReadState {
   }
 
   async markUnread(chatId: ChatId): Promise<boolean> {
-    return this.withChatLock(chatId, () => {
+    return this.withLock(chatLockKey(chatId), () => {
       this.persistManual(chatId, crypto.randomUUID());
       this.notify();
       return true;
@@ -104,10 +105,12 @@ export class ChatReadState {
   }
 
   markRead(chatId: ChatId, entry: ChatResultSummaryEntry | undefined): Promise<boolean> {
+    const summary = entry?.summary;
+    if (summary?.kind === "unavailable") return Promise.resolve(false);
     const capture = this.captureOpen(chatId);
     const revision = entry?.seenRevision ?? this.readSeenCurrent(chatId)?.revision ?? 0;
-    return this.withChatLock(chatId, () =>
-      this.acknowledge(chatId, entry?.summary.latest?.cursor ?? null, revision, capture),
+    return this.withLock(chatLockKey(chatId), () =>
+      this.acknowledge(chatId, summary?.latest?.cursor ?? null, revision, capture),
     );
   }
 
@@ -118,11 +121,13 @@ export class ChatReadState {
     isCurrent: () => boolean = () => true,
   ): Promise<boolean> {
     if (!entry) return Promise.resolve(false);
-    return this.withChatLock(
-      chatId,
+    const { summary } = entry;
+    if (summary.kind === "unavailable") return Promise.resolve(false);
+    return this.withLock(
+      chatLockKey(chatId),
       () =>
         isCurrent() &&
-        this.acknowledge(chatId, entry.summary.latest?.cursor ?? null, entry.seenRevision, capture),
+        this.acknowledge(chatId, summary.latest?.cursor ?? null, entry.seenRevision, capture),
     );
   }
 
@@ -157,32 +162,40 @@ export class ChatReadState {
   }
 
   async reconcileCatalog(entries: ReadonlyMap<ChatId, ChatResultSummaryEntry>): Promise<boolean> {
-    const wasInitialized = this.initialized;
-    if (!wasInitialized) this.reloadFromStorage();
-    const initializing = !this.initialized;
-    let changed = wasInitialized !== this.initialized;
-    for (const [chatId, entry] of entries) {
-      if (!initializing && entry.summary.kind !== "reset") continue;
-      const wrote = await this.withChatLock(chatId, () => {
-        if (initializing && this.initialized) return false;
-        const current = this.readSeenCurrent(chatId);
-        if (initializing && (current !== undefined || this.readManualCurrent(chatId) !== undefined))
-          return false;
-        if ((current?.revision ?? 0) !== entry.seenRevision) return false;
-        const target = entry.summary.latest?.cursor ?? null;
-        if (!initializing && equalCursor(current?.seen ?? null, target)) return false;
-        this.persistSeen(chatId, { seen: target, revision: entry.seenRevision + 1 });
-        return true;
-      });
-      changed = wrote || changed;
-    }
-    if (initializing && !this.initialized) {
-      this.initialized = true;
-      this.persist(initializedKey, "1");
-      changed = true;
-    }
-    if (changed) this.notify();
-    return changed;
+    const reconcile = async () => {
+      const wasInitialized = this.initialized;
+      if (!wasInitialized) this.reloadFromStorage();
+      const initializing = !this.initialized;
+      let changed = wasInitialized !== this.initialized;
+      for (const [chatId, entry] of entries) {
+        const { summary } = entry;
+        if (summary.kind === "unavailable") continue;
+        if (!initializing && summary.kind !== "reset") continue;
+        const wrote = await this.withLock(chatLockKey(chatId), () => {
+          if (initializing && this.initialized) return false;
+          const current = this.readSeenCurrent(chatId);
+          if (
+            initializing &&
+            (current !== undefined || this.readManualCurrent(chatId) !== undefined)
+          )
+            return false;
+          if ((current?.revision ?? 0) !== entry.seenRevision) return false;
+          const target = summary.latest?.cursor ?? null;
+          if (!initializing && equalCursor(current?.seen ?? null, target)) return false;
+          this.persistSeen(chatId, { seen: target, revision: entry.seenRevision + 1 });
+          return true;
+        });
+        changed = wrote || changed;
+      }
+      if (initializing && !this.initialized) {
+        this.initialized = true;
+        this.persist(initializedKey, "1");
+        changed = true;
+      }
+      if (changed) this.notify();
+      return changed;
+    };
+    return this.initialized ? reconcile() : this.withLock(initializedKey, reconcile);
   }
 
   forgetChat(chatId: ChatId): Promise<void> {
@@ -192,7 +205,7 @@ export class ChatReadState {
   async forgetChats(chatIds: Iterable<ChatId>): Promise<void> {
     let changed = false;
     for (const chatId of chatIds) {
-      await this.withChatLock(chatId, () => {
+      await this.withLock(chatLockKey(chatId), () => {
         const hadSeen = this.readSeenCurrent(chatId) !== undefined;
         const hadManual = this.readManualCurrent(chatId) !== undefined;
         this.seen.delete(chatId);
@@ -225,11 +238,11 @@ export class ChatReadState {
     for (const listener of this.listeners) listener();
   }
 
-  private async withChatLock<A>(chatId: ChatId, evaluate: () => A): Promise<A> {
+  private async withLock<A>(name: string, evaluate: () => Promise<A> | A): Promise<A> {
     if (this.storage === null || this.locks === null) return evaluate();
     let acquired = false;
     try {
-      return await this.locks.request(`${storagePrefix}.${chatId}`, () => {
+      return await this.locks.request(name, () => {
         acquired = true;
         return evaluate();
       });

@@ -30,6 +30,9 @@ export const ChatResultSummary = Schema.Union([
     kind: Schema.Literal("reset"),
     latest: Schema.NullOr(ChatResultHead),
   }),
+  Schema.Struct({
+    kind: Schema.Literal("unavailable"),
+  }),
 ]);
 export type ChatResultSummary = typeof ChatResultSummary.Type;
 
