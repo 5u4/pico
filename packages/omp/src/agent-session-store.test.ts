@@ -4,10 +4,10 @@ import * as BunFileSystem from "@effect/platform-bun/BunFileSystem";
 import * as BunPath from "@effect/platform-bun/BunPath";
 import { assert, describe, it } from "@effect/vitest";
 import { getRestorableSessionModels } from "@oh-my-pi/pi-coding-agent/session/session-context";
+import { resetSessionIndexForTests } from "@oh-my-pi/pi-coding-agent/session/session-index";
 import { parseSessionContent } from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { serializeTitleSlot } from "@oh-my-pi/pi-coding-agent/session/session-title-slot";
-import { resetSessionTitleIndexForTests } from "@oh-my-pi/pi-coding-agent/session/title-index";
 import * as ApplicationLayer from "@pico/application/layer";
 import { AgentRuntime } from "@pico/contract/agent-runtime";
 import { AgentSessionStore } from "@pico/contract/agent-session-store";
@@ -43,7 +43,7 @@ const sdkRoot = await vi.hoisted(async () => {
 });
 
 afterAll(async () => {
-  resetSessionTitleIndexForTests();
+  resetSessionIndexForTests();
   vi.unstubAllEnvs();
   await rm(sdkRoot, { recursive: true, force: true });
 });

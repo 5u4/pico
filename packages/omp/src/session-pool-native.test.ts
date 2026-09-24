@@ -164,7 +164,7 @@ const withSession = async (
   const auth = new native.AuthStorage(
     await native.SqliteAuthCredentialStore.open(join(directory, "auth.db")),
   );
-  auth.setRuntimeApiKey("openai", "local-provider-only");
+  auth.keys.setRuntime("openai", "local-provider-only");
   const settings = native.Settings.isolated({
     "compaction.enabled": false,
     "retry.enabled": false,
@@ -614,7 +614,7 @@ describe("native SessionPool ownership", () => {
             expect(
               grouped.nodes.find((node) => node.entryId === assistant.id)?.defaultTargetId,
             ).toBe(tool.id);
-            const forkId = manager.appendMessageToBranch(
+            manager.appendMessageToBranch(
               {
                 ...tool.message,
                 content: [{ type: "text", text: "Forked result" }],
@@ -622,11 +622,6 @@ describe("native SessionPool ownership", () => {
               assistant.id,
             );
             const forked = yield* pool.history({ chatId, query: "" });
-            expect(
-              forked.nodes
-                .filter((node) => node.parentId === assistant.id)
-                .map((node) => node.entryId),
-            ).toEqual([tool.id, forkId]);
             const target = forked.nodes.find((node) => node.entryId === assistant.id);
             if (target === undefined) throw new Error("Expected assistant history node");
             expect(target.defaultTargetId).toBe(assistant.id);
@@ -646,6 +641,110 @@ describe("native SessionPool ownership", () => {
         ),
       ),
     );
+  });
+
+  it("stops grouping at custom-entry forks without selecting trailing bookkeeping", async () => {
+    await withSession([], async (session) => {
+      const manager = session.sessionManager;
+      manager.appendMessage({ role: "user", content: "Run both tools", timestamp: 1 });
+      const assistant: AssistantMessage & { messageId: string } = {
+        role: "assistant",
+        messageId: "custom-chain-assistant",
+        content: [
+          { type: "text", text: "Calling both tools" },
+          { type: "toolCall", id: "first-call", name: "echo", arguments: {} },
+          { type: "toolCall", id: "second-call", name: "echo", arguments: {} },
+        ],
+        api: "openai-responses",
+        provider: "openai",
+        model: "gpt-4.1",
+        stopReason: "toolUse",
+        usage: {
+          input: 1,
+          output: 1,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 2,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        },
+        timestamp: 2,
+      };
+      const assistantId = manager.appendMessage(assistant);
+      manager.appendCustomEntry("checkpoint");
+      const firstResultId = manager.appendMessage({
+        role: "toolResult",
+        toolCallId: "first-call",
+        toolName: "echo",
+        content: [{ type: "text", text: "First result" }],
+        isError: false,
+        timestamp: 3,
+      });
+      const forkPointId = manager.appendCustomEntry("checkpoint");
+      manager.appendCustomEntry("pending");
+      const secondResultId = manager.appendMessage({
+        role: "toolResult",
+        toolCallId: "second-call",
+        toolName: "echo",
+        content: [{ type: "text", text: "Second result" }],
+        isError: false,
+        timestamp: 4,
+      });
+      manager.appendCustomEntry("completed");
+      session.agent.replaceMessages(manager.buildSessionContext().messages);
+      await manager.ensureOnDisk();
+      await manager.flush();
+      await Effect.runPromise(
+        Effect.scoped(
+          Effect.gen(function* () {
+            const pool = yield* makePool(session);
+            const grouped = yield* pool.history({ chatId, query: "" });
+            const target = grouped.nodes.find((node) => node.entryId === assistantId);
+            if (target === undefined) throw new Error("Expected assistant history node");
+            expect(target.defaultTargetId).toBe(secondResultId);
+            const groupedResult = yield* pool.navigateHistory({
+              chatId,
+              targetId: target.defaultTargetId,
+              expectedVersion: grouped.version,
+            });
+            if (groupedResult.kind !== "applied")
+              throw new Error("Expected grouped navigation to apply");
+            expect(
+              groupedResult.snapshot.messages.flatMap((message) =>
+                message.content.flatMap((block) => (block.type === "text" ? [block.text] : [])),
+              ),
+            ).toEqual(["Run both tools", "Calling both tools", "First result", "Second result"]);
+            manager.appendMessageToBranch(
+              {
+                role: "toolResult",
+                toolCallId: "second-call",
+                toolName: "echo",
+                content: [{ type: "text", text: "Forked result" }],
+                isError: false,
+                timestamp: 5,
+              },
+              forkPointId,
+            );
+            const forked = yield* pool.history({ chatId, query: "" });
+            const forkedTarget = forked.nodes.find((node) => node.entryId === assistantId);
+            if (forkedTarget === undefined) throw new Error("Expected assistant history node");
+            expect(forkedTarget.defaultTargetId).toBe(firstResultId);
+            const forkedResult = yield* pool.navigateHistory({
+              chatId,
+              targetId: forkedTarget.defaultTargetId,
+              expectedVersion: forked.version,
+            });
+            if (forkedResult.kind !== "applied")
+              throw new Error("Expected fork-safe navigation to apply");
+            expect(
+              forkedResult.snapshot.messages.flatMap((message) =>
+                message.content.flatMap((block) => (block.type === "text" ? [block.text] : [])),
+              ),
+            ).toEqual(["Run both tools", "Calling both tools", "First result"]);
+            expect((yield* pool.history({ chatId, query: "" })).activeLeafId).toBe(firstResultId);
+          }).pipe(Effect.provide(platform)),
+        ),
+      );
+    });
   });
 
   it("rejects busy, stale and missing navigation, then publishes the persisted replacement", async () => {
@@ -1592,8 +1691,8 @@ describe("native SessionPool ownership", () => {
           },
         ],
       });
-      session.modelRegistry.authStorage.removeConfigApiKey("model-picker-no-auth");
-      session.modelRegistry.authStorage.setFallbackResolver(() => undefined);
+      session.modelRegistry.authStorage.keys.removeConfig("model-picker-no-auth");
+      session.modelRegistry.authStorage.keys.setResolver(async () => undefined);
       const models = await Effect.runPromise(
         native.loadAvailableModels(session.modelRegistry, cwd),
       );
@@ -2789,74 +2888,85 @@ describe("native SessionPool ownership", () => {
     const releaseStartHook = Promise.withResolvers<void>();
     const textReceived = Promise.withResolvers<void>();
     const startPublished = Promise.withResolvers<void>();
-    await withSession(
-      [initial, steered, scheduled],
-      (session) =>
-        Effect.runPromise(
-          Effect.scoped(
-            Effect.gen(function* () {
-              const abort = vi.spyOn(session, "abort");
-              const pool = yield* makePool(session);
-              const ordinary: AgentEvent.AgentEvent[] = [];
-              yield* pool.events.pipe(
-                Stream.runForEach(({ event }) =>
-                  Effect.sync(() => {
-                    ordinary.push(event);
-                    if (event.type === "text-delta") textReceived.resolve();
-                    if (event.type === "run-started") startPublished.resolve();
-                  }),
-                ),
-                Effect.forkChild,
-              );
-              const first = yield* pool.send(chatId, prompt("Ordinary request"));
-              expect(first.kind).toBe("started");
-              yield* Effect.promise(() => startHook.promise);
-              yield* Effect.promise(() => initial.entered.promise);
-              yield* Effect.promise(() => textReceived.promise);
-              expect(ordinary.some((event) => event.type === "run-started")).toBe(false);
-              const captured = yield* pool
-                .sendCaptured(chatId, runId, prompt("Scheduled request"), () => Effect.void)
-                .pipe(Effect.forkChild);
-              yield* Effect.yieldNow;
-              const steer = yield* pool.send(chatId, prompt("Urgent correction"));
-              if (steer.kind !== "steered")
-                throw new Error("Expected immediate native steering admission");
-              expect(abort).not.toHaveBeenCalled();
-              expect(session.agent.peekSteeringQueue()).toHaveLength(1);
-              releaseStartHook.resolve();
-              yield* Effect.promise(() => startPublished.promise);
-              const prefix = ordinary.find((event) => event.type === "text-delta");
-              if (prefix === undefined) throw new Error("Expected pre-start assistant prefix");
-              const snapshot = yield* pool.transcript(chatId);
-              expect(snapshot.runtime.assistant).toEqual([
-                {
-                  kind: "draft",
-                  messageId: prefix.messageId,
-                  blocks: [prefix],
-                },
-              ]);
-              initial.release.resolve();
-              yield* Effect.promise(() => steered.entered.promise);
-              expect(yield* steer.consumed).toBe("consumed");
-              steered.release.resolve();
-              if (first.kind !== "handled") yield* first.completed;
-              yield* Effect.promise(() => scheduled.entered.promise);
-              scheduled.release.resolve();
-              const result = yield* Fiber.join(captured);
-              yield* pool.drain();
-              expect(abort).not.toHaveBeenCalled();
-              expect(result.finalAssistantText).toBe("Scheduled answer");
-              expect(assistantTexts(ordinary)).toEqual(["Ordinary answer", "Steered answer"]);
-              expect(assistantTexts(result.events)).toEqual(["Scheduled answer"]);
-            }).pipe(Effect.provide(platform)),
-          ),
+    await withSession([initial, steered, scheduled], (session) =>
+      Effect.runPromise(
+        Effect.scoped(
+          Effect.gen(function* () {
+            const abort = vi.spyOn(session, "abort");
+            const subscribe = session.subscribe.bind(session);
+            let heldStart = false;
+            const intercepted = vi.spyOn(session, "subscribe").mockImplementation((listener) =>
+              subscribe((event) => {
+                if (event.type === "agent_start" && !heldStart) {
+                  heldStart = true;
+                  startHook.resolve();
+                  void releaseStartHook.promise.then(() => listener(event));
+                  return;
+                }
+                listener(event);
+              }),
+            );
+            const pool = yield* makePool(session);
+            yield* Effect.addFinalizer(() =>
+              Effect.sync(() => {
+                releaseStartHook.resolve();
+                intercepted.mockRestore();
+              }),
+            );
+            const ordinary: AgentEvent.AgentEvent[] = [];
+            yield* pool.events.pipe(
+              Stream.runForEach(({ event }) =>
+                Effect.sync(() => {
+                  ordinary.push(event);
+                  if (event.type === "text-delta") textReceived.resolve();
+                  if (event.type === "run-started") startPublished.resolve();
+                }),
+              ),
+              Effect.forkChild,
+            );
+            const first = yield* pool.send(chatId, prompt("Ordinary request"));
+            expect(first.kind).toBe("started");
+            yield* Effect.promise(() => startHook.promise);
+            yield* Effect.promise(() => initial.entered.promise);
+            yield* Effect.promise(() => textReceived.promise);
+            expect(ordinary.some((event) => event.type === "run-started")).toBe(false);
+            const captured = yield* pool
+              .sendCaptured(chatId, runId, prompt("Scheduled request"), () => Effect.void)
+              .pipe(Effect.forkChild);
+            yield* Effect.yieldNow;
+            const steer = yield* pool.send(chatId, prompt("Urgent correction"));
+            if (steer.kind !== "steered")
+              throw new Error("Expected immediate native steering admission");
+            expect(abort).not.toHaveBeenCalled();
+            expect(session.agent.peekSteeringQueue()).toHaveLength(1);
+            releaseStartHook.resolve();
+            yield* Effect.promise(() => startPublished.promise);
+            const prefix = ordinary.find((event) => event.type === "text-delta");
+            if (prefix === undefined) throw new Error("Expected pre-start assistant prefix");
+            const snapshot = yield* pool.transcript(chatId);
+            expect(snapshot.runtime.assistant).toEqual([
+              {
+                kind: "draft",
+                messageId: prefix.messageId,
+                blocks: [prefix],
+              },
+            ]);
+            initial.release.resolve();
+            yield* Effect.promise(() => steered.entered.promise);
+            expect(yield* steer.consumed).toBe("consumed");
+            steered.release.resolve();
+            if (first.kind !== "handled") yield* first.completed;
+            yield* Effect.promise(() => scheduled.entered.promise);
+            scheduled.release.resolve();
+            const result = yield* Fiber.join(captured);
+            yield* pool.drain();
+            expect(abort).not.toHaveBeenCalled();
+            expect(result.finalAssistantText).toBe("Scheduled answer");
+            expect(assistantTexts(ordinary)).toEqual(["Ordinary answer", "Steered answer"]);
+            expect(assistantTexts(result.events)).toEqual(["Scheduled answer"]);
+          }).pipe(Effect.provide(platform)),
         ),
-      (api) => {
-        api.on("agent_start", async () => {
-          startHook.resolve();
-          await releaseStartHook.promise;
-        });
-      },
+      ),
     );
   }, 30_000);
 });

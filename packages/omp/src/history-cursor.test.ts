@@ -212,7 +212,7 @@ describe("native history cursor persistence", () => {
     await withJournal(async (manager, file, cwd, reopen) => {
       const auth = await native.AuthStorage.create(join(cwd, "auth.db"));
       try {
-        auth.setRuntimeApiKey("openai", "local-history-test");
+        auth.keys.setRuntime("openai", "local-history-test");
         const registry = new native.ModelRegistry(auth, join(cwd, "models.yml"), {
           settings: native.Settings.isolated({}),
           ignoreLocalModelConfig: true,
@@ -474,7 +474,7 @@ describe("native history cursor persistence", () => {
       const original = `${records.map((record) => JSON.stringify(record)).join("\n")}\n`;
       await NodeFileSystem.writeFile(file, original);
       const auth = await native.AuthStorage.create(join(cwd, "auth.db"));
-      auth.setRuntimeApiKey("openai", "local-history-test");
+      auth.keys.setRuntime("openai", "local-history-test");
       const registry = new native.ModelRegistry(auth, join(cwd, "models.yml"), {
         settings: native.Settings.isolated({}),
         ignoreLocalModelConfig: true,

@@ -20,6 +20,10 @@ import {
   sameMessageContent,
   sessionMessagePersistenceKey,
 } from "@oh-my-pi/pi-coding-agent/session/turn-persistence";
+import {
+  customMessageEntryMessage,
+  transcriptEntryMessage,
+} from "@oh-my-pi/pi-tui/chat/transcript-entry";
 import * as History from "@pico/contract/agent-history";
 import { AgentPrompt } from "@pico/contract/agent-message";
 import { AgentRuntime, type ContextUsage, type ShakeResult } from "@pico/contract/agent-runtime";
@@ -493,7 +497,7 @@ export const makeSessionObservation = (
         }
       }
     } else if (entry.type === "custom_message") {
-      const persisted = OmpSessionContext.customMessageEntryMessage(entry);
+      const persisted = customMessageEntryMessage(entry);
       if (persisted === undefined) return;
       const prompt = skillPromptText(persisted);
       if (prompt === undefined) return;
@@ -819,7 +823,7 @@ export const normalizeHistory = (
     let kind: History.HistoryNode["kind"] = "metadata";
     let excerpt = entry.type.replaceAll("_", " ");
     if (OmpSessionContext.isTranscriptEntry(entry)) {
-      const message = OmpSessionContext.transcriptEntryMessage(entry);
+      const message = transcriptEntryMessage(entry);
       const normalized = message === undefined ? undefined : normalizeMessage(message);
       if (normalized !== undefined) {
         kind = normalized.role === "tool-result" ? "tool" : normalized.role;
@@ -854,12 +858,14 @@ export const normalizeHistory = (
     }
     let target = entry;
     if (kind === "assistant") {
+      let cursor = entry;
       while (true) {
-        const next = children.get(target.id);
+        const next = children.get(cursor.id);
         if (next?.length !== 1) break;
         const child = next[0];
-        if (child?.type !== "message" || child.message.role !== "toolResult") break;
-        target = child;
+        if (child?.type === "message" && child.message.role === "toolResult") target = child;
+        else if (child?.type !== "custom") break;
+        cursor = child;
       }
     }
     return {
