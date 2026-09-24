@@ -1966,6 +1966,123 @@ describe("Schedules", () => {
     }).pipe(Effect.provide(platformLayer), Effect.scoped),
   );
 
+  for (const artifact of ["stdout.bin", "stderr.bin", "result.json", "missing"] as const) {
+    it.effect(
+      artifact === "missing"
+        ? "allows missing failure diagnostics without losing the primary failure or notification"
+        : `reports unreadable ${artifact} failure diagnostics without losing the primary failure or notification`,
+      () =>
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const root = yield* fileSystem.makeTempDirectoryScoped({
+            prefix: "pico-private-diagnostics-",
+          });
+          const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
+          const logs = yield* captureLogs();
+          const notifications = yield* Queue.unbounded<string>();
+          let unreadableArtifact: string | undefined;
+          const failingFileSystem = FileSystem.FileSystem.of({
+            ...fileSystem,
+            readFile: (file) =>
+              file === unreadableArtifact
+                ? Effect.fail(permissionDenied("readFile", file))
+                : fileSystem.readFile(file),
+            readFileString: (file, encoding) =>
+              file === unreadableArtifact
+                ? Effect.fail(permissionDenied("readFileString", file))
+                : fileSystem.readFileString(file, encoding),
+          });
+          yield* Effect.gen(function* () {
+            const schedules = yield* open(schedulesDir, resolveTarget);
+            const created = yield* schedules.create(caller, {
+              name: "private diagnostic schedule",
+              enabled: true,
+              target: { kind: "chat", chatId: caller.chatId },
+              trigger: { kind: "once", at: 1_000 },
+              sourceDirectory: yield* prepareSource(
+                artifact === "missing"
+                  ? { "prompt.md": "private prompt" }
+                  : {
+                      "script.js":
+                        'process.stdout.write("private stdout capture");process.stderr.write("private stderr capture");process.exit(7);',
+                    },
+              ),
+            });
+            assert.strictEqual(created.kind, "ready");
+            if (created.kind !== "ready") return;
+            const runId = `scheduled-1000-${created.definition.revision}`;
+            const directory = path.join(schedulesDir, "runs", created.id, runId);
+            if (artifact !== "missing") {
+              unreadableArtifact = path.join(directory, "script", artifact);
+            }
+            yield* TestClock.setTime(1_000);
+            yield* schedules.start({
+              scriptTarget: defaultScriptTarget,
+              resolveTarget,
+              materialize: ({ destination }) =>
+                Effect.succeed(resolveMaterializedTarget(destination, AbsolutePath.make(root))),
+              deliver: () => Effect.die("Failed runs must not deliver agent messages"),
+              publish: (_chatId, content) =>
+                Queue.offer(notifications, content).pipe(Effect.asVoid),
+              runPrompt: (_chatId, runId) =>
+                Effect.succeed({ ...capturedRun(runId, "private agent output"), events: [] }),
+            });
+            const notification = yield* Queue.take(notifications);
+            const run = yield* awaitFinished(fileSystem, path.join(directory, "run.json"));
+            const stage = artifact === "missing" ? "omp" : "script";
+            const primaryFailure = artifact === "missing" ? /assistant message/ : /status 7/;
+            assert.deepInclude(run.state.kind === "finished" ? run.state.outcome : {}, {
+              kind: "failed",
+              stage,
+              notification: { kind: "delivered" },
+            });
+            if (run.state.kind !== "finished" || run.state.outcome.kind !== "failed") {
+              return yield* Effect.die("Expected persisted primary failure");
+            }
+            assert.match(run.state.outcome.message, primaryFailure);
+            assert.include(notification, runId);
+            assert.include(notification, created.id);
+            assert.match(notification, primaryFailure);
+            const primary = yield* awaitLog(logs.events, stage);
+            assert.strictEqual(primary.level, "Error");
+            assert.deepInclude(primary.annotations, {
+              outcome: "failed",
+              persisted: true,
+              category: "operation",
+            });
+            for (const captured of ["stdout.bin", "stderr.bin", "result.json"]) {
+              assert.strictEqual(
+                yield* fileSystem.exists(path.join(directory, "script", captured)),
+                artifact !== "missing",
+              );
+            }
+            const diagnostics = logs.entries.filter(
+              (entry) => entry.annotations.phase === "failure-diagnostics",
+            );
+            if (artifact === "missing") {
+              assert.deepStrictEqual(diagnostics, []);
+            } else {
+              assert.strictEqual(diagnostics[0]?.level, "Error");
+              assert.deepInclude(diagnostics[0]?.annotations ?? {}, {
+                component: "schedule",
+                scheduleId: created.id,
+                runId,
+                phase: "failure-diagnostics",
+                category: "operation",
+              });
+            }
+          }).pipe(
+            Effect.provideService(FileSystem.FileSystem, failingFileSystem),
+            Effect.provide(logs.layer),
+          );
+          const serializedLogs = JSON.stringify(logs.entries);
+          assert.notInclude(serializedLogs, "private");
+          assert.notInclude(serializedLogs, root);
+        }).pipe(Effect.provide(platformLayer), Effect.scoped),
+    );
+  }
+
   it.effect("reports a primary run failure once when finalization also fails", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
