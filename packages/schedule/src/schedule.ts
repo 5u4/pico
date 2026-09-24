@@ -252,13 +252,28 @@ const readFailureDiagnostics = Effect.fn("Schedules.readFailureDiagnostics")(fun
   const directory = runDirectory(storage, run.scheduleId, run.id);
   const stdoutBytes = yield* storage.fileSystem
     .readFile(storage.path.join(directory, "script", "stdout.bin"))
-    .pipe(Effect.option);
+    .pipe(
+      Effect.map(Option.some),
+      Effect.catch((cause) =>
+        cause.reason._tag === "NotFound" ? Effect.succeed(Option.none()) : Effect.fail(cause),
+      ),
+    );
   const stderrBytes = yield* storage.fileSystem
     .readFile(storage.path.join(directory, "script", "stderr.bin"))
-    .pipe(Effect.option);
+    .pipe(
+      Effect.map(Option.some),
+      Effect.catch((cause) =>
+        cause.reason._tag === "NotFound" ? Effect.succeed(Option.none()) : Effect.fail(cause),
+      ),
+    );
   const rawResult = yield* storage.fileSystem
     .readFileString(storage.path.join(directory, "script", "result.json"))
-    .pipe(Effect.option);
+    .pipe(
+      Effect.map(Option.some),
+      Effect.catch((cause) =>
+        cause.reason._tag === "NotFound" ? Effect.succeed(Option.none()) : Effect.fail(cause),
+      ),
+    );
   const parsed = Option.getOrUndefined(Option.flatMap(rawResult, decodeCaptureMetadata));
   const makeCapture = (
     bytes: Option.Option<Uint8Array>,
@@ -635,7 +650,7 @@ const capture = Effect.fn("Schedules.capture")(function* (
         const diagnostics = yield* readFailureDiagnostics(storage, current).pipe(
           Effect.catchCause((cause) =>
             Cause.hasInterruptsOnly(cause)
-              ? Effect.failCause(cause)
+              ? Effect.interrupt
               : Effect.logError("Failed to read run diagnostics for failure report").pipe(
                   Effect.annotateLogs({
                     phase: "failure-diagnostics",
