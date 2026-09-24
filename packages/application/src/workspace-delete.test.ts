@@ -253,7 +253,14 @@ describe("Workspace deletion", () => {
         );
         assert.strictEqual(
           (yield* test.host
-            .prepare({ kind: "workspace", workspaceId: test.workspace.id, newChatId: empty.id })
+            .materialize({
+              destination: {
+                kind: "workspace",
+                workspaceId: test.workspace.id,
+                newChatId: empty.id,
+              },
+              title: "Deleted workspace",
+            })
             .pipe(Effect.flip))._tag,
           "ScheduleHostError",
         );
@@ -389,19 +396,18 @@ describe("Workspace deletion", () => {
       }).pipe(Effect.provide(platformLayer), Effect.scoped),
   );
 
-  it.effect("rejects busy admissions and active ordinary and script work without waiting", () =>
+  it.effect("rejects busy admissions and active ordinary work without waiting", () =>
     Effect.gen(function* () {
-      const admitted = yield* Deferred.make<void>();
+      const admitting = yield* Deferred.make<void>();
       const allowAdmission = yield* Deferred.make<void>();
       const completed = yield* Deferred.make<void>();
       const test = yield* fixture({
         runtime: {
           send: () =>
-            Effect.gen(function* () {
-              yield* Deferred.succeed(admitted, undefined);
-              yield* Deferred.await(allowAdmission);
-              return { kind: "started" as const, completed: Deferred.await(completed) };
-            }),
+            Deferred.succeed(admitting, undefined).pipe(
+              Effect.andThen(Deferred.await(allowAdmission)),
+              Effect.as({ kind: "started", completed: Deferred.await(completed) } as const),
+            ),
         },
       });
       const chat = yield* test.application.createChat({
@@ -410,22 +416,22 @@ describe("Workspace deletion", () => {
         modelOverride: null,
       });
       const sending = yield* test.application
-        .sendMessage(chat.id, { text: "hello", attachments: [] })
+        .sendMessage(chat.id, { text: "running", attachments: [] })
         .pipe(Effect.forkChild);
-      yield* Deferred.await(admitted);
+      yield* Deferred.await(admitting);
       assert.strictEqual(
         (yield* test.application.deleteWorkspace(test.workspace.id).pipe(Effect.flip)).reason,
         "conflict",
       );
       yield* Deferred.succeed(allowAdmission, undefined);
-      yield* Fiber.join(sending);
+      const delivery = yield* Fiber.join(sending);
+      if (delivery.kind !== "started") return yield* Effect.die("Expected started delivery");
       assert.strictEqual(
         (yield* test.application.deleteWorkspace(test.workspace.id).pipe(Effect.flip)).reason,
         "conflict",
       );
       yield* Deferred.succeed(completed, undefined);
-      const scriptStarted = yield* Deferred.make<void>();
-      const scriptDone = yield* Deferred.make<void>();
+      yield* delivery.completed;
       const caller = { workspaceId: test.workspace.id, chatId: chat.id };
       const schedule = yield* test.schedules.create(caller, {
         name: "Removed while running",
@@ -434,27 +440,14 @@ describe("Workspace deletion", () => {
         trigger: { kind: "once", at: 1_000 },
         sourceDirectory: test.sourceDirectory,
       });
-      const script = yield* test.host
-        .withScriptActivity(
-          chat.id,
-          Effect.gen(function* () {
-            yield* Deferred.succeed(scriptStarted, undefined);
-            yield* Deferred.await(scriptDone);
-          }),
-        )
-        .pipe(Effect.forkChild);
-      yield* Deferred.await(scriptStarted);
       yield* test.schedules.remove(caller, schedule.id);
-      assert.strictEqual(
-        (yield* test.application.deleteWorkspace(test.workspace.id).pipe(Effect.flip)).reason,
-        "conflict",
-      );
-      yield* Deferred.succeed(scriptDone, undefined);
-      yield* Fiber.join(script);
       yield* test.application.deleteWorkspace(test.workspace.id);
       assert.strictEqual(
         (yield* test.host
-          .withScriptActivity(chat.id, Effect.die("Deleted script must not start"))
+          .materialize({
+            destination: { kind: "chat", chatId: chat.id },
+            title: "Deleted script must not start",
+          })
           .pipe(Effect.flip))._tag,
         "ScheduleHostError",
       );

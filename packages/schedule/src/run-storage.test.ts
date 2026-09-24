@@ -32,6 +32,25 @@ import {
 } from "./schedule-test-fixtures.ts";
 import type { Storage } from "./storage.ts";
 
+const defaultScriptTarget = (target: Schedule.ScheduleTarget) =>
+  Effect.succeed(
+    target.kind === "chat"
+      ? ({ kind: "existing-chat", workspaceId } satisfies Schedule.ScheduleScriptTarget)
+      : ({
+          kind: "workspace-chat",
+          workspaceId: target.workspaceId,
+        } satisfies Schedule.ScheduleScriptTarget),
+  );
+
+const resolveMaterializedTarget = (
+  destination: Schedule.ScheduleRunDestination,
+  cwd: AbsolutePath,
+): Schedule.ResolvedScheduleRunTarget => ({
+  chatId: destination.kind === "chat" ? destination.chatId : destination.newChatId,
+  workspaceId: destination.kind === "chat" ? workspaceId : destination.workspaceId,
+  cwd,
+});
+
 describe("run storage", () => {
   it.effect("migrates legacy snapshots once without rewriting history bytes", () =>
     Effect.gen(function* () {
@@ -150,10 +169,9 @@ describe("run storage", () => {
         const schedules = yield* make(AbsolutePath.make(storage.schedulesDir), resolveTarget);
         const error = yield* schedules
           .start({
-            withScriptActivity: (_chatId, script) => script,
+            scriptTarget: defaultScriptTarget,
             resolveTarget,
             materialize: () => Effect.die("Unexpected materialization"),
-            prepare: () => Effect.die("Unexpected target preparation"),
             deliver: () => Effect.die("Unexpected delivery"),
             publish: () => Effect.die("Unexpected publication"),
             runPrompt: () => Effect.die("Unexpected agent request"),
@@ -332,7 +350,7 @@ describe("run storage", () => {
         definition,
         yield* prepareSource({ "prompt.md": "identity" }),
         "018f47a0-0000-7000-8000-000000000006",
-        Effect.void,
+        () => Effect.void,
       );
       assert.deepStrictEqual(yield* readRuns(storage), [run]);
 
@@ -374,10 +392,10 @@ describe("run storage", () => {
       let scheduleId: Schedule.ScheduleId | undefined;
       const schedules = yield* make(schedulesDir, resolveTarget);
       const host: Schedule.ScheduleRunHost = {
-        withScriptActivity: (_chatId, script) => script,
+        scriptTarget: defaultScriptTarget,
         resolveTarget,
-        materialize: () => Effect.void,
-        prepare: () => Effect.succeed({ chatId, workspaceId, cwd }),
+        materialize: ({ destination }) =>
+          Effect.succeed(resolveMaterializedTarget(destination, cwd)),
         deliver: () => Effect.void,
         publish: () => Effect.void,
         runPrompt: (_target, runId, _prompt, onEvent) =>
@@ -477,7 +495,7 @@ describe("run storage", () => {
         definition,
         yield* prepareSource({ "prompt.md": "append" }),
         "018f47a0-0000-7000-8000-000000000050",
-        Effect.void,
+        () => Effect.void,
       );
       const original = `${JSON.stringify({ type: "run-started" })}\n`;
       yield* writeArtifactString(storage, run, "omp/events.jsonl", original);
@@ -518,6 +536,28 @@ describe("run storage", () => {
           name.endsWith(".append"),
         ),
       );
+    }).pipe(Effect.provide(platformLayer), Effect.scoped),
+  );
+  it.effect("decodes legacy running-script records with embedded target snapshots", () =>
+    Effect.gen(function* () {
+      const { storage, run, directory } = yield* prepareRunSnapshot("run-root");
+      const legacy: unknown = {
+        ...run,
+        state: {
+          kind: "running-script",
+          startedAt: 1_010,
+          target: { chatId, workspaceId, cwd: AbsolutePath.make("/private/legacy-cwd") },
+        },
+      };
+      yield* storage.fileSystem.writeFileString(
+        storage.path.join(directory, "run.json"),
+        JSON.stringify(legacy),
+      );
+      const decoded = yield* readRuns(storage, run.scheduleId);
+      assert.strictEqual(decoded.length, 1);
+      const current = decoded[0];
+      if (current === undefined) return yield* Effect.die("Expected one decoded run");
+      assert.deepStrictEqual(current.state, { kind: "running-script", startedAt: 1_010 });
     }).pipe(Effect.provide(platformLayer), Effect.scoped),
   );
 });
@@ -567,7 +607,7 @@ const prepareRunSnapshot = Effect.fn("Schedules.test.prepareRunSnapshot")(functi
     definition,
     yield* prepareSource({ "prompt.md": "historical prompt" }),
     "snapshot-fixture",
-    Effect.void,
+    () => Effect.void,
   );
   const directory = runDirectory(storage, run.scheduleId, run.id);
   const source = `${JSON.stringify(

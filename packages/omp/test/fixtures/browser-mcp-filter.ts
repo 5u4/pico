@@ -116,6 +116,7 @@ try {
     get: unusedSchedule,
     update: unusedSchedule,
     remove: unusedSchedule,
+    trigger: unusedSchedule,
     start: unusedSchedule,
   });
   const platform = Layer.mergeAll(

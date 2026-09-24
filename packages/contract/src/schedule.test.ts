@@ -229,10 +229,13 @@ describe("schedule contract", () => {
     }
   });
 
-  it("requires the schedule revision in run IDs", () => {
+  it("requires canonical scheduled and manual run IDs", () => {
     const decodeRunId = Schema.decodeUnknownSync(Schedule.ScheduleRunId);
     assert.strictEqual(decodeRunId(`scheduled-1735689600000-${revision}`), runId);
+    const manual = `manual-018f47a0-0000-7000-8000-000000000099`;
+    assert.strictEqual(decodeRunId(manual), manual);
     assert.throws(() => decodeRunId("scheduled-1735689600000"));
+    assert.throws(() => decodeRunId("manual-018f47a0-0000-6000-8000-000000000099"));
     const decodeScheduleId = Schema.decodeUnknownSync(Schedule.ScheduleId);
     const uppercase = "018F47A0-0000-7000-8ABC-ABCDEFABCDEF";
     assert.strictEqual(decodeScheduleId(uppercase), uppercase);

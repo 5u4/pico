@@ -15,6 +15,7 @@ export const scheduleToolNames = {
   get: "schedule_get",
   update: "schedule_update",
   remove: "schedule_delete",
+  trigger: "schedule_trigger",
 } as const;
 interface OperationContext {
   readonly operation: keyof typeof scheduleToolNames;
@@ -235,5 +236,20 @@ export const make =
           id,
         );
       },
+    });
+
+    api.registerTool({
+      name: scheduleToolNames.trigger,
+      label: "Trigger schedule",
+      description:
+        "Admit one immediate run for an enabled and valid schedule. Returns scheduleId and runId after durable admission.",
+      approval: "write",
+      parameters: Type.Object({ id: uuidV7 }, { additionalProperties: false }),
+      execute: (_toolCallId, params) =>
+        execute(
+          "trigger",
+          (caller) => schedules.trigger(caller, Schedule.ScheduleId.make(params.id)),
+          params.id,
+        ),
     });
   };

@@ -13,6 +13,7 @@ export const unusedSchedulesLayer = Layer.succeed(
     get: unused,
     update: unused,
     remove: unused,
+    trigger: unused,
     withCurrentTargets: unused,
     start: unused,
   }),

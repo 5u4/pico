@@ -80,7 +80,7 @@ describe("definition storage", () => {
           created.definition,
           created.sourceDirectory,
           "legacy-run",
-          Effect.void,
+          () => Effect.void,
         );
         const snapshotFile = path.join(
           runDirectory(storage, run.scheduleId, run.id),

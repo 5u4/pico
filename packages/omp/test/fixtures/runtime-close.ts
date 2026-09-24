@@ -119,6 +119,7 @@ await Effect.runPromise(
           get: unusedSchedule,
           update: unusedSchedule,
           remove: unusedSchedule,
+          trigger: unusedSchedule,
           start: unusedSchedule,
         }),
         browser: { externalBrowser: "agent-browser", idleTimeoutMs: 60_000 },

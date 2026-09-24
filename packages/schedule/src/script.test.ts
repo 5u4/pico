@@ -70,7 +70,7 @@ describe("schedule script runner", () => {
       const path = yield* Path.Path;
       const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-script-runner-" });
       const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
-      const cwd = AbsolutePath.make(root);
+
       const storage: Storage = {
         fileSystem,
         path,
@@ -111,9 +111,9 @@ describe("schedule script runner", () => {
           "script.js": 'process.stdout.write(JSON.stringify({agent:false})+" trailing")',
         }),
         "018f47a0-0000-7000-8000-000000000010",
-        Effect.void,
+        () => Effect.void,
       );
-      const target: Schedule.ResolvedScheduleRunTarget = { chatId, workspaceId, cwd };
+      const target: Schedule.ScheduleScriptTarget = { kind: "existing-chat", workspaceId };
       const readFailedDecision = (id: Schedule.ScheduleRunId) =>
         fileSystem
           .readFileString(path.join(runDirectory(storage, scheduleId, id), "decision.json"))
@@ -143,7 +143,7 @@ describe("schedule script runner", () => {
         definition,
         yield* prepareSource({ "script.js": 'process.stdout.write("private invalid decision")' }),
         "018f47a0-0000-7000-8000-000000000025",
-        Effect.void,
+        () => Effect.void,
       );
       const failureLogs: Array<{
         readonly level: Logger.Options<unknown>["logLevel"];
@@ -208,7 +208,7 @@ describe("schedule script runner", () => {
         definition,
         yield* prepareSource({ "script.js": "process.exit(2)" }),
         "018f47a0-0000-7000-8000-000000000012",
-        Effect.void,
+        () => Effect.void,
       );
       const executionError = yield* runScript(storage, process.execPath, failedRun, target).pipe(
         Effect.flip,
@@ -229,7 +229,7 @@ describe("schedule script runner", () => {
         definition,
         yield* prepareSource({ "script.js": 'process.kill(process.pid,"SIGTERM")' }),
         "018f47a0-0000-7000-8000-000000000014",
-        Effect.void,
+        () => Effect.void,
       );
       const signalError = yield* runScript(storage, process.execPath, signalRun, target).pipe(
         Effect.flip,
@@ -252,7 +252,7 @@ describe("schedule script runner", () => {
           "script.js": 'process.on("SIGTERM",()=>{});setInterval(()=>{},1000)',
         }),
         "018f47a0-0000-7000-8000-000000000016",
-        Effect.void,
+        () => Effect.void,
       );
       const timeoutError = yield* runScript(storage, process.execPath, timeoutRun, target, 10).pipe(
         Effect.flip,
@@ -283,7 +283,7 @@ describe("schedule script runner", () => {
               `,
         }),
         "018f47a0-0000-7000-8000-000000000017",
-        Effect.void,
+        () => Effect.void,
       );
       const inheritedPipe = yield* runScript(
         storage,
@@ -326,7 +326,7 @@ describe("schedule script runner", () => {
               `,
         }),
         "018f47a0-0000-7000-8000-0000000000175",
-        Effect.void,
+        () => Effect.void,
       );
       const incompletePipeError = yield* runScript(
         storage,
@@ -360,7 +360,7 @@ describe("schedule script runner", () => {
         definition,
         yield* prepareSource({ "script.js": "process.exit(0)" }),
         "018f47a0-0000-7000-8000-000000000018",
-        Effect.void,
+        () => Effect.void,
       );
       const spawnError = yield* runScript(
         storage,
@@ -392,7 +392,7 @@ describe("schedule script runner", () => {
         definition,
         yield* prepareSource({ "script.js": 'process.stdout.write("x".repeat(256*1024+1))' }),
         "018f47a0-0000-7000-8000-000000000020",
-        Effect.void,
+        () => Effect.void,
       );
       const oversizedError = yield* runScript(storage, process.execPath, oversizedRun, target).pipe(
         Effect.flip,
@@ -413,7 +413,7 @@ describe("schedule script runner", () => {
           "script.js": 'process.stdout.write(JSON.stringify({agent:false,kind:"unknown"}))',
         }),
         "018f47a0-0000-7000-8000-000000000022",
-        Effect.void,
+        () => Effect.void,
       );
       const invalidVariantError = yield* runScript(
         storage,
@@ -435,7 +435,7 @@ describe("schedule script runner", () => {
         definition,
         yield* prepareSource({ "script.js": "void 0;" }),
         "018f47a0-0000-7000-8000-000000000023",
-        Effect.void,
+        () => Effect.void,
       );
       const emptyOutputError = yield* runScript(
         storage,
@@ -475,7 +475,7 @@ describe("schedule script runner", () => {
               `,
         }),
         "018f47a0-0000-7000-8000-000000000024",
-        Effect.void,
+        () => Effect.void,
       );
       const interrupted = yield* runScript(storage, process.execPath, interruptedRun, target).pipe(
         Effect.forkChild,
