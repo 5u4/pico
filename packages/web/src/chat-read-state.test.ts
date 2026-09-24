@@ -180,7 +180,7 @@ describe("chat read state", () => {
     assert.strictEqual(restored.unread(otherChatId, recovered), true);
   });
 
-  it("preserves reminders and seen records while a chat summary is unavailable", async () => {
+  it("preserves unavailable reminders passively but clears them explicitly without acknowledging results", async () => {
     const state = new ChatReadState();
     await state.reconcileCatalog(catalog(summaryEntry("none", 0)));
     await state.markUnread(chatId);
@@ -190,7 +190,6 @@ describe("chat read state", () => {
       summary: { kind: "unavailable" },
     };
     assert.strictEqual(await state.confirm(chatId, unavailable, state.captureOpen(chatId)), false);
-    assert.strictEqual(await state.markRead(chatId, unavailable), false);
     await state.reconcileCatalog(catalog(unavailable));
     assert.strictEqual(state.unread(chatId, unavailable), true);
     assert.deepStrictEqual(state.buildRequest().chats, [
@@ -198,10 +197,76 @@ describe("chat read state", () => {
     ]);
     const restored = new ChatReadState();
     assert.strictEqual(restored.unread(chatId, unavailable), true);
-    assert.strictEqual(await restored.markRead(chatId, summaryEntry("behind", 1, "entry-2")), true);
-    assert.strictEqual(restored.unread(chatId, summaryEntry("covered", 2, "entry-2")), false);
+    assert.strictEqual(await restored.markRead(chatId, unavailable), true);
+    assert.strictEqual(restored.unread(chatId, unavailable), false);
+    assert.deepStrictEqual(restored.buildRequest().chats, [
+      { chatId, seen: cursor("entry-1"), seenRevision: 1 },
+    ]);
+    const cleared = new ChatReadState();
+    assert.strictEqual(cleared.unread(chatId, unavailable), false);
+    const recovered = summaryEntry("behind", 1, "entry-2");
+    await cleared.reconcileCatalog(catalog(recovered));
+    assert.strictEqual(cleared.unread(chatId, recovered), true);
+    assert.deepStrictEqual(cleared.buildRequest().chats, [
+      { chatId, seen: cursor("entry-1"), seenRevision: 1 },
+    ]);
+    assert.strictEqual(await cleared.markRead(chatId, recovered), true);
+    assert.strictEqual(cleared.unread(chatId, summaryEntry("covered", 2, "entry-2")), false);
+    assert.deepStrictEqual(cleared.buildRequest().chats, [
+      { chatId, seen: cursor("entry-2"), seenRevision: 2 },
+    ]);
+  });
+
+  it("clears an unavailable reminder when another page advances seen state before the lock is acquired", async () => {
+    const state = new ChatReadState();
+    await state.reconcileCatalog(catalog(summaryEntry("none", 0)));
+    await state.markUnread(chatId);
+    const unavailable: ChatResultSummaryEntry = {
+      chatId,
+      seenRevision: 1,
+      summary: { kind: "unavailable" },
+    };
+    const other = new ChatReadState();
+    const advancing = other.confirm(chatId, summaryEntry("behind", 1, "entry-2"), null);
+    const marking = state.markRead(chatId, unavailable);
+    assert.strictEqual(await advancing, true);
+    assert.strictEqual(await marking, true);
+    assert.strictEqual(state.unread(chatId, unavailable), false);
+    assert.deepStrictEqual(state.buildRequest().chats, [
+      { chatId, seen: cursor("entry-2"), seenRevision: 2 },
+    ]);
+    const restored = new ChatReadState();
+    assert.strictEqual(restored.unread(chatId, unavailable), false);
+    assert.strictEqual(restored.unread(chatId, summaryEntry("behind", 2, "entry-3")), true);
     assert.deepStrictEqual(restored.buildRequest().chats, [
       { chatId, seen: cursor("entry-2"), seenRevision: 2 },
+    ]);
+  });
+
+  it("keeps a newer reminder while an unavailable mark read waits for the lock", async () => {
+    const state = new ChatReadState();
+    await state.reconcileCatalog(catalog(summaryEntry("none", 0)));
+    await state.markUnread(chatId);
+    const unavailable: ChatResultSummaryEntry = {
+      chatId,
+      seenRevision: 1,
+      summary: { kind: "unavailable" },
+    };
+    const other = new ChatReadState();
+    const replacing = other.markUnread(chatId);
+    const marking = state.markRead(chatId, unavailable);
+    assert.strictEqual(await replacing, true);
+    assert.strictEqual(await marking, false);
+    assert.strictEqual(state.unread(chatId, unavailable), true);
+    assert.deepStrictEqual(state.buildRequest().chats, [
+      { chatId, seen: cursor("entry-1"), seenRevision: 1 },
+    ]);
+    const restored = new ChatReadState();
+    assert.strictEqual(restored.unread(chatId, unavailable), true);
+    assert.strictEqual(await restored.markRead(chatId, unavailable), true);
+    assert.strictEqual(restored.unread(chatId, unavailable), false);
+    assert.deepStrictEqual(restored.buildRequest().chats, [
+      { chatId, seen: cursor("entry-1"), seenRevision: 1 },
     ]);
   });
 
