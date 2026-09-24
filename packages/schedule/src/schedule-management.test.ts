@@ -25,52 +25,69 @@ import {
 
 const otherWorkspaceId = Workspace.WorkspaceId.make("018f47a0-0000-7000-8000-000000000099");
 
+const defaultScriptTarget = (target: Schedule.ScheduleTarget) =>
+  Effect.succeed(
+    target.kind === "chat"
+      ? ({ kind: "existing-chat", workspaceId } satisfies Schedule.ScheduleScriptTarget)
+      : ({
+          kind: "workspace-chat",
+          workspaceId: target.workspaceId,
+        } satisfies Schedule.ScheduleScriptTarget),
+  );
+
+const resolveMaterializedTarget = (
+  destination: Schedule.ScheduleRunDestination,
+  cwd: AbsolutePath,
+): Schedule.ResolvedScheduleRunTarget => ({
+  chatId: destination.kind === "chat" ? destination.chatId : destination.newChatId,
+  workspaceId: destination.kind === "chat" ? workspaceId : destination.workspaceId,
+  cwd,
+});
 describe("schedule management", () => {
-  it.effect(
-    "does not execute a claimed script when its prepared target is no longer admitted",
-    () =>
-      Effect.gen(function* () {
-        const fileSystem = yield* FileSystem.FileSystem;
-        const path = yield* Path.Path;
-        const root = yield* fileSystem.makeTempDirectoryScoped({
-          prefix: "pico-script-admission-",
-        });
-        const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
-        const schedules = yield* open(schedulesDir, resolveTarget);
-        const marker = path.join(root, "script-executed");
-        yield* TestClock.setTime(1_000);
-        const created = yield* schedules.create(caller, {
-          name: "Deleted destination",
-          enabled: true,
-          target: { kind: "chat", chatId },
-          trigger: { kind: "once", at: 1_000 },
-          sourceDirectory: yield* prepareSource({
-            "script.js": `await Bun.write(${JSON.stringify(marker)}, "executed");process.stdout.write(JSON.stringify({agent:false}));`,
-          }),
-        });
-        if (created.kind !== "ready") return yield* Effect.die("Expected a valid schedule");
-        yield* schedules.start({
-          resolveTarget,
-          withScriptActivity: () =>
-            Effect.fail(new Schedule.ScheduleHostError({ message: "Workspace not found" })),
-          prepare: () => Effect.succeed({ chatId, workspaceId, cwd: AbsolutePath.make(root) }),
-          materialize: () => Effect.die("Rejected script must not materialize"),
-          publish: () => Effect.die("Rejected script must not publish"),
-          deliver: () => Effect.die("Rejected script must not deliver"),
-          runPrompt: () => Effect.die("Rejected script must not start a model"),
-        });
-        const runId = Schedule.ScheduleRunId.make(`scheduled-1000-${created.definition.revision}`);
-        const run = yield* awaitFinished(
-          fileSystem,
-          path.join(schedulesDir, "runs", created.id, runId, "run.json"),
-        );
-        assert.deepStrictEqual(run.state.kind === "finished" && run.state.outcome, {
-          kind: "failed",
-          stage: "target",
-          message: "Workspace not found",
-        });
-        assert.isFalse(yield* fileSystem.exists(marker));
-      }).pipe(Effect.provide(platformLayer), Effect.scoped),
+  it.effect("does not execute a claimed script when its destination metadata is unavailable", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "pico-script-admission-",
+      });
+      const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
+      const schedules = yield* open(schedulesDir, resolveTarget);
+      const marker = path.join(root, "script-executed");
+      yield* TestClock.setTime(1_000);
+      const created = yield* schedules.create(caller, {
+        name: "Deleted destination",
+        enabled: true,
+        target: { kind: "chat", chatId },
+        trigger: { kind: "once", at: 1_000 },
+        sourceDirectory: yield* prepareSource({
+          "script.js": `await Bun.write(${JSON.stringify(marker)}, "executed");process.stdout.write(JSON.stringify({agent:false}));`,
+        }),
+      });
+      if (created.kind !== "ready") return yield* Effect.die("Expected a valid schedule");
+      yield* schedules.start({
+        resolveTarget,
+        scriptTarget: () =>
+          Effect.fail(new Schedule.ScheduleHostError({ message: "Workspace not found" })),
+        materialize: () =>
+          Effect.fail(new Schedule.ScheduleHostError({ message: "Workspace not found" })),
+        publish: () => Effect.die("Rejected script must not publish"),
+        deliver: () => Effect.die("Rejected script must not deliver"),
+        runPrompt: () => Effect.die("Rejected script must not start a model"),
+      });
+      const runId = Schedule.ScheduleRunId.make(`scheduled-1000-${created.definition.revision}`);
+      const run = yield* awaitFinished(
+        fileSystem,
+        path.join(schedulesDir, "runs", created.id, runId, "run.json"),
+      );
+      assert.deepStrictEqual(run.state.kind === "finished" && run.state.outcome, {
+        kind: "failed",
+        stage: "target",
+        message: "Workspace not found",
+        notification: { kind: "failed", message: "Workspace not found" },
+      });
+      assert.isFalse(yield* fileSystem.exists(marker));
+    }).pipe(Effect.provide(platformLayer), Effect.scoped),
   );
 
   it.effect(
@@ -260,7 +277,7 @@ describe("schedule management", () => {
       assert.deepStrictEqual(entry?.lastRun, {
         id: completedId,
         definitionRevision: created.definition.revision,
-        scheduledFor: 1_000,
+        source: { kind: "scheduled", scheduledFor: 1_000 },
         claimedAt: 200,
         state: { kind: "finished", finishedAt: 300, outcome: { kind: "completed" } },
       });
@@ -272,13 +289,12 @@ describe("schedule management", () => {
       const recordedId = yield* saveRun(2_000, 200, {
         kind: "running-script",
         startedAt: 250,
-        target: { chatId, workspaceId, cwd: AbsolutePath.make("/private/execution-directory") },
       });
       const refreshed = yield* schedules.overview();
       assert.deepStrictEqual(refreshed.entries[0]?.lastRun, {
         id: recordedId,
         definitionRevision: created.definition.revision,
-        scheduledFor: 2_000,
+        source: { kind: "scheduled", scheduledFor: 2_000 },
         claimedAt: 200,
         state: { kind: "running-script", startedAt: 250 },
       });
@@ -570,10 +586,10 @@ describe("schedule management", () => {
       yield* TestClock.setTime(1_000);
       const published = yield* Queue.unbounded<string>();
       yield* schedules.start({
-        withScriptActivity: (_chatId, script) => script,
+        scriptTarget: defaultScriptTarget,
         resolveTarget,
-        materialize: () => Effect.void,
-        prepare: () => Effect.succeed({ chatId, workspaceId, cwd: AbsolutePath.make(root) }),
+        materialize: ({ destination }) =>
+          Effect.succeed(resolveMaterializedTarget(destination, AbsolutePath.make(root))),
         deliver: () => Effect.die("Script must publish without OMP"),
         publish: (_chatId, content) => Queue.offer(published, content).pipe(Effect.asVoid),
         runPrompt: () => Effect.die("Script must not invoke OMP"),

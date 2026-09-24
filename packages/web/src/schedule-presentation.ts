@@ -18,6 +18,7 @@ const runLabels = {
   "target-resolved": "Target resolved",
   "running-script": "Script phase recorded",
   "running-omp": "Agent phase recorded",
+  "reporting-failure": "Failure report pending",
   skipped: "Skipped",
   published: "Published",
   completed: "Completed",
@@ -47,7 +48,7 @@ export function presentSchedule(entry: ScheduleOverviewResponse["entries"][numbe
         value:
           definition.target.kind === "chat"
             ? definition.target.chatId
-            : `${definition.target.workspaceId} · New chat for each run`,
+            : `${definition.target.workspaceId} · New chat when needed`,
       },
       {
         label: "Script timeout",
@@ -81,7 +82,9 @@ export function presentSchedule(entry: ScheduleOverviewResponse["entries"][numbe
       timestamp: formatScheduleTime(
         state.kind === "finished"
           ? state.finishedAt
-          : state.kind === "running-script" || state.kind === "running-omp"
+          : state.kind === "running-script" ||
+              state.kind === "running-omp" ||
+              state.kind === "reporting-failure"
             ? state.startedAt
             : lastRun.claimedAt,
       ),
@@ -99,12 +102,22 @@ export function presentSchedule(entry: ScheduleOverviewResponse["entries"][numbe
     details.push(
       { label: "Last recorded run ID", value: lastRun.id },
       { label: "Run definition revision", value: lastRun.definitionRevision },
-      { label: "Run scheduled for", value: formatScheduleTime(lastRun.scheduledFor) },
+      {
+        label: "Run source",
+        value:
+          lastRun.source.kind === "manual"
+            ? "Manual trigger"
+            : `Scheduled · ${formatScheduleTime(lastRun.source.scheduledFor)}`,
+      },
       { label: "Run claimed", value: formatScheduleTime(lastRun.claimedAt) },
     );
     if (state.kind === "finished") {
       details.push({ label: "Run finished", value: formatScheduleTime(state.finishedAt) });
-    } else if (state.kind === "running-script" || state.kind === "running-omp") {
+    } else if (
+      state.kind === "running-script" ||
+      state.kind === "running-omp" ||
+      state.kind === "reporting-failure"
+    ) {
       details.push({ label: "Recorded phase started", value: formatScheduleTime(state.startedAt) });
     }
     if (outcome?.kind === "failed") {

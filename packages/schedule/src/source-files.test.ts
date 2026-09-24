@@ -29,6 +29,25 @@ import {
 } from "./schedule-test-fixtures.ts";
 import type { Storage } from "./storage.ts";
 
+const defaultScriptTarget = (target: Schedule.ScheduleTarget) =>
+  Effect.succeed(
+    target.kind === "chat"
+      ? ({ kind: "existing-chat", workspaceId } satisfies Schedule.ScheduleScriptTarget)
+      : ({
+          kind: "workspace-chat",
+          workspaceId: target.workspaceId,
+        } satisfies Schedule.ScheduleScriptTarget),
+  );
+
+const resolveMaterializedTarget = (
+  destination: Schedule.ScheduleRunDestination,
+  cwd: AbsolutePath,
+): Schedule.ResolvedScheduleRunTarget => ({
+  chatId: destination.kind === "chat" ? destination.chatId : destination.newChatId,
+  workspaceId: destination.kind === "chat" ? workspaceId : destination.workspaceId,
+  cwd,
+});
+
 describe("source files", () => {
   it.effect(
     "copies assets without whole-file reads and captures prompts before script writes",
@@ -72,10 +91,10 @@ describe("source files", () => {
         const requests = yield* Queue.unbounded<Agent.AgentPrompt>();
         yield* TestClock.setTime(1_000);
         yield* schedules.start({
-          withScriptActivity: (_chatId, script) => script,
+          scriptTarget: defaultScriptTarget,
           resolveTarget,
-          materialize: () => Effect.void,
-          prepare: () => Effect.succeed({ chatId, workspaceId, cwd: AbsolutePath.make(root) }),
+          materialize: ({ destination }) =>
+            Effect.succeed(resolveMaterializedTarget(destination, AbsolutePath.make(root))),
           deliver: () => Effect.void,
           publish: () => Effect.die("Expected an agent request"),
           runPrompt: (_chatId, runId, request) =>
@@ -140,9 +159,8 @@ describe("source files", () => {
       const runId = `scheduled-1000-${created.definition.revision}`;
       const directory = path.join(schedulesDir, "runs", created.id, runId);
       const host: Schedule.ScheduleRunHost = {
-        withScriptActivity: (_chatId, script) => script,
+        scriptTarget: defaultScriptTarget,
         resolveTarget,
-        prepare: () => Effect.succeed({ chatId, workspaceId, cwd: AbsolutePath.make(root) }),
         materialize: () => Effect.die("Unexpected materialization"),
         deliver: () => Effect.die("Unexpected delivery"),
         publish: () => Effect.die("Unexpected publication"),
@@ -218,7 +236,7 @@ describe("source files", () => {
         created.definition,
         created.sourceDirectory,
         "source-definition",
-        Effect.void,
+        () => Effect.void,
       );
       const directory = path.join(schedulesDir, "runs", run.scheduleId, run.id);
       assert.deepStrictEqual(
@@ -414,10 +432,10 @@ describe("source files", () => {
       const requests = yield* Queue.unbounded<Agent.AgentPrompt>();
       yield* TestClock.setTime(1_000);
       yield* schedules.start({
-        withScriptActivity: (_chatId, script) => script,
+        scriptTarget: defaultScriptTarget,
         resolveTarget,
-        materialize: () => Effect.void,
-        prepare: () => Effect.succeed({ chatId, workspaceId, cwd: AbsolutePath.make(root) }),
+        materialize: ({ destination }) =>
+          Effect.succeed(resolveMaterializedTarget(destination, AbsolutePath.make(root))),
         deliver: () => Effect.void,
         publish: () => Effect.die("Expected an agent request"),
         runPrompt: (_chatId, runId, request) =>
@@ -561,10 +579,9 @@ describe("source files", () => {
       assert.sameDeepMembers([...(yield* schedules.list(caller))], created);
       yield* TestClock.setTime(1_000);
       yield* schedules.start({
-        withScriptActivity: (_chatId, script) => script,
+        scriptTarget: defaultScriptTarget,
         resolveTarget,
-        materialize: () => Effect.void,
-        prepare: () => Effect.die("Disabled and non-due schedules must not execute"),
+        materialize: () => Effect.die("Disabled and non-due schedules must not execute"),
         deliver: () => Effect.die("Unexpected delivery"),
         publish: () => Effect.die("Unexpected publication"),
         runPrompt: () => Effect.die("Unexpected prompt"),
@@ -827,7 +844,7 @@ describe("source files", () => {
         created.definition,
         yield* prepareSource({ "prompt.md": "valid", "Meta.json": "{}" }),
         "case-check",
-        Effect.void,
+        () => Effect.void,
       ).pipe(Effect.flip);
       assert.strictEqual(error.kind, "invalid");
       assert.deepStrictEqual(yield* readRuns(storage), []);
@@ -930,31 +947,20 @@ describe("source files", () => {
           sourceDirectory,
         };
         if (phase === "run") yield* schedules.create(caller, input);
-        let prepared = 0;
-        let prompts = 0;
         const host: Schedule.ScheduleRunHost = {
-          withScriptActivity: (_chatId, script) => script,
+          scriptTarget: defaultScriptTarget,
           resolveTarget,
-          materialize: () => Effect.void,
-          prepare: () =>
-            Effect.sync(() => {
-              prepared++;
-              return { chatId, workspaceId, cwd: AbsolutePath.make(root) };
-            }),
+          materialize: () => Effect.die("Interrupted source capture must not materialize a target"),
           deliver: () => Effect.void,
           publish: () => Effect.void,
-          runPrompt: (_chatId, runId) =>
-            Effect.sync(() => {
-              prompts++;
-              return capturedRun(runId, "unexpected");
-            }),
+          runPrompt: () => Effect.die("Interrupted source capture must not invoke OMP"),
         };
         yield* TestClock.setTime(1_000);
         capturing = true;
         const operation = yield* (
           phase === "definition"
             ? schedules.create(caller, input).pipe(Effect.asVoid)
-            : schedules.start(host)
+            : schedules.start(host).pipe(Effect.andThen(Effect.never))
         ).pipe(Effect.scoped, Effect.forkChild);
         const active = yield* Deferred.await(copyStarted);
         const shutdown = yield* Fiber.interrupt(operation).pipe(
@@ -969,8 +975,6 @@ describe("source files", () => {
         assert.deepStrictEqual(events, ["copy-started", "copy-settled", "staging-removed"]);
         assert.isTrue(Exit.isSuccess(copied));
         assert.strictEqual(copies.length, 1);
-        assert.strictEqual(prepared, 0);
-        assert.strictEqual(prompts, 0);
         assert.deepStrictEqual(
           yield* fileSystem.readDirectory(path.join(schedulesDir, ".staging")),
           [],

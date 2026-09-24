@@ -1,6 +1,7 @@
 import * as Schedule from "@pico/contract/schedule";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import { ensureRunAsset, runDirectory, writeArtifact, writeArtifactString } from "./run-storage.ts";
@@ -19,6 +20,7 @@ interface Capture {
 
 interface StreamCapture {
   readonly result: Promise<Capture>;
+  readonly snapshot: () => Capture;
   readonly cancel: () => Promise<void>;
 }
 
@@ -68,9 +70,13 @@ const recordFailureArtifact = Effect.fn("Schedules.recordScriptFailureArtifact")
   storage: Storage,
   run: Schedule.ScheduleRunLifecycle,
   artifact: string,
-  content: string,
+  content: string | Uint8Array,
 ) {
-  yield* writeArtifactString(storage, run, artifact, content).pipe(
+  yield* (
+    typeof content === "string"
+      ? writeArtifactString(storage, run, artifact, content)
+      : writeArtifact(storage, run, artifact, content)
+  ).pipe(
     Effect.catchCause((cause) =>
       Cause.hasInterruptsOnly(cause)
         ? Effect.failCause(cause)
@@ -92,7 +98,7 @@ const recordFailureArtifact = Effect.fn("Schedules.recordScriptFailureArtifact")
 const failWithDecision = Effect.fn("Schedules.failScriptRun")(function* (
   storage: Storage,
   run: Schedule.ScheduleRunLifecycle,
-  error: ScriptRunError,
+  error: ScriptRunError | Schedule.ScheduleError,
 ) {
   yield* recordFailureArtifact(
     storage,
@@ -111,6 +117,18 @@ const captureStream = (stream: ReadableStream<Uint8Array>): StreamCapture => {
   let cancelled = false;
   let settled = false;
   let cancellation: Promise<void> | undefined;
+  let captured: Capture | undefined;
+  const snapshot = (): Capture => {
+    if (captured !== undefined) return captured;
+    const bytes = new Uint8Array(retained);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    captured = { bytes, totalBytes, truncated: totalBytes > retained };
+    return captured;
+  };
   const result = (async () => {
     try {
       for (;;) {
@@ -131,16 +149,12 @@ const captureStream = (stream: ReadableStream<Uint8Array>): StreamCapture => {
       settled = true;
       reader.releaseLock();
     }
-    const bytes = new Uint8Array(retained);
-    let offset = 0;
-    for (const chunk of chunks) {
-      bytes.set(chunk, offset);
-      offset += chunk.byteLength;
-    }
-    return { bytes, totalBytes, truncated: totalBytes > retained };
+    return snapshot();
   })();
+  void result.catch(() => undefined);
   return {
     result,
+    snapshot,
     cancel: () => {
       cancelled = true;
       cancellation ??= Promise.resolve().then(() => {
@@ -153,12 +167,11 @@ const captureStream = (stream: ReadableStream<Uint8Array>): StreamCapture => {
 
 const curatedEnvironment = (
   run: Schedule.ScheduleRunLifecycle,
-  target: Schedule.ResolvedScheduleRunTarget,
+  target: Schedule.ScheduleScriptTarget,
 ) => {
   const env: Record<string, string> = {
     PICO_SCHEDULE_ID: run.scheduleId,
     PICO_RUN_ID: run.id,
-    PICO_CHAT_ID: target.chatId,
     PICO_WORKSPACE_ID: target.workspaceId,
   };
   for (const name of ["HOME", "PATH", "TMPDIR", "TEMP", "TMP", "LANG", "LC_ALL"]) {
@@ -170,17 +183,13 @@ const curatedEnvironment = (
 
 const stdinDocument = (
   run: Schedule.ScheduleRunLifecycle,
-  target: Schedule.ResolvedScheduleRunTarget,
+  target: Schedule.ScheduleScriptTarget,
 ) => ({
   scheduleId: run.scheduleId,
   runId: run.id,
   source: run.source,
   claimedAt: run.claimedAt,
-  target: {
-    kind: run.plannedTarget.kind,
-    chatId: target.chatId,
-    workspaceId: target.workspaceId,
-  },
+  target,
 });
 
 export const runScript = Effect.fn("Schedules.runScript")(
@@ -188,7 +197,7 @@ export const runScript = Effect.fn("Schedules.runScript")(
     storage: Storage,
     executable: string,
     run: Schedule.ScheduleRunLifecycle,
-    target: Schedule.ResolvedScheduleRunTarget,
+    target: Schedule.ScheduleScriptTarget,
     timeoutMillis = Schedule.DEFAULT_SCRIPT_TIMEOUT_MS,
   ): Effect.fn.Return<ScriptRun, Schedule.ScheduleError | ScriptRunError> {
     const scriptPath = storage.path.join(
@@ -212,6 +221,7 @@ export const runScript = Effect.fn("Schedules.runScript")(
       ],
       { concurrency: "unbounded", discard: true },
     );
+    let failureCaptured = false;
 
     const attempted = yield* Effect.acquireUseRelease(
       Effect.try({
@@ -285,7 +295,7 @@ export const runScript = Effect.fn("Schedules.runScript")(
           },
           catch: (cause) => nativeScriptError("Failed to capture schedule script execution", cause),
         }),
-      ({ child, stdoutCapture, stderrCapture }) =>
+      ({ child, stdoutCapture, stderrCapture }, exit) =>
         Effect.promise(async () => {
           if (child.exitCode !== null) return;
           child.kill("SIGTERM");
@@ -321,15 +331,43 @@ export const runScript = Effect.fn("Schedules.runScript")(
               { discard: true },
             ),
           ),
+          Effect.andThen(
+            Effect.gen(function* () {
+              if (Exit.isSuccess(exit)) return;
+              yield* Effect.promise(() =>
+                Promise.allSettled([stdoutCapture.result, stderrCapture.result]),
+              );
+              const stdout = stdoutCapture.snapshot();
+              const stderr = stderrCapture.snapshot();
+              const reason = exit.cause.reasons.find(Cause.isFailReason)?.error;
+              yield* recordFailureArtifact(storage, run, "script/stdout.bin", stdout.bytes);
+              yield* recordFailureArtifact(storage, run, "script/stderr.bin", stderr.bytes);
+              yield* recordFailureArtifact(
+                storage,
+                run,
+                "script/result.json",
+                JSON.stringify({
+                  kind: Cause.hasInterruptsOnly(exit.cause) ? "interrupted" : "failed",
+                  ...(reason instanceof ScriptRunError ? { message: reason.message } : {}),
+                  timeoutMillis,
+                  stdout: { totalBytes: stdout.totalBytes, truncated: stdout.truncated },
+                  stderr: { totalBytes: stderr.totalBytes, truncated: stderr.truncated },
+                }),
+              );
+              failureCaptured = true;
+            }),
+          ),
         ),
     ).pipe(Effect.result);
     if (Result.isFailure(attempted)) {
-      yield* recordFailureArtifact(
-        storage,
-        run,
-        "script/result.json",
-        JSON.stringify({ kind: "failed", message: attempted.failure.message, timeoutMillis }),
-      );
+      if (!failureCaptured) {
+        yield* recordFailureArtifact(
+          storage,
+          run,
+          "script/result.json",
+          JSON.stringify({ kind: "failed", message: attempted.failure.message, timeoutMillis }),
+        );
+      }
       return yield* failWithDecision(storage, run, attempted.failure);
     }
     const processResult = attempted.success;
@@ -353,7 +391,7 @@ export const runScript = Effect.fn("Schedules.runScript")(
           }).pipe(Effect.result)
         : Result.fail(processFailure);
 
-    yield* Effect.all(
+    const recorded = yield* Effect.all(
       [
         writeArtifact(storage, run, "script/stdout.bin", processResult.stdout.bytes),
         writeArtifact(storage, run, "script/stderr.bin", processResult.stderr.bytes),
@@ -376,21 +414,21 @@ export const runScript = Effect.fn("Schedules.runScript")(
             },
           }),
         ),
-      ],
-      { concurrency: "unbounded", discard: true },
-    ).pipe(
-      Effect.catchCause((cause) => {
-        if (Result.isSuccess(decoded) || Cause.hasInterruptsOnly(cause)) {
-          return Effect.failCause(cause);
-        }
-        return Effect.logError("Failed to record schedule script result artifacts").pipe(
-          Effect.annotateLogs({
-            phase: "failure-artifact",
-            category: cause.reasons.some(Cause.isDieReason) ? "defect" : "io",
-          }),
-        );
-      }),
+      ].map(Effect.exit),
+      { concurrency: "unbounded" },
     );
+    for (const artifact of recorded) {
+      if (Exit.isSuccess(artifact)) continue;
+      if (Result.isSuccess(decoded) || Cause.hasInterruptsOnly(artifact.cause)) {
+        return yield* Effect.failCause(artifact.cause);
+      }
+      yield* Effect.logError("Failed to record schedule script result artifacts").pipe(
+        Effect.annotateLogs({
+          phase: "failure-artifact",
+          category: artifact.cause.reasons.some(Cause.isDieReason) ? "defect" : "io",
+        }),
+      );
+    }
     if (Result.isFailure(decoded)) {
       return yield* failWithDecision(storage, run, decoded.failure);
     }
@@ -418,7 +456,6 @@ export const runScript = Effect.fn("Schedules.runScript")(
         operation: "script",
         scheduleId: run.scheduleId,
         runId: run.id,
-        chatId: target.chatId,
         workspaceId: target.workspaceId,
       }),
     ),

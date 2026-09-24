@@ -104,6 +104,7 @@ const schedules = Schedule.Schedules.of({
   get: unusedSchedule,
   update: unusedSchedule,
   remove: unusedSchedule,
+  trigger: unusedSchedule,
   start: unusedSchedule,
 });
 const platform = Layer.mergeAll(

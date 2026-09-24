@@ -27,7 +27,7 @@ const view: Schedule.ReadyScheduleView = {
 const failedRun: Schedule.ScheduleRunSummary = {
   id: Schedule.ScheduleRunId.make(`scheduled-1700000001000-${revision}`),
   definitionRevision: revision,
-  scheduledFor: 1_700_000_001_000,
+  source: { kind: "scheduled", scheduledFor: 1_700_000_001_000 },
   claimedAt: 1_700_000_001_000,
   state: {
     kind: "finished",

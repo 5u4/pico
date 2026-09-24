@@ -21,7 +21,7 @@ export type ScheduleRevision = typeof ScheduleRevision.Type;
 
 export const ScheduleRunId = Schema.String.check(
   Schema.isPattern(
-    /^scheduled-[0-9]+-[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu,
+    /^(?:scheduled-[0-9]+-[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}|manual-[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/iu,
   ),
 ).pipe(Schema.brand("@pico/contract/ScheduleRunId"));
 export type ScheduleRunId = typeof ScheduleRunId.Type;
@@ -113,10 +113,13 @@ export type InvalidScheduleView = typeof InvalidScheduleView.Type;
 export const ScheduleView = Schema.Union([ReadyScheduleView, InvalidScheduleView]);
 export type ScheduleView = typeof ScheduleView.Type;
 
-export const ScheduleRunSource = Schema.Struct({
-  kind: Schema.Literal("scheduled"),
-  scheduledFor: Schema.Natural,
-});
+export const ScheduleRunSource = Schema.Union([
+  Schema.Struct({
+    kind: Schema.Literal("scheduled"),
+    scheduledFor: Schema.Natural,
+  }),
+  Schema.Struct({ kind: Schema.Literal("manual") }),
+]);
 export type ScheduleRunSource = typeof ScheduleRunSource.Type;
 
 export const PlannedScheduleRunTarget = Schema.Union([
@@ -138,6 +141,11 @@ export type ScheduleRunDestination =
   | (Extract<ScheduleTarget, { readonly kind: "workspace" }> & {
       readonly newChatId: typeof ChatId.Type;
     });
+export const ScheduleScriptTarget = Schema.Struct({
+  kind: Schema.Literals(["existing-chat", "workspace-chat"]),
+  workspaceId: WorkspaceId,
+});
+export type ScheduleScriptTarget = typeof ScheduleScriptTarget.Type;
 
 export const ResolvedScheduleRunTarget = Schema.Struct({
   chatId: ChatId,
@@ -146,10 +154,18 @@ export const ResolvedScheduleRunTarget = Schema.Struct({
 });
 export type ResolvedScheduleRunTarget = typeof ResolvedScheduleRunTarget.Type;
 
+export const FailedScheduleNotification = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("delivered") }),
+  Schema.Struct({ kind: Schema.Literal("interrupted") }),
+  Schema.Struct({ kind: Schema.Literal("failed"), message: Schema.String }),
+]);
+export type FailedScheduleNotification = typeof FailedScheduleNotification.Type;
+
 const FailedScheduleOutcome = Schema.Struct({
   kind: Schema.Literal("failed"),
   stage: Schema.Literals(["target", "script", "protocol", "omp", "publish"]),
   message: Schema.String,
+  notification: Schema.optional(FailedScheduleNotification),
 });
 const InterruptedScheduleOutcome = Schema.Struct({
   kind: Schema.Literal("interrupted"),
@@ -192,9 +208,24 @@ export const ScheduleRunLifecycle = Schema.Union([
   Schema.Struct({
     ...ScheduleRunBase,
     state: Schema.Struct({
-      kind: Schema.Literals(["running-script", "running-omp"]),
+      kind: Schema.Literal("running-script"),
+      startedAt: Schema.Natural,
+    }),
+  }),
+  Schema.Struct({
+    ...ScheduleRunBase,
+    state: Schema.Struct({
+      kind: Schema.Literal("running-omp"),
       target: ResolvedScheduleRunTarget,
       startedAt: Schema.Natural,
+    }),
+  }),
+  Schema.Struct({
+    ...ScheduleRunBase,
+    state: Schema.Struct({
+      kind: Schema.Literal("reporting-failure"),
+      startedAt: Schema.Natural,
+      outcome: FailedScheduleOutcome,
     }),
   }),
   Schema.Struct({
@@ -211,14 +242,13 @@ export type ScheduleRunLifecycle = typeof ScheduleRunLifecycle.Type;
 export const ScheduleRunSummary = Schema.Struct({
   id: ScheduleRunId,
   definitionRevision: ScheduleRevision,
-  scheduledFor: Schema.Natural,
+  source: ScheduleRunSource,
   claimedAt: Schema.Natural,
   state: Schema.Union([
     Schema.Struct({ kind: Schema.Literals(["claimed", "target-resolved"]) }),
-    Schema.Struct({
-      kind: Schema.Literals(["running-script", "running-omp"]),
-      startedAt: Schema.Natural,
-    }),
+    Schema.Struct({ kind: Schema.Literal("running-script"), startedAt: Schema.Natural }),
+    Schema.Struct({ kind: Schema.Literal("running-omp"), startedAt: Schema.Natural }),
+    Schema.Struct({ kind: Schema.Literal("reporting-failure"), startedAt: Schema.Natural }),
     Schema.Struct({
       kind: Schema.Literal("finished"),
       finishedAt: Schema.Natural,
@@ -324,22 +354,16 @@ export class SchedulePlatformService extends Context.Service<
 >()("@pico/contract/schedule/SchedulePlatform") {}
 
 export interface ScheduleRunHost {
-  /** The scheduler uses this while a script runs against a prepared chat. */
-  readonly withScriptActivity: <A, E, R>(
-    chatId: typeof ChatId.Type,
-    script: Effect.Effect<A, E, R>,
-  ) => Effect.Effect<A, E | ScheduleHostError, R>;
   readonly resolveTarget: (
     input: ScheduleTargetInput,
   ) => Effect.Effect<ScheduleTarget, ScheduleHostError>;
-  readonly prepare: (
-    destination: ScheduleRunDestination,
-  ) => Effect.Effect<ResolvedScheduleRunTarget, ScheduleHostError>;
+  readonly scriptTarget: (
+    destination: ScheduleTarget,
+  ) => Effect.Effect<ScheduleScriptTarget, ScheduleHostError>;
   readonly materialize: (input: {
     readonly destination: ScheduleRunDestination;
-    readonly target: ResolvedScheduleRunTarget;
     readonly title: string;
-  }) => Effect.Effect<void, ScheduleHostError>;
+  }) => Effect.Effect<ResolvedScheduleRunTarget, ScheduleHostError>;
   readonly deliver: (
     chatId: typeof ChatId.Type,
     message: AgentAssistantMessage,
@@ -387,6 +411,17 @@ export class Schedules extends Context.Service<
     ) => Effect.Effect<ScheduleView, ScheduleError>;
     /** OMP removes the live definition, retaining run history. */
     readonly remove: (caller: ScheduleCaller, id: ScheduleId) => Effect.Effect<void, ScheduleError>;
+    /** OMP calls this when the user requests an immediate schedule run. */
+    readonly trigger: (
+      caller: ScheduleCaller,
+      id: ScheduleId,
+    ) => Effect.Effect<
+      {
+        readonly scheduleId: ScheduleId;
+        readonly runId: ScheduleRunId;
+      },
+      ScheduleError
+    >;
     /** Application holds this scope while checking references and deleting a workspace. */
     readonly withCurrentTargets: <A, E, R>(
       use: (targets: readonly ScheduleTarget[]) => Effect.Effect<A, E, R>,

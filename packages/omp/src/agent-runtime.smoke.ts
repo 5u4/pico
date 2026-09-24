@@ -51,6 +51,7 @@ const smoke = Effect.fn("AgentRuntime.smoke")(function* () {
     get: () => Effect.die("unexpected schedule get"),
     update: () => Effect.die("unexpected schedule update"),
     remove: () => Effect.die("unexpected schedule delete"),
+    trigger: () => Effect.die("unexpected schedule trigger"),
     start: () => Effect.die("unexpected scheduler start"),
   });
   const persistenceLayer = Persistence.layer(storeFile);

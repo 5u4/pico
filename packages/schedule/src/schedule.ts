@@ -36,6 +36,7 @@ import {
   publishRun,
   readRunDefinition,
   readRuns,
+  runDirectory,
   writeArtifactString,
   writeRun,
 } from "./run-storage.ts";
@@ -99,7 +100,7 @@ const summarizeRun = (run: Schedule.ScheduleRunLifecycle): Schedule.ScheduleRunS
   const base = {
     id: run.id,
     definitionRevision: run.definitionRevision,
-    scheduledFor: run.source.scheduledFor,
+    source: run.source,
     claimedAt: run.claimedAt,
   };
   const state = run.state;
@@ -109,6 +110,7 @@ const summarizeRun = (run: Schedule.ScheduleRunLifecycle): Schedule.ScheduleRunS
       return { ...base, state: { kind: state.kind } };
     case "running-script":
     case "running-omp":
+    case "reporting-failure":
       return { ...base, state: { kind: state.kind, startedAt: state.startedAt } };
     case "finished":
       return {
@@ -184,6 +186,115 @@ const latestCronSlot = (
   return Cron.prev(parsed.success, now + 1_000).getTime();
 };
 
+interface FailureCapture {
+  readonly bytes: Uint8Array;
+  readonly totalBytes: number;
+  readonly truncated: boolean;
+}
+
+interface FailureDiagnostics {
+  readonly stdout?: FailureCapture;
+  readonly stderr?: FailureCapture;
+}
+
+const captureMetadata = Schema.Struct({
+  totalBytes: Schema.Natural,
+  truncated: Schema.Boolean,
+});
+const decodeCaptureMetadata = Schema.decodeUnknownOption(
+  Schema.fromJsonString(
+    Schema.Struct({
+      stdout: Schema.optional(captureMetadata),
+      stderr: Schema.optional(captureMetadata),
+    }),
+  ),
+);
+
+const decodeCaptureText = (capture: FailureCapture) => {
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(capture.bytes);
+  } catch {
+    return `[invalid utf-8 bytes, replacement shown]\n${new TextDecoder().decode(capture.bytes)}`;
+  }
+};
+
+const renderCapture = (label: "stdout" | "stderr", capture?: FailureCapture) => {
+  if (capture === undefined) return "";
+  const decoded = decodeCaptureText(capture);
+  const truncation = capture.truncated
+    ? ` [truncated ${capture.bytes.byteLength}/${capture.totalBytes} bytes]`
+    : ` [${capture.totalBytes} bytes]`;
+  const text = decoded.length === 0 ? "[empty]" : decoded;
+  return `\n\n${label}${truncation}\n${text}`;
+};
+
+const renderFailureMessage = (
+  run: Schedule.ScheduleRunLifecycle,
+  name: string,
+  outcome: Extract<Schedule.TerminalOutcome, { readonly kind: "failed" }>,
+  diagnostics: FailureDiagnostics,
+) =>
+  [
+    `Schedule run failed`,
+    `name: ${name}`,
+    `scheduleId: ${run.scheduleId}`,
+    `runId: ${run.id}`,
+    `stage: ${outcome.stage}`,
+    `message: ${outcome.message}`,
+    renderCapture("stderr", diagnostics.stderr),
+    renderCapture("stdout", diagnostics.stdout),
+  ].join("\n");
+
+const readFailureDiagnostics = Effect.fn("Schedules.readFailureDiagnostics")(function* (
+  storage: Storage,
+  run: Schedule.ScheduleRunLifecycle,
+) {
+  const directory = runDirectory(storage, run.scheduleId, run.id);
+  const stdoutBytes = yield* storage.fileSystem
+    .readFile(storage.path.join(directory, "script", "stdout.bin"))
+    .pipe(
+      Effect.map(Option.some),
+      Effect.catch((cause) =>
+        cause.reason._tag === "NotFound" ? Effect.succeed(Option.none()) : Effect.fail(cause),
+      ),
+    );
+  const stderrBytes = yield* storage.fileSystem
+    .readFile(storage.path.join(directory, "script", "stderr.bin"))
+    .pipe(
+      Effect.map(Option.some),
+      Effect.catch((cause) =>
+        cause.reason._tag === "NotFound" ? Effect.succeed(Option.none()) : Effect.fail(cause),
+      ),
+    );
+  const rawResult = yield* storage.fileSystem
+    .readFileString(storage.path.join(directory, "script", "result.json"))
+    .pipe(
+      Effect.map(Option.some),
+      Effect.catch((cause) =>
+        cause.reason._tag === "NotFound" ? Effect.succeed(Option.none()) : Effect.fail(cause),
+      ),
+    );
+  const parsed = Option.getOrUndefined(Option.flatMap(rawResult, decodeCaptureMetadata));
+  const makeCapture = (
+    bytes: Option.Option<Uint8Array>,
+    stream: "stdout" | "stderr",
+  ): FailureCapture | undefined => {
+    if (Option.isNone(bytes)) return undefined;
+    const stats = stream === "stdout" ? parsed?.stdout : parsed?.stderr;
+    return {
+      bytes: bytes.value,
+      totalBytes: stats?.totalBytes ?? bytes.value.byteLength,
+      truncated: stats?.truncated ?? false,
+    };
+  };
+  const stdout = makeCapture(stdoutBytes, "stdout");
+  const stderr = makeCapture(stderrBytes, "stderr");
+  return {
+    ...(stdout === undefined ? {} : { stdout }),
+    ...(stderr === undefined ? {} : { stderr }),
+  } satisfies FailureDiagnostics;
+});
+
 const capture = Effect.fn("Schedules.capture")(function* (
   schedulesDir: AbsolutePath,
   resolveTarget: Schedule.ScheduleRunHost["resolveTarget"],
@@ -195,12 +306,18 @@ const capture = Effect.fn("Schedules.capture")(function* (
   const mutation = Semaphore.makeUnsafe(1);
   const wake = yield* Queue.sliding<void>(1);
   const invalidDefinitions = new Set<Schedule.ScheduleId>();
+  interface RunnerState {
+    readonly host: Schedule.ScheduleRunHost;
+    readonly scope: Scope.Scope;
+  }
+  let runner: RunnerState | undefined;
 
   const transactionId = () =>
     crypto.randomUUIDv7.pipe(
       Effect.mapError(() => scheduleError("io", "Failed to generate schedule identity")),
     );
   const storage: Storage = { fileSystem, path, schedulesDir, temporaryId: transactionId };
+  const initialize = yield* Effect.cached(mutation.withPermit(bootstrap(storage)));
 
   const loadOwned = Effect.fn("Schedules.loadOwned")(function* (
     caller: Schedule.ScheduleCaller,
@@ -456,6 +573,14 @@ const capture = Effect.fn("Schedules.capture")(function* (
       let completion:
         | { readonly outcome: Schedule.TerminalOutcome; readonly category: string }
         | undefined;
+      const destination: Schedule.ScheduleRunDestination =
+        definition.target.kind === "chat"
+          ? definition.target
+          : { ...definition.target, newChatId: run.plannedTarget.chatId };
+      const materialize = yield* Effect.cached(
+        host.materialize({ destination, title: definition.name }),
+      );
+
       const complete = (
         outcome: Schedule.TerminalOutcome,
         category = outcome.kind === "failed" ? "operation" : outcome.kind,
@@ -471,65 +596,123 @@ const capture = Effect.fn("Schedules.capture")(function* (
         return complete({ kind: "failed", stage, message });
       };
 
+      const resolveMaterializedTarget = Effect.fn("Schedules.resolveMaterializedTarget")(
+        function* () {
+          const resolved = yield* materialize.pipe(Effect.result);
+          if (Result.isFailure(resolved)) return resolved;
+          current = {
+            ...scheduleRunBase(current),
+            state: { kind: "target-resolved", target: resolved.success },
+          };
+          yield* writeRun(storage, current, yield* transactionId());
+          yield* writeArtifactString(
+            storage,
+            current,
+            "target/result.json",
+            JSON.stringify({
+              chatId: resolved.success.chatId,
+              workspaceId: resolved.success.workspaceId,
+              cwd: resolved.success.cwd,
+            }),
+          );
+          return resolved;
+        },
+      );
+
+      const notifyFailure = Effect.fn("Schedules.notifyFailure")(function* (
+        outcome: Extract<Schedule.TerminalOutcome, { readonly kind: "failed" }>,
+      ): Effect.fn.Return<Schedule.FailedScheduleNotification, Schedule.ScheduleError> {
+        const reporting: Schedule.ScheduleRunLifecycle = {
+          ...scheduleRunBase(current),
+          state: {
+            kind: "reporting-failure",
+            startedAt: yield* Clock.currentTimeMillis,
+            outcome,
+          },
+        };
+        yield* writeRun(storage, reporting, yield* transactionId()).pipe(
+          Effect.tap(() =>
+            Effect.sync(() => {
+              current = reporting;
+            }),
+          ),
+          Effect.catchCause((cause) =>
+            Cause.hasInterruptsOnly(cause)
+              ? Effect.failCause(cause)
+              : Effect.logError("Failed to persist reporting-failure state").pipe(
+                  Effect.annotateLogs({
+                    phase: "failure-reporting-state",
+                    category: failureCategory(cause),
+                  }),
+                ),
+          ),
+        );
+        const diagnostics = yield* readFailureDiagnostics(storage, current).pipe(
+          Effect.catchCause((cause) =>
+            Cause.hasInterruptsOnly(cause)
+              ? Effect.interrupt
+              : Effect.logError("Failed to read run diagnostics for failure report").pipe(
+                  Effect.annotateLogs({
+                    phase: "failure-diagnostics",
+                    category: failureCategory(cause),
+                  }),
+                  Effect.as({} satisfies FailureDiagnostics),
+                ),
+          ),
+        );
+        const target = yield* materialize.pipe(Effect.result);
+        if (Result.isFailure(target)) {
+          return {
+            kind: "failed",
+            message: target.failure.message,
+          } satisfies Schedule.FailedScheduleNotification;
+        }
+        const rendered = renderFailureMessage(current, definition.name, outcome, diagnostics);
+        const notified = yield* host.publish(target.success.chatId, rendered).pipe(Effect.exit);
+        if (Exit.isSuccess(notified)) {
+          return { kind: "delivered" } satisfies Schedule.FailedScheduleNotification;
+        }
+        if (Cause.hasInterruptsOnly(notified.cause)) {
+          return { kind: "interrupted" } satisfies Schedule.FailedScheduleNotification;
+        }
+        const reason = notified.cause.reasons.find(Cause.isFailReason)?.error;
+        return {
+          kind: "failed",
+          message:
+            reason instanceof Schedule.ScheduleHostError
+              ? reason.message
+              : "Failed to report scheduled run failure",
+        } satisfies Schedule.FailedScheduleNotification;
+      });
+
       yield* Effect.logInfo("Scheduled run started");
       yield* Effect.gen(function* () {
-        const destination: Schedule.ScheduleRunDestination =
-          definition.target.kind === "chat"
-            ? definition.target
-            : { ...definition.target, newChatId: run.plannedTarget.chatId };
-        const targetResult = yield* host.prepare(destination).pipe(Effect.result);
-        if (Result.isFailure(targetResult)) {
-          yield* fail("target", targetResult.failure.message);
-          return;
-        }
-        const target = targetResult.success;
-        current = {
-          ...scheduleRunBase(run),
-          state: { kind: "target-resolved", target },
-        };
-        yield* writeRun(storage, current, yield* transactionId());
-        yield* writeArtifactString(
-          storage,
-          current,
-          "target/result.json",
-          JSON.stringify({
-            chatId: target.chatId,
-            workspaceId: target.workspaceId,
-            cwd: target.cwd,
-          }),
-        );
-        failureStage = "protocol";
-
         let decision: Schedule.ScriptDecision;
         if (!input.hasScript) {
           decision = { agent: true };
           yield* writeArtifactString(storage, current, "decision.json", JSON.stringify(decision));
         } else {
+          const scriptTarget = yield* host.scriptTarget(definition.target).pipe(Effect.result);
+          if (Result.isFailure(scriptTarget)) {
+            yield* fail("target", scriptTarget.failure.message);
+            return;
+          }
           failureStage = "script";
           current = {
             ...scheduleRunBase(current),
-            state: { kind: "running-script", target, startedAt: yield* Clock.currentTimeMillis },
+            state: { kind: "running-script", startedAt: yield* Clock.currentTimeMillis },
           };
           yield* writeRun(storage, current, yield* transactionId());
-          const script = yield* host
-            .withScriptActivity(
-              target.chatId,
-              runScript(
-                storage,
-                executable,
-                current,
-                target,
-                definition.scriptTimeoutMs ?? Schedule.DEFAULT_SCRIPT_TIMEOUT_MS,
-              ),
-            )
-            .pipe(Effect.result);
+          const script = yield* runScript(
+            storage,
+            executable,
+            current,
+            scriptTarget.success,
+            definition.scriptTimeoutMs ?? Schedule.DEFAULT_SCRIPT_TIMEOUT_MS,
+          ).pipe(Effect.result);
           if (Result.isFailure(script)) {
             const stage =
-              script.failure._tag === "ScriptRunError"
-                ? script.failure.stage
-                : script.failure._tag === "ScheduleHostError"
-                  ? "target"
-                  : "script";
+              script.failure._tag === "ScriptRunError" ? script.failure.stage : "script";
             yield* fail(stage, script.failure.message);
             return;
           }
@@ -551,22 +734,17 @@ const capture = Effect.fn("Schedules.capture")(function* (
           yield* fail("protocol", "Script requested an agent run without providing input");
           return;
         }
-        failureStage = "target";
-        const materialized = yield* host
-          .materialize({
-            destination,
-            target,
-            title: definition.name,
-          })
-          .pipe(Effect.result);
-        if (Result.isFailure(materialized)) {
-          yield* fail("target", materialized.failure.message);
-          return;
-        }
+
         if (!decision.agent && decision.content !== undefined) {
+          failureStage = "target";
+          const target = yield* resolveMaterializedTarget();
+          if (Result.isFailure(target)) {
+            yield* fail("target", target.failure.message);
+            return;
+          }
           failureStage = "publish";
           const published = yield* host
-            .publish(target.chatId, decision.content)
+            .publish(target.success.chatId, decision.content)
             .pipe(Effect.result);
           if (Result.isFailure(published)) {
             yield* fail("publish", published.failure.message);
@@ -576,11 +754,21 @@ const capture = Effect.fn("Schedules.capture")(function* (
           return;
         }
 
+        failureStage = "target";
+        const target = yield* resolveMaterializedTarget();
+        if (Result.isFailure(target)) {
+          yield* fail("target", target.failure.message);
+          return;
+        }
         failureStage = "omp";
         yield* writeArtifactString(storage, current, "omp/request.md", request);
         current = {
           ...scheduleRunBase(current),
-          state: { kind: "running-omp", target, startedAt: yield* Clock.currentTimeMillis },
+          state: {
+            kind: "running-omp",
+            target: target.success,
+            startedAt: yield* Clock.currentTimeMillis,
+          },
         };
         yield* writeRun(storage, current, yield* transactionId());
         yield* Effect.all(
@@ -598,7 +786,7 @@ const capture = Effect.fn("Schedules.capture")(function* (
         );
         const captured = yield* host
           .runPrompt(
-            target.chatId,
+            target.success.chatId,
             current.id,
             AgentMessage.AgentPrompt.make({ text: request, attachments: [] }),
             (event) =>
@@ -638,10 +826,18 @@ const capture = Effect.fn("Schedules.capture")(function* (
         }
         const text = captured.success.finalAssistantText;
         if (captured.success.outcome !== "completed") {
-          yield* complete(
-            { kind: "failed", stage: "omp", message: `OMP run ${captured.success.outcome}` },
-            captured.success.outcome === "aborted" ? "cancelled" : "agent",
-          );
+          if (captured.success.outcome === "aborted") {
+            yield* complete(
+              { kind: "interrupted", phase: `omp-${captured.success.outcome}` },
+              "cancelled",
+            );
+          } else {
+            yield* complete({
+              kind: "failed",
+              stage: "omp",
+              message: `OMP run ${captured.success.outcome}`,
+            });
+          }
         }
         yield* Effect.all(
           [
@@ -679,7 +875,9 @@ const capture = Effect.fn("Schedules.capture")(function* (
           return;
         }
         failureStage = "publish";
-        const delivery = yield* host.deliver(target.chatId, settlement.message).pipe(Effect.result);
+        const delivery = yield* host
+          .deliver(target.success.chatId, settlement.message)
+          .pipe(Effect.result);
         if (Result.isFailure(delivery)) {
           yield* fail("publish", delivery.failure.message);
           return;
@@ -711,16 +909,32 @@ const capture = Effect.fn("Schedules.capture")(function* (
                 };
               }
             }
-            const { outcome, category } = completion;
+            let outcome = completion.outcome;
+            if (outcome.kind === "failed") {
+              const notification: Schedule.FailedScheduleNotification =
+                Exit.isFailure(exit) && Cause.hasInterrupts(exit.cause)
+                  ? { kind: "interrupted" }
+                  : yield* notifyFailure(outcome).pipe(
+                      Effect.interruptible,
+                      Effect.catchCause((cause) =>
+                        Effect.succeed<Schedule.FailedScheduleNotification>(
+                          Cause.hasInterruptsOnly(cause)
+                            ? { kind: "interrupted" }
+                            : { kind: "failed", message: "Failed to report scheduled run failure" },
+                        ),
+                      ),
+                    );
+              outcome = { ...outcome, notification };
+            }
             const finalized = yield* finishFallback(current, outcome).pipe(Effect.exit);
             const annotations = {
               phase: outcome.kind === "failed" ? outcome.stage : current.state.kind,
               outcome: outcome.kind,
-              category,
+              category: completion.category,
               persisted: Exit.isSuccess(finalized),
             };
             yield* (
-              outcome.kind === "failed" && category !== "cancelled"
+              outcome.kind === "failed" && completion.category !== "cancelled"
                 ? Effect.logError("Scheduled run failed")
                 : Effect.logInfo("Scheduled run finished")
             ).pipe(Effect.annotateLogs(annotations));
@@ -761,14 +975,94 @@ const capture = Effect.fn("Schedules.capture")(function* (
       effect.pipe(Effect.annotateLogs({ ...runAnnotations(run), operation: "execute" })),
   );
 
+  const dispatchClaimedRun = Effect.fn("Schedules.dispatchClaimedRun")(function* (
+    runnerState: RunnerState,
+    run: Schedule.ScheduleRunLifecycle,
+    definition: Schedule.ScheduleDefinition,
+    input: ExecutionInput,
+  ) {
+    if (runnerState.scope.state._tag === "Closed") {
+      yield* finishFallback(run, { kind: "interrupted", phase: "schedule-cycle" }).pipe(
+        Effect.catchCause((cause) =>
+          Effect.logError("Failed to finish a claim after scheduler shutdown").pipe(
+            Effect.annotateLogs({
+              ...runAnnotations(run),
+              phase: "claim-cleanup",
+              category: failureCategory(cause),
+            }),
+          ),
+        ),
+      );
+      return;
+    }
+    let fallback: Schedule.TerminalOutcome = { kind: "interrupted", phase: "schedule-cycle" };
+    yield* Effect.gen(function* () {
+      const now = yield* Clock.currentTimeMillis;
+      if (run.source.kind === "scheduled" && now - run.source.scheduledFor > MISSED_GRACE_MILLIS) {
+        fallback = { kind: "missed", scheduledFor: run.source.scheduledFor, observedAt: now };
+        const terminal = yield* finish(run, fallback);
+        yield* Effect.logInfo("Scheduled run finished").pipe(
+          Effect.annotateLogs({
+            ...runAnnotations(terminal),
+            operation: "scan",
+            phase: "missed",
+            outcome: "missed",
+          }),
+        );
+        yield* disableFinishedOnce(terminal, definition);
+        return;
+      }
+      yield* executeRun(runnerState.host, run, definition, input);
+    }).pipe(
+      Effect.interruptible,
+      Effect.onExit((exit) =>
+        Exit.isSuccess(exit)
+          ? Effect.void
+          : Effect.gen(function* () {
+              const interrupted = Cause.hasInterruptsOnly(exit.cause);
+              if (!interrupted && fallback.kind === "missed") {
+                yield* Effect.logError("Scheduled run finalization failed").pipe(
+                  Effect.annotateLogs({
+                    ...runAnnotations(run),
+                    phase: "finalize",
+                    category: failureCategory(exit.cause),
+                  }),
+                );
+              }
+              yield* finishFallback(
+                run,
+                interrupted ? { kind: "interrupted", phase: "schedule-cycle" } : fallback,
+              ).pipe(
+                Effect.catchCause((cause) =>
+                  Cause.hasInterruptsOnly(cause)
+                    ? Effect.void
+                    : Effect.logError("Failed to finish an interrupted schedule claim").pipe(
+                        Effect.annotateLogs({
+                          ...runAnnotations(run),
+                          phase: "claim-cleanup",
+                          category: failureCategory(cause),
+                        }),
+                      ),
+                ),
+              );
+            }),
+      ),
+      Effect.forkIn(runnerState.scope, { startImmediately: true }),
+      Effect.asVoid,
+    );
+  });
+
   const claim = Effect.fn("Schedules.claim")(function* (
     view: Schedule.ReadyScheduleView,
     source: Schedule.ScheduleRunSource,
-    owned: Set<Schedule.ScheduleRunLifecycle>,
+    runnerState: RunnerState,
   ) {
-    const id = Schedule.ScheduleRunId.make(
-      `scheduled-${source.scheduledFor}-${view.definition.revision}`,
-    );
+    const id =
+      source.kind === "scheduled"
+        ? Schedule.ScheduleRunId.make(
+            `scheduled-${source.scheduledFor}-${view.definition.revision}`,
+          )
+        : Schedule.ScheduleRunId.make(`manual-${yield* transactionId()}`);
     const chatId =
       view.definition.target.kind === "chat"
         ? view.definition.target.chatId
@@ -795,162 +1089,138 @@ const capture = Effect.fn("Schedules.capture")(function* (
       claimedAt: yield* Clock.currentTimeMillis,
       state: { kind: "claimed" },
     };
-    const input = yield* publishRun(
+    yield* publishRun(
       storage,
       run,
       view.definition,
       view.sourceDirectory,
       yield* transactionId(),
-      Effect.sync(() => void owned.add(run)),
+      (execution) => dispatchClaimedRun(runnerState, run, view.definition, execution),
     );
     yield* Effect.logInfo("Scheduled run claimed").pipe(
       Effect.annotateLogs({ ...runAnnotations(run), operation: "claim", phase: "claimed" }),
     );
-    return { run, input };
+    return run;
+  });
+
+  const trigger = Effect.fn("Schedules.trigger")(function* (
+    caller: Schedule.ScheduleCaller,
+    id: Schedule.ScheduleId,
+  ) {
+    return yield* mutation.withPermit(
+      Effect.gen(function* () {
+        const runnerState = runner;
+        if (runnerState === undefined || runnerState.scope.state._tag === "Closed") {
+          return yield* scheduleError("busy", "Scheduler is not running");
+        }
+        yield* reconcileUpdates(storage);
+        const loaded = yield* loadOwned(caller, id);
+        const view = invalidExternalView(loaded);
+        if (view.kind !== "ready") {
+          return yield* scheduleError("invalid", "Schedule is invalid");
+        }
+        if (view.state !== "enabled") {
+          return yield* scheduleError("busy", "Schedule is disabled");
+        }
+        const triggerError = validateTrigger(view.definition.trigger);
+        if (triggerError !== undefined) {
+          return yield* scheduleError("invalid", triggerError);
+        }
+        const runs = yield* readRuns(storage, view.id);
+        if (runs.some((run) => run.state.kind !== "finished")) {
+          return yield* scheduleError("busy", "Schedule run already in progress");
+        }
+        const currentRuns = runs.filter(
+          (run) => run.definitionRevision === view.definition.revision,
+        );
+        if (view.definition.trigger.kind === "once" && currentRuns.length > 0) {
+          return yield* scheduleError("busy", "Once schedule already consumed");
+        }
+        const run = yield* claim(view, { kind: "manual" }, runnerState);
+        return { scheduleId: run.scheduleId, runId: run.id };
+      }),
+    );
   });
 
   const scheduleCycle = Effect.fn("Schedules.scheduleCycle")(function* (
-    host: Schedule.ScheduleRunHost,
-  ): Effect.fn.Return<void, Schedule.ScheduleError, Scope.Scope> {
-    const owned = new Set<Schedule.ScheduleRunLifecycle>();
-    const cleanupOwned = Effect.suspend(() =>
-      Effect.forEach(
-        [...owned.values()],
-        (run) =>
-          finishFallback(run, { kind: "interrupted", phase: "schedule-cycle" }).pipe(
-            Effect.asVoid,
-            Effect.catchCause((cause) =>
-              Cause.hasInterruptsOnly(cause)
-                ? Effect.void
-                : Effect.logError("Failed to finish an interrupted schedule claim").pipe(
-                    Effect.annotateLogs({
-                      ...runAnnotations(run),
-                      operation: "scan",
-                      phase: "claim-cleanup",
-                      category: failureCategory(cause),
-                    }),
-                  ),
-            ),
-          ),
-        { discard: true },
-      ),
-    );
+    runnerState: RunnerState,
+  ): Effect.fn.Return<void, Schedule.ScheduleError> {
+    yield* mutation.withPermit(
+      Effect.gen(function* () {
+        if (runner !== runnerState || runnerState.scope.state._tag === "Closed") return;
+        yield* reconcileUpdates(storage);
+        const now = yield* Clock.currentTimeMillis;
+        const schedules = yield* scanSchedules(storage);
+        const invalid = new Set<Schedule.ScheduleId>();
+        for (const loaded of schedules) {
+          const view = invalidExternalView(loaded);
+          if (view.kind !== "invalid") continue;
+          invalid.add(view.id);
+          if (!invalidDefinitions.has(view.id)) {
+            yield* Effect.logWarning("Invalid schedule definition excluded from execution").pipe(
+              Effect.annotateLogs({
+                component: "schedule",
+                operation: "scan",
+                phase: "definition",
+                scheduleId: view.id,
+                state: view.state,
+                category: view.state === "conflicted" ? "conflict" : "invalid",
+              }),
+            );
+          }
+        }
+        for (const loaded of schedules) {
+          if (loaded.view.kind !== "ready" || loaded.view.state !== "enabled") continue;
+          if (validateTrigger(loaded.view.definition.trigger) !== undefined) continue;
+          const view = loaded.view;
+          const existing = yield* readRuns(storage, view.id);
+          if (existing.some((run) => run.state.kind !== "finished")) continue;
+          const currentRuns = existing.filter(
+            (run) => run.definitionRevision === view.definition.revision,
+          );
 
-    return yield* Effect.gen(function* () {
-      const claimed = yield* mutation.withPermit(
-        Effect.gen(function* () {
-          yield* reconcileUpdates(storage);
-          const now = yield* Clock.currentTimeMillis;
-          const schedules = yield* scanSchedules(storage);
-          const invalid = new Set<Schedule.ScheduleId>();
-          for (const loaded of schedules) {
-            const view = invalidExternalView(loaded);
-            if (view.kind !== "invalid") continue;
+          let source: Schedule.ScheduleRunSource | undefined;
+          if (view.definition.trigger.kind === "once") {
+            if (currentRuns.length > 0) {
+              yield* disableDefinition(view.id, view.definition.revision);
+              continue;
+            }
+            if (view.definition.trigger.at > now) continue;
+            source = { kind: "scheduled", scheduledFor: view.definition.trigger.at };
+          } else {
+            const latest = latestCronSlot(view.definition.trigger, now);
+            if (latest === undefined || latest <= view.definition.createdAt) continue;
+            if (
+              currentRuns.some(
+                (run) => run.source.kind === "scheduled" && run.source.scheduledFor === latest,
+              )
+            ) {
+              continue;
+            }
+            source = { kind: "scheduled", scheduledFor: latest };
+          }
+
+          const claimed = yield* claim(view, source, runnerState).pipe(Effect.result);
+          if (Result.isFailure(claimed)) {
             invalid.add(view.id);
             if (!invalidDefinitions.has(view.id)) {
-              yield* Effect.logWarning("Invalid schedule definition excluded from execution").pipe(
+              yield* Effect.logWarning("Schedule source capture failed").pipe(
                 Effect.annotateLogs({
                   component: "schedule",
                   operation: "scan",
-                  phase: "definition",
+                  phase: "source",
                   scheduleId: view.id,
                   state: view.state,
-                  category: view.state === "conflicted" ? "conflict" : "invalid",
+                  category: claimed.failure.kind,
                 }),
               );
             }
           }
-          const pending: Array<{
-            readonly run: Schedule.ScheduleRunLifecycle;
-            readonly definition: Schedule.ScheduleDefinition;
-            readonly input: ExecutionInput;
-            readonly missed: boolean;
-          }> = [];
-          for (const loaded of schedules) {
-            if (loaded.view.kind !== "ready" || loaded.view.state !== "enabled") continue;
-            if (validateTrigger(loaded.view.definition.trigger) !== undefined) continue;
-            const view = loaded.view;
-            const existing = yield* readRuns(storage, view.id);
-            if (existing.some((run) => run.state.kind !== "finished")) continue;
-            const currentRuns = existing.filter(
-              (run) => run.definitionRevision === view.definition.revision,
-            );
-
-            let scheduledFor: number;
-            if (view.definition.trigger.kind === "once") {
-              scheduledFor = view.definition.trigger.at;
-              if (currentRuns.some((run) => run.source.scheduledFor === scheduledFor)) {
-                yield* disableDefinition(view.id, view.definition.revision);
-                continue;
-              }
-              if (scheduledFor > now) continue;
-            } else {
-              const latest = latestCronSlot(view.definition.trigger, now);
-              if (latest === undefined || latest <= view.definition.createdAt) continue;
-              scheduledFor = latest;
-              if (currentRuns.some((run) => run.source.scheduledFor === scheduledFor)) continue;
-            }
-
-            const claimed = yield* claim(view, { kind: "scheduled", scheduledFor }, owned).pipe(
-              Effect.result,
-            );
-            if (Result.isFailure(claimed)) {
-              invalid.add(view.id);
-              if (!invalidDefinitions.has(view.id)) {
-                yield* Effect.logWarning("Schedule source capture failed").pipe(
-                  Effect.annotateLogs({
-                    component: "schedule",
-                    operation: "scan",
-                    phase: "source",
-                    scheduleId: view.id,
-                    state: view.state,
-                    category: claimed.failure.kind,
-                  }),
-                );
-              }
-              continue;
-            }
-            pending.push({
-              run: claimed.success.run,
-              definition: view.definition,
-              input: claimed.success.input,
-              missed: now - scheduledFor > MISSED_GRACE_MILLIS,
-            });
-          }
-          invalidDefinitions.clear();
-          for (const id of invalid) invalidDefinitions.add(id);
-          return pending;
-        }),
-      );
-
-      for (const item of claimed) {
-        if (item.missed) {
-          const terminal = yield* finish(item.run, {
-            kind: "missed",
-            scheduledFor: item.run.source.scheduledFor,
-            observedAt: yield* Clock.currentTimeMillis,
-          });
-          yield* Effect.logInfo("Scheduled run finished").pipe(
-            Effect.annotateLogs({
-              ...runAnnotations(terminal),
-              operation: "scan",
-              phase: "missed",
-              outcome: "missed",
-            }),
-          );
-          yield* disableFinishedOnce(terminal, item.definition);
-          owned.delete(item.run);
-        } else {
-          yield* Effect.uninterruptible(
-            executeRun(host, item.run, item.definition, item.input).pipe(
-              Effect.forkScoped({ startImmediately: true }),
-              Effect.tap(() => Effect.sync(() => owned.delete(item.run))),
-              Effect.asVoid,
-            ),
-          );
         }
-      }
-    }).pipe(Effect.ensuring(cleanupOwned));
+        invalidDefinitions.clear();
+        for (const id of invalid) invalidDefinitions.add(id);
+      }),
+    );
   });
 
   const reconcile = Effect.fn("Schedules.reconcile")(function* () {
@@ -960,64 +1230,96 @@ const capture = Effect.fn("Schedules.capture")(function* (
       const terminal =
         run.state.kind === "finished"
           ? run
-          : yield* finish(run, { kind: "interrupted", phase: run.state.kind });
+          : run.state.kind === "reporting-failure"
+            ? yield* finish(run, {
+                ...run.state.outcome,
+                notification: { kind: "interrupted" },
+              })
+            : yield* finish(run, { kind: "interrupted", phase: run.state.kind });
       if (run.state.kind !== "finished") {
         yield* Effect.logInfo("Interrupted scheduled run reconciled").pipe(
           Effect.annotateLogs({
             ...runAnnotations(run),
             operation: "reconcile",
             phase: run.state.kind,
-            outcome: "interrupted",
+            outcome:
+              terminal.state.kind === "finished" ? terminal.state.outcome.kind : "interrupted",
           }),
         );
       }
-      yield* disableFinishedOnce(terminal, definition);
+      if (definition.trigger.kind === "once" && definition.revision === run.definitionRevision) {
+        yield* disableDefinition(run.scheduleId, run.definitionRevision);
+      }
     }
   });
-
-  const initialize = yield* Effect.cached(bootstrap(storage));
 
   const start = Effect.fn("Schedules.start")(function* (
     host: Schedule.ScheduleRunHost,
   ): Effect.fn.Return<void, Schedule.ScheduleError, Scope.Scope> {
     yield* initialize;
-    yield* reconcile();
-    const cycle = scheduleCycle(host).pipe(
-      Effect.catchCause((cause) =>
-        Cause.hasInterruptsOnly(cause)
-          ? Effect.failCause(cause)
-          : Effect.logError("Schedule scan failed").pipe(
-              Effect.annotateLogs({
-                component: "schedule",
-                operation: "scan",
-                phase: "cycle",
-                category: failureCategory(cause),
-              }),
-              Effect.andThen(Cause.hasInterrupts(cause) ? Effect.interrupt : Effect.void),
-            ),
-      ),
+    const scope = yield* Effect.scope;
+    const runnerState: RunnerState = { host, scope };
+    const clearRunner = mutation.withPermit(
+      Effect.sync(() => {
+        if (runner === runnerState) runner = undefined;
+      }),
     );
-    yield* cycle;
-    yield* Effect.logInfo("Scheduler started").pipe(
-      Effect.annotateLogs({ component: "schedule", operation: "start" }),
-    );
-    const wait = Effect.race(Queue.take(wake), Effect.sleep(RESCAN_INTERVAL));
-    yield* Effect.forever(wait.pipe(Effect.andThen(cycle))).pipe(
-      Effect.onExit((exit) =>
-        Exit.isFailure(exit) && !Cause.hasInterruptsOnly(exit.cause)
-          ? Effect.logError("Schedule scan loop stopped unexpectedly").pipe(
-              Effect.annotateLogs({
-                component: "schedule",
-                operation: "scan",
-                phase: "loop",
-                category: failureCategory(exit.cause),
-              }),
-            )
-          : Effect.logDebug("Schedule scan loop stopped").pipe(
-              Effect.annotateLogs({ component: "schedule", operation: "scan", phase: "loop" }),
-            ),
-      ),
-      Effect.forkScoped({ startImmediately: true }),
+    const loop = Effect.gen(function* () {
+      const cycle = scheduleCycle(runnerState).pipe(
+        Effect.catchCause((cause) =>
+          Cause.hasInterruptsOnly(cause)
+            ? Effect.failCause(cause)
+            : Effect.logError("Schedule scan failed").pipe(
+                Effect.annotateLogs({
+                  component: "schedule",
+                  operation: "scan",
+                  phase: "cycle",
+                  category: failureCategory(cause),
+                }),
+                Effect.andThen(Cause.hasInterrupts(cause) ? Effect.interrupt : Effect.void),
+              ),
+        ),
+      );
+      yield* cycle;
+      yield* Effect.logInfo("Scheduler started").pipe(
+        Effect.annotateLogs({ component: "schedule", operation: "start" }),
+      );
+      const wait = Effect.race(Queue.take(wake), Effect.sleep(RESCAN_INTERVAL));
+      yield* Effect.forever(wait.pipe(Effect.andThen(cycle))).pipe(
+        Effect.onExit((exit) =>
+          Exit.isFailure(exit) && !Cause.hasInterruptsOnly(exit.cause)
+            ? Effect.logError("Schedule scan loop stopped unexpectedly").pipe(
+                Effect.annotateLogs({
+                  component: "schedule",
+                  operation: "scan",
+                  phase: "loop",
+                  category: failureCategory(exit.cause),
+                }),
+              )
+            : Effect.logDebug("Schedule scan loop stopped").pipe(
+                Effect.annotateLogs({ component: "schedule", operation: "scan", phase: "loop" }),
+              ),
+        ),
+      );
+    });
+    yield* mutation.withPermit(
+      Effect.gen(function* () {
+        if (runner !== undefined) {
+          return yield* scheduleError("busy", "Scheduler is already running");
+        }
+        yield* reconcile();
+        yield* Effect.gen(function* () {
+          if (scope.state._tag === "Closed") {
+            return yield* scheduleError("busy", "Scheduler scope is closed");
+          }
+          runner = runnerState;
+          yield* loop.pipe(
+            Effect.interruptible,
+            Effect.ensuring(clearRunner),
+            Effect.forkIn(scope, { startImmediately: true }),
+          );
+        }).pipe(Effect.uninterruptible);
+      }),
     );
   });
 
@@ -1029,6 +1331,7 @@ const capture = Effect.fn("Schedules.capture")(function* (
       get,
       update,
       remove,
+      trigger,
       withCurrentTargets,
       start,
     }),

@@ -223,10 +223,10 @@ describe("Application history", () => {
       }).pipe(Effect.scoped, Effect.provide(platform)),
   );
 
-  for (const kind of ["ordinary", "captured", "script"] as const) {
+  for (const kind of ["ordinary", "captured"] as const) {
     it.effect(`denies navigation until the tracked ${kind} operation completes`, () =>
       Effect.gen(function* () {
-        const { application, host, chat, request, started, release, held } = yield* makeFixture();
+        const { application, host, chat, request, started, release } = yield* makeFixture();
         const operation = yield* Effect.gen(function* () {
           switch (kind) {
             case "ordinary": {
@@ -240,11 +240,6 @@ describe("Application history", () => {
               return yield* host
                 .runPrompt(chat.id, runId, prompt, () => Effect.void)
                 .pipe(Effect.map((result) => result.finalAssistantText));
-            case "script":
-              return yield* host.withScriptActivity(
-                chat.id,
-                held.pipe(Effect.as("script completed")),
-              );
           }
         }).pipe(Effect.forkScoped);
         yield* Deferred.await(started);

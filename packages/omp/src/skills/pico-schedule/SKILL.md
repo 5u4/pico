@@ -28,7 +28,7 @@ Schedules stay owned and managed by the workspace that created them. Supply one 
 
 Use Pico UUIDv7 IDs for `chatId` and `workspaceId`. Use a Discord thread ID for `external-chat` or a channel ID for `external-workspace`. Creation and retargeting resolve these selectors to canonical Pico IDs. An omitted update target keeps the current destination. The agent uses the destination chat's workspace and working directory, not the owner's context.
 
-Workspace targets prepare a new local chat and its working directory per run, even when the script skips. Native web, desktop, and mobile destinations stay local. Discord workspace targets create a public thread named after the schedule only when the run publishes text or starts the agent. A skipped run or an invalid agent decision creates no Discord thread.
+Workspace targets reserve a per-run chat ID but only materialize a local chat/session/worktree when the run publishes text, starts the agent, or reports a failure. Script skips leave run history only. Native web, desktop, and mobile destinations stay local. Discord workspace targets create a public thread named after the schedule only when the run publishes text, starts the agent, or reports a failure.
 
 Discord text channels must belong to an allowed guild. Unregistered channels use Discord's configured default working directory; existing channel configuration is preserved. Existing-chat selectors reuse a live, open Pico-bound thread in its expected channel. Unknown, archived, mismatched, unsupported, or unavailable destinations fail without adoption or fallback. Pico IDs and external IDs follow the same delivery rules.
 
@@ -66,6 +66,12 @@ Changing `name`, `target`, `trigger`, or `scriptTimeoutMs` creates a new metadat
 
 Pico reads v1 metadata as a reply-free v2 model while preserving the canonical target, owner, and revision. Routine reads leave `meta.json` untouched. The next metadata revision persists v2 without the legacy `replyTarget`. Source files and immutable run history remain unchanged and readable.
 
+## Trigger a schedule now
+
+Call `schedule_trigger` with `{ id }` to run an enabled schedule immediately through the same execution path as a timed trigger. Paused, invalid, and already-running schedules return errors. The tool returns `scheduleId` and `runId` after accepting the run, not after completing it. Results and raw failure diagnostics go to the schedule's configured destination.
+
+A manual trigger consumes a once schedule, including when execution skips or fails. The schedule is disabled after completion. Cron schedules keep their original timing. Call `schedule_get` after a once run finishes before editing its managed files, because disabling moves the source directory.
+
 ## Write script.js
 
 Write a Bun JavaScript program. Pico sets `process.cwd()` to the per-run snapshot directory containing `script.js`. Relative data paths and root script imports resolve inside that snapshot, not the chat's working directory or the editable `sourceDirectory`. Relative writes stay in that run's snapshot and do not carry over to future runs. Use an explicit absolute path to access files outside the snapshot.
@@ -75,10 +81,10 @@ Pico stores run metadata outside the script directory. On startup, older run sna
 When needed, read run context with `JSON.parse(await Bun.stdin.text())`. It contains:
 
 - `scheduleId`, `runId`, and `claimedAt`.
-- `source.kind`, which is `"scheduled"`, and `source.scheduledFor`.
-- `target.kind`, which is `"existing-chat"` or `"workspace-chat"`, plus `target.chatId` and `target.workspaceId`.
+- `source`, where `source.kind` is either `"scheduled"` (with `source.scheduledFor`) or `"manual"`.
+- `target.kind`, which is `"existing-chat"` or `"workspace-chat"`, plus `target.workspaceId`.
 
-Timestamps are Unix epoch milliseconds. The environment contains `PICO_SCHEDULE_ID`, `PICO_RUN_ID`, `PICO_CHAT_ID`, and `PICO_WORKSPACE_ID`. Pico forwards only `HOME`, `PATH`, `TMPDIR`, `TEMP`, `TMP`, `LANG`, and `LC_ALL` from its own environment when present.
+Timestamps are Unix epoch milliseconds. The environment contains `PICO_SCHEDULE_ID`, `PICO_RUN_ID`, and `PICO_WORKSPACE_ID`. Pico forwards only `HOME`, `PATH`, `TMPDIR`, `TEMP`, `TMP`, `LANG`, and `LC_ALL` from its own environment when present.
 
 Write one JSON object to stdout and exit successfully. Send logs to stderr with `console.error`. Only `agent` and optional non-empty `content` are accepted.
 
@@ -91,7 +97,7 @@ Write one JSON object to stdout and exit successfully. Send logs to stderr with 
 
 Pico captures the prompt from the completed snapshot before starting the script. A script that edits its snapshot's `prompt.md` does not change that run's agent input.
 
-The default script timeout is 60 seconds. `scriptTimeoutMs` controls only the script, not the agent. A nonzero exit, timeout, invalid decision, or stdout larger than 256 KiB fails the run. Failures are recorded in run history, not automatically posted to the chat.
+The default script timeout is 60 seconds. `scriptTimeoutMs` controls only the script, not the agent. A nonzero exit, timeout, invalid decision, or stdout larger than 256 KiB fails the run. Failure notifications are posted to the resolved destination when possible and include raw captured stderr/stdout with truncation metadata; notification delivery state is recorded in run history.
 
 ### Review only when the working tree has changes
 

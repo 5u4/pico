@@ -173,6 +173,7 @@ if (process.argv[2] === "runtime") {
     get: unexpected,
     update: unexpected,
     remove: unexpected,
+    trigger: unexpected,
     start: unexpected,
   });
   const platform = Layer.mergeAll(

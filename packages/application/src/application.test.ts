@@ -434,15 +434,21 @@ describe("Application", () => {
         );
         const firstScheduledId = Chat.ChatId.make("018f47a0-0000-7000-8000-000000000010");
         const secondScheduledId = Chat.ChatId.make("018f47a0-0000-7000-8000-000000000011");
-        const firstScheduled = yield* scheduleHost.prepare({
-          kind: "workspace",
-          workspaceId: worktreeWorkspace.id,
-          newChatId: firstScheduledId,
+        const firstScheduled = yield* scheduleHost.materialize({
+          destination: {
+            kind: "workspace",
+            workspaceId: worktreeWorkspace.id,
+            newChatId: firstScheduledId,
+          },
+          title: "Scheduled run",
         });
-        const secondScheduled = yield* scheduleHost.prepare({
-          kind: "workspace",
-          workspaceId: worktreeWorkspace.id,
-          newChatId: secondScheduledId,
+        const secondScheduled = yield* scheduleHost.materialize({
+          destination: {
+            kind: "workspace",
+            workspaceId: worktreeWorkspace.id,
+            newChatId: secondScheduledId,
+          },
+          title: "Scheduled run",
         });
         assert.strictEqual(firstScheduled.chatId, firstScheduledId);
         assert.strictEqual(secondScheduled.chatId, secondScheduledId);
@@ -451,16 +457,19 @@ describe("Application", () => {
         assert.strictEqual(secondScheduled.cwd, worktreeCwd);
         assert.strictEqual(firstScheduled.workspaceId, worktreeWorkspace.id);
         assert.deepStrictEqual(
-          yield* scheduleHost.prepare({
-            kind: "workspace",
-            workspaceId: worktreeWorkspace.id,
-            newChatId: firstScheduledId,
+          yield* scheduleHost.materialize({
+            destination: {
+              kind: "workspace",
+              workspaceId: worktreeWorkspace.id,
+              newChatId: firstScheduledId,
+            },
+            title: "Scheduled run",
           }),
           firstScheduled,
         );
-        const resolvedChat = yield* scheduleHost.prepare({
-          kind: "chat",
-          chatId: worktreeChat.id,
+        const resolvedChat = yield* scheduleHost.materialize({
+          destination: { kind: "chat", chatId: worktreeChat.id },
+          title: "Existing destination",
         });
         assert.deepStrictEqual(resolvedChat, {
           chatId: worktreeChat.id,
@@ -477,22 +486,9 @@ describe("Application", () => {
           },
         ] satisfies ReadonlyArray<Schedule.ScheduleRunDestination>) {
           assert.instanceOf(
-            yield* scheduleHost.prepare(destination).pipe(Effect.flip),
-            Schedule.ScheduleHostError,
-          );
-        }
-        assert.isTrue(Option.isNone(yield* chats.findById(missingChatId)));
-        yield* chats.archive(firstScheduledId, 7_000);
-        for (const destination of [
-          { kind: "chat", chatId: firstScheduledId },
-          {
-            kind: "workspace",
-            workspaceId: worktreeWorkspace.id,
-            newChatId: firstScheduledId,
-          },
-        ] satisfies ReadonlyArray<Schedule.ScheduleRunDestination>) {
-          assert.instanceOf(
-            yield* scheduleHost.prepare(destination).pipe(Effect.flip),
+            yield* scheduleHost
+              .materialize({ destination, title: "Invalid destination" })
+              .pipe(Effect.flip),
             Schedule.ScheduleHostError,
           );
         }
@@ -531,6 +527,25 @@ describe("Application", () => {
           chatId: regularChat.id,
           content: "scheduled publish",
         });
+
+        yield* chats.archive(firstScheduledId, 7_000);
+        assert.deepStrictEqual(
+          yield* scheduleHost.scriptTarget({ kind: "chat", chatId: firstScheduledId }),
+          { kind: "existing-chat", workspaceId: worktreeWorkspace.id },
+        );
+        assert.instanceOf(
+          yield* scheduleHost
+            .materialize({
+              destination: { kind: "chat", chatId: firstScheduledId },
+              title: "Archived destination",
+            })
+            .pipe(Effect.flip),
+          Schedule.ScheduleHostError,
+        );
+        assert.strictEqual(
+          Option.getOrThrow(yield* chats.findById(firstScheduledId)).archivedAt,
+          7_000,
+        );
 
         const remoteThreads = new Set(["thread-1"]);
         const deletedThreads: string[] = [];
@@ -590,20 +605,18 @@ describe("Application", () => {
           workspaceId: discordWorkspace.id,
           newChatId: scheduledDiscordId,
         } satisfies Schedule.ScheduleRunDestination;
-        const target = yield* discordHost.prepare(destination);
         assert.strictEqual(createdThreads, 0);
-        assert.instanceOf(
-          yield* discordHost
-            .resolveTarget({ kind: "chat", chatId: target.chatId })
-            .pipe(Effect.flip),
-          Schedule.ScheduleHostError,
-        );
-        yield* Effect.all(
+        const [target, duplicateTarget] = yield* Effect.all(
           [
-            discordHost.materialize({ destination, target, title: "Daily report" }),
-            discordHost.materialize({ destination, target, title: "Daily report" }),
+            discordHost.materialize({ destination, title: "Daily report" }),
+            discordHost.materialize({ destination, title: "Daily report" }),
           ],
           { concurrency: "unbounded" },
+        );
+        assert.deepStrictEqual(duplicateTarget, target);
+        assert.deepStrictEqual(
+          yield* discordHost.resolveTarget({ kind: "chat", chatId: target.chatId }),
+          { kind: "chat", chatId: target.chatId },
         );
         assert.strictEqual(createdThreads, 1);
         assert.deepStrictEqual(
@@ -634,7 +647,6 @@ describe("Application", () => {
         assert.deepStrictEqual(deletedThreads, []);
         yield* discordHost.materialize({
           destination: { kind: "chat", chatId: discordChat.id },
-          target: { chatId: discordChat.id, workspaceId: discordWorkspace.id, cwd: defaultCwd },
           title: "Existing destination",
         });
         assert.strictEqual(createdThreads, 1);
@@ -643,13 +655,11 @@ describe("Application", () => {
           ...destination,
           newChatId: Chat.ChatId.make("018f47a0-0000-7000-8000-000000000021"),
         };
-        const failedTarget = yield* discordHost.prepare(failedDestination);
         rejectCreate = true;
         assert.strictEqual(
           (yield* discordHost
             .materialize({
               destination: failedDestination,
-              target: failedTarget,
               title: "Failed create",
             })
             .pipe(Effect.flip)).message,
@@ -658,11 +668,10 @@ describe("Application", () => {
         assert.deepStrictEqual(deletedThreads, []);
         rejectCreate = false;
         rejectCleanup = true;
-        archiveBeforeBinding = failedTarget.chatId;
+        archiveBeforeBinding = failedDestination.newChatId;
         const bindFailure = yield* discordHost
           .materialize({
             destination: failedDestination,
-            target: failedTarget,
             title: "Failed bind",
           })
           .pipe(Effect.flip);
@@ -670,7 +679,7 @@ describe("Application", () => {
         assert.notInclude(bindFailure.message, "Cleanup rejected");
         assert.deepStrictEqual(deletedThreads, ["2"]);
         assert.isTrue(
-          Option.isNone(yield* application.findChatPlatformBinding(failedTarget.chatId)),
+          Option.isNone(yield* application.findChatPlatformBinding(failedDestination.newChatId)),
         );
 
         const workspaces = yield* WorkspaceRepository;

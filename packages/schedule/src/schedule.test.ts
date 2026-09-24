@@ -53,6 +53,25 @@ const awaitLog = Effect.fn("Schedules.test.awaitLog")(function* (
   }
 });
 
+const defaultScriptTarget = (target: Schedule.ScheduleTarget) =>
+  Effect.succeed(
+    target.kind === "chat"
+      ? ({ kind: "existing-chat", workspaceId } satisfies Schedule.ScheduleScriptTarget)
+      : ({
+          kind: "workspace-chat",
+          workspaceId: target.workspaceId,
+        } satisfies Schedule.ScheduleScriptTarget),
+  );
+
+const resolveMaterializedTarget = (
+  destination: Schedule.ScheduleRunDestination,
+  cwd: AbsolutePath,
+): Schedule.ResolvedScheduleRunTarget => ({
+  chatId: destination.kind === "chat" ? destination.chatId : destination.newChatId,
+  workspaceId: destination.kind === "chat" ? workspaceId : destination.workspaceId,
+  cwd,
+});
+
 describe("Schedules", () => {
   it.effect("initializes direct construction when the runner starts", () =>
     Effect.scoped(
@@ -64,10 +83,10 @@ describe("Schedules", () => {
         const schedules = yield* make(schedulesDir, resolveTarget);
         const cwd = AbsolutePath.make(root);
         yield* schedules.start({
-          withScriptActivity: (_chatId, script) => script,
+          scriptTarget: defaultScriptTarget,
           resolveTarget,
-          materialize: () => Effect.void,
-          prepare: () => Effect.succeed({ chatId, workspaceId, cwd }),
+          materialize: ({ destination }) =>
+            Effect.succeed(resolveMaterializedTarget(destination, cwd)),
           deliver: () => Effect.void,
           publish: () => Effect.void,
           runPrompt: () => Effect.die("unexpected scheduled prompt"),
@@ -91,10 +110,10 @@ describe("Schedules", () => {
         const published = yield* Queue.unbounded<string>();
         const schedules = yield* make(schedulesDir, resolveTarget);
         const host: Schedule.ScheduleRunHost = {
-          withScriptActivity: (_chatId, script) => script,
+          scriptTarget: defaultScriptTarget,
           resolveTarget,
-          materialize: () => Effect.void,
-          prepare: () => Effect.succeed({ chatId, workspaceId, cwd }),
+          materialize: ({ destination }) =>
+            Effect.succeed(resolveMaterializedTarget(destination, cwd)),
           deliver: () => Effect.die("script-only schedules must not deliver agent output"),
           publish: (_targetChatId, content) => Queue.offer(published, content).pipe(Effect.asVoid),
           runPrompt: () => Effect.die("script-only schedules must not invoke OMP"),
@@ -227,10 +246,10 @@ describe("Schedules", () => {
       const publishedEvents = yield* Queue.unbounded<void>();
       yield* TestClock.setTime(1_000);
       yield* schedules.start({
-        withScriptActivity: (_chatId, script) => script,
+        scriptTarget: defaultScriptTarget,
         resolveTarget,
-        materialize: () => Effect.void,
-        prepare: () => Effect.succeed({ chatId, workspaceId, cwd: AbsolutePath.make(root) }),
+        materialize: ({ destination }) =>
+          Effect.succeed(resolveMaterializedTarget(destination, AbsolutePath.make(root))),
         deliver: () => Effect.die("Script must publish without OMP"),
         publish: (_chatId, content) =>
           Effect.sync(() => void published.push(content)).pipe(
@@ -300,10 +319,10 @@ describe("Schedules", () => {
         timestamp: 1,
       };
       const host: Schedule.ScheduleRunHost = {
-        withScriptActivity: (_chatId, script) => script,
+        scriptTarget: defaultScriptTarget,
         resolveTarget,
-        materialize: () => Effect.void,
-        prepare: () => Effect.succeed({ chatId, workspaceId, cwd }),
+        materialize: ({ destination }) =>
+          Effect.succeed(resolveMaterializedTarget(destination, cwd)),
         deliver: (_target, content) => Deferred.succeed(delivered, content).pipe(Effect.asVoid),
         publish: () => Effect.die("agent output must not be persisted twice"),
         runPrompt: (_target, runId, prompt, onEvent) =>
@@ -424,10 +443,10 @@ describe("Schedules", () => {
           Effect.gen(function* () {
             const restarted = yield* make(schedulesDir, resolveTarget);
             yield* restarted.start({
-              withScriptActivity: (_chatId, script) => script,
+              scriptTarget: defaultScriptTarget,
               resolveTarget,
-              materialize: () => Effect.void,
-              prepare: () => Effect.succeed({ chatId, workspaceId, cwd }),
+              materialize: ({ destination }) =>
+                Effect.succeed(resolveMaterializedTarget(destination, cwd)),
               deliver: send,
               publish: send,
               runPrompt: (_chatId, runId) => Effect.succeed(capturedRun(runId, "reminder")),
@@ -448,6 +467,7 @@ describe("Schedules", () => {
               kind: "failed",
               stage: "publish",
               message: "Destination unavailable",
+              notification: { kind: "failed", message: "Destination unavailable" },
             });
           }),
         );
@@ -466,21 +486,18 @@ describe("Schedules", () => {
       const cwd = AbsolutePath.make(root);
       const requests = new Map<Schedule.ScheduleRunId, Agent.AgentPrompt>();
       let deliveries = 0;
-      const materialized = new Set<string>();
+      const notifications: Array<string> = [];
       const schedules = yield* make(schedulesDir, resolveTarget);
       const host: Schedule.ScheduleRunHost = {
-        withScriptActivity: (_chatId, script) => script,
+        scriptTarget: defaultScriptTarget,
         resolveTarget,
-        materialize: ({ title }) =>
-          Effect.sync(() => {
-            materialized.add(title);
-          }),
-        prepare: () => Effect.succeed({ chatId, workspaceId, cwd }),
+        materialize: ({ destination }) =>
+          Effect.succeed(resolveMaterializedTarget(destination, cwd)),
         deliver: () =>
           Effect.sync(() => {
             deliveries += 1;
           }),
-        publish: () => Effect.die("agent output must not be persisted twice"),
+        publish: (_chatId, content) => Effect.sync(() => void notifications.push(content)),
         runPrompt: (_target, runId, prompt) =>
           Effect.sync(() => requests.set(runId, prompt)).pipe(
             Effect.as(capturedRun(runId, "finished")),
@@ -567,7 +584,6 @@ describe("Schedules", () => {
       const scriptOnlyRun = yield* finishedRun(scriptOnly);
       const storedPromptRun = yield* finishedRun(storedPrompt);
       const missingInputRun = yield* finishedRun(missingInput);
-      assert.deepStrictEqual(materialized, new Set(["composed", "script only", "stored prompt"]));
 
       assert.deepStrictEqual(skipRun.state.kind === "finished" && skipRun.state.outcome, {
         kind: "skipped",
@@ -582,10 +598,401 @@ describe("Schedules", () => {
       assert.isFalse(requests.has(missingInputRun.id));
       assert.deepInclude(
         missingInputRun.state.kind === "finished" ? missingInputRun.state.outcome : {},
-        { kind: "failed", stage: "protocol" },
+        { kind: "failed", stage: "protocol", notification: { kind: "delivered" } },
       );
+      assert.strictEqual(notifications.length, 1);
+      const missingInputOutcome =
+        missingInputRun.state.kind === "finished" ? missingInputRun.state.outcome : undefined;
+      if (missingInputOutcome?.kind !== "failed") {
+        return yield* Effect.die("Expected missing input failure");
+      }
+      assert.include(notifications[0] ?? "", missingInputRun.id);
+      assert.include(notifications[0] ?? "", missingInputOutcome.message);
       assert.strictEqual(deliveries, 3);
     }).pipe(Effect.provide(platformLayer), Effect.scoped),
+  );
+
+  it.effect("admits manual once runs before due and consumes the schedule", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-manual-once-" });
+      const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
+      const cwd = AbsolutePath.make(root);
+      const published: Array<string> = [];
+      const schedules = yield* make(schedulesDir, resolveTarget);
+      yield* TestClock.setTime(1_000);
+      yield* schedules.start({
+        scriptTarget: defaultScriptTarget,
+        resolveTarget,
+        materialize: ({ destination }) =>
+          Effect.succeed(resolveMaterializedTarget(destination, cwd)),
+        deliver: () => Effect.die("Manual script runs must publish without OMP"),
+        publish: (_chatId, content) =>
+          Effect.sync(() => void published.push(content)).pipe(Effect.asVoid),
+        runPrompt: () => Effect.die("Manual script runs must not invoke OMP"),
+      });
+      const created = yield* schedules.create(caller, {
+        name: "manual once",
+        enabled: true,
+        target: { kind: "chat", chatId: caller.chatId },
+        trigger: { kind: "once", at: 10_000 },
+        sourceDirectory: yield* prepareSource({
+          "script.js": 'process.stdout.write(JSON.stringify({agent:false,content:"manual"}));',
+        }),
+      });
+      assert.strictEqual(created.kind, "ready");
+      if (created.kind !== "ready") return;
+      const admitted = yield* schedules.trigger(caller, created.id);
+      const run = yield* awaitFinished(
+        fileSystem,
+        path.join(schedulesDir, "runs", created.id, admitted.runId, "run.json"),
+      );
+      assert.strictEqual(run.source.kind, "manual");
+      assert.deepStrictEqual(run.state.kind === "finished" && run.state.outcome, {
+        kind: "published",
+        content: "manual",
+      });
+      assert.deepStrictEqual(published, ["manual"]);
+      yield* awaitExists(fileSystem, path.join(schedulesDir, "disabled", created.id, "meta.json"));
+      const disabled = yield* schedules.get(caller, created.id);
+      assert.strictEqual(disabled.kind, "ready");
+      if (disabled.kind !== "ready") return;
+      assert.strictEqual(disabled.state, "disabled");
+      yield* TestClock.adjust("1 minute");
+      assert.deepStrictEqual(
+        yield* fileSystem.readDirectory(path.join(schedulesDir, "runs", created.id)),
+        [admitted.runId],
+      );
+      assert.deepStrictEqual(published, ["manual"]);
+    }).pipe(Effect.provide(platformLayer), Effect.scoped),
+  );
+
+  it.effect("admits manual and timed once runs atomically", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-admission-race-" });
+      const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
+      const cwd = AbsolutePath.make(root);
+      const schedules = yield* make(schedulesDir, resolveTarget);
+      yield* TestClock.setTime(1_000);
+      yield* schedules.start({
+        scriptTarget: defaultScriptTarget,
+        resolveTarget,
+        materialize: ({ destination }) =>
+          Effect.succeed(resolveMaterializedTarget(destination, cwd)),
+        deliver: () => Effect.die("Race script runs must publish without OMP"),
+        publish: () => Effect.void,
+        runPrompt: () => Effect.die("Race script runs must not invoke OMP"),
+      });
+      const created = yield* schedules.create(caller, {
+        name: "admission race",
+        enabled: true,
+        target: { kind: "chat", chatId: caller.chatId },
+        trigger: { kind: "once", at: 2_000 },
+        sourceDirectory: yield* prepareSource({
+          "script.js": 'process.stdout.write(JSON.stringify({agent:false,content:"race"}));',
+        }),
+      });
+      assert.strictEqual(created.kind, "ready");
+      if (created.kind !== "ready") return;
+      yield* TestClock.setTime(2_000);
+      const [triggerExit] = yield* Effect.all(
+        [schedules.trigger(caller, created.id).pipe(Effect.exit), TestClock.adjust("30 seconds")],
+        { concurrency: "unbounded" },
+      );
+      const runIds = yield* fileSystem.readDirectory(path.join(schedulesDir, "runs", created.id));
+      assert.strictEqual(runIds.length, 1);
+      const runId = runIds[0];
+      if (runId === undefined) return yield* Effect.die("Expected one admitted run");
+      const terminal = yield* awaitFinished(
+        fileSystem,
+        path.join(schedulesDir, "runs", created.id, runId, "run.json"),
+      );
+      assert.deepStrictEqual(terminal.state.kind === "finished" && terminal.state.outcome, {
+        kind: "published",
+        content: "race",
+      });
+      if (Exit.isSuccess(triggerExit)) {
+        assert.strictEqual(triggerExit.value.runId, terminal.id);
+      } else {
+        const reason = triggerExit.cause.reasons.find(Cause.isFailReason)?.error;
+        assert.instanceOf(reason, Schedule.ScheduleError);
+        if (reason instanceof Schedule.ScheduleError) {
+          assert.strictEqual(reason.kind, "busy");
+        }
+      }
+    }).pipe(Effect.provide(platformLayer), Effect.scoped),
+  );
+
+  it.effect("keeps admitted manual runs alive after trigger caller cancellation", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-manual-daemon-" });
+      const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
+      const cwd = AbsolutePath.make(root);
+      const published = yield* Queue.unbounded<string>();
+      const schedules = yield* make(schedulesDir, resolveTarget);
+      yield* TestClock.setTime(1_000);
+      yield* schedules.start({
+        scriptTarget: defaultScriptTarget,
+        resolveTarget,
+        materialize: ({ destination }) =>
+          Effect.succeed(resolveMaterializedTarget(destination, cwd)),
+        deliver: () => Effect.die("Manual daemon run must publish without OMP"),
+        publish: (_chatId, content) => Queue.offer(published, content).pipe(Effect.asVoid),
+        runPrompt: () => Effect.die("Manual daemon run must not invoke OMP"),
+      });
+      const created = yield* schedules.create(caller, {
+        name: "manual daemon",
+        enabled: true,
+        target: { kind: "chat", chatId: caller.chatId },
+        trigger: { kind: "once", at: 10_000 },
+        sourceDirectory: yield* prepareSource({
+          "script.js":
+            'await Bun.sleep(50);process.stdout.write(JSON.stringify({agent:false,content:"daemon"}));',
+        }),
+      });
+      assert.strictEqual(created.kind, "ready");
+      if (created.kind !== "ready") return;
+      const admitted = yield* Deferred.make<{ readonly runId: Schedule.ScheduleRunId }>();
+      const callerFiber = yield* Effect.scoped(
+        Effect.gen(function* () {
+          const run = yield* schedules.trigger(caller, created.id);
+          yield* Deferred.succeed(admitted, { runId: run.runId });
+          yield* Effect.never;
+        }),
+      ).pipe(Effect.forkChild);
+      const run = yield* Deferred.await(admitted);
+      yield* Fiber.interrupt(callerFiber);
+      assert.strictEqual(yield* Queue.take(published), "daemon");
+      const terminal = yield* awaitFinished(
+        fileSystem,
+        path.join(schedulesDir, "runs", created.id, run.runId, "run.json"),
+      );
+      assert.deepStrictEqual(terminal.state.kind === "finished" && terminal.state.outcome, {
+        kind: "published",
+        content: "daemon",
+      });
+    }).pipe(Effect.provide(platformLayer), Effect.scoped),
+  );
+
+  it.effect("reports script failures once with both captured streams", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-failure-report-" });
+      const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
+      const cwd = AbsolutePath.make(root);
+      const notifications: Array<string> = [];
+      const schedules = yield* make(schedulesDir, resolveTarget);
+      yield* TestClock.setTime(1_000);
+      yield* schedules.start({
+        scriptTarget: defaultScriptTarget,
+        resolveTarget,
+        materialize: ({ destination }) =>
+          Effect.succeed(resolveMaterializedTarget(destination, cwd)),
+        deliver: () => Effect.die("Failure runs must not deliver agent messages"),
+        publish: (_chatId, content) =>
+          Effect.sync(() => void notifications.push(content)).pipe(
+            Effect.andThen(
+              Effect.fail(new Schedule.ScheduleHostError({ message: "notification rejected" })),
+            ),
+          ),
+        runPrompt: () => Effect.die("Failure runs must not invoke OMP"),
+      });
+      const created = yield* schedules.create(caller, {
+        name: "failure report",
+        enabled: true,
+        target: { kind: "chat", chatId: caller.chatId },
+        trigger: { kind: "once", at: 1_000 },
+        sourceDirectory: yield* prepareSource({
+          "script.js":
+            'process.stderr.write("stderr signal\\n");process.stdout.write("stdout signal\\n");process.exit(2);',
+        }),
+      });
+      assert.strictEqual(created.kind, "ready");
+      if (created.kind !== "ready") return;
+      yield* TestClock.adjust("30 seconds");
+      const run = yield* awaitFinished(
+        fileSystem,
+        path.join(
+          schedulesDir,
+          "runs",
+          created.id,
+          `scheduled-1000-${created.definition.revision}`,
+          "run.json",
+        ),
+      );
+      assert.strictEqual(notifications.length, 1);
+      const notification = notifications[0];
+      if (notification === undefined) return yield* Effect.die("Missing failure notification");
+      assert.include(notification, run.id);
+      assert.include(notification, created.definition.name);
+      assert.include(notification, "stderr");
+      assert.include(notification, "stderr signal");
+      assert.include(notification, "stdout");
+      assert.include(notification, "stdout signal");
+      assert.deepInclude(run.state.kind === "finished" ? run.state.outcome : {}, {
+        kind: "failed",
+        stage: "script",
+        notification: { kind: "failed", message: "notification rejected" },
+      });
+    }).pipe(Effect.provide(platformLayer), Effect.scoped),
+  );
+
+  it.effect(
+    "preserves the original failure when notification interruption needs restart recovery",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-report-recovery-" });
+        const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
+        const notifying = yield* Deferred.make<string>();
+        let rejectFinalization = false;
+        const failingFileSystem = FileSystem.FileSystem.of({
+          ...fileSystem,
+          rename: (from, to) =>
+            rejectFinalization && path.basename(to) === "run.json"
+              ? Effect.fail(permissionDenied("rename", from))
+              : fileSystem.rename(from, to),
+        });
+        yield* TestClock.setTime(1_000);
+        const created = yield* Effect.scoped(
+          Effect.gen(function* () {
+            const schedules = yield* make(schedulesDir, resolveTarget);
+            yield* schedules.start({
+              scriptTarget: defaultScriptTarget,
+              resolveTarget,
+              materialize: ({ destination }) =>
+                Effect.succeed(resolveMaterializedTarget(destination, AbsolutePath.make(root))),
+              deliver: () => Effect.die("Script failures must not deliver agent messages"),
+              publish: (_chatId, content) =>
+                Effect.sync(() => {
+                  rejectFinalization = true;
+                }).pipe(
+                  Effect.andThen(Deferred.succeed(notifying, content)),
+                  Effect.andThen(Effect.never),
+                ),
+              runPrompt: () => Effect.die("Script failures must not invoke OMP"),
+            });
+            const created = yield* schedules.create(caller, {
+              name: "interrupted failure report",
+              enabled: true,
+              target: { kind: "chat", chatId },
+              trigger: { kind: "once", at: 1_000 },
+              sourceDirectory: yield* prepareSource({
+                "script.js": 'process.stderr.write("retained stderr");process.exit(2);',
+              }),
+            });
+            if (created.kind !== "ready") return yield* Effect.die("Expected a ready schedule");
+            const notification = yield* Deferred.await(notifying);
+            assert.include(notification, "retained stderr");
+            return created;
+          }),
+        ).pipe(Effect.provideService(FileSystem.FileSystem, failingFileSystem));
+        const runId = `scheduled-1000-${created.definition.revision}`;
+        const runFile = path.join(schedulesDir, "runs", created.id, runId, "run.json");
+        const pending = yield* decodeRun(yield* fileSystem.readFileString(runFile));
+        assert.strictEqual(pending.state.kind, "reporting-failure");
+        if (pending.state.kind !== "reporting-failure") {
+          return yield* Effect.die("Expected durable failure awaiting notification settlement");
+        }
+        assert.strictEqual(pending.state.outcome.stage, "script");
+        const originalFailure = pending.state.outcome;
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const restarted = yield* make(schedulesDir, resolveTarget);
+            yield* restarted.start({
+              scriptTarget: () => Effect.die("Restart must not execute a consumed run"),
+              resolveTarget,
+              materialize: () => Effect.die("Restart must not recreate a failure destination"),
+              deliver: () => Effect.die("Restart must not redeliver"),
+              publish: () => Effect.die("Restart must not retry interrupted notification"),
+              runPrompt: () => Effect.die("Restart must not invoke OMP"),
+            });
+            const recovered = yield* awaitFinished(fileSystem, runFile);
+            assert.deepStrictEqual(recovered.state.kind === "finished" && recovered.state.outcome, {
+              ...originalFailure,
+              notification: { kind: "interrupted" },
+            });
+            assert.strictEqual((yield* restarted.get(caller, created.id)).state, "disabled");
+            assert.deepStrictEqual(
+              yield* fileSystem.readDirectory(path.join(schedulesDir, "runs", created.id)),
+              [runId],
+            );
+          }),
+        );
+      }).pipe(Effect.provide(platformLayer), Effect.scoped),
+  );
+
+  it.effect(
+    "retains materialization failure without allocating a second destination for its report",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "pico-materialize-failure-",
+        });
+        const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
+        const unexpectedDestination = path.join(root, "unexpected-destination");
+        let unavailable = true;
+        const schedules = yield* make(schedulesDir, resolveTarget);
+        yield* TestClock.setTime(1_000);
+        yield* schedules.start({
+          scriptTarget: defaultScriptTarget,
+          resolveTarget,
+          materialize: ({ destination }) =>
+            Effect.suspend(() => {
+              if (unavailable) {
+                unavailable = false;
+                return Effect.fail(
+                  new Schedule.ScheduleHostError({ message: "Destination unavailable" }),
+                );
+              }
+              return fileSystem.makeDirectory(unexpectedDestination).pipe(
+                Effect.mapError(
+                  (error) => new Schedule.ScheduleHostError({ message: error.message }),
+                ),
+                Effect.as(resolveMaterializedTarget(destination, AbsolutePath.make(root))),
+              );
+            }),
+          deliver: () => Effect.die("Materialization failure must not deliver agent messages"),
+          publish: () => Effect.die("Materialization failure must not publish"),
+          runPrompt: () => Effect.die("Materialization failure must not invoke OMP"),
+        });
+        const created = yield* schedules.create(caller, {
+          name: "unavailable destination",
+          enabled: true,
+          target: { kind: "workspace", workspaceId },
+          trigger: { kind: "once", at: 1_000 },
+          sourceDirectory: yield* prepareSource({
+            "script.js": 'process.stdout.write(JSON.stringify({agent:false,content:"ready"}));',
+          }),
+        });
+        if (created.kind !== "ready") return yield* Effect.die("Expected a ready schedule");
+        const run = yield* awaitFinished(
+          fileSystem,
+          path.join(
+            schedulesDir,
+            "runs",
+            created.id,
+            `scheduled-1000-${created.definition.revision}`,
+            "run.json",
+          ),
+        );
+        assert.deepStrictEqual(run.state.kind === "finished" && run.state.outcome, {
+          kind: "failed",
+          stage: "target",
+          message: "Destination unavailable",
+          notification: { kind: "failed", message: "Destination unavailable" },
+        });
+        assert.isFalse(yield* fileSystem.exists(unexpectedDestination));
+      }).pipe(Effect.provide(platformLayer), Effect.scoped),
   );
 
   it.effect(
@@ -602,13 +1009,12 @@ describe("Schedules", () => {
         const schedules = yield* open(schedulesDir, resolveTarget);
         yield* TestClock.setTime(1_000);
         yield* schedules.start({
-          withScriptActivity: (_chatId, script) => script,
+          scriptTarget: defaultScriptTarget,
           resolveTarget,
-          materialize: () => Effect.void,
-          prepare: () =>
+          materialize: ({ destination }) =>
             Deferred.succeed(prepareStarted, undefined).pipe(
               Effect.andThen(Deferred.await(releasePrepare)),
-              Effect.as({ chatId, workspaceId, cwd: AbsolutePath.make(root) }),
+              Effect.as(resolveMaterializedTarget(destination, AbsolutePath.make(root))),
             ),
           deliver: () => Effect.die("Script decisions must publish without OMP"),
           publish: (_chatId, content) => Queue.offer(published, content).pipe(Effect.asVoid),
@@ -735,10 +1141,9 @@ describe("Schedules", () => {
       const releasePrepare = yield* Deferred.make<void>();
       const schedules = yield* make(schedulesDir, resolveTarget);
       const host: Schedule.ScheduleRunHost = {
-        withScriptActivity: (_chatId, script) => script,
+        scriptTarget: defaultScriptTarget,
         resolveTarget,
-        materialize: () => Effect.void,
-        prepare: (destination) =>
+        materialize: ({ destination }) =>
           Effect.gen(function* () {
             yield* Deferred.succeed(prepareStarted, undefined);
             yield* Deferred.await(releasePrepare);
@@ -875,10 +1280,10 @@ describe("Schedules", () => {
       const invoked = yield* Deferred.make<void>();
       const schedules = yield* make(schedulesDir, resolveTarget);
       const host: Schedule.ScheduleRunHost = {
-        withScriptActivity: (_chatId, script) => script,
+        scriptTarget: defaultScriptTarget,
         resolveTarget,
-        materialize: () => Effect.void,
-        prepare: () => Effect.succeed({ chatId, workspaceId, cwd }),
+        materialize: ({ destination }) =>
+          Effect.succeed(resolveMaterializedTarget(destination, cwd)),
         deliver: () => Effect.void,
         publish: () => Effect.void,
         runPrompt: (_target, runId) =>
@@ -933,10 +1338,10 @@ describe("Schedules", () => {
         const published = yield* Queue.unbounded<string>();
         yield* TestClock.setTime(1_000);
         yield* schedules.start({
-          withScriptActivity: (_chatId, script) => script,
+          scriptTarget: defaultScriptTarget,
           resolveTarget,
-          materialize: () => Effect.void,
-          prepare: () => Effect.succeed({ chatId, workspaceId, cwd: AbsolutePath.make(root) }),
+          materialize: ({ destination }) =>
+            Effect.succeed(resolveMaterializedTarget(destination, AbsolutePath.make(root))),
           deliver: () => Effect.die("Script must publish without OMP"),
           publish: (_chatId, content) => Queue.offer(published, content).pipe(Effect.asVoid),
           runPrompt: () => Effect.die("Script must not invoke OMP"),
@@ -1024,10 +1429,10 @@ describe("Schedules", () => {
         const delivered = yield* Deferred.make<void>();
         const schedules = yield* make(schedulesDir, resolveTarget);
         const host: Schedule.ScheduleRunHost = {
-          withScriptActivity: (_chatId, script) => script,
+          scriptTarget: defaultScriptTarget,
           resolveTarget,
-          materialize: () => Effect.void,
-          prepare: () => Effect.succeed({ chatId, workspaceId, cwd }),
+          materialize: ({ destination }) =>
+            Effect.succeed(resolveMaterializedTarget(destination, cwd)),
           deliver: () => Deferred.succeed(delivered, undefined).pipe(Effect.asVoid),
           publish: () => Effect.die("Agent schedules must deliver their final response"),
           runPrompt: (_target, runId) => Effect.succeed(capturedRun(runId, "complete")),
@@ -1062,6 +1467,10 @@ describe("Schedules", () => {
         assert.strictEqual(disableFailure.annotations.runId, completed.id);
         assert.strictEqual(disableFailure.annotations.outcome, "completed");
         assert.isTrue(yield* fileSystem.exists(path.join(schedulesDir, "enabled", created.id)));
+        assert.strictEqual(
+          (yield* schedules.trigger(caller, created.id).pipe(Effect.flip)).kind,
+          "busy",
+        );
 
         yield* TestClock.adjust("30 seconds");
         yield* awaitExists(
@@ -1088,12 +1497,16 @@ describe("Schedules", () => {
       const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pico-run-phase-" });
       const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
       const cwd = AbsolutePath.make(root);
-      let rejectedDecision = false;
+      let rejectedTargetArtifact = false;
       const failingFileSystem = FileSystem.FileSystem.of({
         ...fileSystem,
         writeFile: (file, data, options) => {
-          if (!rejectedDecision && path.basename(file).startsWith(".decision.json-")) {
-            rejectedDecision = true;
+          if (
+            !rejectedTargetArtifact &&
+            path.basename(path.dirname(file)) === "target" &&
+            path.basename(file).startsWith(".result.json-")
+          ) {
+            rejectedTargetArtifact = true;
             return Effect.fail(permissionDenied("writeFile", file));
           }
           return fileSystem.writeFile(file, data, options);
@@ -1102,13 +1515,13 @@ describe("Schedules", () => {
       yield* Effect.gen(function* () {
         const schedules = yield* make(schedulesDir, resolveTarget);
         const host: Schedule.ScheduleRunHost = {
-          withScriptActivity: (_chatId, script) => script,
+          scriptTarget: defaultScriptTarget,
           resolveTarget,
-          materialize: () => Effect.void,
-          prepare: () => Effect.succeed({ chatId, workspaceId, cwd }),
-          deliver: () => Effect.die("Protocol failures must not deliver output"),
-          publish: () => Effect.die("Protocol failures must not publish output"),
-          runPrompt: () => Effect.die("Protocol failures must not invoke OMP"),
+          materialize: ({ destination }) =>
+            Effect.succeed(resolveMaterializedTarget(destination, cwd)),
+          deliver: () => Effect.die("Target failures must not deliver agent output"),
+          publish: () => Effect.void,
+          runPrompt: () => Effect.die("Target failures must not invoke OMP"),
         };
         yield* TestClock.setTime(1_000);
         yield* schedules.start(host);
@@ -1134,7 +1547,8 @@ describe("Schedules", () => {
         );
         assert.deepInclude(failed.state.kind === "finished" ? failed.state.outcome : {}, {
           kind: "failed",
-          stage: "protocol",
+          stage: "target",
+          notification: { kind: "delivered" },
         });
       }).pipe(Effect.provide(Layer.succeed(FileSystem.FileSystem, failingFileSystem)));
     }).pipe(Effect.provide(platformLayer), Effect.scoped),
@@ -1244,7 +1658,7 @@ describe("Schedules", () => {
         definition,
         source,
         "preexisting",
-        Effect.void,
+        () => Effect.void,
       ).pipe(Effect.flip);
       assert.strictEqual(runError.kind, "corrupt");
       assert.deepStrictEqual(yield* fileSystem.readDirectory(outside), ["sentinel"]);
@@ -1271,7 +1685,7 @@ describe("Schedules", () => {
         definition,
         source,
         inputTransactionId,
-        Effect.void,
+        () => Effect.void,
       ).pipe(Effect.flip);
       assert.strictEqual(inputError.kind, "corrupt");
       assert.deepStrictEqual(yield* fileSystem.readDirectory(outside), ["sentinel"]);
@@ -1319,10 +1733,10 @@ describe("Schedules", () => {
       yield* TestClock.setTime(1_000);
       const operation = yield* schedules
         .start({
-          withScriptActivity: (_chatId, script) => script,
+          scriptTarget: defaultScriptTarget,
           resolveTarget,
-          materialize: () => Effect.void,
-          prepare: () => Effect.succeed({ chatId, workspaceId, cwd: AbsolutePath.make(root) }),
+          materialize: ({ destination }) =>
+            Effect.succeed(resolveMaterializedTarget(destination, AbsolutePath.make(root))),
           deliver: () => Effect.void,
           publish: () => Effect.void,
           runPrompt: (_chatId, runId) =>
@@ -1331,7 +1745,7 @@ describe("Schedules", () => {
               return capturedRun(runId, "unexpected");
             }),
         })
-        .pipe(Effect.scoped, Effect.forkChild);
+        .pipe(Effect.andThen(Effect.never), Effect.scoped, Effect.forkChild);
       const active = yield* Deferred.await(publishing);
       const shutdown = yield* Fiber.interrupt(operation).pipe(
         Effect.forkChild({ startImmediately: true }),
@@ -1345,9 +1759,8 @@ describe("Schedules", () => {
       const run = yield* decodeRun(
         yield* fileSystem.readFileString(path.join(active.to, "run.json")),
       );
-      assert.deepStrictEqual(run.state.kind === "finished" && run.state.outcome, {
+      assert.deepInclude(run.state.kind === "finished" ? run.state.outcome : {}, {
         kind: "interrupted",
-        phase: "schedule-cycle",
       });
       assert.strictEqual(prompts, 0);
       assert.deepStrictEqual(
@@ -1357,95 +1770,102 @@ describe("Schedules", () => {
     }).pipe(Effect.provide(platformLayer), Effect.scoped),
   );
 
-  it.effect("terminalizes an earlier claim when a later schedule history read fails", () =>
-    Effect.gen(function* () {
-      const fileSystem = yield* FileSystem.FileSystem;
-      const path = yield* Path.Path;
-      const root = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "pico-cycle-read-failure-",
-      });
-      const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
-      const storage: Storage = {
-        fileSystem,
-        path,
-        schedulesDir,
-        temporaryId: () => Effect.succeed("018f47a0-0000-7000-8000-000000000070"),
-      };
-      const firstId = Schedule.ScheduleId.make("018f47a0-0000-7000-8000-000000000071");
-      const secondId = Schedule.ScheduleId.make("018f47a0-0000-7000-8000-000000000072");
-      const firstDefinition: Schedule.ScheduleDefinition = {
-        version: 2,
-        revision: Schedule.ScheduleRevision.make("018f47a0-0000-7000-8000-000000000073"),
-        name: "first",
-        ownerWorkspaceId: workspaceId,
-        createdByChatId: chatId,
-        createdAt: 0,
-        target: { kind: "chat", chatId },
-        trigger: { kind: "once", at: 1_000 },
-      };
-      const secondDefinition: Schedule.ScheduleDefinition = {
-        ...firstDefinition,
-        revision: Schedule.ScheduleRevision.make("018f47a0-0000-7000-8000-000000000074"),
-        name: "second",
-      };
-      yield* bootstrap(storage);
-      yield* publishDefinition(
-        storage,
-        firstId,
-        "enabled",
-        firstDefinition,
-        yield* prepareSource({ "prompt.md": "first" }),
-        "first-definition",
-      );
-      yield* publishDefinition(
-        storage,
-        secondId,
-        "enabled",
-        secondDefinition,
-        yield* prepareSource({ "prompt.md": "second" }),
-        "second-definition",
-      );
-      const firstRunId = Schedule.ScheduleRunId.make(`scheduled-1000-${firstDefinition.revision}`);
-      const firstRunDirectory = runDirectory(storage, firstId, firstRunId);
-      const secondRuns = path.join(schedulesDir, "runs", secondId);
-      yield* fileSystem.makeDirectory(secondRuns);
-      const failingFileSystem = FileSystem.FileSystem.of({
-        ...fileSystem,
-        readDirectory: (directory) =>
-          directory === secondRuns
-            ? fileSystem
-                .exists(firstRunDirectory)
-                .pipe(
-                  Effect.flatMap((firstClaimed) =>
-                    firstClaimed
-                      ? Effect.fail(permissionDenied("readDirectory", directory))
-                      : fileSystem.readDirectory(directory),
-                  ),
-                )
-            : fileSystem.readDirectory(directory),
-      });
-
-      yield* Effect.gen(function* () {
-        const schedules = yield* make(schedulesDir, resolveTarget);
-        const host: Schedule.ScheduleRunHost = {
-          withScriptActivity: (_chatId, script) => script,
-          resolveTarget,
-          materialize: () => Effect.void,
-          prepare: () => Effect.die("Claimed runs must not dispatch after the scan fails"),
-          deliver: () => Effect.die("Claimed runs must not dispatch after the scan fails"),
-          publish: () => Effect.die("Claimed runs must not dispatch after the scan fails"),
-          runPrompt: () => Effect.die("Claimed runs must not dispatch after the scan fails"),
-        };
-        yield* TestClock.setTime(1_000);
-        yield* schedules.start(host);
-        const terminal = yield* awaitFinished(fileSystem, path.join(firstRunDirectory, "run.json"));
-        assert.deepStrictEqual(terminal.state.kind === "finished" && terminal.state.outcome, {
-          kind: "interrupted",
-          phase: "schedule-cycle",
+  it.effect(
+    "finishes an earlier claim independently of a later schedule history read failure",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "pico-cycle-read-failure-",
         });
-        assert.deepStrictEqual(yield* fileSystem.readDirectory(secondRuns), []);
-      }).pipe(Effect.provide(Layer.succeed(FileSystem.FileSystem, failingFileSystem)));
-    }).pipe(Effect.provide(platformLayer), Effect.scoped),
+        const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
+        const storage: Storage = {
+          fileSystem,
+          path,
+          schedulesDir,
+          temporaryId: () => Effect.succeed("018f47a0-0000-7000-8000-000000000070"),
+        };
+        const firstId = Schedule.ScheduleId.make("018f47a0-0000-7000-8000-000000000071");
+        const secondId = Schedule.ScheduleId.make("018f47a0-0000-7000-8000-000000000072");
+        const firstDefinition: Schedule.ScheduleDefinition = {
+          version: 2,
+          revision: Schedule.ScheduleRevision.make("018f47a0-0000-7000-8000-000000000073"),
+          name: "first",
+          ownerWorkspaceId: workspaceId,
+          createdByChatId: chatId,
+          createdAt: 0,
+          target: { kind: "chat", chatId },
+          trigger: { kind: "once", at: 1_000 },
+        };
+        const secondDefinition: Schedule.ScheduleDefinition = {
+          ...firstDefinition,
+          revision: Schedule.ScheduleRevision.make("018f47a0-0000-7000-8000-000000000074"),
+          name: "second",
+        };
+        yield* bootstrap(storage);
+        yield* publishDefinition(
+          storage,
+          firstId,
+          "enabled",
+          firstDefinition,
+          yield* prepareSource({ "prompt.md": "first" }),
+          "first-definition",
+        );
+        yield* publishDefinition(
+          storage,
+          secondId,
+          "enabled",
+          secondDefinition,
+          yield* prepareSource({ "prompt.md": "second" }),
+          "second-definition",
+        );
+        const firstRunId = Schedule.ScheduleRunId.make(
+          `scheduled-1000-${firstDefinition.revision}`,
+        );
+        const firstRunDirectory = runDirectory(storage, firstId, firstRunId);
+        const secondRuns = path.join(schedulesDir, "runs", secondId);
+        yield* fileSystem.makeDirectory(secondRuns);
+        const failingFileSystem = FileSystem.FileSystem.of({
+          ...fileSystem,
+          readDirectory: (directory) =>
+            directory === secondRuns
+              ? fileSystem
+                  .exists(firstRunDirectory)
+                  .pipe(
+                    Effect.flatMap((firstClaimed) =>
+                      firstClaimed
+                        ? Effect.fail(permissionDenied("readDirectory", directory))
+                        : fileSystem.readDirectory(directory),
+                    ),
+                  )
+              : fileSystem.readDirectory(directory),
+        });
+
+        yield* Effect.gen(function* () {
+          const schedules = yield* make(schedulesDir, resolveTarget);
+          const host: Schedule.ScheduleRunHost = {
+            scriptTarget: defaultScriptTarget,
+            resolveTarget,
+            materialize: ({ destination }) =>
+              Effect.succeed(resolveMaterializedTarget(destination, AbsolutePath.make(root))),
+            deliver: () => Effect.void,
+            publish: () => Effect.die("Agent runs must deliver their completed response"),
+            runPrompt: (_chatId, runId) => Effect.succeed(capturedRun(runId, "first completed")),
+          };
+          yield* TestClock.setTime(1_000);
+          yield* schedules.start(host);
+          const terminal = yield* awaitFinished(
+            fileSystem,
+            path.join(firstRunDirectory, "run.json"),
+          );
+          assert.deepStrictEqual(terminal.state.kind === "finished" && terminal.state.outcome, {
+            kind: "completed",
+            finalAssistantText: "first completed",
+          });
+          assert.deepStrictEqual(yield* fileSystem.readDirectory(secondRuns), []);
+        }).pipe(Effect.provide(Layer.succeed(FileSystem.FileSystem, failingFileSystem)));
+      }).pipe(Effect.provide(platformLayer), Effect.scoped),
   );
 
   it.effect("terminalizes every missed claim when one finalization fails", () =>
@@ -1521,10 +1941,9 @@ describe("Schedules", () => {
       yield* Effect.gen(function* () {
         const schedules = yield* make(schedulesDir, resolveTarget);
         const host: Schedule.ScheduleRunHost = {
-          withScriptActivity: (_chatId, script) => script,
+          scriptTarget: defaultScriptTarget,
           resolveTarget,
-          materialize: () => Effect.void,
-          prepare: () => Effect.die("Missed runs must not dispatch"),
+          materialize: () => Effect.die("Missed runs must not dispatch"),
           deliver: () => Effect.die("Missed runs must not dispatch"),
           publish: () => Effect.die("Missed runs must not dispatch"),
           runPrompt: () => Effect.die("Missed runs must not dispatch"),
@@ -1533,15 +1952,136 @@ describe("Schedules", () => {
         yield* schedules.start(host);
         const first = yield* awaitFinished(fileSystem, firstRunFile);
         const second = yield* awaitFinished(fileSystem, secondRunFile);
-        for (const terminal of [first, second]) {
-          assert.deepStrictEqual(terminal.state.kind === "finished" && terminal.state.outcome, {
-            kind: "interrupted",
-            phase: "schedule-cycle",
-          });
-        }
+        assert.deepStrictEqual(first.state.kind === "finished" && first.state.outcome, {
+          kind: "missed",
+          scheduledFor: 1_000,
+          observedAt: 3 * 60 * 60 * 1_000,
+        });
+        assert.deepStrictEqual(second.state.kind === "finished" && second.state.outcome, {
+          kind: "missed",
+          scheduledFor: 1_000,
+          observedAt: 3 * 60 * 60 * 1_000,
+        });
       }).pipe(Effect.provide(Layer.succeed(FileSystem.FileSystem, failingFileSystem)));
     }).pipe(Effect.provide(platformLayer), Effect.scoped),
   );
+
+  for (const artifact of ["stdout.bin", "stderr.bin", "result.json", "missing"] as const) {
+    it.effect(
+      artifact === "missing"
+        ? "allows missing failure diagnostics without losing the primary failure or notification"
+        : `reports unreadable ${artifact} failure diagnostics without losing the primary failure or notification`,
+      () =>
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const root = yield* fileSystem.makeTempDirectoryScoped({
+            prefix: "pico-private-diagnostics-",
+          });
+          const schedulesDir = AbsolutePath.make(path.join(root, "schedules"));
+          const logs = yield* captureLogs();
+          const notifications = yield* Queue.unbounded<string>();
+          let unreadableArtifact: string | undefined;
+          const failingFileSystem = FileSystem.FileSystem.of({
+            ...fileSystem,
+            readFile: (file) =>
+              file === unreadableArtifact
+                ? Effect.fail(permissionDenied("readFile", file))
+                : fileSystem.readFile(file),
+            readFileString: (file, encoding) =>
+              file === unreadableArtifact
+                ? Effect.fail(permissionDenied("readFileString", file))
+                : fileSystem.readFileString(file, encoding),
+          });
+          yield* Effect.gen(function* () {
+            const schedules = yield* open(schedulesDir, resolveTarget);
+            const created = yield* schedules.create(caller, {
+              name: "private diagnostic schedule",
+              enabled: true,
+              target: { kind: "chat", chatId: caller.chatId },
+              trigger: { kind: "once", at: 1_000 },
+              sourceDirectory: yield* prepareSource(
+                artifact === "missing"
+                  ? { "prompt.md": "private prompt" }
+                  : {
+                      "script.js":
+                        'process.stdout.write("private stdout capture");process.stderr.write("private stderr capture");process.exit(7);',
+                    },
+              ),
+            });
+            assert.strictEqual(created.kind, "ready");
+            if (created.kind !== "ready") return;
+            const runId = `scheduled-1000-${created.definition.revision}`;
+            const directory = path.join(schedulesDir, "runs", created.id, runId);
+            if (artifact !== "missing") {
+              unreadableArtifact = path.join(directory, "script", artifact);
+            }
+            yield* TestClock.setTime(1_000);
+            yield* schedules.start({
+              scriptTarget: defaultScriptTarget,
+              resolveTarget,
+              materialize: ({ destination }) =>
+                Effect.succeed(resolveMaterializedTarget(destination, AbsolutePath.make(root))),
+              deliver: () => Effect.die("Failed runs must not deliver agent messages"),
+              publish: (_chatId, content) =>
+                Queue.offer(notifications, content).pipe(Effect.asVoid),
+              runPrompt: (_chatId, runId) =>
+                Effect.succeed({ ...capturedRun(runId, "private agent output"), events: [] }),
+            });
+            const notification = yield* Queue.take(notifications);
+            const run = yield* awaitFinished(fileSystem, path.join(directory, "run.json"));
+            const stage = artifact === "missing" ? "omp" : "script";
+            const primaryFailure = artifact === "missing" ? /assistant message/ : /status 7/;
+            assert.deepInclude(run.state.kind === "finished" ? run.state.outcome : {}, {
+              kind: "failed",
+              stage,
+              notification: { kind: "delivered" },
+            });
+            if (run.state.kind !== "finished" || run.state.outcome.kind !== "failed") {
+              return yield* Effect.die("Expected persisted primary failure");
+            }
+            assert.match(run.state.outcome.message, primaryFailure);
+            assert.include(notification, runId);
+            assert.include(notification, created.id);
+            assert.match(notification, primaryFailure);
+            const primary = yield* awaitLog(logs.events, stage);
+            assert.strictEqual(primary.level, "Error");
+            assert.deepInclude(primary.annotations, {
+              outcome: "failed",
+              persisted: true,
+              category: "operation",
+            });
+            for (const captured of ["stdout.bin", "stderr.bin", "result.json"]) {
+              assert.strictEqual(
+                yield* fileSystem.exists(path.join(directory, "script", captured)),
+                artifact !== "missing",
+              );
+            }
+            const diagnostics = logs.entries.filter(
+              (entry) => entry.annotations.phase === "failure-diagnostics",
+            );
+            if (artifact === "missing") {
+              assert.deepStrictEqual(diagnostics, []);
+            } else {
+              assert.strictEqual(diagnostics[0]?.level, "Error");
+              assert.deepInclude(diagnostics[0]?.annotations ?? {}, {
+                component: "schedule",
+                scheduleId: created.id,
+                runId,
+                phase: "failure-diagnostics",
+                category: "operation",
+              });
+            }
+          }).pipe(
+            Effect.provideService(FileSystem.FileSystem, failingFileSystem),
+            Effect.provide(logs.layer),
+          );
+          const serializedLogs = JSON.stringify(logs.entries);
+          assert.notInclude(serializedLogs, "private");
+          assert.notInclude(serializedLogs, root);
+        }).pipe(Effect.provide(platformLayer), Effect.scoped),
+    );
+  }
 
   it.effect("reports a primary run failure once when finalization also fails", () =>
     Effect.gen(function* () {
@@ -1562,10 +2102,10 @@ describe("Schedules", () => {
           const schedules = yield* make(schedulesDir, resolveTarget);
           yield* TestClock.setTime(1_000);
           yield* schedules.start({
-            withScriptActivity: (_chatId, script) => script,
+            scriptTarget: () =>
+              Effect.fail(new Schedule.ScheduleHostError({ message: "private target detail" })),
             resolveTarget,
-            materialize: () => Effect.void,
-            prepare: () =>
+            materialize: () =>
               Effect.fail(new Schedule.ScheduleHostError({ message: "private target detail" })),
             deliver: () => Effect.die("Failed targets cannot deliver"),
             publish: () => Effect.die("Failed targets cannot publish"),
@@ -1576,7 +2116,7 @@ describe("Schedules", () => {
             enabled: true,
             target: { kind: "chat", chatId: caller.chatId },
             trigger: { kind: "once", at: 1_000 },
-            sourceDirectory: yield* prepareSource({ "prompt.md": "private prompt" }),
+            sourceDirectory: yield* prepareSource({ "script.js": "process.exit(0)" }),
           });
           assert.strictEqual(created.kind, "ready");
           if (created.kind !== "ready") return;
@@ -1584,13 +2124,21 @@ describe("Schedules", () => {
           const runId = `scheduled-1000-${created.definition.revision}`;
           assert.strictEqual(finalized.annotations.runId, runId);
           const failures = logs.entries.filter((entry) => entry.level === "Error");
-          assert.deepStrictEqual(
-            failures.map((entry) => entry.annotations.phase),
-            ["target", "finalize"],
+          const primary = failures.filter(
+            (entry) =>
+              entry.annotations.outcome === "failed" && entry.annotations.persisted === false,
           );
+          assert.strictEqual(primary.length, 1);
+          assert.strictEqual(primary[0]?.annotations.category, "operation");
+          assert.isTrue(
+            failures.some(
+              (entry) =>
+                entry.annotations.phase === "failure-reporting-state" &&
+                entry.annotations.category === "io",
+            ),
+          );
+          assert.strictEqual(finalized.annotations.category, "io");
           assert.isTrue(failures.every((entry) => entry.annotations.scheduleId === created.id));
-          assert.strictEqual(failures[0]?.annotations.outcome, "failed");
-          assert.strictEqual(failures[0]?.annotations.persisted, false);
           const durable = yield* fileSystem
             .readFileString(path.join(schedulesDir, "runs", created.id, runId, "run.json"))
             .pipe(Effect.flatMap(decodeRun));
@@ -1600,7 +2148,6 @@ describe("Schedules", () => {
         Effect.provide(Layer.succeed(FileSystem.FileSystem, failingFileSystem)),
         Effect.provide(logs.layer),
       );
-      assert.strictEqual(logs.entries.filter((entry) => entry.level === "Error").length, 2);
       assert.notInclude(JSON.stringify(logs.entries), "private");
     }).pipe(Effect.provide(platformLayer), Effect.scoped),
   );
@@ -1619,10 +2166,10 @@ describe("Schedules", () => {
             const schedules = yield* make(schedulesDir, resolveTarget);
             yield* TestClock.setTime(1_000);
             yield* schedules.start({
-              withScriptActivity: (_chatId, script) => script,
+              scriptTarget: () => Effect.die(new Error("private SDK payload")),
               resolveTarget,
-              materialize: () => Effect.void,
-              prepare: () => Effect.die(new Error("private SDK payload")),
+              materialize: () =>
+                Effect.fail(new Schedule.ScheduleHostError({ message: "Destination unavailable" })),
               deliver: () => Effect.die("Failed targets cannot deliver"),
               publish: () => Effect.die("Failed targets cannot publish"),
               runPrompt: () => Effect.die("Failed targets cannot run"),
@@ -1632,7 +2179,7 @@ describe("Schedules", () => {
               enabled: true,
               target: { kind: "chat", chatId: caller.chatId },
               trigger: { kind: "once", at: 1_000 },
-              sourceDirectory: yield* prepareSource({ "prompt.md": "private prompt" }),
+              sourceDirectory: yield* prepareSource({ "script.js": "process.exit(0)" }),
             });
             assert.strictEqual(created.kind, "ready");
             if (created.kind !== "ready") return;
@@ -1674,10 +2221,10 @@ describe("Schedules", () => {
             const schedules = yield* make(schedulesDir, resolveTarget);
             yield* TestClock.setTime(1_000);
             yield* schedules.start({
-              withScriptActivity: (_chatId, script) => script,
+              scriptTarget: defaultScriptTarget,
               resolveTarget,
-              materialize: () => Effect.void,
-              prepare: () => Effect.succeed({ chatId, workspaceId, cwd: AbsolutePath.make(root) }),
+              materialize: ({ destination }) =>
+                Effect.succeed(resolveMaterializedTarget(destination, AbsolutePath.make(root))),
               deliver: () => Effect.die("Cancelled runs cannot deliver"),
               publish: () => Effect.die("Cancelled runs cannot publish"),
               runPrompt: (_chatId, runId) =>
@@ -1702,7 +2249,18 @@ describe("Schedules", () => {
               sourceDirectory: yield* prepareSource({ "prompt.md": "private cancellation prompt" }),
             });
             yield* Deferred.await(started);
-            if (mode === "aborted") yield* awaitLog(logs.events, "omp");
+            if (mode === "aborted" && created.kind === "ready") {
+              yield* awaitFinished(
+                fileSystem,
+                path.join(
+                  schedulesDir,
+                  "runs",
+                  created.id,
+                  `scheduled-1000-${created.definition.revision}`,
+                  "run.json",
+                ),
+              );
+            }
             return created;
           }),
         ).pipe(Effect.provide(logs.layer));
@@ -1719,7 +2277,7 @@ describe("Schedules", () => {
           ),
         );
         assert.deepInclude(durable.state.kind === "finished" ? durable.state.outcome : {}, {
-          kind: mode === "aborted" ? "failed" : "interrupted",
+          kind: "interrupted",
         });
       }
       assert.deepStrictEqual(
@@ -1768,10 +2326,9 @@ describe("Schedules", () => {
           const validSource = yield* fileSystem.readFileString(metadata);
           yield* fileSystem.writeFileString(metadata, '{"private":"invalid metadata"}');
           yield* schedules.start({
-            withScriptActivity: (_chatId, script) => script,
+            scriptTarget: defaultScriptTarget,
             resolveTarget,
-            materialize: () => Effect.void,
-            prepare: () => Effect.die("Disabled schedules cannot execute"),
+            materialize: () => Effect.die("Disabled schedules cannot execute"),
             deliver: () => Effect.die("Disabled schedules cannot execute"),
             publish: () => Effect.die("Disabled schedules cannot execute"),
             runPrompt: () => Effect.die("Disabled schedules cannot execute"),

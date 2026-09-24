@@ -2,6 +2,7 @@ import * as Schedule from "@pico/contract/schedule";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { decodeDefinition, decodeScheduleId } from "./definition-storage.ts";
+import type { ExecutionInput } from "./source-files.ts";
 import { inspectSource } from "./source-files.ts";
 import {
   createDirectory,
@@ -17,10 +18,23 @@ import {
   type Storage,
 } from "./storage.ts";
 
-const runJson = Schema.fromJsonString(Schedule.ScheduleRunLifecycle);
+const decodeRunLifecycle = Schema.decodeUnknownEffect(Schedule.ScheduleRunLifecycle, {
+  onExcessProperty: "error",
+});
 
-const decodeRun = Schema.decodeUnknownEffect(runJson, { onExcessProperty: "error" });
+const normalizeLegacyRun = (value: unknown): unknown => {
+  if (typeof value !== "object" || value === null || !("state" in value)) return value;
+  const state = value.state;
+  if (typeof state !== "object" || state === null || !("kind" in state)) return value;
+  if (state.kind !== "running-script" || !("target" in state)) return value;
+  const { target: _target, ...normalizedState } = state;
+  return { ...value, state: normalizedState };
+};
 
+const decodeRun = Effect.fn("Schedules.decodeRun")(function* (source: string) {
+  const parsed: unknown = yield* Effect.try(() => JSON.parse(source));
+  return yield* decodeRunLifecycle(normalizeLegacyRun(parsed));
+});
 const decodeRunId = Schema.decodeUnknownOption(Schedule.ScheduleRunId);
 
 const snapshotLayout = Schema.Struct({
@@ -70,7 +84,7 @@ export const publishRun = Effect.fn("Schedules.publishRun")(function* (
   definition: Schedule.ScheduleDefinition,
   sourceDirectory: string,
   transactionId: string,
-  onPublished: Effect.Effect<void>,
+  onPublished: (input: ExecutionInput) => Effect.Effect<void>,
 ) {
   const value = roots(storage);
   return yield* Effect.acquireUseRelease(
@@ -118,7 +132,7 @@ export const publishRun = Effect.fn("Schedules.publishRun")(function* (
           .rename(stage, storage.path.join(parent, run.id))
           .pipe(
             mapIo("Failed to publish schedule run claim"),
-            Effect.andThen(onPublished),
+            Effect.andThen(onPublished(execution)),
             Effect.uninterruptible,
           );
         return execution;
@@ -267,13 +281,17 @@ export const readRuns = Effect.fn("Schedules.readRuns")(function* (
             }),
         ),
       );
-      const expectedRunId = Schedule.ScheduleRunId.make(
-        `scheduled-${run.source.scheduledFor}-${run.definitionRevision}`,
-      );
+      const sourceMatchesId =
+        run.source.kind === "scheduled"
+          ? run.id ===
+            Schedule.ScheduleRunId.make(
+              `scheduled-${run.source.scheduledFor}-${run.definitionRevision}`,
+            )
+          : /^manual-/iu.test(run.id);
       if (
         run.scheduleId !== directoryScheduleId.value ||
         run.id !== directoryRunId.value ||
-        run.id !== expectedRunId
+        !sourceMatchesId
       ) {
         return yield* new Schedule.ScheduleError({
           kind: "corrupt",
