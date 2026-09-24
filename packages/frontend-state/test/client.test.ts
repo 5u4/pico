@@ -25,7 +25,12 @@ import type {
   TranscriptSnapshot,
 } from "@pico/contract/agent-snapshot";
 import { Application } from "@pico/contract/application";
-import { ChatId, type ChatListEntry } from "@pico/contract/chat-model";
+import {
+  ChatId,
+  type ChatListEntry,
+  type ChatResultsRequest,
+  type ChatResultsResponse,
+} from "@pico/contract/chat-model";
 import { ChatRepository } from "@pico/contract/chat-repository";
 import { ApplicationError, ChatClosed } from "@pico/contract/errors";
 import { EventRouter } from "@pico/contract/event-router";
@@ -154,6 +159,7 @@ const fixture = Effect.fnUntraced(function* (
         | "history"
         | "previewHistory"
         | "navigateHistory"
+        | "chatResults"
       >
     >,
   beforeReady: Effect.Effect<void> = Effect.void,
@@ -334,7 +340,423 @@ const snapshotFixture = Effect.fnUntraced(function* (
   };
 });
 
+const resultsFixture = Effect.fnUntraced(function* () {
+  const requests = yield* Queue.unbounded<{
+    readonly input: ChatResultsRequest;
+    readonly reply: Deferred.Deferred<ChatResultsResponse>;
+  }>();
+  const server = yield* fixture({
+    transcript: () => Effect.die("unexpected transcript read"),
+    sendMessage: () => Effect.succeed({ kind: "handled" }),
+    abort: () => Effect.void,
+    chatResults: Effect.fnUntraced(function* (input: ChatResultsRequest) {
+      const reply = yield* Deferred.make<ChatResultsResponse>();
+      yield* Queue.offer(requests, { input, reply });
+      return yield* Deferred.await(reply);
+    }),
+  });
+  return { ...server, requests };
+});
+
 describe("frontend state over WebSocket", () => {
+  it.live("loads the complete results catalog without opening chat transcripts", () =>
+    Effect.gen(function* () {
+      const server = yield* resultsFixture();
+      yield* Effect.gen(function* () {
+        const registry = yield* registryInScope;
+        const state = make({ url: yield* endpoint });
+        registry.mount(state.chatResults);
+        const catalog = yield* Queue.take(server.requests);
+        assert.deepStrictEqual(catalog.input, { chats: [], includeAllOpenChats: true });
+        yield* Deferred.succeed(catalog.reply, [
+          {
+            chatId: firstChat,
+            seenRevision: 0,
+            summary: {
+              kind: "ready",
+              latest: {
+                cursor: { sessionId: "first-session", entryId: "first-result" },
+                messageId: firstMessageId,
+              },
+              relation: "none",
+            },
+          },
+          {
+            chatId: secondChat,
+            seenRevision: 0,
+            summary: { kind: "ready", latest: null, relation: "none" },
+          },
+        ]);
+        const results = yield* AtomRegistry.getResult(registry, state.chatResults, {
+          suspendOnWaiting: true,
+        });
+        assert.deepStrictEqual(
+          [...results],
+          [
+            [
+              firstChat,
+              {
+                chatId: firstChat,
+                seenRevision: 0,
+                summary: {
+                  kind: "ready",
+                  latest: {
+                    cursor: { sessionId: "first-session", entryId: "first-result" },
+                    messageId: firstMessageId,
+                  },
+                  relation: "none",
+                },
+              },
+            ],
+            [
+              secondChat,
+              {
+                chatId: secondChat,
+                seenRevision: 0,
+                summary: { kind: "ready", latest: null, relation: "none" },
+              },
+            ],
+          ],
+        );
+      }).pipe(Effect.scoped, Effect.provide(server.layer));
+    }),
+  );
+
+  it.live("merges a background chat terminal refresh without losing other results", () =>
+    Effect.gen(function* () {
+      const server = yield* resultsFixture();
+      yield* Effect.gen(function* () {
+        const registry = yield* registryInScope;
+        const state = make({ url: yield* endpoint });
+        registry.mount(state.chatResults);
+        const route = yield* Queue.take(server.opened);
+        yield* Deferred.succeed((yield* Queue.take(server.requests)).reply, [
+          {
+            chatId: firstChat,
+            seenRevision: 0,
+            summary: {
+              kind: "ready",
+              latest: {
+                cursor: { sessionId: "first-session", entryId: "first-result" },
+                messageId: firstMessageId,
+              },
+              relation: "none",
+            },
+          },
+          {
+            chatId: secondChat,
+            seenRevision: 0,
+            summary: { kind: "ready", latest: null, relation: "none" },
+          },
+        ]);
+        yield* AtomRegistry.getResult(registry, state.chatResults, { suspendOnWaiting: true });
+        yield* waitFor(registry, state.connection, (value) => value.kind === "active");
+        yield* Queue.offer(route.queue, {
+          chatId: secondChat,
+          event: { type: "run-finished", outcome: "completed" },
+        });
+        const refresh = yield* Queue.take(server.requests);
+        assert.deepStrictEqual(refresh.input, {
+          chats: [{ chatId: secondChat, seen: null, seenRevision: 0 }],
+          includeAllOpenChats: false,
+        });
+        yield* Deferred.succeed(refresh.reply, [
+          {
+            chatId: secondChat,
+            seenRevision: 0,
+            summary: {
+              kind: "ready",
+              latest: {
+                cursor: { sessionId: "second-session", entryId: "background-result" },
+                messageId: secondMessageId,
+              },
+              relation: "none",
+            },
+          },
+        ]);
+        const results = yield* AtomRegistry.getResult(registry, state.chatResults, {
+          suspendOnWaiting: true,
+        });
+        assert.deepStrictEqual(
+          [...results],
+          [
+            [
+              firstChat,
+              {
+                chatId: firstChat,
+                seenRevision: 0,
+                summary: {
+                  kind: "ready",
+                  latest: {
+                    cursor: { sessionId: "first-session", entryId: "first-result" },
+                    messageId: firstMessageId,
+                  },
+                  relation: "none",
+                },
+              },
+            ],
+            [
+              secondChat,
+              {
+                chatId: secondChat,
+                seenRevision: 0,
+                summary: {
+                  kind: "ready",
+                  latest: {
+                    cursor: { sessionId: "second-session", entryId: "background-result" },
+                    messageId: secondMessageId,
+                  },
+                  relation: "none",
+                },
+              },
+            ],
+          ],
+        );
+      }).pipe(Effect.scoped, Effect.provide(server.layer));
+    }),
+  );
+
+  it.live(
+    "drops an in-flight result after the seen basis changes and publishes the new basis",
+    () =>
+      Effect.gen(function* () {
+        const server = yield* resultsFixture();
+        yield* Effect.gen(function* () {
+          const registry = yield* registryInScope;
+          const state = make({ url: yield* endpoint });
+          registry.set(state.chatResults, {
+            chats: [
+              {
+                chatId: firstChat,
+                seen: { sessionId: "first-session", entryId: "first-result" },
+                seenRevision: 1,
+              },
+            ],
+            includeAllOpenChats: true,
+          });
+          const publishedHeads = new Set<string | null>();
+          registry.subscribe(state.chatResults, (value) => {
+            if (value._tag !== "Success") return;
+            const summary = value.value.get(firstChat)?.summary;
+            if (summary?.kind === "ready") {
+              publishedHeads.add(summary.latest?.cursor.entryId ?? null);
+            }
+          });
+          registry.mount(state.chatResults);
+          const route = yield* Queue.take(server.opened);
+          yield* Deferred.succeed((yield* Queue.take(server.requests)).reply, [
+            {
+              chatId: firstChat,
+              seenRevision: 1,
+              summary: {
+                kind: "ready",
+                latest: {
+                  cursor: { sessionId: "first-session", entryId: "first-result" },
+                  messageId: firstMessageId,
+                },
+                relation: "covered",
+              },
+            },
+          ]);
+          yield* AtomRegistry.getResult(registry, state.chatResults, { suspendOnWaiting: true });
+          yield* waitFor(registry, state.connection, (value) => value.kind === "active");
+          yield* Queue.offer(route.queue, {
+            chatId: firstChat,
+            event: { type: "run-finished", outcome: "completed" },
+          });
+          const stale = yield* Queue.take(server.requests);
+          registry.set(state.chatResults, {
+            chats: [
+              {
+                chatId: firstChat,
+                seen: { sessionId: "first-session", entryId: "second-result" },
+                seenRevision: 2,
+              },
+            ],
+            includeAllOpenChats: true,
+          });
+          yield* Deferred.succeed(stale.reply, [
+            {
+              chatId: firstChat,
+              seenRevision: 1,
+              summary: {
+                kind: "ready",
+                latest: {
+                  cursor: { sessionId: "first-session", entryId: "stale-result" },
+                  messageId: orphanMessageId,
+                },
+                relation: "behind",
+              },
+            },
+          ]);
+          const fresh = yield* Queue.take(server.requests);
+          assert.deepStrictEqual(fresh.input.chats, [
+            {
+              chatId: firstChat,
+              seen: { sessionId: "first-session", entryId: "second-result" },
+              seenRevision: 2,
+            },
+          ]);
+          assert.deepStrictEqual(
+            [...AsyncResult.getOrThrow(registry.get(state.chatResults))],
+            [
+              [
+                firstChat,
+                {
+                  chatId: firstChat,
+                  seenRevision: 1,
+                  summary: {
+                    kind: "ready",
+                    latest: {
+                      cursor: { sessionId: "first-session", entryId: "first-result" },
+                      messageId: firstMessageId,
+                    },
+                    relation: "covered",
+                  },
+                },
+              ],
+            ],
+          );
+          yield* Deferred.succeed(fresh.reply, [
+            {
+              chatId: firstChat,
+              seenRevision: 2,
+              summary: {
+                kind: "ready",
+                latest: {
+                  cursor: { sessionId: "first-session", entryId: "second-result" },
+                  messageId: secondMessageId,
+                },
+                relation: "covered",
+              },
+            },
+          ]);
+          const results = yield* AtomRegistry.getResult(registry, state.chatResults, {
+            suspendOnWaiting: true,
+          });
+          assert.deepStrictEqual(
+            [...results],
+            [
+              [
+                firstChat,
+                {
+                  chatId: firstChat,
+                  seenRevision: 2,
+                  summary: {
+                    kind: "ready",
+                    latest: {
+                      cursor: { sessionId: "first-session", entryId: "second-result" },
+                      messageId: secondMessageId,
+                    },
+                    relation: "covered",
+                  },
+                },
+              ],
+            ],
+          );
+          assert.deepStrictEqual([...publishedHeads], ["first-result", "second-result"]);
+        }).pipe(Effect.scoped, Effect.provide(server.layer));
+      }),
+  );
+
+  it.live("rehydrates the complete results catalog after reconnecting", () =>
+    Effect.gen(function* () {
+      const thirdChat = ChatId.make("018f47a0-0000-7000-8000-000000000004");
+      const server = yield* resultsFixture();
+      yield* Effect.gen(function* () {
+        const registry = yield* registryInScope;
+        const state = make({ url: yield* endpoint });
+        registry.mount(state.chatResults);
+        const first = yield* Queue.take(server.opened);
+        yield* Deferred.succeed((yield* Queue.take(server.requests)).reply, [
+          {
+            chatId: firstChat,
+            seenRevision: 0,
+            summary: { kind: "ready", latest: null, relation: "none" },
+          },
+          {
+            chatId: secondChat,
+            seenRevision: 0,
+            summary: { kind: "ready", latest: null, relation: "none" },
+          },
+        ]);
+        yield* AtomRegistry.getResult(registry, state.chatResults, { suspendOnWaiting: true });
+        yield* waitFor(registry, state.connection, (value) => value.kind === "active");
+        yield* Queue.end(first.queue);
+        yield* waitFor(registry, state.connection, (value) => value.kind === "unavailable");
+        registry.set(state.ensure, undefined);
+        yield* Queue.take(server.opened);
+        const rehydration = yield* Queue.take(server.requests);
+        assert.deepStrictEqual(rehydration.input, { chats: [], includeAllOpenChats: true });
+        yield* Deferred.succeed(rehydration.reply, [
+          {
+            chatId: firstChat,
+            seenRevision: 0,
+            summary: {
+              kind: "ready",
+              latest: {
+                cursor: { sessionId: "first-session", entryId: "offline-result" },
+                messageId: nextMessageId,
+              },
+              relation: "none",
+            },
+          },
+          {
+            chatId: thirdChat,
+            seenRevision: 0,
+            summary: {
+              kind: "ready",
+              latest: {
+                cursor: { sessionId: "third-session", entryId: "discovered-result" },
+                messageId: thirdMessageId,
+              },
+              relation: "none",
+            },
+          },
+        ]);
+        yield* waitFor(registry, state.connection, (value) => value.kind === "active");
+        const results = yield* AtomRegistry.getResult(registry, state.chatResults, {
+          suspendOnWaiting: true,
+        });
+        assert.deepStrictEqual(
+          [...results],
+          [
+            [
+              firstChat,
+              {
+                chatId: firstChat,
+                seenRevision: 0,
+                summary: {
+                  kind: "ready",
+                  latest: {
+                    cursor: { sessionId: "first-session", entryId: "offline-result" },
+                    messageId: nextMessageId,
+                  },
+                  relation: "none",
+                },
+              },
+            ],
+            [
+              thirdChat,
+              {
+                chatId: thirdChat,
+                seenRevision: 0,
+                summary: {
+                  kind: "ready",
+                  latest: {
+                    cursor: { sessionId: "third-session", entryId: "discovered-result" },
+                    messageId: thirdMessageId,
+                  },
+                  relation: "none",
+                },
+              },
+            ],
+          ],
+        );
+      }).pipe(Effect.scoped, Effect.provide(server.layer));
+    }),
+  );
+
   for (const kind of ["history", "preview"] as const) {
     it.live(
       `interrupts superseded ${kind} reads, coalesces bursts, and recovers without affecting other chats`,

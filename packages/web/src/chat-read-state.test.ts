@@ -116,6 +116,36 @@ describe("chat read state", () => {
     assert.deepStrictEqual(dormant.buildRequest().chats, []);
   });
 
+  it("keeps a new result unread when another page initializes while its catalog waits for a lock", async () => {
+    const waiting = new ChatReadState();
+    const initializing = new ChatReadState();
+    const releaseInitialization = Promise.withResolvers<void>();
+    const releaseChat = Promise.withResolvers<void>();
+    const heldInitialization = locks.request(
+      "pico-unread.v1.initialized",
+      () => releaseInitialization.promise,
+    );
+    const heldChat = locks.request(lockKey, () => releaseChat.promise);
+    const initialized = Promise.withResolvers<boolean>();
+    const request = locks.request.bind(locks);
+    vi.spyOn(locks, "request").mockImplementationOnce((name, callback) => {
+      initialized.resolve(initializing.reconcileCatalog(new Map()));
+      return request(name, callback);
+    });
+    const firstResult = summaryEntry("none", 0);
+    const reconciliation = waiting.reconcileCatalog(catalog(firstResult));
+    releaseInitialization.resolve();
+    try {
+      await initialized.promise;
+    } finally {
+      releaseChat.resolve();
+    }
+    await Promise.all([heldInitialization, heldChat, reconciliation]);
+    assert.strictEqual(waiting.unread(chatId, firstResult), true);
+    assert.deepStrictEqual(waiting.buildRequest().chats, []);
+    assert.strictEqual(new ChatReadState().unread(chatId, firstResult), true);
+  });
+
   it("keeps reminders across reload and passive confirmation until an explicit open", async () => {
     const state = new ChatReadState();
     await state.reconcileCatalog(catalog(summaryEntry("none", 0)));
