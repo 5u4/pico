@@ -13,30 +13,44 @@ import {
 } from "react";
 import ReactMarkdown, { type Components, type ExtraProps } from "react-markdown";
 import rehypeHighlight from "rehype-highlight";
+import rehypeKatex from "rehype-katex";
 import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
 import { MermaidBlock, type MermaidFence } from "./mermaid-block.tsx";
 
 const LinkContext = createContext(false);
 const MERMAID_CLOSED_PROPERTY = "data-mermaid-closed-fence";
 
+type FormulaTransformMode = "typeset" | "source";
+
 type MarkdownCompileContext = {
   readonly stack: Array<{ readonly type?: string; readonly [key: string]: unknown }>;
   readonly data: {
-    mermaidFenceSequenceByCode?: WeakMap<CodeNode, number>;
+    fenceSequenceByNode?: WeakMap<MarkdownNode, number>;
   };
 };
 
 type HastElement = NonNullable<ExtraProps["node"]>;
 type HastChild = HastElement["children"][number];
 
-type CodeNode = {
-  readonly type: "code";
+type MarkdownNode = {
+  readonly type: string;
   readonly lang?: string | null;
+  readonly value?: string;
+  readonly position?: {
+    readonly start?: { readonly offset?: number };
+    readonly end?: { readonly offset?: number };
+  };
   data?: {
     hProperties?: Record<string, unknown>;
+    hName?: string;
+    hChildren?: HastChild[];
+    closedFence?: boolean;
     [key: string]: unknown;
   };
+  children?: MarkdownNode[];
+  [key: string]: unknown;
 };
 
 type CopyState =
@@ -46,12 +60,30 @@ type CopyState =
       readonly source: string;
     };
 
-const remarkPlugins = [remarkGfm, remarkBreaks, remarkMermaidFenceMetadata];
+const remarkPlugins: ComponentProps<typeof ReactMarkdown>["remarkPlugins"] = [
+  remarkGfm,
+  remarkBreaks,
+  remarkMath,
+  [remarkFormulaMetadata, { mode: "typeset" }],
+];
+const labelRemarkPlugins: ComponentProps<typeof ReactMarkdown>["remarkPlugins"] = [
+  remarkGfm,
+  remarkBreaks,
+  remarkMath,
+  [remarkFormulaMetadata, { mode: "source" }],
+];
+const rehypeKatexTransformer = rehypeKatex({
+  errorColor: "var(--raw-danger)",
+  maxExpand: 1000,
+  maxSize: 20,
+  output: "htmlAndMathml",
+  trust: false,
+});
 const rehypeCodeHighlightTransformer = rehypeHighlight({
   detect: false,
   plainText: ["mermaid"],
 });
-const rehypePlugins = [rehypeCodeHighlightPlugin];
+const rehypePlugins = [rehypeKatexPlugin, rehypeCodeHighlightPlugin];
 
 const components = {
   a({ node: _node, children, href, ...props }) {
@@ -175,7 +207,7 @@ export const MarkdownLabel = memo(function MarkdownLabel({
       <ReactMarkdown
         allowedElements={labelAllowedElements}
         components={labelComponents}
-        remarkPlugins={remarkPlugins}
+        remarkPlugins={labelRemarkPlugins}
         unwrapDisallowed
       >
         {text}
@@ -303,19 +335,31 @@ function MarkdownImage({ alt, src, title }: ComponentProps<"img">) {
   );
 }
 
-export function remarkMermaidFenceMetadata(this: {
-  data(key: "fromMarkdownExtensions"): unknown;
-  data(key: "fromMarkdownExtensions", value: unknown): undefined;
-}) {
+export function remarkFormulaMetadata(
+  this: {
+    data(key: "fromMarkdownExtensions"): unknown;
+    data(key: "fromMarkdownExtensions", value: unknown): undefined;
+  },
+  options?: { readonly mode?: FormulaTransformMode },
+) {
   const extensions = (this.data("fromMarkdownExtensions") as Array<unknown> | undefined) ?? [];
   extensions.push({
     exit: {
       codeFencedFenceSequence(this: MarkdownCompileContext) {
-        onCodeFenceSequence(this);
+        onFenceSequence(this, "code");
+      },
+      mathFlowFenceSequence(this: MarkdownCompileContext) {
+        onFenceSequence(this, "math");
       },
     },
   });
   this.data("fromMarkdownExtensions", extensions);
+
+  return (tree: MarkdownNode, file: { readonly value?: unknown }) => {
+    const mode = options?.mode ?? "typeset";
+    const source = typeof file.value === "string" ? file.value : undefined;
+    rewriteFormulaNodes(tree, source, mode);
+  };
 }
 
 export function mermaidFenceFromPre(node: HastElement | undefined): MermaidFence | undefined {
@@ -325,36 +369,97 @@ export function mermaidFenceFromPre(node: HastElement | undefined): MermaidFence
   const className = readClassNames(codeElement.properties?.className);
   if (!className.includes("language-mermaid")) return;
   const source = readCodeValue(codeElement.children);
-  const closed =
-    codeElement.properties?.[MERMAID_CLOSED_PROPERTY] === true ||
-    codeElement.properties?.[MERMAID_CLOSED_PROPERTY] === "true";
+  const closed = isClosedFenceValue(codeElement.properties?.[MERMAID_CLOSED_PROPERTY]);
   return { kind: closed ? "closed" : "open", source };
 }
 
-function onCodeFenceSequence(context: MarkdownCompileContext): void {
-  const codeNode = findNearestCodeNode(context.stack);
-  if (!codeNode) return;
-  const sequenceByCode = context.data.mermaidFenceSequenceByCode ?? new WeakMap<CodeNode, number>();
-  context.data.mermaidFenceSequenceByCode = sequenceByCode;
-  const nextSequence = (sequenceByCode.get(codeNode) ?? 0) + 1;
-  sequenceByCode.set(codeNode, nextSequence);
-  if (nextSequence < 2) return;
-  if (codeNode.lang?.trim().toLowerCase() !== "mermaid") return;
-
-  const data = codeNode.data ?? {};
-  const hProperties = data.hProperties ?? {};
-  hProperties[MERMAID_CLOSED_PROPERTY] = "true";
-  data.hProperties = hProperties;
-  codeNode.data = data;
-}
-
-function findNearestCodeNode(stack: MarkdownCompileContext["stack"]): CodeNode | undefined {
-  for (let index = stack.length - 1; index >= 0; index -= 1) {
-    const entry = stack[index];
-    if (entry?.type === "code") {
-      return entry as CodeNode;
+function rewriteFormulaNodes(
+  parent: MarkdownNode,
+  source: string | undefined,
+  mode: FormulaTransformMode,
+): void {
+  if (!parent.children) return;
+  for (let index = 0; index < parent.children.length; index++) {
+    const node = parent.children[index];
+    if (!node) continue;
+    if (node.type === "inlineMath") {
+      if (mode === "source") {
+        parent.children[index] = {
+          type: "text",
+          value: readNodeSource(node, source) ?? node.value ?? "",
+        };
+      }
+    } else if (node.type === "math" || (node.type === "code" && node.lang === "math")) {
+      parent.children[index] =
+        mode === "typeset" && node.data?.closedFence
+          ? toTypesetMathBlock(node)
+          : {
+              type: "paragraph",
+              data: { hName: "div", hProperties: { className: ["chat-math-source"] } },
+              children: [{ type: "text", value: readNodeSource(node, source) ?? node.value ?? "" }],
+            };
+    } else {
+      rewriteFormulaNodes(node, source, mode);
     }
   }
+}
+
+function toTypesetMathBlock(node: MarkdownNode): MarkdownNode {
+  const value = typeof node.value === "string" ? node.value : "";
+  const data = { ...(node.data ?? {}) };
+  data.hName = "div";
+  data.hProperties = {
+    "aria-label": "Math formula",
+    className: ["chat-math-block"],
+    role: "region",
+    tabIndex: 0,
+  };
+  data.hChildren = [
+    {
+      type: "element",
+      tagName: "code",
+      properties: {
+        className: ["language-math", "math-display"],
+      },
+      children: [{ type: "text", value }],
+    },
+  ];
+  return { ...node, type: "math", data };
+}
+
+function readNodeSource(node: MarkdownNode, source: string | undefined): string | undefined {
+  if (!source) return;
+  const start = node.position?.start?.offset;
+  const end = node.position?.end?.offset;
+  if (typeof start !== "number" || typeof end !== "number") return;
+  if (start < 0 || end < start || end > source.length) return;
+  return source.slice(start, end);
+}
+
+function onFenceSequence(context: MarkdownCompileContext, type: "code" | "math"): void {
+  const node = context.stack.findLast((entry) => entry.type === type) as MarkdownNode | undefined;
+  if (!node) return;
+  context.data.fenceSequenceByNode ??= new WeakMap<MarkdownNode, number>();
+  const sequences = context.data.fenceSequenceByNode;
+  const count = (sequences.get(node) ?? 0) + 1;
+  sequences.set(node, count);
+  if (count < 2) return;
+  node.data ??= {};
+  const data = node.data;
+  data.closedFence = true;
+  if (type === "code" && node.lang?.trim().toLowerCase() === "mermaid") {
+    data.hProperties ??= {};
+    const properties = data.hProperties;
+    properties[MERMAID_CLOSED_PROPERTY] = "true";
+  }
+}
+
+function isClosedFenceValue(value: unknown): boolean {
+  return value === true || value === "true";
+}
+
+function rehypeKatexPlugin() {
+  return rehypeKatexTransformer;
 }
 
 function rehypeCodeHighlightPlugin() {
