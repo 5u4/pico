@@ -280,7 +280,9 @@ export const make = ({ url }: { readonly url: string }) => {
         );
         yield* Deferred.await(generation.ready);
         while (isCurrent(generation)) {
-          const pending = [...reads].filter((record) => record.generation !== generation);
+          const pending = [...reads].filter(
+            (record) => record.kind !== "results" && record.generation !== generation,
+          );
           if (pending.length === 0) break;
           yield* Effect.forEach(pending, (record) => refresh(record, generation, false), {
             concurrency: "unbounded",
@@ -290,6 +292,8 @@ export const make = ({ url }: { readonly url: string }) => {
         if (!isCurrent(generation)) return yield* unavailableError();
         generation.phase = "active";
         registry.set(status, { kind: "active" });
+        if (resultsRead !== undefined)
+          yield* refresh(resultsRead, generation, false).pipe(Effect.forkIn(scope));
       });
       const ensure = (): Effect.Effect<void, ApplicationError> =>
         Effect.suspend(() => {
@@ -341,14 +345,14 @@ export const make = ({ url }: { readonly url: string }) => {
       const read = (record: ReadRecord) =>
         Effect.gen(function* () {
           reads.add(record);
-          const previous = current;
-          if (previous?.phase !== "active") {
+          const active = current?.phase === "active";
+          if (!active) {
             yield* ensure().pipe(Effect.ignore);
             if (record.generation === current) return;
           }
           const generation = current;
           if (generation === undefined) return;
-          yield* refresh(record, generation);
+          yield* refresh(record, generation, active);
         });
       const registerChat = (record: ChatRead) => {
         reads.add(record);
@@ -533,22 +537,14 @@ export const make = ({ url }: { readonly url: string }) => {
           }
           if (fullCatalog) catalogGeneration = undefined;
           get.registry.update(chatResultsState, AsyncResult.waiting);
-          const outcome = yield* generation.client
-            .ChatResults(filtered)
-            .pipe(Effect.exit, Effect.timeoutOption("5 seconds"));
+          const exit = yield* generation.client.ChatResults(filtered).pipe(Effect.exit);
           if (!manager.isCurrent(generation)) return;
-          const exit = Option.isSome(outcome) ? outcome.value : Exit.fail(unavailableError());
           if (Exit.isFailure(exit)) {
             for (const entry of filtered.chats) dirty.add(entry.chatId);
             get.registry.update(chatResultsState, (previous) =>
               AsyncResult.failureWithPrevious(exit.cause, { previous: Option.some(previous) }),
             );
-            if (Option.isNone(outcome) || !domainFailure(exit.cause)) {
-              yield* manager.fail(
-                generation,
-                Option.isNone(outcome) ? Cause.fail(new Cause.TimeoutError()) : exit.cause,
-              );
-            }
+            if (!domainFailure(exit.cause)) yield* manager.fail(generation, exit.cause);
             return;
           }
           if (flight.dirty || requested !== get.registry.get(chatResultsInput)) {

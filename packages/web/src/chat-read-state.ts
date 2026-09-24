@@ -107,15 +107,14 @@ export class ChatReadState {
   markRead(chatId: ChatId, entry: ChatResultSummaryEntry | undefined): Promise<boolean> {
     const summary = entry?.summary;
     const capture = this.captureOpen(chatId);
-    if (summary?.kind === "unavailable") {
-      return this.withLock(chatLockKey(chatId), () =>
-        this.acknowledge(chatId, null, this.readSeenCurrent(chatId)?.revision ?? 0, capture),
-      );
-    }
-    const revision = entry?.seenRevision ?? this.readSeenCurrent(chatId)?.revision ?? 0;
-    return this.withLock(chatLockKey(chatId), () =>
-      this.acknowledge(chatId, summary?.latest?.cursor ?? null, revision, capture),
-    );
+    return this.withLock(chatLockKey(chatId), () => {
+      const revision = this.readSeenCurrent(chatId)?.revision ?? 0;
+      const latest =
+        entry?.seenRevision === revision && summary?.kind !== "unavailable"
+          ? (summary?.latest?.cursor ?? null)
+          : null;
+      return this.acknowledge(chatId, latest, revision, capture);
+    });
   }
 
   confirm(
