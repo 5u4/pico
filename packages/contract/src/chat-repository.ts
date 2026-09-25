@@ -13,6 +13,8 @@ export class ChatRepository extends Context.Service<
       workspaceId: WorkspaceId,
     ) => Effect.Effect<readonly Chat[], PersistenceError>;
 
+    /** Application lifecycle checks use this for root-wide active cwd references. */
+    readonly listOpen: () => Effect.Effect<readonly Chat[], PersistenceError>;
     readonly create: (chat: NewChat) => Effect.Effect<Chat, PersistenceError>;
 
     readonly bindExternalId: (input: {

@@ -61,6 +61,7 @@ const makeFixture = Effect.fn("ChatResultsTest.makeFixture")(function* () {
     validate: () => Effect.die("unexpected git validation"),
     create: () => Effect.die("unexpected worktree creation"),
     inspectChat: () => Effect.die("unexpected worktree inspection"),
+    slotCandidate: () => Effect.die("unexpected slot candidate lookup"),
     renameChatBranch: () => Effect.die("unexpected branch rename"),
     removeChat: () => Effect.die("unexpected worktree removal"),
   };
@@ -93,11 +94,13 @@ const makeFixture = Effect.fn("ChatResultsTest.makeFixture")(function* () {
     workspaceId: workspace.id,
     externalId: null,
     modelOverride: null,
+    sourceChatId: null,
   });
   const healthyChat = yield* application.createChat({
     workspaceId: workspace.id,
     externalId: null,
     modelOverride: null,
+    sourceChatId: null,
   });
   return { application, responses, failedChat, healthyChat };
 });

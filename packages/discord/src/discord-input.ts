@@ -595,6 +595,7 @@ export const install = Effect.fn("DiscordInput.install")(function* <
             workspaceId,
             externalId: thread.id.toString(),
             modelOverride: null,
+            sourceChatId: null,
           });
           cacheChat(thread.id, chat.id);
           failureMessage = "pico could not submit your opening message.";

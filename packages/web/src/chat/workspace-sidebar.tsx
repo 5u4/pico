@@ -48,6 +48,7 @@ export interface WorkspaceSidebarProps {
   readonly onChatMarkUnread: (workspaceId: string, chatId: string) => void;
   readonly onChatMarkRead: (workspaceId: string, chatId: string) => void;
   readonly onChatClose: (workspaceId: string, chatId: string, origin: HTMLElement) => void;
+  readonly onNewChatInDirectory: (workspaceId: string, sourceChatId: string) => void;
   readonly chatCloseDisabled: boolean;
   readonly onNewChat: (workspaceId?: string) => void;
   readonly schedulesHref: string;
@@ -74,6 +75,7 @@ export function WorkspaceSidebar({
   onChatMarkUnread,
   onChatMarkRead,
   onChatClose,
+  onNewChatInDirectory,
   chatCloseDisabled,
   onNewChat,
   schedulesHref,
@@ -387,6 +389,7 @@ export function WorkspaceSidebar({
                       onChatMarkRead={onChatMarkRead}
                       onChatMarkUnread={onChatMarkUnread}
                       onChatSelect={onChatSelect}
+                      onNewChatInDirectory={onNewChatInDirectory}
                       selected={selected}
                       workspaceId={workspace.id}
                     />
@@ -499,6 +502,7 @@ function ChatRow({
   onChatMarkUnread,
   onChatMarkRead,
   onChatClose,
+  onNewChatInDirectory,
   chatCloseDisabled,
   contextMenuContainer,
 }: Pick<
@@ -507,6 +511,7 @@ function ChatRow({
   | "onChatMarkUnread"
   | "onChatMarkRead"
   | "onChatClose"
+  | "onNewChatInDirectory"
   | "chatCloseDisabled"
   | "contextMenuContainer"
 > & {
@@ -623,6 +628,14 @@ function ChatRow({
         >
           <CopyIcon aria-hidden="true" size={17} />
           Copy chat ID
+        </ContextMenuItem>
+        <ContextMenuItem
+          onSelect={() => {
+            onNewChatInDirectory(workspaceId, chat.id);
+          }}
+        >
+          <FolderSimpleIcon aria-hidden="true" size={17} />
+          New chat in this directory
         </ContextMenuItem>
         <ContextMenuItem
           onSelect={() => {

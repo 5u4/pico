@@ -133,6 +133,18 @@ export const make = ({ url }: { readonly url: string }) => {
       historyEpoch: 0,
     }).pipe(Atom.keepAlive),
   );
+  interface WorkspaceCatalogTarget {
+    readonly workspaceId: WorkspaceId;
+    readonly sourceChatId: ChatId | null;
+  }
+  const workspaceCatalogKey = (target: WorkspaceCatalogTarget) =>
+    `${target.workspaceId}\u0000${target.sourceChatId ?? ""}`;
+  const workspaceCatalogTarget = (key: string): WorkspaceCatalogTarget => {
+    const separator = key.indexOf("\u0000");
+    const workspaceId = key.slice(0, separator) as WorkspaceId;
+    const source = key.slice(separator + 1);
+    return { workspaceId, sourceChatId: source.length === 0 ? null : (source as ChatId) };
+  };
 
   const owner = Atom.make((get) =>
     Effect.gen(function* () {
@@ -890,13 +902,15 @@ export const make = ({ url }: { readonly url: string }) => {
       }),
     ).pipe(Atom.setIdleTTL(0)),
   );
-  const availableWorkspaceModels = Atom.family((workspaceId: WorkspaceId) =>
-    list<readonly ModelInfo[]>((client) => client.AvailableWorkspaceModels({ workspaceId })),
+  const availableWorkspaceModelsByKey = Atom.family((key: string) =>
+    list<readonly ModelInfo[]>((client) =>
+      client.AvailableWorkspaceModels(workspaceCatalogTarget(key)),
+    ),
   );
-  const availableWorkspaceSkills = Atom.family((workspaceId: WorkspaceId) =>
+  const availableWorkspaceSkillsByKey = Atom.family((key: string) =>
     list<readonly SkillCommand[]>(
       (client) =>
-        client.AvailableWorkspaceSkills({ workspaceId }).pipe(
+        client.AvailableWorkspaceSkills(workspaceCatalogTarget(key)).pipe(
           Effect.timeout("30 seconds"),
           Effect.catchTag("TimeoutError", () =>
             Effect.fail(
@@ -911,6 +925,12 @@ export const make = ({ url }: { readonly url: string }) => {
       { fastTimeout: false },
     ),
   );
+  const availableWorkspaceModels = (target: WorkspaceCatalogTarget) => {
+    return availableWorkspaceModelsByKey(workspaceCatalogKey(target));
+  };
+  const availableWorkspaceSkills = (target: WorkspaceCatalogTarget) => {
+    return availableWorkspaceSkillsByKey(workspaceCatalogKey(target));
+  };
   const availableModels = Atom.family((chatId: ChatId) =>
     list<readonly ModelInfo[], ChatClosed>((client) => client.AvailableModels({ chatId })),
   );
@@ -1058,8 +1078,9 @@ export const make = ({ url }: { readonly url: string }) => {
             current.map((existing) => (existing.id === workspace.id ? workspace : existing)),
           );
           const nodes = get.registry.getNodes();
-          const models = availableWorkspaceModels(workspace.id);
-          const skills = availableWorkspaceSkills(workspace.id);
+          const target = { workspaceId: workspace.id, sourceChatId: null };
+          const models = availableWorkspaceModels(target);
+          const skills = availableWorkspaceSkills(target);
           if (nodes.has(models)) get.registry.refresh(models);
           if (nodes.has(skills)) get.registry.refresh(skills);
         },

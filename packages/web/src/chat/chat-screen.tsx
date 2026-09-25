@@ -180,6 +180,7 @@ export function ChatScreen({
   onChatMarkUnread,
   onChatMarkRead,
   onNewChat,
+  onNewChatInDirectory,
   schedulesHref,
   onOpenSchedules,
   onTabSelect,
@@ -483,6 +484,10 @@ export function ChatScreen({
     },
     onNewChat: (workspaceId) => {
       onNewChat(workspaceId);
+      closeSidebar();
+    },
+    onNewChatInDirectory: (workspaceId, sourceChatId) => {
+      onNewChatInDirectory(workspaceId, sourceChatId);
       closeSidebar();
     },
     onAddWorkspace: () => {

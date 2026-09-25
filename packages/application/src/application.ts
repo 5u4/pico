@@ -32,7 +32,7 @@ import { AbsolutePath } from "@pico/contract/path";
 import * as Schedule from "@pico/contract/schedule";
 import * as Workspace from "@pico/contract/workspace-model";
 import { WorkspaceRepository } from "@pico/contract/workspace-repository";
-import type { GitWorktree } from "@pico/contract/worktree";
+import type { GitWorktree, ManagedSlotCandidate } from "@pico/contract/worktree";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
@@ -155,6 +155,116 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
         }),
     );
 
+  const lifecycleSemaphore = Semaphore.makeUnsafe(1);
+  const pendingRuntimeReleases = new Map<Chat.ChatId, AbsolutePath>();
+  const withLifecycleGate = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+    lifecycleSemaphore.withPermit(effect);
+  const normalizeCwd = (cwd: AbsolutePath) => AbsolutePath.make(path.normalize(cwd));
+
+  const canonicalCwd = Effect.fn("Application.canonicalCwd")(function* (cwd: AbsolutePath) {
+    return yield* fileSystem.realPath(cwd).pipe(
+      Effect.map((resolved) => Option.some(normalizeCwd(AbsolutePath.make(resolved)))),
+      Effect.catch(() => Effect.succeed(Option.none<AbsolutePath>())),
+    );
+  });
+
+  const hasOpenCwdReference = Effect.fn("Application.hasOpenCwdReference")(function* (
+    closingChatId: Chat.ChatId,
+    cwd: AbsolutePath,
+  ) {
+    const openChats = yield* chats
+      .listOpen()
+      .pipe(Effect.mapError(failure("Failed to list open chats")));
+    const normalizedTarget = normalizeCwd(cwd);
+    const peers = openChats.filter((chat) => chat.id !== closingChatId);
+    if (peers.some((chat) => normalizeCwd(chat.cwd) === normalizedTarget)) return true;
+
+    const targetCanonical = yield* canonicalCwd(normalizedTarget);
+    if (Option.isNone(targetCanonical)) return true;
+    const canonicalByCwd = new Map<AbsolutePath, Option.Option<AbsolutePath>>();
+    for (const peer of peers) {
+      const normalizedPeer = normalizeCwd(peer.cwd);
+      const cached = canonicalByCwd.get(normalizedPeer);
+      const canonical =
+        cached ??
+        (yield* canonicalCwd(normalizedPeer).pipe(
+          Effect.tap((value) =>
+            Effect.sync(() => {
+              canonicalByCwd.set(normalizedPeer, value);
+            }),
+          ),
+        ));
+      if (Option.isNone(canonical)) return true;
+      if (canonical.value === targetCanonical.value) return true;
+    }
+    return false;
+  });
+
+  const hasPendingRuntimeRelease = Effect.fn("Application.hasPendingRuntimeRelease")(function* (
+    chatId: Chat.ChatId,
+    cwd: AbsolutePath,
+  ) {
+    const normalizedTarget = normalizeCwd(cwd);
+    const blockers = [...pendingRuntimeReleases.entries()].filter(([id]) => id !== chatId);
+    if (blockers.some(([, cwd]) => normalizeCwd(cwd) === normalizedTarget)) return true;
+
+    const targetCanonical = yield* canonicalCwd(normalizedTarget);
+    if (Option.isNone(targetCanonical)) return blockers.length > 0;
+    for (const [, blocker] of blockers) {
+      const canonical = yield* canonicalCwd(normalizeCwd(blocker));
+      if (Option.isNone(canonical)) return true;
+      if (canonical.value === targetCanonical.value) return true;
+    }
+    return false;
+  });
+
+  const resolveSourceChatCwd = Effect.fn("Application.resolveSourceChatCwd")(function* (
+    workspaceId: Workspace.WorkspaceId,
+    sourceChatId: Chat.ChatId,
+    operation: string,
+  ) {
+    const source = yield* chats
+      .findById(sourceChatId)
+      .pipe(Effect.mapError(failure(`Failed to ${operation}`)));
+    if (Option.isNone(source)) {
+      return yield* new ApplicationError({
+        reason: "invalid-state",
+        message: "Source chat is no longer available",
+      });
+    }
+    if (source.value.archivedAt !== null) {
+      return yield* new ApplicationError({
+        reason: "invalid-state",
+        message: "Source chat is closed",
+      });
+    }
+    if (source.value.workspaceId !== workspaceId) {
+      return yield* new ApplicationError({
+        reason: "invalid-state",
+        message: "Source chat does not belong to this workspace",
+      });
+    }
+    yield* resolveWorkspacePath("cwd", source.value.cwd).pipe(
+      Effect.mapError(failure(`Failed to ${operation}`)),
+    );
+    return source.value.cwd;
+  });
+
+  const resolveManagedSlotCandidate = Effect.fn("Application.resolveManagedSlotCandidate")(
+    function* (cwd: AbsolutePath) {
+      const candidate = yield* gitWorktree
+        .slotCandidate(cwd)
+        .pipe(Effect.mapError(failure("Failed to resolve managed worktree slot")));
+      if (Option.isNone(candidate)) return Option.none<ManagedSlotCandidate>();
+      const owner = yield* chats
+        .findById(candidate.value.chatId)
+        .pipe(Effect.mapError(failure("Failed to resolve managed worktree slot owner")));
+      if (Option.isNone(owner)) return Option.none<ManagedSlotCandidate>();
+      return normalizeCwd(owner.value.cwd) === normalizeCwd(candidate.value.cwd)
+        ? candidate
+        : Option.none<ManagedSlotCandidate>();
+    },
+  );
   const findChat = Effect.fn("Application.findChat")(function* (chatId: Chat.ChatId) {
     const chat = yield* chats
       .findById(chatId)
@@ -436,6 +546,24 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
     return workspace;
   });
 
+  const resolveWorkspaceCatalogCwd = Effect.fn("Application.resolveWorkspaceCatalogCwd")(function* (
+    workspaceId: Workspace.WorkspaceId,
+    sourceChatId: Chat.ChatId | null,
+    operation: string,
+  ) {
+    const workspace = yield* workspaces
+      .findById(workspaceId)
+      .pipe(Effect.mapError(failure(`Failed to ${operation}`)));
+    if (Option.isNone(workspace)) {
+      return yield* new ApplicationError({
+        reason: "not-found",
+        message: "Workspace not found",
+      });
+    }
+    if (sourceChatId === null) return workspace.value.defaultCwd;
+    return yield* resolveSourceChatCwd(workspaceId, sourceChatId, operation);
+  });
+
   const availableWorkspaceModels = Effect.fn("Application.availableWorkspaceModels")(function* (
     input: Parameters<Application["Service"]["availableWorkspaceModels"]>[0],
   ) {
@@ -447,34 +575,30 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
         .availableModels(Option.isSome(workspace) ? workspace.value.defaultCwd : input.defaultCwd)
         .pipe(Effect.mapError(failure("Failed to list available models")));
     }
-    const workspace = yield* workspaces
-      .findById(input.workspaceId)
-      .pipe(Effect.mapError(failure("Failed to find workspace")));
-    if (Option.isNone(workspace)) {
-      return yield* new ApplicationError({
-        reason: "not-found",
-        message: "Workspace not found",
-      });
-    }
+    const cwd = yield* withLifecycleGate(
+      resolveWorkspaceCatalogCwd(
+        input.workspaceId,
+        input.sourceChatId,
+        "list available workspace models",
+      ),
+    );
     return yield* runtime
-      .availableModels(workspace.value.defaultCwd)
+      .availableModels(cwd)
       .pipe(Effect.mapError(failure("Failed to list available models")));
   });
 
   const availableWorkspaceSkills = Effect.fn("Application.availableWorkspaceSkills")(function* (
-    workspaceId: Workspace.WorkspaceId,
+    input: Parameters<Application["Service"]["availableWorkspaceSkills"]>[0],
   ) {
-    const workspace = yield* workspaces
-      .findById(workspaceId)
-      .pipe(Effect.mapError(failure("Failed to find workspace")));
-    if (Option.isNone(workspace)) {
-      return yield* new ApplicationError({
-        reason: "not-found",
-        message: "Workspace not found",
-      });
-    }
+    const cwd = yield* withLifecycleGate(
+      resolveWorkspaceCatalogCwd(
+        input.workspaceId,
+        input.sourceChatId,
+        "list workspace skill commands",
+      ),
+    );
     return yield* runtime
-      .discoverSkills(workspace.value.defaultCwd)
+      .discoverSkills(cwd)
       .pipe(Effect.mapError(failure("Failed to list workspace skill commands")));
   });
 
@@ -560,40 +684,57 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
 
   const createChatWithId = Effect.fn("Application.createChatWithId")(
     function* (input: CreateChat, id: Chat.ChatId, createdAt: number) {
-      const maybeWorkspace = yield* workspaces.findById(input.workspaceId);
-      if (Option.isNone(maybeWorkspace)) {
-        return yield* new ApplicationError({
-          reason: "not-found",
-          message: "Cannot create chat: workspace not found",
-        });
-      }
+      return yield* withLifecycleGate(
+        Effect.gen(function* () {
+          const maybeWorkspace = yield* workspaces.findById(input.workspaceId);
+          if (Option.isNone(maybeWorkspace)) {
+            return yield* new ApplicationError({
+              reason: "not-found",
+              message: "Cannot create chat: workspace not found",
+            });
+          }
 
-      const workspace = maybeWorkspace.value;
-      if (workspace.worktree === null) {
-        const cwd = yield* resolveWorkspacePath("cwd", workspace.defaultCwd);
-        const modelOverride = yield* resolveInitialModelOverride(
-          cwd,
-          workspace.modelOverride,
-          input.modelOverride,
-        );
-        return yield* persistChat(input, id, cwd, createdAt, modelOverride);
-      }
-
-      return yield* gitWorktree.create(
-        {
-          chatId: id,
-          repositoryCwd: workspace.defaultCwd,
-          settings: workspace.worktree,
-        },
-        (cwd) =>
-          Effect.gen(function* () {
+          const workspace = maybeWorkspace.value;
+          if (input.sourceChatId !== null) {
+            const cwd = yield* resolveSourceChatCwd(
+              input.workspaceId,
+              input.sourceChatId,
+              "create chat",
+            );
             const modelOverride = yield* resolveInitialModelOverride(
               cwd,
               workspace.modelOverride,
               input.modelOverride,
             );
             return yield* persistChat(input, id, cwd, createdAt, modelOverride);
-          }),
+          }
+          if (workspace.worktree === null) {
+            const cwd = yield* resolveWorkspacePath("cwd", workspace.defaultCwd);
+            const modelOverride = yield* resolveInitialModelOverride(
+              cwd,
+              workspace.modelOverride,
+              input.modelOverride,
+            );
+            return yield* persistChat(input, id, cwd, createdAt, modelOverride);
+          }
+
+          return yield* gitWorktree.create(
+            {
+              chatId: id,
+              repositoryCwd: workspace.defaultCwd,
+              settings: workspace.worktree,
+            },
+            (cwd) =>
+              Effect.gen(function* () {
+                const modelOverride = yield* resolveInitialModelOverride(
+                  cwd,
+                  workspace.modelOverride,
+                  input.modelOverride,
+                );
+                return yield* persistChat(input, id, cwd, createdAt, modelOverride);
+              }),
+          );
+        }),
       );
     },
     Effect.mapError(failure("Failed to create chat")),
@@ -690,7 +831,7 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
       return yield* ensureChatOpen(chatId, "Failed to create scheduled chat");
     }
     return yield* createChatWithId(
-      { workspaceId, externalId: null, modelOverride: null },
+      { workspaceId, externalId: null, modelOverride: null, sourceChatId: null },
       chatId,
       yield* Clock.currentTimeMillis,
     );
@@ -813,94 +954,152 @@ const make = Effect.fn("Application.make")(function* (gitWorktree: GitWorktree) 
             operation.kind === "ordinary" ? Deferred.await(operation.finished) : Effect.void,
           { discard: true },
         );
-        const chat = yield* findChat(chatId);
-        const inspection = yield* gitWorktree
-          .inspectChat({ chatId, cwd: chat.cwd })
-          .pipe(Effect.mapError(failure("Failed to inspect chat worktree")));
-        if (
-          inspection.kind === "managed" &&
-          inspection.state === "dirty" &&
-          !options.allowDirtyWorktree
-        ) {
-          return { kind: "worktree-confirmation-required" } satisfies CloseChatResult;
-        }
-
-        const archivedAt = yield* Clock.currentTimeMillis;
-        const archived = yield* chats
-          .archive(chatId, archivedAt)
-          .pipe(Effect.mapError(failure("Failed to archive chat")));
-        if (Option.isNone(archived)) {
-          return yield* new ApplicationError({ reason: "not-found", message: "Chat not found" });
-        }
-        yield* Effect.logInfo("Chat archived").pipe(
-          Effect.annotateLogs({
-            component: "application",
-            operation: "close-chat",
-            phase: "archive",
-            chatId,
-            workspaceId: chat.workspaceId,
-          }),
-        );
-        for (const operation of activeOperations.get(chatId) ?? []) {
-          if (operation.kind !== "btw") continue;
-          yield* Deferred.succeed(operation.cancelled, undefined);
-        }
-        for (const operation of activeOperations.get(chatId) ?? []) {
-          if (operation.kind !== "btw") continue;
-          yield* Deferred.await(operation.finished);
-        }
-        yield* runtime
-          .close(chatId)
-          .pipe(Effect.mapError(failure("Chat archived, but runtime close failed")));
-        yield* Effect.forEach(
-          activeOperations.get(chatId) ?? [],
-          (operation) => Deferred.await(operation.finished),
-          { discard: true },
-        );
-        yield* Effect.logDebug("Chat runtime closed").pipe(
-          Effect.annotateLogs({
-            component: "application",
-            operation: "close-chat",
-            phase: "runtime-close",
-            chatId,
-            workspaceId: chat.workspaceId,
-          }),
-        );
-
-        if (inspection.kind === "managed" && inspection.state !== "absent") {
-          const removal = yield* gitWorktree
-            .removeChat({ chatId, cwd: chat.cwd, force: options.allowDirtyWorktree })
-            .pipe(
-              Effect.mapError(
-                failure("Chat archived and runtime closed, but worktree removal failed"),
-              ),
-            );
-          switch (removal.kind) {
-            case "removed":
-            case "already-absent":
-              break;
-            case "force-required":
-              return { kind: "worktree-confirmation-required" } satisfies CloseChatResult;
-            case "not-managed":
-              return yield* new ApplicationError({
-                reason: "invalid-state",
-                message: "Chat archived and runtime closed, but worktree is no longer managed",
-              });
-            default: {
-              const exhaustive: never = removal;
-              return exhaustive;
+        return yield* withLifecycleGate(
+          Effect.gen(function* () {
+            const chat = yield* findChat(chatId);
+            const slot = yield* resolveManagedSlotCandidate(chat.cwd);
+            if (
+              Option.isSome(slot) &&
+              !(yield* hasOpenCwdReference(chatId, slot.value.cwd)) &&
+              !(yield* hasPendingRuntimeRelease(chatId, slot.value.cwd))
+            ) {
+              const inspection = yield* gitWorktree
+                .inspectChat({ chatId: slot.value.chatId, cwd: slot.value.cwd })
+                .pipe(Effect.mapError(failure("Failed to inspect chat worktree")));
+              if (
+                inspection.kind === "managed" &&
+                inspection.state === "dirty" &&
+                !options.allowDirtyWorktree
+              ) {
+                return { kind: "worktree-confirmation-required" } satisfies CloseChatResult;
+              }
             }
-          }
-        }
-        yield* Effect.logInfo("Chat closed").pipe(
-          Effect.annotateLogs({
-            component: "application",
-            operation: "close-chat",
-            chatId,
-            workspaceId: chat.workspaceId,
+
+            yield* Effect.sync(() => {
+              pendingRuntimeReleases.set(chatId, chat.cwd);
+            });
+            const archivedAt = yield* Clock.currentTimeMillis;
+            const archived = yield* chats
+              .archive(chatId, archivedAt)
+              .pipe(Effect.mapError(failure("Failed to archive chat")));
+            if (Option.isNone(archived)) {
+              return yield* new ApplicationError({
+                reason: "not-found",
+                message: "Chat not found",
+              });
+            }
+            yield* Effect.logInfo("Chat archived").pipe(
+              Effect.annotateLogs({
+                component: "application",
+                operation: "close-chat",
+                phase: "archive",
+                chatId,
+                workspaceId: chat.workspaceId,
+              }),
+            );
+            for (const operation of activeOperations.get(chatId) ?? []) {
+              if (operation.kind !== "btw") continue;
+              yield* Deferred.succeed(operation.cancelled, undefined);
+            }
+            for (const operation of activeOperations.get(chatId) ?? []) {
+              if (operation.kind !== "btw") continue;
+              yield* Deferred.await(operation.finished);
+            }
+
+            yield* runtime
+              .close(chatId)
+              .pipe(Effect.mapError(failure("Chat archived, but runtime close failed")));
+            yield* Effect.forEach(
+              activeOperations.get(chatId) ?? [],
+              (operation) => Deferred.await(operation.finished),
+              { discard: true },
+            );
+            yield* Effect.sync(() => {
+              pendingRuntimeReleases.delete(chatId);
+            });
+            yield* Effect.logDebug("Chat runtime closed").pipe(
+              Effect.annotateLogs({
+                component: "application",
+                operation: "close-chat",
+                phase: "runtime-close",
+                chatId,
+                workspaceId: chat.workspaceId,
+              }),
+            );
+
+            if (Option.isSome(slot)) {
+              if (yield* hasPendingRuntimeRelease(chatId, slot.value.cwd)) {
+                yield* Effect.logWarning(
+                  "Skipping worktree removal due to incomplete runtime cleanup",
+                ).pipe(
+                  Effect.annotateLogs({
+                    component: "application",
+                    operation: "close-chat",
+                    phase: "worktree-remove",
+                    chatId,
+                    workspaceId: chat.workspaceId,
+                  }),
+                );
+              } else if (yield* hasOpenCwdReference(chatId, slot.value.cwd)) {
+                yield* Effect.logDebug(
+                  "Skipping worktree removal because chat peers still reference cwd",
+                ).pipe(
+                  Effect.annotateLogs({
+                    component: "application",
+                    operation: "close-chat",
+                    phase: "worktree-remove",
+                    chatId,
+                    workspaceId: chat.workspaceId,
+                  }),
+                );
+              } else {
+                const inspection = yield* gitWorktree
+                  .inspectChat({ chatId: slot.value.chatId, cwd: slot.value.cwd })
+                  .pipe(Effect.mapError(failure("Failed to inspect chat worktree")));
+                if (inspection.kind === "managed" && inspection.state !== "absent") {
+                  const removal = yield* gitWorktree
+                    .removeChat({
+                      chatId: slot.value.chatId,
+                      cwd: slot.value.cwd,
+                      force: options.allowDirtyWorktree,
+                    })
+                    .pipe(
+                      Effect.mapError(
+                        failure("Chat archived and runtime closed, but worktree removal failed"),
+                      ),
+                    );
+                  switch (removal.kind) {
+                    case "removed":
+                    case "already-absent":
+                      break;
+                    case "force-required":
+                      return { kind: "worktree-confirmation-required" } satisfies CloseChatResult;
+                    case "not-managed":
+                      return yield* new ApplicationError({
+                        reason: "invalid-state",
+                        message:
+                          "Chat archived and runtime closed, but worktree is no longer managed",
+                      });
+                    default: {
+                      const exhaustive: never = removal;
+                      return exhaustive;
+                    }
+                  }
+                }
+              }
+            }
+
+            yield* Effect.logInfo("Chat closed").pipe(
+              Effect.annotateLogs({
+                component: "application",
+                operation: "close-chat",
+                chatId,
+                workspaceId: chat.workspaceId,
+              }),
+            );
+            return { kind: "closed" } satisfies CloseChatResult;
           }),
         );
-        return { kind: "closed" } satisfies CloseChatResult;
       }),
     );
   });

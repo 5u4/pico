@@ -22,12 +22,12 @@ import type {
 } from "./agent-runtime.ts";
 import { ModelRef } from "./agent-runtime.ts";
 import type { NavigateHistoryResult, TranscriptSnapshot } from "./agent-snapshot.ts";
-import type {
-  Chat,
+import {
+  type Chat,
   ChatId,
-  ChatListEntry,
-  ChatResultsRequest,
-  ChatResultsResponse,
+  type ChatListEntry,
+  type ChatResultsRequest,
+  type ChatResultsResponse,
 } from "./chat-model.ts";
 import type { ApplicationError, ChatClosed, GitError, WorkspaceBindingInvalid } from "./errors.ts";
 import type { AbsolutePath } from "./path.ts";
@@ -66,6 +66,7 @@ export const CreateChat = Schema.Struct({
   workspaceId: WorkspaceId,
   externalId: Schema.NullOr(Schema.NonEmptyString),
   modelOverride: Schema.NullOr(ModelRef),
+  sourceChatId: Schema.NullOr(ChatId),
 });
 export type CreateChat = typeof CreateChat.Type;
 
@@ -121,12 +122,14 @@ export class Application extends Context.Service<
         | {
             readonly kind: "workspace";
             readonly workspaceId: WorkspaceId;
+            readonly sourceChatId: ChatId | null;
           },
     ) => Effect.Effect<readonly ModelInfo[], ApplicationError>;
     /** Web clients call this when opening draft skill completion before first send. */
-    readonly availableWorkspaceSkills: (
-      workspaceId: WorkspaceId,
-    ) => Effect.Effect<readonly SkillCommand[], ApplicationError>;
+    readonly availableWorkspaceSkills: (input: {
+      readonly workspaceId: WorkspaceId;
+      readonly sourceChatId: ChatId | null;
+    }) => Effect.Effect<readonly SkillCommand[], ApplicationError>;
 
     /** Platform adapters call this after resolving a workspace model selection. */
     readonly setWorkspaceModel: (

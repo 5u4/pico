@@ -596,7 +596,12 @@ describe("RPC", () => {
           for (const request of [
             client.ListChats({ workspaceId: id }).pipe(Effect.asVoid),
             client
-              .CreateChat({ workspaceId: id, externalId: null, modelOverride: null })
+              .CreateChat({
+                workspaceId: id,
+                externalId: null,
+                modelOverride: null,
+                sourceChatId: null,
+              })
               .pipe(Effect.asVoid),
             client.DeleteWorkspace({ workspaceId: id }).pipe(Effect.asVoid),
             client
@@ -773,6 +778,7 @@ describe("RPC", () => {
           workspaceId: webWorkspace.id,
           externalId: null,
           modelOverride: null,
+          sourceChatId: null,
         });
         assert.strictEqual(created.id, newChatId);
         const createdEvent: AgentEvent.AgentEventEnvelope = {

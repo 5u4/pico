@@ -219,10 +219,10 @@ const handlers = PicoRpcs.toLayer(
             requestId: String(requestId),
           }),
         ),
-      AvailableWorkspaceModels: ({ workspaceId }, { requestId }) =>
+      AvailableWorkspaceModels: ({ workspaceId, sourceChatId }, { requestId }) =>
         requireWebWorkspace(workspaces, workspaceId).pipe(
           Effect.andThen(() =>
-            application.availableWorkspaceModels({ kind: "workspace", workspaceId }),
+            application.availableWorkspaceModels({ kind: "workspace", workspaceId, sourceChatId }),
           ),
           Effect.tapCause(reportFailure),
           Effect.annotateLogs({
@@ -232,9 +232,9 @@ const handlers = PicoRpcs.toLayer(
             requestId: String(requestId),
           }),
         ),
-      AvailableWorkspaceSkills: ({ workspaceId }, { requestId }) =>
+      AvailableWorkspaceSkills: ({ workspaceId, sourceChatId }, { requestId }) =>
         requireWebWorkspace(workspaces, workspaceId).pipe(
-          Effect.andThen(() => application.availableWorkspaceSkills(workspaceId)),
+          Effect.andThen(() => application.availableWorkspaceSkills({ workspaceId, sourceChatId })),
           Effect.tapCause(reportFailure),
           Effect.annotateLogs({
             component: "rpc",

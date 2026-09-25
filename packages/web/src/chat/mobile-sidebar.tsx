@@ -99,6 +99,9 @@ export function MobileSidebar({
               : undefined
           }
           onNewChat={(workspaceId) => afterClose(() => sidebar.onNewChat(workspaceId))}
+          onNewChatInDirectory={(workspaceId, sourceChatId) =>
+            afterClose(() => sidebar.onNewChatInDirectory(workspaceId, sourceChatId))
+          }
           onOpenSchedules={(origin) =>
             afterClose(() => sidebar.onOpenSchedules(returnFocus.current ?? origin))
           }

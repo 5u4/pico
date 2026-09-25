@@ -85,7 +85,11 @@ interface DraftEntry {
   readonly recoveredDraft: DraftValue | null;
   readonly disclosures: ReadonlyMap<string, boolean>;
   readonly target:
-    | { readonly kind: "new"; readonly modelOverride: ModelRef | null }
+    | {
+        readonly kind: "new";
+        readonly modelOverride: ModelRef | null;
+        readonly source: { readonly chatId: ChatId; readonly cwd: string } | null;
+      }
     | { readonly kind: "chat"; readonly chat: Chat };
   readonly submission:
     | { readonly kind: "idle" }
@@ -130,6 +134,29 @@ const menuStatusId = (key: string) => `skill-completion-status-${key}`;
 const menuOptionId = (key: string, index: number) => `skill-completion-option-${key}-${index}`;
 const isCreationUnconfirmed = (entry: DraftEntry | undefined) =>
   entry?.target.kind === "new" && entry.submission.kind === "error";
+type DraftSource = NonNullable<Extract<DraftEntry["target"], { readonly kind: "new" }>["source"]>;
+
+const sameDraftSource = (left: DraftSource | null, right: DraftSource | null) =>
+  left?.chatId === right?.chatId && left?.cwd === right?.cwd;
+
+const newDraftTarget = (
+  source: DraftSource | null,
+  modelOverride: ModelRef | null = null,
+): Extract<DraftEntry["target"], { readonly kind: "new" }> => ({
+  kind: "new",
+  modelOverride,
+  source,
+});
+
+const workspaceCatalogTargetForDraft = (workspaceId: WorkspaceId, source: DraftSource | null) => ({
+  workspaceId,
+  sourceChatId: source?.chatId ?? null,
+});
+
+const targetCwd = (entry: Pick<DraftEntry, "workspace" | "target">) =>
+  entry.target.kind === "chat"
+    ? entry.target.chat.cwd
+    : (entry.target.source?.cwd ?? entry.workspace.defaultCwd);
 interface TabState {
   readonly openKeys: readonly string[];
   readonly entries: ReadonlyMap<string, DraftEntry>;
@@ -703,8 +730,7 @@ export function WorkspaceChat({
     if (page.kind === "settings" && workspaceSaving && workspaceEditor?.session !== visit) {
       return { kind: "loading", label: "Finishing the previous workspace save..." };
     }
-    if (page.kind !== "chat")
-      return { kind: "ready", workspace, target: { kind: "new", modelOverride: null } };
+    if (page.kind !== "chat") return { kind: "ready", workspace, target: newDraftTarget(null) };
     const chats = group?.chats;
     if (chats?._tag === "Success" && !chats.waiting) {
       const chat = chats.value.find((chat) => chat.id === page.chatId);
@@ -741,6 +767,10 @@ export function WorkspaceChat({
     conversationEntry?.target.kind === "chat" ? conversationEntry.target.chat.id : null;
   const draftWorkspaceId =
     conversationEntry?.target.kind === "new" ? conversationEntry.workspace.id : null;
+  const draftSourceChatId =
+    conversationEntry?.target.kind === "new"
+      ? (conversationEntry.target.source?.chatId ?? null)
+      : null;
   const schedulesHref = router.buildLocation({ to: "/schedules" }).href;
   const visibleChatId =
     page.kind === "chat" &&
@@ -800,14 +830,24 @@ export function WorkspaceChat({
       Atom.make((get) =>
         state && draftWorkspaceId
           ? {
-              models: get(state.availableWorkspaceModels(draftWorkspaceId)),
+              models: get(
+                state.availableWorkspaceModels({
+                  workspaceId: draftWorkspaceId,
+                  sourceChatId: draftSourceChatId,
+                }),
+              ),
               skills: skillsVisible
-                ? get(state.availableWorkspaceSkills(draftWorkspaceId))
+                ? get(
+                    state.availableWorkspaceSkills({
+                      workspaceId: draftWorkspaceId,
+                      sourceChatId: draftSourceChatId,
+                    }),
+                  )
                 : undefined,
             }
           : null,
       ),
-    [state, draftWorkspaceId, skillsVisible],
+    [state, draftWorkspaceId, draftSourceChatId, skillsVisible],
   );
   const draftCatalog = useAtomValue(draftCatalogAtom);
 
@@ -1137,7 +1177,9 @@ export function WorkspaceChat({
           (target.kind === "chat"
             ? entry.target.kind === "chat" && entry.target.chat.id === target.chat.id
             : entry.target.kind === "new" &&
+              target.modelOverride === null &&
               entry.target.modelOverride === null &&
+              sameDraftSource(entry.target.source, target.source) &&
               isDraftEmpty(entry.value) &&
               entry.submission.kind === "idle")
         ) {
@@ -1336,7 +1378,7 @@ export function WorkspaceChat({
     const exit = await runCommand(registry, state.createWorkspace, decoded.value);
     workspacePending.current = false;
     const entry = Exit.isSuccess(exit)
-      ? retainEntry(exit.value, { kind: "new", modelOverride: null }, false)
+      ? retainEntry(exit.value, newDraftTarget(null), false)
       : undefined;
     if (!ownsVisit()) {
       setWorkspaceSubmission({ session: visit, value: { kind: "ready" } });
@@ -1566,9 +1608,29 @@ export function WorkspaceChat({
       : (groups.find((group) => group.workspace.id === routeWorkspaceId)?.workspace ??
         groups.find((group) => group.workspace.id === preferredWorkspace.current)?.workspace ??
         groups[0]?.workspace);
-    if (workspace)
-      navigatePage(entryPage(retainEntry(workspace, { kind: "new", modelOverride: null }, true)));
+    if (workspace) navigatePage(entryPage(retainEntry(workspace, newDraftTarget(null), true)));
     else if (!workspaceId) addWorkspace();
+  };
+
+  const newChatInDirectory = (workspaceId: string, sourceChatId: string) => {
+    const sourceId = sourceChatId as ChatId;
+    const group = groups.find((item) => item.workspace.id === workspaceId);
+    if (!group) return;
+    const retained = [...navigationRef.current.entries.values()].find(
+      (entry) =>
+        entry.workspace.id === workspaceId &&
+        entry.target.kind === "chat" &&
+        entry.target.chat.id === sourceId,
+    );
+    const sourceChat =
+      (group.chats
+        ? Option.getOrElse(AsyncResult.value(group.chats), () => []).find(
+            (chat) => chat.id === sourceId,
+          )
+        : undefined) ?? (retained?.target.kind === "chat" ? retained.target.chat : undefined);
+    if (!sourceChat || sourceChat.archivedAt !== null) return;
+    const source: DraftSource = { chatId: sourceChat.id, cwd: sourceChat.cwd };
+    navigatePage(entryPage(retainEntry(group.workspace, newDraftTarget(source), true)));
   };
   const captureOpen = (workspaceId: string, chatId: ChatId, navigating: boolean) => {
     openCapture.current = {
@@ -1770,6 +1832,7 @@ export function WorkspaceChat({
     const exit = await runCommand(registry, state.createChat(entry.workspace.id), {
       externalId: null,
       modelOverride: entry.target.modelOverride,
+      sourceChatId: entry.target.source?.chatId ?? null,
     });
     creatingChats.current.delete(entry.workspace.id);
     if (Exit.isFailure(exit)) {
@@ -1805,9 +1868,10 @@ export function WorkspaceChat({
       }
       return;
     }
-    const catalog = registry.get(state.availableWorkspaceSkills(entry.workspace.id));
+    const target = workspaceCatalogTargetForDraft(entry.workspace.id, entry.target.source);
+    const catalog = registry.get(state.availableWorkspaceSkills(target));
     if (catalog._tag !== "Initial" && !catalog.waiting) {
-      registry.refresh(state.availableWorkspaceSkills(entry.workspace.id));
+      registry.refresh(state.availableWorkspaceSkills(target));
     }
   };
 
@@ -1843,9 +1907,10 @@ export function WorkspaceChat({
     const entry = modelEntry();
     if (!entry) return;
     if (entry.target.kind === "new") {
-      const catalog = registry.get(state.availableWorkspaceModels(entry.workspace.id));
+      const target = workspaceCatalogTargetForDraft(entry.workspace.id, entry.target.source);
+      const catalog = registry.get(state.availableWorkspaceModels(target));
       if (catalog._tag !== "Initial" && !catalog.waiting) {
-        registry.refresh(state.availableWorkspaceModels(entry.workspace.id));
+        registry.refresh(state.availableWorkspaceModels(target));
       }
     }
   };
@@ -1894,7 +1959,11 @@ export function WorkspaceChat({
     const entry = modelEntry();
     if (!state || !entry) return;
     if (entry.target.kind === "new") {
-      registry.refresh(state.availableWorkspaceModels(entry.workspace.id));
+      registry.refresh(
+        state.availableWorkspaceModels(
+          workspaceCatalogTargetForDraft(entry.workspace.id, entry.target.source),
+        ),
+      );
       return;
     }
     const id = entry.target.chat.id;
@@ -1967,7 +2036,14 @@ export function WorkspaceChat({
       return;
     }
     if (draftCatalog?.skills?.waiting) return;
-    registry.refresh(state.availableWorkspaceSkills(conversationEntry.workspace.id));
+    registry.refresh(
+      state.availableWorkspaceSkills(
+        workspaceCatalogTargetForDraft(
+          conversationEntry.workspace.id,
+          conversationEntry.target.source,
+        ),
+      ),
+    );
   };
 
   const recordComposerCaret = (selection: { readonly start: number; readonly end: number }) => {
@@ -2331,7 +2407,7 @@ export function WorkspaceChat({
         entry.target.kind === "chat"
           ? (titles.get(entry.target.chat.id) ?? `Chat ${entry.target.chat.id.slice(-8)}`)
           : newChatTitle(entry.value.text),
-      contextLabel: `${entry.workspace.name} · ${entry.target.kind === "chat" ? entry.target.chat.cwd : entry.workspace.defaultCwd}`,
+      contextLabel: `${entry.workspace.name} · ${targetCwd(entry)}`,
       unread:
         entry.target.kind === "chat"
           ? chatReadState.unread(entry.target.chat.id, chatResultEntries.get(entry.target.chat.id))
@@ -2910,7 +2986,7 @@ export function WorkspaceChat({
           }}
           contextLabel={
             conversationEntry
-              ? `${conversationEntry.workspace.name} · ${conversationEntry.target.kind === "chat" ? conversationEntry.target.chat.cwd : conversationEntry.workspace.defaultCwd}`
+              ? `${conversationEntry.workspace.name} · ${targetCwd(conversationEntry)}`
               : "Your project conversations"
           }
           conversationKey={conversationEntry?.key ?? null}
@@ -2980,6 +3056,7 @@ export function WorkspaceChat({
             if (deleteFlowRef.current.kind === "confirmation") updateDeleteFlow({ kind: "idle" });
           }}
           onNewChat={newChat}
+          onNewChatInDirectory={newChatInDirectory}
           onSearchChange={changeSearch}
           onSidebarOpenChange={setSidebarOpen}
           onStop={stop}

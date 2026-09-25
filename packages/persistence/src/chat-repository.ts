@@ -44,6 +44,22 @@ const make = Effect.fn("ChatRepository.make")(function* () {
       ORDER BY created_at DESC, id DESC
     `,
   });
+  const selectOpen = SqlSchema.findAll({
+    Request: Schema.Void,
+    Result: Chat.Chat,
+    execute: () => sql`
+      SELECT
+        id,
+        workspace_id AS "workspaceId",
+        cwd,
+        external_id AS "externalId",
+        created_at AS "createdAt",
+        archived_at AS "archivedAt"
+      FROM chats
+      WHERE archived_at IS NULL
+      ORDER BY created_at DESC, id DESC
+    `,
+  });
 
   const insert = SqlSchema.findOne({
     Request: Chat.NewChat,
@@ -142,6 +158,12 @@ const make = Effect.fn("ChatRepository.make")(function* () {
     },
     Effect.mapError(failure("chat.listOpenByWorkspace")),
   );
+  const listOpen = Effect.fn("ChatRepository.listOpen")(
+    function* () {
+      return yield* selectOpen();
+    },
+    Effect.mapError(failure("chat.listOpen")),
+  );
 
   const create = Effect.fn("ChatRepository.create")(
     function* (chat: Chat.NewChat) {
@@ -180,6 +202,7 @@ const make = Effect.fn("ChatRepository.make")(function* () {
 
   return ChatRepository.of({
     listOpenByWorkspace,
+    listOpen,
     create,
     archive,
     bindExternalId,

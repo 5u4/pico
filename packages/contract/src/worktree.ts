@@ -1,4 +1,5 @@
 import type * as Effect from "effect/Effect";
+import type * as Option from "effect/Option";
 import type { ChatId } from "./chat-model.ts";
 import type { GitError, WorkspaceBindingInvalid } from "./errors.ts";
 import type { AbsolutePath } from "./path.ts";
@@ -16,6 +17,10 @@ export interface ValidateWorktreeOptions {
 }
 
 export interface ChatWorktreeOptions {
+  readonly chatId: ChatId;
+  readonly cwd: AbsolutePath;
+}
+export interface ManagedSlotCandidate {
   readonly chatId: ChatId;
   readonly cwd: AbsolutePath;
 }
@@ -69,6 +74,10 @@ export interface GitWorktree {
   readonly inspectChat: (
     options: ChatWorktreeOptions,
   ) => Effect.Effect<WorktreeInspection, GitError>;
+  /** Application calls this when resolving a chat directory before worktree cleanup. */
+  readonly slotCandidate: (
+    cwd: AbsolutePath,
+  ) => Effect.Effect<Option.Option<ManagedSlotCandidate>, GitError>;
   readonly renameChatBranch: (
     options: RenameChatBranchOptions,
   ) => Effect.Effect<RenameChatBranchResult, GitError>;
