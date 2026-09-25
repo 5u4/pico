@@ -746,7 +746,7 @@ export function ChatScreen({
                   if (!chatVisible) return;
                   const element = event.currentTarget;
                   const following =
-                    element.scrollHeight - element.clientHeight - element.scrollTop < 120;
+                    element.scrollHeight - element.clientHeight - element.scrollTop <= 1;
                   scroll.current.following = following;
                   setShowJump(!following);
                   measureBottom();
