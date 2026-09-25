@@ -718,35 +718,130 @@ textarea:disabled {
   border-color: var(--raw-border-strong);
 }
 
-.composer-input {
-  field-sizing: content;
-  min-height: 68px;
-  max-height: 100px;
-  padding: 8px;
-  font-size: 16px;
-  line-height: 20px;
+.composer-images {
+  max-height: 88px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   scrollbar-width: thin;
 }
 
-.composer:has(.composer-input:focus-visible) {
+.composer-input {
+  min-height: 68px;
+  max-height: 100px;
+  overflow: hidden;
+  border-radius: var(--raw-radius-control);
+  background: transparent;
+}
+
+.composer-input .cm-editor {
+  max-height: inherit;
+  background: transparent;
+  color: var(--raw-foreground);
+}
+
+.composer-input .cm-scroller {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+}
+
+.composer-input .cm-content,
+.composer-input .cm-gutter {
+  padding-top: 8px;
+  padding-bottom: 8px;
+}
+
+.composer-input .cm-content {
+  min-height: 68px;
+  padding-inline: 8px;
+  font-size: 16px;
+  line-height: 20px;
+  caret-color: var(--raw-foreground);
+  font-family: var(--raw-font-sans);
+  overflow-wrap: anywhere;
+}
+
+.composer-input .cm-placeholder {
+  color: var(--raw-subtle);
+}
+
+.composer-input .cm-focused {
+  outline: none;
+}
+
+.composer-input .cm-line {
+  padding-inline: 0;
+}
+
+.composer-input .cm-selectionBackground,
+.composer-input .cm-content::selection {
+  background: var(--raw-selection);
+}
+
+.composer:has(.composer-input .cm-editor.cm-focused) {
   outline: 2px solid var(--raw-focus);
   outline-offset: -2px;
 }
 
-.composer:has(.composer-input:focus-visible) .composer-input {
-  outline: none;
+.composer-expanded {
+  height: 100%;
+  min-height: 0;
+  max-height: 100%;
+}
+
+.composer-expanded .composer-images {
+  flex-shrink: 0;
+  max-height: min(5.5rem, 25%);
+}
+
+.composer-expanded .composer-input {
+  flex: 1 1 0;
+  min-height: 0;
+  max-height: none;
+}
+
+.composer-expanded .composer-input .cm-editor {
+  height: 100%;
+  min-height: 0;
+  max-height: 100%;
+}
+
+.composer-expanded .composer-input .cm-scroller {
+  min-height: 0;
+  height: 100%;
 }
 
 .composer-toolbar {
   display: flex;
   height: 28px;
+  flex-shrink: 0;
   align-items: center;
   gap: 6px;
+}
+
+@media (max-width: 48rem) {
+  .composer-expanded .composer-toolbar {
+    height: auto;
+    flex-wrap: wrap;
+  }
+
+  .composer-expanded .composer-status {
+    order: -1;
+    flex-basis: 100%;
+    overflow: visible;
+    white-space: normal;
+  }
+
+  .composer-expanded .composer-context {
+    flex: 1;
+    max-width: none;
+  }
 }
 
 .prompt-control {
   width: 28px;
   height: 28px;
+  flex-shrink: 0;
   border-radius: var(--raw-radius-control);
   padding: 0;
   transition:
@@ -774,6 +869,77 @@ textarea:disabled {
 
 .composer-fade {
   background: linear-gradient(to top, var(--raw-page) 64%, transparent);
+}
+
+.composer-shell {
+  min-width: 0;
+}
+
+.composer-menu-anchor {
+  pointer-events: none;
+}
+
+.composer-menu-anchor > * {
+  pointer-events: auto;
+}
+
+.composer-shell:has(.composer-expanded) .composer-menu-anchor {
+  --skill-completion-direction: down;
+  top: 12px;
+  right: 12px;
+  bottom: auto;
+  left: 12px;
+  margin-bottom: 0;
+}
+
+.chat-conversation:has(.composer-expanded) .composer-fade,
+.chat-conversation:has(.composer-expanded) .composer-jump {
+  display: none;
+}
+
+.chat-composer-overlay:has(.composer-expanded) {
+  height: 100%;
+  overflow-y: auto;
+  padding-block: 12px;
+}
+
+.chat-composer-frame:has(.composer-expanded) {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+  flex-direction: column;
+  justify-content: flex-start;
+  padding-block: 0;
+}
+
+.chat-composer-frame-welcome:has(.composer-expanded) .chat-home-heading,
+.chat-composer-frame-welcome:has(.composer-expanded) .chat-home-recommendations {
+  display: none;
+}
+
+.chat-composer-stack:has(.composer-expanded) {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+  flex-direction: column;
+  margin-top: 0;
+}
+
+.composer-shell:has(.composer-expanded) {
+  flex: 1 1 0;
+  min-height: 0;
+}
+
+.chat-composer-stack:has(.composer-expanded) .todo-dock {
+  flex: 0 1 auto;
+  max-height: 25%;
+  overflow-y: auto;
+}
+
+.chat-composer-stack:has(.composer-expanded) .composer-settings {
+  flex-shrink: 0;
+  max-height: 30%;
+  overflow-y: auto;
 }
 
 .skill-completion {
@@ -1162,7 +1328,7 @@ textarea:disabled {
     grid-template-columns: var(--raw-sidebar-collapsed) minmax(0, 1fr);
   }
 
-  .composer-input {
+  .composer-input .cm-content {
     font-size: 14px;
   }
 }

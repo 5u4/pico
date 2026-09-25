@@ -14,14 +14,23 @@ export function SkillCompletionMenu({ presentation, onSelect, onRetry }: SkillCo
   useLayoutEffect(() => {
     const element = menu.current;
     if (!open || !element) return;
+    const anchor = element.parentElement;
+    if (!anchor) return;
     const measure = () => {
       let top = window.visualViewport?.offsetTop ?? 0;
-      for (let parent = element.parentElement; parent; parent = parent.parentElement) {
+      let bottom = top + (window.visualViewport?.height ?? window.innerHeight);
+      for (let parent: HTMLElement | null = anchor; parent; parent = parent.parentElement) {
         if (/(auto|scroll|hidden|clip)/u.test(getComputedStyle(parent).overflowY)) {
-          top = Math.max(top, parent.getBoundingClientRect().top);
+          const bounds = parent.getBoundingClientRect();
+          top = Math.max(top, bounds.top);
+          bottom = Math.min(bottom, bounds.bottom);
         }
       }
-      element.style.maxHeight = `${Math.max(0, element.getBoundingClientRect().bottom - top - 8)}px`;
+      const bounds = anchor.getBoundingClientRect();
+      const downward =
+        getComputedStyle(anchor).getPropertyValue("--skill-completion-direction").trim() === "down";
+      const available = downward ? bottom - bounds.top : bounds.bottom - top;
+      element.style.maxHeight = `${Math.max(0, available - 8)}px`;
     };
     measure();
     const observer = new ResizeObserver(measure);

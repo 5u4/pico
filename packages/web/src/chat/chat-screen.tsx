@@ -731,7 +731,7 @@ export function ChatScreen({
             >
               {shakeFeedback.kind === "error" ? shakeFeedback.message : ""}
             </p>
-            <div className="relative min-h-0 flex-1">
+            <div className="chat-conversation relative min-h-0 flex-1">
               <div
                 aria-label="Conversation history"
                 className="transcript-scroll h-full overflow-y-auto overscroll-contain"
@@ -771,7 +771,7 @@ export function ChatScreen({
               )}
               {showJump && !welcome && (
                 <div
-                  className="pointer-events-none absolute inset-x-0 z-10 flex justify-center"
+                  className="composer-jump pointer-events-none absolute inset-x-0 z-10 flex justify-center"
                   style={{ bottom: composerHeight + 8 }}
                 >
                   <Button
@@ -788,8 +788,8 @@ export function ChatScreen({
                 aria-label={welcome ? "Conversation" : undefined}
                 className={
                   welcome
-                    ? "absolute inset-0 overflow-y-auto overscroll-contain"
-                    : "absolute inset-x-0 bottom-0 px-4 pb-6 sm:px-8 lg:px-12"
+                    ? "chat-composer-overlay absolute inset-0 overflow-y-auto overscroll-contain"
+                    : "chat-composer-overlay absolute inset-x-0 bottom-0 px-4 pb-6 sm:px-8 lg:px-12"
                 }
                 id={welcome ? "conversation-history" : undefined}
                 ref={composerRef}
@@ -799,12 +799,12 @@ export function ChatScreen({
                 <div
                   className={
                     welcome
-                      ? "mx-auto flex min-h-full max-w-[960px] flex-col justify-center px-4 py-10 sm:px-8"
-                      : "mx-auto max-w-[960px]"
+                      ? "chat-composer-frame chat-composer-frame-welcome mx-auto flex min-h-full max-w-[960px] flex-col justify-center px-4 py-10 sm:px-8"
+                      : "chat-composer-frame mx-auto max-w-[960px]"
                   }
                 >
                   {welcome && transcript.state === "empty" && (
-                    <h1 className="text-[26px] font-normal tracking-[-0.02em]">
+                    <h1 className="chat-home-heading text-[26px] font-normal tracking-[-0.02em]">
                       <span className="home-reveal home-reveal-hello block text-subtle">Hello</span>
                       <span className="home-reveal home-reveal-question block">
                         {transcript.title}
@@ -813,7 +813,9 @@ export function ChatScreen({
                   )}
                   <div
                     className={
-                      welcome ? "home-reveal home-reveal-prompt relative mt-7" : "relative"
+                      welcome
+                        ? "chat-composer-stack home-reveal home-reveal-prompt relative mt-7"
+                        : "chat-composer-stack relative"
                     }
                   >
                     {todo && (
@@ -822,8 +824,8 @@ export function ChatScreen({
                         presentation={todo}
                       />
                     )}
-                    <div className="relative">
-                      <div className="absolute inset-x-0 bottom-full z-20 mb-2">
+                    <div className="composer-shell relative">
+                      <div className="composer-menu-anchor absolute inset-x-0 bottom-full z-20 mb-2">
                         <SkillCompletionMenu
                           onRetry={onSkillCompletionRetry}
                           onSelect={onSkillCompletionSelect}
@@ -846,7 +848,7 @@ export function ChatScreen({
                         presentation={composer}
                       />
                     </div>
-                    <div className="mt-1 flex items-start justify-between gap-2">
+                    <div className="composer-settings mt-1 flex items-start justify-between gap-2">
                       <ModelPicker
                         key={conversationKey}
                         onOpen={onModelPickerOpen}
@@ -869,7 +871,7 @@ export function ChatScreen({
                     </div>
                   </div>
                   {welcome && transcript.state === "empty" && (
-                    <div className="home-reveal home-reveal-recommendations mt-6 flex flex-col text-subtle">
+                    <div className="chat-home-recommendations home-reveal home-reveal-recommendations mt-6 flex flex-col text-subtle">
                       <p className="text-[13px]">{transcript.description}</p>
                       {onboarding && (
                         <Button className="mt-4" onClick={onAddWorkspace} tone="primary">
