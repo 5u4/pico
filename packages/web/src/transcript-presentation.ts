@@ -169,6 +169,7 @@ export function presentTranscript(
           blocks.push({ kind: "text", id, text: content.text });
           break;
         case "thinking":
+          if (message.status === "completed" && content.text.trim() === "") break;
           flushTools();
           blocks.push({
             kind: "thinking",

@@ -193,6 +193,57 @@ describe("transcript identity", () => {
     );
   });
 
+  it("hides blank completed thoughts without changing content identity or splitting adjacent tools", () => {
+    const message: AgentAssistantMessage = {
+      ...toolMessage,
+      content: [
+        { type: "thinking", text: "" },
+        { type: "thinking", text: "  plan\n" },
+        toolCall("read-first"),
+        { type: "thinking", text: " \n\t " },
+        toolCall("read-second"),
+        { type: "text", text: "after tools" },
+      ],
+    };
+    for (const content of message.content) Object.freeze(content);
+    Object.freeze(message.content);
+    Object.freeze(message);
+    const disclosures = new Map([["assistant-first-content-1", true]]);
+    const settled = reduceLiveChat(emptyLiveChat(), { type: "message-settled", message });
+    const finished = reduceLiveChat(settled, { type: "run-finished", outcome: "completed" });
+    const acknowledged = acknowledgeTranscript(finished, [message]);
+    for (const presentation of [
+      items([], finished, disclosures),
+      items([message], acknowledged, disclosures),
+    ]) {
+      assert.deepStrictEqual(
+        presentation.map((item) => item.kind),
+        ["assistant", "tool-group", "assistant"],
+      );
+      assert.deepStrictEqual(
+        presentation.flatMap((item) => (item.kind === "assistant" ? item.blocks : [])),
+        [
+          {
+            kind: "thinking",
+            id: "assistant-first-content-1",
+            label: "Thought",
+            text: "  plan\n",
+            open: true,
+          },
+          { kind: "text", id: "assistant-first-content-5", text: "after tools" },
+        ],
+      );
+      assert.deepStrictEqual(
+        presentation.flatMap((item) =>
+          item.kind === "tool-group"
+            ? [{ id: item.id, calls: item.calls.map((call) => call.id) }]
+            : [],
+        ),
+        [{ id: "tool-read-first", calls: ["tool-read-first", "tool-read-second"] }],
+      );
+    }
+  });
+
   it("keeps a result-only tool disclosure open when its assistant anchor arrives without merging distinct calls", () => {
     const running = reduceLiveChat(emptyLiveChat(), {
       type: "tool-started",
@@ -535,6 +586,44 @@ describe("response activity", () => {
     assert.strictEqual(reconnecting.state, "empty");
     const completed = reduceLiveChat(running, { type: "run-finished", outcome: "completed" });
     assert.deepStrictEqual(items([], completed), []);
+  });
+
+  it("keeps empty active thinking visible and resumes waiting when it settles without text", () => {
+    const running = reduceLiveChat(emptyLiveChat(), { type: "run-started" });
+    const draft = reduceLiveChat(running, {
+      type: "thinking-delta",
+      messageId: firstId,
+      contentIndex: 0,
+      text: "",
+    });
+    const active = items([], draft);
+    assert.deepStrictEqual(
+      active.map((item) => (item.kind === "assistant" ? item.state.kind : item.kind)),
+      ["streaming"],
+    );
+    assert.deepStrictEqual(thinkingBlocks(active), [
+      {
+        kind: "thinking",
+        id: "assistant-first-content-0",
+        label: "Thinking",
+        text: "",
+        open: true,
+      },
+    ]);
+    const message: AgentAssistantMessage = {
+      ...toolMessage,
+      stopReason: "stop",
+      content: [{ type: "thinking", text: "" }],
+    };
+    const settled = reduceLiveChat(draft, { type: "message-settled", message });
+    for (const presentation of [
+      items([], settled),
+      items([message], acknowledgeTranscript(settled, [message])),
+    ]) {
+      assert.deepStrictEqual(presentation, [
+        { kind: "waiting", id: "run-waiting", label: "Thinking" },
+      ]);
+    }
   });
 
   it("lets drafts and running tools replace waiting and resumes waiting between completed activities", () => {
