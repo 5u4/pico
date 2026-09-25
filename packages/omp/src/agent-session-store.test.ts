@@ -91,6 +91,7 @@ describe("AgentSessionStore", () => {
           validate: () => Effect.void,
           create: unused,
           inspectChat: unused,
+          slotCandidate: unused,
           renameChatBranch: unused,
           removeChat: unused,
         })
@@ -118,18 +119,21 @@ describe("AgentSessionStore", () => {
             workspaceId: workspace.id,
             externalId: null,
             modelOverride: null,
+            sourceChatId: null,
           });
           yield* TestClock.setTime(2_000);
           const untitled = yield* application.createChat({
             workspaceId: workspace.id,
             externalId: null,
             modelOverride: null,
+            sourceChatId: null,
           });
           yield* TestClock.setTime(3_000);
           const missing = yield* application.createChat({
             workspaceId: workspace.id,
             externalId: null,
             modelOverride: null,
+            sourceChatId: null,
           });
           return { workspace, titled, untitled, missing };
         }).pipe(Effect.provide(applicationLayer), Effect.scoped);
@@ -274,6 +278,7 @@ describe("AgentSessionStore", () => {
         validate: () => Effect.void,
         create: (_options, use) => use(worktreeCwd),
         inspectChat: unused,
+        slotCandidate: unused,
         renameChatBranch: unused,
         removeChat: unused,
       })
@@ -322,6 +327,7 @@ describe("AgentSessionStore", () => {
           workspaceId: workspace.id,
           externalId: null,
           modelOverride: null,
+          sourceChatId: null,
         });
         const oldJournal = yield* fileSystem.readFile(journalFile(old.id));
         yield* application.setWorkspaceModel(workspace.id, firstModel);
@@ -329,6 +335,7 @@ describe("AgentSessionStore", () => {
           workspaceId: workspace.id,
           externalId: null,
           modelOverride: null,
+          sourceChatId: null,
         });
         const firstJournal = yield* fileSystem.readFile(journalFile(first.id));
         yield* application.setWorkspaceModel(workspace.id, secondModel);
@@ -336,6 +343,7 @@ describe("AgentSessionStore", () => {
           workspaceId: workspace.id,
           externalId: null,
           modelOverride: firstModel,
+          sourceChatId: null,
         });
         assert.deepStrictEqual(yield* restoredModels(explicit.id), ["native/first"]);
         yield* application.bindWorkspace({
@@ -362,6 +370,7 @@ describe("AgentSessionStore", () => {
             workspaceId: workspace.id,
             externalId: null,
             modelOverride: firstModel,
+            sourceChatId: null,
           })
           .pipe(Effect.flip);
         assert.instanceOf(rejected, ApplicationError);
@@ -378,12 +387,14 @@ describe("AgentSessionStore", () => {
           workspaceId: workspace.id,
           externalId: null,
           modelOverride: null,
+          sourceChatId: null,
         });
         yield* application.setWorkspaceModel(workspace.id, null);
         const cleared = yield* application.createChat({
           workspaceId: workspace.id,
           externalId: null,
           modelOverride: null,
+          sourceChatId: null,
         });
         assert.deepStrictEqual(yield* fileSystem.readFile(journalFile(old.id)), oldJournal);
         assert.deepStrictEqual(yield* fileSystem.readFile(journalFile(first.id)), firstJournal);

@@ -109,12 +109,12 @@ export const PicoRpcs = RpcGroup.make(
     error: Schema.Union([Errors.ApplicationError, Errors.ChatClosed]),
   }),
   Rpc.make("AvailableWorkspaceModels", {
-    payload: { workspaceId: Workspace.WorkspaceId },
+    payload: { workspaceId: Workspace.WorkspaceId, sourceChatId: Schema.NullOr(Chat.ChatId) },
     success: Schema.Array(ModelInfo),
     error: Errors.ApplicationError,
   }),
   Rpc.make("AvailableWorkspaceSkills", {
-    payload: { workspaceId: Workspace.WorkspaceId },
+    payload: { workspaceId: Workspace.WorkspaceId, sourceChatId: Schema.NullOr(Chat.ChatId) },
     success: Schema.Array(SkillCommand),
     error: Errors.ApplicationError,
   }),

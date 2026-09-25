@@ -121,6 +121,7 @@ describe("Workspace binding", () => {
           ),
         create: (_options, use) => use(worktreeCwd),
         inspectChat: () => Effect.succeed({ kind: "not-managed" }),
+        slotCandidate: () => Effect.die("unexpected slot candidate lookup"),
         renameChatBranch: () => Effect.die("unexpected branch rename"),
         removeChat: () => Effect.die("unexpected worktree removal"),
       };
@@ -160,6 +161,7 @@ describe("Workspace binding", () => {
           workspaceId: created.id,
           externalId: "thread-old",
           modelOverride: null,
+          sourceChatId: null,
         });
         const modelOverride = { provider: "native", id: "channel-model" };
         const configured = yield* application.setWorkspaceModel(created.id, modelOverride);
@@ -204,6 +206,7 @@ describe("Workspace binding", () => {
           workspaceId: created.id,
           externalId: "thread-worktree",
           modelOverride: null,
+          sourceChatId: null,
         });
         assert.strictEqual(worktreeChat.cwd, worktreeCwd);
 
@@ -229,6 +232,7 @@ describe("Workspace binding", () => {
           workspaceId: created.id,
           externalId: "thread-new",
           modelOverride: null,
+          sourceChatId: null,
         });
         assert.strictEqual(oldChat.cwd, firstCwd);
         assert.strictEqual(
@@ -383,6 +387,7 @@ describe("Workspace binding", () => {
             return yield* use(worktreeCwd);
           }),
         inspectChat: () => Effect.succeed({ kind: "not-managed" }),
+        slotCandidate: () => Effect.die("unexpected slot candidate lookup"),
         renameChatBranch: () => Effect.die("unexpected branch rename"),
         removeChat: () => Effect.die("unexpected worktree removal"),
       };
@@ -438,6 +443,7 @@ describe("Workspace binding", () => {
             workspaceId: first.id,
             externalId: "before-release",
             modelOverride: null,
+            sourceChatId: null,
           });
           assert.strictEqual(initialChat.cwd, winner === "message" ? defaultCwd : worktreeCwd);
 
@@ -459,6 +465,7 @@ describe("Workspace binding", () => {
             workspaceId: second.id,
             externalId: "after-release",
             modelOverride: null,
+            sourceChatId: null,
           });
           assert.strictEqual(nextChat.cwd, worktreeCwd);
           assert.strictEqual(

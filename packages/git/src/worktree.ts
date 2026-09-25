@@ -1,3 +1,4 @@
+import { ChatId } from "@pico/contract/chat-model";
 import { GitError, WorkspaceBindingInvalid } from "@pico/contract/errors";
 import { AbsolutePath } from "@pico/contract/path";
 import type {
@@ -5,6 +6,7 @@ import type {
   CreateWorktree,
   CreateWorktreeOptions,
   GitWorktree,
+  ManagedSlotCandidate,
   RemoveChatWorktreeOptions,
   RemoveChatWorktreeResult,
   RenameChatBranchOptions,
@@ -16,8 +18,10 @@ import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import type * as PlatformError from "effect/PlatformError";
+import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import * as ChildProcess from "effect/unstable/process/ChildProcess";
@@ -256,6 +260,26 @@ const inspectChat = (
         : { kind: "managed", state: inspection.state },
     ),
   );
+const decodeChatId = Schema.decodeUnknownOption(ChatId);
+
+const slotCandidate = (
+  path: Path.Path,
+  worktreesDir: AbsolutePath,
+  cwd: AbsolutePath,
+): Option.Option<ManagedSlotCandidate> => {
+  const normalizedWorktreesDir = path.normalize(worktreesDir);
+  const normalizedCwd = path.normalize(cwd);
+  if (path.dirname(normalizedCwd) !== normalizedWorktreesDir) return Option.none();
+  const slot = path.basename(normalizedCwd);
+  const chatId = decodeChatId(slot);
+  if (Option.isNone(chatId)) return Option.none();
+  if (path.normalize(path.join(normalizedWorktreesDir, slot)) !== normalizedCwd)
+    return Option.none();
+  return Option.some({
+    chatId: chatId.value,
+    cwd: AbsolutePath.make(normalizedCwd),
+  });
+};
 
 type SymbolicHead =
   | { readonly kind: "branch"; readonly branch: string }
@@ -822,5 +846,6 @@ export const make = Effect.fn("GitWorktree.make")(function* (
     renameChatBranch: (options) =>
       renameChatBranch(fileSystem, path, spawner, renameLocks, worktreesDir, options),
     removeChat: (options) => removeChat(fileSystem, path, spawner, worktreesDir, options),
+    slotCandidate: (cwd) => Effect.succeed(slotCandidate(path, worktreesDir, cwd)),
   };
 });

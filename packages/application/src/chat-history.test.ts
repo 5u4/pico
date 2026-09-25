@@ -145,6 +145,7 @@ const makeFixture = Effect.fn("HistoryTest.makeFixture")(function* () {
     validate: () => Effect.die("unexpected git validation"),
     create: () => Effect.die("unexpected worktree creation"),
     inspectChat: () => Effect.succeed({ kind: "not-managed" }),
+    slotCandidate: () => Effect.succeed(Option.none()),
     renameChatBranch: () => Effect.die("unexpected branch rename"),
     removeChat: () => Effect.die("unexpected worktree removal"),
   };
@@ -180,6 +181,7 @@ const makeFixture = Effect.fn("HistoryTest.makeFixture")(function* () {
     workspaceId: workspace.id,
     externalId: null,
     modelOverride: null,
+    sourceChatId: null,
   });
   const request = {
     chatId: chat.id,

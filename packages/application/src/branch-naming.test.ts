@@ -111,6 +111,7 @@ describe("BranchNaming", () => {
           ChatRepository,
           ChatRepository.of({
             listOpenByWorkspace: () => Effect.die("unexpected open chat list"),
+            listOpen: () => Effect.die("unexpected open chat list"),
             create: () => Effect.die("unexpected chat create"),
             bindExternalId: () => Effect.die("unexpected chat binding"),
             archive: () => Effect.die("unexpected chat archive"),
@@ -143,6 +144,7 @@ describe("BranchNaming", () => {
         validate: () => Effect.die("unexpected validation"),
         create: () => Effect.die("unexpected worktree creation"),
         inspectChat: () => Effect.die("unexpected worktree inspection"),
+        slotCandidate: () => Effect.die("unexpected slot candidate lookup"),
         renameChatBranch: (input) =>
           Effect.sync(() => {
             renames.push(input);
@@ -222,6 +224,7 @@ describe("BranchNaming", () => {
           ChatRepository,
           ChatRepository.of({
             listOpenByWorkspace: () => Effect.die("unexpected open chat list"),
+            listOpen: () => Effect.die("unexpected open chat list"),
             create: () => Effect.die("unexpected chat create"),
             bindExternalId: () => Effect.die("unexpected chat binding"),
             archive: () => Effect.die("unexpected chat archive"),
@@ -261,6 +264,7 @@ describe("BranchNaming", () => {
         validate: () => Effect.die("unexpected validation"),
         create: () => Effect.die("unexpected worktree creation"),
         inspectChat: () => Effect.die("unexpected worktree inspection"),
+        slotCandidate: () => Effect.die("unexpected slot candidate lookup"),
         renameChatBranch: ({ topic }) =>
           Effect.sync(() => {
             renames.push(topic);
@@ -380,6 +384,7 @@ describe("BranchNaming", () => {
           ChatRepository,
           ChatRepository.of({
             listOpenByWorkspace: () => Effect.die("unexpected open chat list"),
+            listOpen: () => Effect.die("unexpected open chat list"),
             create: () => Effect.die("unexpected chat create"),
             bindExternalId: () => Effect.die("unexpected chat binding"),
             archive: () => Effect.die("unexpected chat archive"),
@@ -420,6 +425,7 @@ describe("BranchNaming", () => {
         validate: () => Effect.die("unexpected validation"),
         create: () => Effect.die("unexpected worktree creation"),
         inspectChat: () => Effect.die("unexpected worktree inspection"),
+        slotCandidate: () => Effect.die("unexpected slot candidate lookup"),
         renameChatBranch: () =>
           Effect.gen(function* () {
             renameAttempts += 1;

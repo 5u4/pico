@@ -12,6 +12,7 @@ import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Logger from "effect/Logger";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
 import * as References from "effect/References";
@@ -872,6 +873,11 @@ describe("GitWorktree.renameChatBranch", () => {
       const source = `chat/${id}`;
       const target = renamedBranch(id, "fix-parser-flow");
       yield* worktree.create(options(id, repositoryCwd), () => Effect.void);
+      assert.deepStrictEqual(
+        yield* worktree.renameChatBranch(renameOptions(chatId(29), cwd, "sibling-topic")),
+        { kind: "skipped", reason: "not-managed" },
+      );
+      assert.strictEqual((yield* git(cwd, ["branch", "--show-current"])).trim(), source);
 
       assert.deepStrictEqual(
         yield* worktree.renameChatBranch(renameOptions(id, cwd, "fix-parser-flow")),
@@ -1424,6 +1430,53 @@ describe("GitWorktree.renameChatBranch", () => {
   );
 });
 describe("GitWorktree chat cleanup", () => {
+  it.effect(
+    "resolves only direct UUIDv7 slots without treating aliases as deletion authority",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const directory = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "pico-slot-candidate-",
+        });
+        const worktreesDir = AbsolutePath.make(path.join(directory, "worktrees"));
+        const worktree = yield* make(worktreesDir);
+        const id = chatId(25);
+        const cwd = AbsolutePath.make(path.join(worktreesDir, id));
+        yield* fileSystem.makeDirectory(cwd, { recursive: true });
+        yield* fileSystem.writeFileString(path.join(cwd, "keep.txt"), "retained");
+        assert.deepStrictEqual(
+          yield* worktree.slotCandidate(AbsolutePath.make(`${cwd}/.`)),
+          Option.some({ chatId: id, cwd }),
+        );
+        const uppercaseId = Chat.ChatId.make(id.toUpperCase());
+        const uppercaseCwd = AbsolutePath.make(path.join(worktreesDir, uppercaseId));
+        assert.deepStrictEqual(
+          yield* worktree.slotCandidate(uppercaseCwd),
+          Option.some({ chatId: uppercaseId, cwd: uppercaseCwd }),
+        );
+        const alias = AbsolutePath.make(path.join(directory, "alias"));
+        yield* fileSystem.symlink(cwd, alias);
+        for (const rejected of [
+          alias,
+          path.join(worktreesDir, "not-a-chat"),
+          path.join(worktreesDir, "018f47a0-0000-4000-8000-000000000025"),
+          path.join(worktreesDir, "018f47a0-0000-7000-7000-000000000025"),
+          path.join(cwd, id),
+          path.join(`${worktreesDir}-other`, id),
+        ]) {
+          assert.deepStrictEqual(
+            yield* worktree.slotCandidate(AbsolutePath.make(rejected)),
+            Option.none(),
+          );
+        }
+        assert.strictEqual(
+          yield* fileSystem.readFileString(path.join(cwd, "keep.txt")),
+          "retained",
+        );
+      }).pipe(Effect.provide(BunServices.layer)),
+  );
+
   it.effect("removes a clean managed worktree and preserves its branch", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
@@ -1562,6 +1615,10 @@ describe("GitWorktree chat cleanup", () => {
       const slot = AbsolutePath.make(path.join(worktreesDir, id));
       yield* git(repositoryCwd, ["worktree", "add", "-b", `chat/${id}`, "--", target, "main"]);
       yield* fileSystem.symlink(target, slot);
+      assert.deepStrictEqual(
+        yield* worktree.slotCandidate(slot),
+        Option.some({ chatId: id, cwd: slot }),
+      );
 
       assert.instanceOf(
         yield* worktree.removeChat({ chatId: id, cwd: slot, force: true }).pipe(Effect.flip),

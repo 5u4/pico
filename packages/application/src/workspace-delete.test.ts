@@ -79,6 +79,7 @@ const fixture = Effect.fn("WorkspaceDelete.test.fixture")(function* (
         return yield* use(directory);
       }),
     inspectChat: unused,
+    slotCandidate: () => Effect.die("unexpected slot candidate lookup"),
     renameChatBranch: unused,
     removeChat: unused,
   };
@@ -198,11 +199,13 @@ describe("Workspace deletion", () => {
           workspaceId: test.workspace.id,
           externalId: null,
           modelOverride: null,
+          sourceChatId: null,
         });
         const empty = yield* test.application.createChat({
           workspaceId: test.workspace.id,
           externalId: null,
           modelOverride: null,
+          sourceChatId: null,
         });
         const retainedWorkspace = yield* test.application.createWorkspace({
           ...test.workspace,
@@ -212,6 +215,7 @@ describe("Workspace deletion", () => {
           workspaceId: retainedWorkspace.id,
           externalId: null,
           modelOverride: null,
+          sourceChatId: null,
         });
         transcripts.set(archived.id, populatedTranscript);
         assert.strictEqual(
@@ -264,7 +268,12 @@ describe("Workspace deletion", () => {
         );
         assert.strictEqual(
           (yield* test.application
-            .createChat({ workspaceId: test.workspace.id, externalId: null, modelOverride: null })
+            .createChat({
+              workspaceId: test.workspace.id,
+              externalId: null,
+              modelOverride: null,
+              sourceChatId: null,
+            })
             .pipe(Effect.flip)).reason,
           "not-found",
         );
@@ -295,6 +304,7 @@ describe("Workspace deletion", () => {
         workspaceId: test.workspace.id,
         externalId: null,
         modelOverride: null,
+        sourceChatId: null,
       });
       const owner = yield* test.application.createWorkspace({
         ...test.workspace,
@@ -398,6 +408,7 @@ describe("Workspace deletion", () => {
           workspaceId: test.workspace.id,
           externalId: null,
           modelOverride: null,
+          sourceChatId: null,
         });
         const shaking = yield* test.application.shake(chat.id, "elide").pipe(Effect.forkScoped);
         yield* Effect.addFinalizer(() => Deferred.succeed(releaseCleanup, undefined));
@@ -435,6 +446,7 @@ describe("Workspace deletion", () => {
         workspaceId: test.workspace.id,
         externalId: null,
         modelOverride: null,
+        sourceChatId: null,
       });
       const sending = yield* test.application
         .sendMessage(chat.id, { text: "running", attachments: [] })
@@ -500,6 +512,7 @@ describe("Workspace deletion", () => {
           workspaceId: test.workspace.id,
           externalId: null,
           modelOverride: null,
+          sourceChatId: null,
         });
         const deleting = yield* test.application
           .deleteWorkspace(test.workspace.id)
@@ -509,6 +522,7 @@ describe("Workspace deletion", () => {
           workspaceId: test.workspace.id,
           externalId: null,
           modelOverride: null,
+          sourceChatId: null,
         });
         yield* Deferred.succeed(release, undefined);
         const result = yield* Fiber.join(deleting);
@@ -536,7 +550,12 @@ describe("Workspace deletion", () => {
           }),
       });
       const creating = yield* test.application
-        .createChat({ workspaceId: test.workspace.id, externalId: null, modelOverride: null })
+        .createChat({
+          workspaceId: test.workspace.id,
+          externalId: null,
+          modelOverride: null,
+          sourceChatId: null,
+        })
         .pipe(Effect.result, Effect.forkChild);
       const chatId = yield* Deferred.await(started);
       yield* test.application.deleteWorkspace(test.workspace.id);
