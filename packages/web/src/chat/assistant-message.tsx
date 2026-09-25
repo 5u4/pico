@@ -51,7 +51,7 @@ function AssistantCopy({ source }: { readonly source: string }) {
     <div className="mt-2">
       <button
         aria-label="Copy Markdown"
-        className={`inline-flex min-h-7 min-w-7 items-center justify-center rounded-chip text-muted transition-colors duration-100 hover:bg-surface-hover hover:text-foreground disabled:cursor-wait [@media(pointer:coarse)]:min-h-11 [@media(pointer:coarse)]:min-w-11 ${state === "copied" ? "text-success hover:text-success" : ""}`}
+        className={`inline-flex min-h-7 min-w-7 items-center justify-center rounded-chip text-muted transition-colors duration-100 hover:bg-surface-hover hover:text-foreground disabled:cursor-wait [@media(any-pointer:coarse)]:min-h-11 [@media(any-pointer:coarse)]:min-w-11 ${state === "copied" ? "text-success hover:text-success" : ""}`}
         disabled={state === "copying"}
         onClick={copy}
         title={state === "copied" ? "Copied" : "Copy Markdown"}
