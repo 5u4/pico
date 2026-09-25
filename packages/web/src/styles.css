@@ -66,6 +66,7 @@
   --raw-code-token-number: oklch(0.82 0.11 74);
   --raw-code-token-title: oklch(0.82 0.09 222);
   --raw-code-token-comment: oklch(0.64 0.01 264.3);
+  --raw-code-token-addition: var(--raw-success);
   --raw-radius-chip: 6px;
   --raw-radius-control: 8px;
   --raw-radius-card: 10px;
@@ -140,6 +141,7 @@
   --raw-code-token-number: oklch(0.53 0.14 75);
   --raw-code-token-title: oklch(0.42 0.13 241);
   --raw-code-token-comment: oklch(0.53 0.015 264.5);
+  --raw-code-token-addition: oklch(0.52 0.155 150.883);
 }
 
 @theme inline {
@@ -572,6 +574,25 @@ textarea:disabled {
 .chat-code-block .hljs-title.function_,
 .chat-code-block .hljs-function .hljs-title {
   color: var(--raw-code-token-title);
+}
+
+.chat-code-block .hljs-addition,
+.chat-code-block .hljs-deletion {
+  display: inline-block;
+  min-width: calc(100% + 2em);
+  margin-inline: -1em;
+  padding-inline: 1em;
+  vertical-align: top;
+}
+
+.chat-code-block .hljs-addition {
+  background: var(--raw-success-soft);
+  color: var(--raw-code-token-addition);
+}
+
+.chat-code-block .hljs-deletion {
+  background: var(--raw-danger-soft);
+  color: var(--raw-danger);
 }
 
 .chat-code-block-copy-error {
