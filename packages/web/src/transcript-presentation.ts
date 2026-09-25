@@ -148,6 +148,7 @@ export function presentTranscript(
     }
     flushTools();
     let blocks: AssistantBlock[] = [];
+    let sourceChunks: string[] = [];
     let part = 0;
     const flush = () => {
       if (blocks.length === 0) return;
@@ -155,11 +156,13 @@ export function presentTranscript(
         kind: "assistant",
         id: `${key}-part-${part++}`,
         blocks,
+        copySource: toCopySource(sourceChunks),
         state: assistantState(message),
         timestampLabel: timeFormat.format(message.timestamp),
         modelLabel: message.model,
       });
       blocks = [];
+      sourceChunks = [];
     };
     for (const [index, content] of message.content.entries()) {
       const id = `${key}-content-${index}`;
@@ -167,6 +170,7 @@ export function presentTranscript(
         case "text":
           flushTools();
           blocks.push({ kind: "text", id, text: content.text });
+          if (content.text !== "") sourceChunks.push(content.text);
           break;
         case "thinking":
           if (message.status === "completed" && content.text.trim() === "") break;
@@ -212,29 +216,35 @@ export function presentTranscript(
     flushTools();
     const active = draft.phase === "streaming" && activeRun;
     if (active && draft.blocks.size > 0) hasLiveFeedback = true;
+    const sortedBlocks = [...draft.blocks.values()].sort((a, b) => a.contentIndex - b.contentIndex);
     items.push({
       kind: "assistant",
       id: `${key}-part-0`,
       timestampLabel: "Live response",
       modelLabel: "pico",
+      copySource: active
+        ? null
+        : toCopySource(
+            sortedBlocks.flatMap((block) =>
+              block.type === "text-delta" && block.text !== "" ? [block.text] : [],
+            ),
+          ),
       state: active
         ? { kind: "streaming", label: "Responding" }
         : { kind: "unknown", label: "Partial response retained" },
-      blocks: [...draft.blocks.values()]
-        .sort((a, b) => a.contentIndex - b.contentIndex)
-        .map((block, index, blocks): AssistantBlock => {
-          const id = `${key}-content-${block.contentIndex}`;
-          if (block.type === "text-delta") return { kind: "text", id, text: block.text };
-          const last = index === blocks.length - 1;
-          const thinking = active && last;
-          return {
-            kind: "thinking",
-            id,
-            label: thinking ? "Thinking" : last ? "Thinking status unknown" : "Thought",
-            text: block.text,
-            open: disclosures.get(id) ?? thinking,
-          };
-        }),
+      blocks: sortedBlocks.map((block, index, blocks): AssistantBlock => {
+        const id = `${key}-content-${block.contentIndex}`;
+        if (block.type === "text-delta") return { kind: "text", id, text: block.text };
+        const last = index === blocks.length - 1;
+        const thinking = active && last;
+        return {
+          kind: "thinking",
+          id,
+          label: thinking ? "Thinking" : last ? "Thinking status unknown" : "Thought",
+          text: block.text,
+          open: disclosures.get(id) ?? thinking,
+        };
+      }),
     });
   };
   for (const [index, message] of messages.entries()) {
@@ -347,6 +357,12 @@ export function presentTodo(todo: TodoState, open: boolean): TodoPresentation | 
               ? `Finished · ${skipped} skipped`
               : "All tasks completed"),
   };
+}
+
+function toCopySource(chunks: readonly string[]): string | null {
+  if (chunks.length === 0) return null;
+  if (chunks.length === 1) return chunks[0] ?? null;
+  return chunks.join("\n\n");
 }
 
 function assistantState(message: AgentAssistantMessage): AssistantState {

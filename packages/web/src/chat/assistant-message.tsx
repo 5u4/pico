@@ -1,4 +1,5 @@
-import { CaretDownIcon, SparkleIcon } from "@phosphor-icons/react";
+import { CaretDownIcon, CheckIcon, CopyIcon, SparkleIcon } from "@phosphor-icons/react";
+import { useState } from "react";
 import type { AssistantBlock, AssistantState, TranscriptItem } from "./chat-model.ts";
 import { LoadingDots } from "./loading-dots.tsx";
 import { Markdown } from "./markdown.tsx";
@@ -25,8 +26,52 @@ export function AssistantMessage({
           />
         ))}
       </div>
+      {item.copySource !== null ? (
+        <AssistantCopy key={item.copySource} source={item.copySource} />
+      ) : null}
       <AssistantStateView state={item.state} />
     </article>
+  );
+}
+
+function AssistantCopy({ source }: { readonly source: string }) {
+  const [state, setState] = useState<"idle" | "copying" | "copied" | "failed">("idle");
+  const copy = async () => {
+    if (state === "copying") return;
+    setState("copying");
+    try {
+      await navigator.clipboard.writeText(source);
+      setState("copied");
+    } catch {
+      setState("failed");
+    }
+  };
+
+  return (
+    <div className="mt-2">
+      <button
+        aria-label="Copy Markdown"
+        className={`inline-flex min-h-7 min-w-7 items-center justify-center rounded-chip text-muted transition-colors duration-100 hover:bg-surface-hover hover:text-foreground disabled:cursor-wait [@media(any-pointer:coarse)]:min-h-11 [@media(any-pointer:coarse)]:min-w-11 ${state === "copied" ? "text-success hover:text-success" : ""}`}
+        disabled={state === "copying"}
+        onClick={copy}
+        title={state === "copied" ? "Copied" : "Copy Markdown"}
+        type="button"
+      >
+        {state === "copied" ? (
+          <CheckIcon aria-hidden="true" size={15} />
+        ) : (
+          <CopyIcon aria-hidden="true" size={15} />
+        )}
+      </button>
+      <p aria-live="polite" className="sr-only">
+        {state === "copied" ? "Markdown copied" : ""}
+      </p>
+      {state === "failed" ? (
+        <p className="mt-2 text-[12px] text-danger" role="alert">
+          Could not copy markdown. Select the text and copy it manually.
+        </p>
+      ) : null}
+    </div>
   );
 }
 
