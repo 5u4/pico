@@ -149,6 +149,7 @@ export type TranscriptItem =
       readonly kind: "assistant";
       readonly id: string;
       readonly blocks: readonly AssistantBlock[];
+      readonly copySource: string | null;
       readonly state: AssistantState;
       readonly timestampLabel: string;
       readonly modelLabel: string;

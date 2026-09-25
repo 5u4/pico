@@ -77,6 +77,8 @@ const thinkingBlocks = (presentation: ReturnType<typeof items>) =>
   presentation.flatMap((item) =>
     item.kind === "assistant" ? item.blocks.filter((block) => block.kind === "thinking") : [],
   );
+const assistantItems = (presentation: ReturnType<typeof items>) =>
+  presentation.flatMap((item) => (item.kind === "assistant" ? [item] : []));
 
 describe("transcript identity", () => {
   it("keeps manually opened thinking and tool disclosures through settlement and snapshot handoff", () => {
@@ -394,6 +396,94 @@ describe("transcript identity", () => {
       open: false,
       label: "Thinking status unknown",
     });
+  });
+});
+describe("assistant copy source", () => {
+  it("keeps copy source scoped to each displayed assistant part and message", () => {
+    const message: AgentAssistantMessage = {
+      ...toolMessage,
+      content: [
+        { type: "text", text: "before tool" },
+        toolCall("copy-boundary"),
+        { type: "text", text: "after tool" },
+        { type: "text", text: "" },
+        { type: "text", text: "```ts\nconst value = 1;\n```" },
+      ],
+    };
+    const nextMessage: AgentAssistantMessage = {
+      ...toolMessage,
+      id: secondId,
+      content: [{ type: "text", text: "next message" }],
+    };
+
+    assert.deepStrictEqual(
+      assistantItems(items([message, nextMessage], emptyLiveChat())).map((item) => ({
+        id: item.id,
+        source: item.copySource,
+      })),
+      [
+        { id: "assistant-first-part-0", source: "before tool" },
+        {
+          id: "assistant-first-part-1",
+          source: "after tool\n\n```ts\nconst value = 1;\n```",
+        },
+        { id: "assistant-second-part-0", source: "next message" },
+      ],
+    );
+  });
+
+  it("excludes thinking and synthetic image placeholders while preserving exact text bytes", () => {
+    const fenced = "  ```md\n# Heading\n```\n\t";
+    const message: AgentAssistantMessage = {
+      ...toolMessage,
+      content: [
+        { type: "text", text: fenced },
+        { type: "image", data: "", mimeType: "image/png" },
+        { type: "thinking", text: "plan" },
+        { type: "text", text: "" },
+        { type: "text", text: "[Image response]" },
+      ],
+    };
+
+    const assistant = assistantItems(items([message], emptyLiveChat()));
+    assert.strictEqual(assistant[0]?.copySource, "  ```md\n# Heading\n```\n\t\n\n[Image response]");
+  });
+
+  it("keeps active drafts unavailable and enables copy after stopping with sorted text deltas", () => {
+    let live = reduceLiveChat(emptyLiveChat(), { type: "run-started" });
+    live = reduceLiveChat(live, {
+      type: "text-delta",
+      messageId: firstId,
+      contentIndex: 2,
+      text: "second",
+    });
+    live = reduceLiveChat(live, {
+      type: "thinking-delta",
+      messageId: firstId,
+      contentIndex: 1,
+      text: "plan",
+    });
+    live = reduceLiveChat(live, {
+      type: "text-delta",
+      messageId: firstId,
+      contentIndex: 0,
+      text: "first",
+    });
+    live = reduceLiveChat(live, {
+      type: "text-delta",
+      messageId: firstId,
+      contentIndex: 3,
+      text: "",
+    });
+
+    const active = assistantItems(items([], live));
+    assert.strictEqual(active[0]?.copySource, null);
+
+    const retained = assistantItems(
+      items([], reduceLiveChat(live, { type: "run-finished", outcome: "aborted" })),
+    );
+    assert.strictEqual(retained[0]?.copySource, "first\n\nsecond");
+    assert.strictEqual(retained[0]?.state.kind, "unknown");
   });
 });
 
