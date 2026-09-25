@@ -2389,7 +2389,7 @@ export function WorkspaceChat({
                           : conversation?.live.run.kind === "finished" &&
                               conversation.live.run.outcome === "failed"
                             ? "Response failed. Review the error before sending again."
-                            : "Enter to send · Shift+Enter for a new line";
+                            : null;
   const composerImages = toComposerImages(conversationEntry?.value ?? emptyDraft);
   const composer: ComposerPresentation =
     running || sending

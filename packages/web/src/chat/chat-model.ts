@@ -230,7 +230,7 @@ export type ComposerPresentation =
       readonly placeholder: string;
       readonly editable: boolean;
       readonly canSubmit: boolean;
-      readonly statusLabel: string;
+      readonly statusLabel: string | null;
     }
   | {
       readonly mode: "stop";
@@ -239,7 +239,7 @@ export type ComposerPresentation =
       readonly placeholder: string;
       readonly editable: boolean;
       readonly canStop: boolean;
-      readonly statusLabel: string;
+      readonly statusLabel: string | null;
     };
 
 export interface HistoryItemPresentation {
