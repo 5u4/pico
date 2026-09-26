@@ -1,4 +1,5 @@
 <div align="center">
+<img src="packages/web/src/assets/shrimp.jpg" alt="Pico shrimp" width="128" height="128" />
 <h1>pico</h1>
 </div>
 
